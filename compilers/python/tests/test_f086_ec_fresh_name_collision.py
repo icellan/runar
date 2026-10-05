@@ -2,7 +2,7 @@
 method already uses.
 
 The scalar-fusing rules (9, 10, 11) bind the folded scalar under a generated
-name (``__ec_opt_N`` in this tier) just before the rewritten binding.
+name (``<binding>_k`` since F-191, as in TS; ``__ec_opt_N`` before) just before the rewritten binding.
 ``_fresh_const_name`` never checked whether that name was taken. ANF is
 single-assignment and stack lowering resolves a name to its shallowest slot,
 so when ``__ec_opt_N`` is already a body binding or a method param the two
@@ -22,10 +22,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from runar_compiler.compiler import compile_from_ir_bytes
-from runar_compiler.frontend import anf_optimize
 from runar_compiler.frontend.anf_optimize import optimize_ec
 from runar_compiler.ir.loader import load_ir
 
@@ -66,13 +63,6 @@ def _program_json(body_name: str | None, k_param: str) -> str:
     })
 
 
-@pytest.fixture(autouse=True)
-def _reset_counter(monkeypatch):
-    # The counter is process-global; pin it so the first minted name is the
-    # one the colliding programs below already use.
-    monkeypatch.setattr(anf_optimize, "_fresh_counter", 0)
-
-
 def _optimized_unlock(src: str):
     program = optimize_ec(load_ir(src))
     return next(m for m in program.methods if m.name == "unlock")
@@ -97,26 +87,25 @@ def _assert_single_assignment(method) -> None:
 
 def test_no_collision_keeps_historical_name():
     m = _optimized_unlock(_program_json(None, "k"))
-    assert any(b.name == "__ec_opt_1" for b in m.body)
+    assert any(b.name == "s_k" for b in m.body)
     assert _fused_scalar(m) == 5
 
 
 def test_preexisting_body_binding_is_not_shadowed():
-    m = _optimized_unlock(_program_json("__ec_opt_1", "k"))
+    m = _optimized_unlock(_program_json("s_k", "k"))
     _assert_single_assignment(m)
     assert _fused_scalar(m) == 5
 
 
 def test_param_is_not_shadowed():
-    m = _optimized_unlock(_program_json(None, "__ec_opt_1"))
+    m = _optimized_unlock(_program_json(None, "s_k"))
     _assert_single_assignment(m)
     assert _fused_scalar(m) == 5
 
 
-def test_colliding_programs_compile_like_their_renamed_twins(monkeypatch):
+def test_colliding_programs_compile_like_their_renamed_twins():
     def hex_of(src: str) -> str:
-        monkeypatch.setattr(anf_optimize, "_fresh_counter", 0)
         return compile_from_ir_bytes(src.encode(), disable_constant_folding=True).script
 
-    assert hex_of(_program_json("__ec_opt_1", "k")) == hex_of(_program_json("zz_unused", "k"))
-    assert hex_of(_program_json(None, "__ec_opt_1")) == hex_of(_program_json(None, "zz"))
+    assert hex_of(_program_json("s_k", "k")) == hex_of(_program_json("zz_unused", "k"))
+    assert hex_of(_program_json(None, "s_k")) == hex_of(_program_json(None, "zz"))

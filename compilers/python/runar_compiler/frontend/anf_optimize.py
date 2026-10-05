@@ -214,7 +214,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
             k1 = _get_const_int(inner.args[1], vm)
             if k1 is not None:
                 combined = (k1 * k2) % CURVE_N
-                return _make_call("ecMul", [inner.args[0], _fresh_const_name(combined, vm, prelude, used_names)])
+                return _make_call("ecMul", [inner.args[0], _fresh_const_name(name, combined, vm, prelude, used_names)])
 
     # Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N)
     if func == "ecAdd" and len(args) == 2:
@@ -227,7 +227,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
             k2 = _get_const_int(right.args[0], vm)
             if k1 is not None and k2 is not None:
                 combined = (k1 + k2) % CURVE_N
-                return _make_call("ecMulGen", [_fresh_const_name(combined, vm, prelude, used_names)])
+                return _make_call("ecMulGen", [_fresh_const_name(name, combined, vm, prelude, used_names)])
 
     # Rule 11: ecAdd(ecMul(k1,p), ecMul(k2,p)) -> ecMul(k1+k2, p) when same p
     if func == "ecAdd" and len(args) == 2:
@@ -241,7 +241,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
                 k2 = _get_const_int(right.args[1], vm)
                 if k1 is not None and k2 is not None:
                     combined = (k1 + k2) % CURVE_N
-                    return _make_call("ecMul", [left.args[0], _fresh_const_name(combined, vm, prelude, used_names)])
+                    return _make_call("ecMul", [left.args[0], _fresh_const_name(name, combined, vm, prelude, used_names)])
 
     # Rule 12: ecMul(k, G) -> ecMulGen(k)
     if func == "ecMul" and len(args) == 2:
@@ -398,11 +398,7 @@ def _emit_operand_gate(of_mul: bool, base: str, q: str, vm: dict[str, ANFValue],
     add("_gate", ANFValue(kind="assert", raw_value=ok, value_ref=ok))
 
 
-# Counter for generating fresh constant binding names
-_fresh_counter = 0
-
-
-def _fresh_const_name(value: int, vm: dict[str, ANFValue],
+def _fresh_const_name(base: str, value: int, vm: dict[str, ANFValue],
                       prelude: list[ANFBinding], used_names: set[str]) -> str:
     """Bind a freshly folded constant and return its name.
 
@@ -413,19 +409,22 @@ def _fresh_const_name(value: int, vm: dict[str, ANFValue],
     point just before the binding currently being rewritten — as well as
     registered in the value map. Registering it in the value map alone is not
     enough: stack lowering walks the body, so a call referencing a name that
-    never got a binding dies with "value '__ec_opt_N' not found on stack".
+    never got a binding dies with "value '<name>' not found on stack".
     Mirrors AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
     `newBindings` list in anf-ec.ts (TypeScript).
 
-    F-086: the name skips every ``__ec_opt_N`` the method already uses
-    (*used_names*, see _collect_used_names) and is reserved there.
+    The name follows the TS ``freshName(`${binding.name}_k`, usedNames)``:
+    ``<base>_k``, else the first unused ``<base>_k_<i>`` (F-086: against every
+    name the method already uses, see _collect_used_names), and is reserved
+    there. F-191: it is derived from the program alone -- no process-global
+    counter -- so the same program always gets the same names.
     """
-    global _fresh_counter
-    _fresh_counter += 1
-    name = f"__ec_opt_{_fresh_counter}"
+    stem = f"{base}_k"
+    name = stem
+    i = 1
     while name in used_names:
-        _fresh_counter += 1
-        name = f"__ec_opt_{_fresh_counter}"
+        name = f"{stem}_{i}"
+        i += 1
     used_names.add(name)
     const = _make_const_int(value)
     vm[name] = const

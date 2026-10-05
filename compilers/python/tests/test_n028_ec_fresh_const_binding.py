@@ -256,7 +256,7 @@ def test_folded_scalar_uses_canonical_bigint_json_encoding(tmp_path):
         b
         for m in ir["methods"]
         for b in m["body"]
-        if b["name"].startswith("__ec_opt_")
+        if b["name"].endswith("_k")  # the TS-style `<binding>_k` name (F-191)
     ]
     assert folded, "expected the EC optimizer to emit a folded-scalar binding"
     value = folded[0]["value"]["value"]
