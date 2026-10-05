@@ -1138,6 +1138,13 @@ func TestSourceCompile_ExampleEscrow(t *testing.T) {
 	}
 }
 
+// TestSourceCompile_IRvsSourceMatch proves that compiling basic-p2pkh via the
+// --ir path (CompileFromIR) produces byte-identical Script/ASM to compiling
+// the same fixture via the --source path (CompileFromSource). It does NOT
+// prove the --ir and --source paths agree on every fixture (that's
+// TestCompilerParity_AllConformance's job), and it does not prove either
+// path produces a CORRECT script, only that the two paths agree with each
+// other on this one fixture.
 func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 	// Compile from IR and from source, both should produce non-empty valid output
 	irPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-ir.json")
@@ -1166,6 +1173,17 @@ func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 		t.Error("both paths should produce non-empty scripts")
 	}
 
+	// The actual parity check this test is named for: the --ir path and the
+	// --source path must emit byte-identical hex for the same fixture.
+	if irArtifact.Script != sourceArtifact.Script {
+		t.Errorf("IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
+			irArtifact.Script, sourceArtifact.Script)
+	}
+	if irArtifact.ASM != sourceArtifact.ASM {
+		t.Errorf("IR-compiled ASM differs from source-compiled ASM\n  IR:     %s\n  Source: %s",
+			irArtifact.ASM, sourceArtifact.ASM)
+	}
+
 	t.Logf("IR hex:     %s", irArtifact.Script)
 	t.Logf("Source hex: %s", sourceArtifact.Script)
 }
@@ -1174,6 +1192,23 @@ func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 // Test: ALL 27 conformance tests compile and match golden hex
 // ---------------------------------------------------------------------------
 
+// irRoundTripExceptions lists conformance fixtures whose --ir path is not
+// expected to produce the same script as their --source path, each with the
+// reason it's excepted. TestCompilerParity_AllConformance fails on any other
+// fixture where --ir compilation errors or diverges from --source. Do not
+// add an entry here to silence a real divergence — report it instead
+// (F-181 brief: "If you find a real divergence, report it. Do not fix it.").
+var irRoundTripExceptions = map[string]string{}
+
+// TestCompilerParity_AllConformance proves that, for every one of the 27
+// listed conformance fixtures, (a) compiling from --source matches the
+// checked-in golden hex, and (b) compiling the same fixture's checked-in
+// expected-ir.json via --ir either errors or diverges only for fixtures
+// explicitly listed in irRoundTripExceptions (with a reason) — any other
+// --ir failure or divergence fails the test. It does NOT prove the --ir and
+// --source paths agree on fixtures outside this hardcoded list of 27, and it
+// does not prove the golden hex itself is correct Bitcoin Script — only that
+// both compilation paths reproduce it.
 func TestCompilerParity_AllConformance(t *testing.T) {
 	// All 27 conformance test directories
 	testDirs := []string{
@@ -1256,18 +1291,27 @@ func TestCompilerParity_AllConformance(t *testing.T) {
 				t.Logf("%s: MATCH (hex=%d bytes)", dir, len(artifact.Script)/2)
 			}
 
-			// Also compile from IR and verify both paths produce the same output
+			// Also compile from IR and verify both paths produce the same output.
+			// A fixture that is NOT in irRoundTripExceptions must have its --ir
+			// path both succeed and byte-match the --source script; a total
+			// --ir regression (CompileFromIR erroring on every fixture) now
+			// fails this loop instead of being silently t.Logf'd.
 			irPath := filepath.Join(conformanceDir(), dir, "expected-ir.json")
 			if _, err := os.Stat(irPath); err == nil {
 				irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
-				if err != nil {
-					t.Logf("%s: IR compilation failed (may be expected for some tests): %v", dir, err)
-				} else {
-					// Compare IR path vs source path
-					if irArtifact.Script != artifact.Script {
-						t.Errorf("%s: IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
-							dir, truncate(irArtifact.Script, 200), truncate(artifact.Script, 200))
-					}
+				reason, excepted := irRoundTripExceptions[dir]
+				switch {
+				case excepted && err != nil:
+					t.Logf("%s: IR compilation failed as expected (%s): %v", dir, reason, err)
+				case excepted && irArtifact.Script != artifact.Script:
+					t.Logf("%s: IR script differs from source script as expected (%s)", dir, reason)
+				case excepted:
+					t.Logf("%s: IR path round-tripped despite being listed in irRoundTripExceptions (%s) — consider removing the entry", dir, reason)
+				case err != nil:
+					t.Errorf("%s: IR compilation failed: %v (if this fixture is genuinely not expected to round-trip, add it to irRoundTripExceptions with a reason)", dir, err)
+				case irArtifact.Script != artifact.Script:
+					t.Errorf("%s: IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
+						dir, truncate(irArtifact.Script, 200), truncate(artifact.Script, 200))
 				}
 			}
 		})
