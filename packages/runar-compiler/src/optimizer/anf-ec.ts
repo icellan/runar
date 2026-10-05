@@ -25,6 +25,9 @@ import { eliminateDeadBindings } from './dce.js';
 /** secp256k1 curve order */
 const CURVE_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
+/** secp256k1 field prime */
+const FIELD_P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+
 /** Generator x-coordinate */
 const GEN_X = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
 /** Generator y-coordinate */
@@ -148,6 +151,63 @@ function freshName(base: string, usedNames: Set<string>): string {
 }
 
 /**
+ * N-104 — the operand gate a rewrite must leave behind.
+ *
+ * R1-R4 (`ecAdd(q, O) → q`, `ecAdd(O, q) → q`, `ecMul(q, 1) → q`,
+ * `ecMul(q, 0) → O`) replace a builtin whose FIRST act is to validate `q`, and
+ * the answer they substitute is only the builtin's answer for a q that passes
+ * that validation. Dropping it made a malformed or off-curve q accepted by the
+ * default compile and aborted by `disableEcOptimizer`. So each rewrite still
+ * elides the add/mul but emits the validation, as plain ANF ahead of the
+ * rewritten binding. Each gate ends in an `assert`, which DCE keeps, and the
+ * assert keeps everything it reads.
+ *
+ * The gate is built only from forms no EC rule matches (ecPointX/Y, ecOnCurve,
+ * bin_op, assert). The other six tiers run this optimizer to a fixed point
+ * while TS makes one pass; a gate a later pass could rewrite
+ * (an `ecNegate(q)`, say, under ec-negate-negate) would split the tiers.
+ *
+ * `ecAdd` operand gate (CL-BUG-095 width + R-117 coordinate canonicity):
+ * `assert(ecPointX(q) < p && ecPointY(q) < p)`. ecPointX/Y abort unless q is
+ * exactly 64 bytes, as decomposePoint does inside `ecAdd`; the two compares are
+ * emitCoordCanonVerify. `ecAdd` does NOT require on-curve (R-157 explains
+ * why), so neither may this.
+ */
+function emitAddOperandGate(base: string, q: string, out: ANFBinding[], usedNames: Set<string>): void {
+  const px = freshName(`${base}_px`, usedNames);
+  out.push({ name: px, value: { kind: 'call', func: 'ecPointX', args: [q] } });
+  const py = freshName(`${base}_py`, usedNames);
+  out.push({ name: py, value: { kind: 'call', func: 'ecPointY', args: [q] } });
+  const fp = freshName(`${base}_fp`, usedNames);
+  out.push({ name: fp, value: makeLoadConst(FIELD_P) });
+  const xOk = freshName(`${base}_pxok`, usedNames);
+  out.push({ name: xOk, value: { kind: 'bin_op', op: '<', left: px, right: fp } });
+  const yOk = freshName(`${base}_pyok`, usedNames);
+  out.push({ name: yOk, value: { kind: 'bin_op', op: '<', left: py, right: fp } });
+  const ok = freshName(`${base}_ok`, usedNames);
+  out.push({ name: ok, value: { kind: 'bin_op', op: '&&', left: xOk, right: yOk } });
+  out.push({ name: freshName(`${base}_gate`, usedNames), value: { kind: 'assert', value: ok } });
+}
+
+/**
+ * `ecMul` operand gate (R-157): `assert(q === O || ecOnCurve(q))` — the same
+ * predicate, in the same order, as `emitPointGate` in ec-codegen.ts. ecOnCurve
+ * already folds in the width and canonicity checks, so this subsumes the
+ * `ecAdd` gate exactly as R-157 subsumes it inside `ecMul`.
+ */
+function emitMulOperandGate(base: string, q: string, out: ANFBinding[], usedNames: Set<string>): void {
+  const inf = freshName(`${base}_inf`, usedNames);
+  out.push({ name: inf, value: makeLoadConst(INFINITY_HEX) });
+  const isInf = freshName(`${base}_isinf`, usedNames);
+  out.push({ name: isInf, value: { kind: 'bin_op', op: '===', left: q, right: inf, result_type: 'bytes' } });
+  const onCurve = freshName(`${base}_oncurve`, usedNames);
+  out.push({ name: onCurve, value: { kind: 'call', func: 'ecOnCurve', args: [q] } });
+  const ok = freshName(`${base}_ok`, usedNames);
+  out.push({ name: ok, value: { kind: 'bin_op', op: '||', left: isInf, right: onCurve } });
+  out.push({ name: freshName(`${base}_gate`, usedNames), value: { kind: 'assert', value: ok } });
+}
+
+/**
  * Try to rewrite a single binding. Returns the new value if rewritten, or null.
  */
 function tryRewrite(
@@ -187,13 +247,15 @@ function tryRewrite(
       const scalarVal = resolveArg(scalarArg, valueMap);
       if (!scalarVal) return null;
 
-      // Rule 4: ecMul(x, 0) → INFINITY
+      // Rule 4: ecMul(x, 0) → INFINITY, keeping ecMul's operand gate (N-104)
       if (isConstInt(scalarVal, 0n)) {
+        emitMulOperandGate(binding.name, pointArg, newBindings, usedNames);
         return makeLoadConst(INFINITY_HEX);
       }
 
-      // Rule 3: ecMul(x, 1) → x (alias)
+      // Rule 3: ecMul(x, 1) → x (alias), keeping ecMul's operand gate (N-104)
       if (isConstInt(scalarVal, 1n)) {
+        emitMulOperandGate(binding.name, pointArg, newBindings, usedNames);
         // Return a reference to the point argument
         return { kind: 'load_const', value: `@ref:${pointArg}` } as ANFValue;
       }
@@ -233,13 +295,15 @@ function tryRewrite(
       const leftArg = args[0]!;
       const rightArg = args[1]!;
 
-      // Rule 1: ecAdd(x, INFINITY) → x
+      // Rule 1: ecAdd(x, INFINITY) → x, keeping ecAdd's operand gate (N-104)
       if (argIsInfinity(rightArg, valueMap)) {
+        emitAddOperandGate(binding.name, leftArg, newBindings, usedNames);
         return { kind: 'load_const', value: `@ref:${leftArg}` } as ANFValue;
       }
 
-      // Rule 2: ecAdd(INFINITY, x) → x
+      // Rule 2: ecAdd(INFINITY, x) → x, keeping ecAdd's operand gate (N-104)
       if (argIsInfinity(leftArg, valueMap)) {
+        emitAddOperandGate(binding.name, rightArg, newBindings, usedNames);
         return { kind: 'load_const', value: `@ref:${rightArg}` } as ANFValue;
       }
 

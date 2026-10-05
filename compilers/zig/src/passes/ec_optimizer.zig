@@ -142,7 +142,7 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
             // `new_body` doubles as the prelude list: a rule that folds a new
             // constant appends its binding here, i.e. immediately BEFORE the
             // binding being rewritten (see `freshConstName`).
-            if (tryOptimize(allocator, current.value, &value_map, &fresh_counter, &used_names, &new_body)) |optimized| {
+            if (tryOptimize(allocator, binding.name, current.value, &value_map, &fresh_counter, &used_names, &new_body)) |optimized| {
                 current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
                 changed = true;
             }
@@ -189,6 +189,7 @@ fn hasEcCalls(body: []const types.ANFBinding) bool {
 
 fn tryOptimize(
     allocator: Allocator,
+    name: []const u8,
     v: types.ANFValue,
     vm: *std.StringHashMap(types.ANFValue),
     counter: *u32,
@@ -203,21 +204,32 @@ fn tryOptimize(
     const func = c.func;
     const args = c.args;
 
-    // Rule 1: ecAdd(x, INFINITY) -> x
-    if (eql(func, "ecAdd") and args.len == 2 and isInfinity(args[1], vm))
-        return makeRef(allocator, args[0]);
+    // Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
+    if (eql(func, "ecAdd") and args.len == 2 and isInfinity(args[1], vm)) {
+        const ref = makeRef(allocator, args[0]) orelse return null;
+        if (!emitOperandGate(allocator, .add, name, args[0], vm, used, prelude)) return null;
+        return ref;
+    }
 
-    // Rule 2: ecAdd(INFINITY, x) -> x
-    if (eql(func, "ecAdd") and args.len == 2 and isInfinity(args[0], vm))
-        return makeRef(allocator, args[1]);
+    // Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
+    if (eql(func, "ecAdd") and args.len == 2 and isInfinity(args[0], vm)) {
+        const ref = makeRef(allocator, args[1]) orelse return null;
+        if (!emitOperandGate(allocator, .add, name, args[1], vm, used, prelude)) return null;
+        return ref;
+    }
 
-    // Rule 3: ecMul(x, 1) -> x
-    if (eql(func, "ecMul") and args.len == 2 and isConstInt(allocator, args[1], 1, vm))
-        return makeRef(allocator, args[0]);
+    // Rule 3: ecMul(x, 1) -> x, keeping ecMul's operand gate (N-104)
+    if (eql(func, "ecMul") and args.len == 2 and isConstInt(allocator, args[1], 1, vm)) {
+        const ref = makeRef(allocator, args[0]) orelse return null;
+        if (!emitOperandGate(allocator, .mul, name, args[0], vm, used, prelude)) return null;
+        return ref;
+    }
 
-    // Rule 4: ecMul(x, 0) -> INFINITY
-    if (eql(func, "ecMul") and args.len == 2 and isConstInt(allocator, args[1], 0, vm))
+    // Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
+    if (eql(func, "ecMul") and args.len == 2 and isConstInt(allocator, args[1], 0, vm)) {
+        if (!emitOperandGate(allocator, .mul, name, args[0], vm, used, prelude)) return null;
         return makeConstHex(INFINITY_HEX);
+    }
 
     // Rule 5: ecMulGen(0) -> INFINITY
     if (eql(func, "ecMulGen") and args.len == 1 and isConstInt(allocator, args[0], 0, vm))
@@ -425,6 +437,83 @@ fn makeCall(allocator: Allocator, func: []const u8, args: []const []const u8) ?t
     return .{ .call = .{ .func = func, .args = owned } };
 }
 
+/// secp256k1 field prime, as the canonical decimal text `ConstValue.big_integer`
+/// carries (it does not fit `i128`).
+const FIELD_P_DEC = "115792089237316195423570985008687907853269984665640564039457584007908834671663";
+
+const GateOf = enum { add, mul };
+
+/// N-104 -- the operand gate a rewrite must leave behind. Byte-for-byte the TS
+/// reference (`emitAddOperandGate` / `emitMulOperandGate` in
+/// packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries in
+/// optimizer/ec-rules.json:
+///
+///   ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+///   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+///
+/// R1-R4 replace a builtin whose first act is to validate q; without this a
+/// malformed or off-curve q was accepted by the default compile and aborted
+/// under disableEcOptimizer. Built only from forms no rule matches, so the
+/// fixed-point loop cannot rewrite it on a later pass. Names follow the TS
+/// `freshName`: `<base><suffix>`, else the first unused `..._<i>`.
+///
+/// Builds every binding first and appends them to `prelude` only once all
+/// allocations succeeded, so a false return (the caller then declines the
+/// rewrite) never leaves a half-built gate behind.
+fn emitOperandGate(
+    allocator: Allocator,
+    of: GateOf,
+    base: []const u8,
+    q: []const u8,
+    vm: *std.StringHashMap(types.ANFValue),
+    used: *std.StringHashMap(void),
+    prelude: *std.ArrayListUnmanaged(types.ANFBinding),
+) bool {
+    var out: [7]types.ANFBinding = undefined;
+    var n: usize = 0;
+    const Builder = struct {
+        fn name(a: Allocator, u: *std.StringHashMap(void), b: []const u8, suffix: []const u8) ?[]const u8 {
+            var nm = std.fmt.allocPrint(a, "{s}{s}", .{ b, suffix }) catch return null;
+            var i: usize = 1;
+            while (u.contains(nm)) : (i += 1) {
+                nm = std.fmt.allocPrint(a, "{s}{s}_{d}", .{ b, suffix, i }) catch return null;
+            }
+            u.put(nm, {}) catch return null;
+            return nm;
+        }
+    };
+    const push = struct {
+        fn f(o: *[7]types.ANFBinding, k: *usize, nm: []const u8, v: types.ANFValue) []const u8 {
+            o[k.*] = .{ .name = nm, .value = v, .source_loc = null };
+            k.* += 1;
+            return nm;
+        }
+    }.f;
+    var ok_name: []const u8 = undefined;
+    switch (of) {
+        .add => {
+            const px = push(&out, &n, Builder.name(allocator, used, base, "_px") orelse return false, makeCall(allocator, "ecPointX", &.{q}) orelse return false);
+            const py = push(&out, &n, Builder.name(allocator, used, base, "_py") orelse return false, makeCall(allocator, "ecPointY", &.{q}) orelse return false);
+            const fp = push(&out, &n, Builder.name(allocator, used, base, "_fp") orelse return false, .{ .load_const = .{ .value = .{ .big_integer = FIELD_P_DEC } } });
+            const x_ok = push(&out, &n, Builder.name(allocator, used, base, "_pxok") orelse return false, .{ .bin_op = .{ .op = "<", .left = px, .right = fp } });
+            const y_ok = push(&out, &n, Builder.name(allocator, used, base, "_pyok") orelse return false, .{ .bin_op = .{ .op = "<", .left = py, .right = fp } });
+            ok_name = push(&out, &n, Builder.name(allocator, used, base, "_ok") orelse return false, .{ .bin_op = .{ .op = "&&", .left = x_ok, .right = y_ok } });
+        },
+        .mul => {
+            const inf = push(&out, &n, Builder.name(allocator, used, base, "_inf") orelse return false, makeConstHex(INFINITY_HEX));
+            const is_inf = push(&out, &n, Builder.name(allocator, used, base, "_isinf") orelse return false, .{ .bin_op = .{ .op = "===", .left = q, .right = inf, .result_type = "bytes" } });
+            const on_curve = push(&out, &n, Builder.name(allocator, used, base, "_oncurve") orelse return false, makeCall(allocator, "ecOnCurve", &.{q}) orelse return false);
+            ok_name = push(&out, &n, Builder.name(allocator, used, base, "_ok") orelse return false, .{ .bin_op = .{ .op = "||", .left = is_inf, .right = on_curve } });
+        },
+    }
+    _ = push(&out, &n, Builder.name(allocator, used, base, "_gate") orelse return false, .{ .assert = .{ .value = ok_name } });
+    for (out[0..n]) |b| {
+        vm.put(b.name, b.value) catch return false;
+        prelude.append(allocator, b) catch return false;
+    }
+    return true;
+}
+
 /// Bind a freshly folded constant and return its name.
 ///
 /// The binding is appended to `prelude` — the rebuilt method body, at the
@@ -581,9 +670,18 @@ fn expectConstStr(val: types.ANFValue, expected: []const u8) !void {
     }
 }
 
+fn findValue(body: []const types.ANFBinding, name: []const u8) !types.ANFValue {
+    for (body) |b| if (std.mem.eql(u8, b.name, name)) return b.value;
+    return error.TestUnexpectedResult;
+}
+
 // --- Rule 1: ecAdd(x, INFINITY) -> x ---
 test "rule 1: ecAdd(x, INFINITY) -> x" {
-    const alloc = testing.allocator;
+    // N-104: the operand gate's names and call args are not individually
+    // owned by the result, so freeOptimizeResult cannot release them.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var body = [_]types.ANFBinding{
         makeBinding("t0", .{ .load_const = .{ .value = .{ .integer = 42 } } }),
         makeBinding("inf", .{ .load_const = .{ .value = .{ .string = INFINITY_HEX } } }),
@@ -591,15 +689,18 @@ test "rule 1: ecAdd(x, INFINITY) -> x" {
         makeBinding("t3", .{ .assert = .{ .value = "t2" } }),
     };
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
-    defer freeOptimizeResult(alloc, result);
-    // After optimization t2 = @ref:t0, dead binding elimination removes unused "inf".
-    // Body: [t0, t2, t3] — t2 is at index 1.
-    try expectRefTo(result.methods[0].body[1].value, "t0");
+    // After optimization t2 = @ref:t0, dead binding elimination removes unused
+    // "inf". N-104: ecAdd's operand gate now precedes t2, so find it by name.
+    try expectRefTo(try findValue(result.methods[0].body, "t2"), "t0");
 }
 
 // --- Rule 2: ecAdd(INFINITY, x) -> x ---
 test "rule 2: ecAdd(INFINITY, x) -> x" {
-    const alloc = testing.allocator;
+    // N-104: the operand gate's names and call args are not individually
+    // owned by the result, so freeOptimizeResult cannot release them.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var body = [_]types.ANFBinding{
         makeBinding("inf", .{ .load_const = .{ .value = .{ .string = INFINITY_HEX } } }),
         makeBinding("t1", .{ .load_const = .{ .value = .{ .integer = 42 } } }),
@@ -607,15 +708,18 @@ test "rule 2: ecAdd(INFINITY, x) -> x" {
         makeBinding("t3", .{ .assert = .{ .value = "t2" } }),
     };
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
-    defer freeOptimizeResult(alloc, result);
-    // After optimization t2 = @ref:t1, dead binding elimination removes unused "inf".
-    // Body: [t1, t2, t3] — t2 is at index 1.
-    try expectRefTo(result.methods[0].body[1].value, "t1");
+    // After optimization t2 = @ref:t1, dead binding elimination removes unused
+    // "inf". N-104: ecAdd's operand gate now precedes t2, so find it by name.
+    try expectRefTo(try findValue(result.methods[0].body, "t2"), "t1");
 }
 
 // --- Rule 3: ecMul(x, 1) -> x ---
 test "rule 3: ecMul(x, 1) -> x" {
-    const alloc = testing.allocator;
+    // N-104: the operand gate's names and call args are not individually
+    // owned by the result, so freeOptimizeResult cannot release them.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var body = [_]types.ANFBinding{
         makeBinding("p", .{ .load_const = .{ .value = .{ .string = G_HEX } } }),
         makeBinding("k", .{ .load_const = .{ .value = .{ .integer = 1 } } }),
@@ -623,15 +727,18 @@ test "rule 3: ecMul(x, 1) -> x" {
         makeBinding("t1", .{ .assert = .{ .value = "t0" } }),
     };
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
-    defer freeOptimizeResult(alloc, result);
-    // After optimization t0 = @ref:p, dead binding elimination removes unused "k".
-    // Body: [p, t0, t1] — t0 is at index 1.
-    try expectRefTo(result.methods[0].body[1].value, "p");
+    // After optimization t0 = @ref:p, dead binding elimination removes unused
+    // "k". N-104: ecMul's operand gate now precedes t0, so find it by name.
+    try expectRefTo(try findValue(result.methods[0].body, "t0"), "p");
 }
 
 // --- Rule 4: ecMul(x, 0) -> INFINITY ---
 test "rule 4: ecMul(x, 0) -> INFINITY" {
-    const alloc = testing.allocator;
+    // N-104: the operand gate's names and call args are not individually
+    // owned by the result, so freeOptimizeResult cannot release them.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var body = [_]types.ANFBinding{
         makeBinding("p", .{ .load_const = .{ .value = .{ .string = G_HEX } } }),
         makeBinding("k", .{ .load_const = .{ .value = .{ .integer = 0 } } }),
@@ -639,10 +746,9 @@ test "rule 4: ecMul(x, 0) -> INFINITY" {
         makeBinding("t1", .{ .assert = .{ .value = "t0" } }),
     };
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
-    defer freeOptimizeResult(alloc, result);
-    // After optimization t0 = INFINITY_HEX, dead binding elimination removes unused "p" and "k".
-    // Body: [t0, t1] — t0 is at index 0.
-    try expectConstStr(result.methods[0].body[0].value, INFINITY_HEX);
+    // After optimization t0 = INFINITY_HEX and "k" is dead. N-104: ecMul's
+    // operand gate now reads "p" and precedes t0, so find it by name.
+    try expectConstStr(try findValue(result.methods[0].body, "t0"), INFINITY_HEX);
 }
 
 // --- Rule 5: ecMulGen(0) -> INFINITY ---
@@ -855,4 +961,126 @@ test "combineModN: operands past i128 reduce into [0, N)" {
     const n_minus_6 = "115792089237316195423570985008687907852837564279074904382605163141518161494331";
     const n_minus_13 = "115792089237316195423570985008687907852837564279074904382605163141518161494324";
     try expectCombine(n_minus_7, n_minus_6, .add, n_minus_13);
+}
+
+// --- N-104: the identity rewrites R1-R4 keep the replaced builtin's operand gate ---
+//
+// Pins the exact gate bindings -- names, kinds, operands, order -- every tier
+// emits (the "gate" entries in optimizer/ec-rules.json), so the seven tiers
+// stay ANF- and hex-identical. Proves this tier emits the gate; the gate's
+// script semantics are executed on the real Spend engine by
+// packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts.
+
+fn n104Describe(a: Allocator, b: types.ANFBinding) ![]const u8 {
+    const d: []const u8 = switch (b.value) {
+        .load_param => |lp| try std.fmt.allocPrint(a, "load_param {s}", .{lp.name}),
+        .load_const => |lc| switch (lc.value) {
+            .string => |s| if (std.mem.eql(u8, s, INFINITY_HEX))
+                "const INFINITY"
+            else if (std.mem.startsWith(u8, s, "@ref:"))
+                try std.fmt.allocPrint(a, "ref {s}", .{s[5..]})
+            else
+                try std.fmt.allocPrint(a, "const {s}", .{s}),
+            .integer => |n| try std.fmt.allocPrint(a, "const {d}", .{n}),
+            .big_integer => |s| try std.fmt.allocPrint(a, "const {s}", .{s}),
+            else => "const ?",
+        },
+        .call => |c| blk: {
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            try buf.appendSlice(a, "call ");
+            try buf.appendSlice(a, c.func);
+            for (c.args) |arg| {
+                try buf.append(a, ' ');
+                try buf.appendSlice(a, arg);
+            }
+            break :blk buf.items;
+        },
+        .bin_op => |bo| if (bo.result_type) |rt|
+            try std.fmt.allocPrint(a, "bin_op {s} {s} {s} {s}", .{ bo.op, bo.left, bo.right, rt })
+        else
+            try std.fmt.allocPrint(a, "bin_op {s} {s} {s}", .{ bo.op, bo.left, bo.right }),
+        .assert => |as| try std.fmt.allocPrint(a, "assert {s}", .{as.value}),
+        else => "other",
+    };
+    return std.fmt.allocPrint(a, "{s} = {s}", .{ b.name, d });
+}
+
+const N104_ADD_GATE = [_][]const u8{
+    "t_px = call ecPointX p",
+    "t_py = call ecPointY p",
+    "t_fp = const 115792089237316195423570985008687907853269984665640564039457584007908834671663",
+    "t_pxok = bin_op < t_px t_fp",
+    "t_pyok = bin_op < t_py t_fp",
+    "t_ok = bin_op && t_pxok t_pyok",
+    "t_gate = assert t_ok",
+};
+
+const N104_MUL_GATE = [_][]const u8{
+    "t_inf = const INFINITY",
+    "t_isinf = bin_op === p t_inf bytes",
+    "t_oncurve = call ecOnCurve p",
+    "t_ok = bin_op || t_isinf t_oncurve",
+    "t_gate = assert t_ok",
+};
+
+fn n104Check(second: types.ANFBinding, call: types.ANFValue, gate: []const []const u8, result: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_param = .{ .name = "pt" } }),
+        second,
+        makeBinding("t", call),
+        makeBinding("a", .{ .assert = .{ .value = "t" } }),
+    };
+    const out = try optimize(a, testProgram(&.{testMethod(&body)}));
+    var want = std.ArrayListUnmanaged([]const u8).empty;
+    try want.append(a, "p = load_param pt");
+    try want.appendSlice(a, gate);
+    try want.append(a, try std.fmt.allocPrint(a, "t = {s}", .{result}));
+    try want.append(a, "a = assert t");
+    const got_body = out.methods[0].body;
+    var got = std.ArrayListUnmanaged([]const u8).empty;
+    for (got_body) |b| try got.append(a, try n104Describe(a, b));
+    if (got.items.len != want.items.len) {
+        for (got.items) |g| std.debug.print("  got: {s}\n", .{g});
+        return error.TestUnexpectedResult;
+    }
+    for (want.items, got.items) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "N-104 ec-add-identity-right keeps ecAdd's operand gate" {
+    try n104Check(
+        makeBinding("inf", .{ .load_const = .{ .value = .{ .string = INFINITY_HEX } } }),
+        .{ .call = .{ .func = "ecAdd", .args = &.{ "p", "inf" } } },
+        &N104_ADD_GATE,
+        "ref p",
+    );
+}
+
+test "N-104 ec-add-identity-left keeps ecAdd's operand gate" {
+    try n104Check(
+        makeBinding("inf", .{ .load_const = .{ .value = .{ .string = INFINITY_HEX } } }),
+        .{ .call = .{ .func = "ecAdd", .args = &.{ "inf", "p" } } },
+        &N104_ADD_GATE,
+        "ref p",
+    );
+}
+
+test "N-104 ec-mul-one keeps ecMul's operand gate" {
+    try n104Check(
+        makeBinding("one", .{ .load_const = .{ .value = .{ .integer = 1 } } }),
+        .{ .call = .{ .func = "ecMul", .args = &.{ "p", "one" } } },
+        &N104_MUL_GATE,
+        "ref p",
+    );
+}
+
+test "N-104 ec-mul-zero keeps ecMul's operand gate" {
+    try n104Check(
+        makeBinding("zero", .{ .load_const = .{ .value = .{ .integer = 0 } } }),
+        .{ .call = .{ .func = "ecMul", .args = &.{ "p", "zero" } } },
+        &N104_MUL_GATE,
+        "const INFINITY",
+    );
 }

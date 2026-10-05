@@ -186,7 +186,7 @@ module RunarCompiler
             # +new_body+ doubles as the prelude list: a rule that folds a new
             # constant appends its binding here, i.e. immediately BEFORE the
             # binding being rewritten (see fresh_const_name).
-            optimized = try_optimize(binding.value, value_map, new_body, used_names)
+            optimized = try_optimize(binding.value, value_map, new_body, used_names, binding.name)
             if optimized
               binding = IR::ANFBinding.new(
                 name: binding.name,
@@ -210,30 +210,34 @@ module RunarCompiler
       # Optimization rules
       # -----------------------------------------------------------------
 
-      def self.try_optimize(v, vm, prelude, used_names)
+      def self.try_optimize(v, vm, prelude, used_names, name = "")
         return nil unless v.kind == "call" && v.func && v.args
 
         func = v.func
         args = v.args
 
-        # Rule 1: ecAdd(x, INFINITY) -> x
-        if func == "ecAdd" && args.size == 2
-          return make_ref(args[0]) if infinity?(args[1], vm)
+        # Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
+        if func == "ecAdd" && args.size == 2 && infinity?(args[1], vm)
+          emit_operand_gate(false, name, args[0], vm, prelude, used_names)
+          return make_ref(args[0])
         end
 
-        # Rule 2: ecAdd(INFINITY, x) -> x
-        if func == "ecAdd" && args.size == 2
-          return make_ref(args[1]) if infinity?(args[0], vm)
+        # Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
+        if func == "ecAdd" && args.size == 2 && infinity?(args[0], vm)
+          emit_operand_gate(false, name, args[1], vm, prelude, used_names)
+          return make_ref(args[1])
         end
 
-        # Rule 3: ecMul(x, 1) -> x
-        if func == "ecMul" && args.size == 2
-          return make_ref(args[0]) if const_int?(args[1], 1, vm)
+        # Rule 3: ecMul(x, 1) -> x, keeping ecMul's operand gate (N-104)
+        if func == "ecMul" && args.size == 2 && const_int?(args[1], 1, vm)
+          emit_operand_gate(true, name, args[0], vm, prelude, used_names)
+          return make_ref(args[0])
         end
 
-        # Rule 4: ecMul(x, 0) -> INFINITY
-        if func == "ecMul" && args.size == 2
-          return make_const_hex(INFINITY_HEX) if const_int?(args[1], 0, vm)
+        # Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
+        if func == "ecMul" && args.size == 2 && const_int?(args[1], 0, vm)
+          emit_operand_gate(true, name, args[0], vm, prelude, used_names)
+          return make_const_hex(INFINITY_HEX)
         end
 
         # Rule 5: ecMulGen(0) -> INFINITY
@@ -448,6 +452,59 @@ module RunarCompiler
         v
       end
       private_class_method :make_call
+
+      FIELD_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+      # N-104 -- the operand gate a rewrite must leave behind. Byte-for-byte the
+      # TS reference (emitAddOperandGate / emitMulOperandGate in
+      # packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries
+      # in optimizer/ec-rules.json:
+      #
+      #   ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+      #   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+      #
+      # R1-R4 replace a builtin whose first act is to validate q; without this a
+      # malformed or off-curve q was accepted by the default compile and aborted
+      # under disableEcOptimizer. Built only from forms no rule matches, so the
+      # fixed-point loop cannot rewrite it on a later pass. Names follow the TS
+      # freshName: <base><suffix>, else the first unused ..._<i>.
+      def self.emit_operand_gate(of_mul, base, q, vm, prelude, used_names)
+        add = lambda do |suffix, value|
+          name = "#{base}#{suffix}"
+          i = 1
+          while used_names.include?(name)
+            name = "#{base}#{suffix}_#{i}"
+            i += 1
+          end
+          used_names << name
+          vm[name] = value
+          prelude << IR::ANFBinding.new(name: name, value: value)
+          name
+        end
+        bin = lambda do |op, left, right, result_type = nil|
+          IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = op
+            v.left = left
+            v.right = right
+            v.result_type = result_type if result_type
+          end
+        end
+        if of_mul
+          inf = add.call("_inf", make_const_hex(INFINITY_HEX))
+          is_inf = add.call("_isinf", bin.call("===", q, inf, "bytes"))
+          on_curve = add.call("_oncurve", make_call("ecOnCurve", [q]))
+          ok = add.call("_ok", bin.call("||", is_inf, on_curve))
+        else
+          px = add.call("_px", make_call("ecPointX", [q]))
+          py = add.call("_py", make_call("ecPointY", [q]))
+          fp = add.call("_fp", make_const_int(FIELD_P))
+          x_ok = add.call("_pxok", bin.call("<", px, fp))
+          y_ok = add.call("_pyok", bin.call("<", py, fp))
+          ok = add.call("_ok", bin.call("&&", x_ok, y_ok))
+        end
+        add.call("_gate", Frontend._make_assert(ok))
+      end
+      private_class_method :emit_operand_gate
 
       # Bind a freshly folded constant and return its name.
       #

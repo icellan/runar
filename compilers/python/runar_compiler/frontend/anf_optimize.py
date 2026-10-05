@@ -117,7 +117,7 @@ def _optimize_method(method: ANFMethod, properties) -> None:
             # `new_body` doubles as the prelude list: a rule that folds a new
             # constant appends its binding here, i.e. immediately BEFORE the
             # binding being rewritten (see _fresh_const_name).
-            optimized = _try_optimize(binding.value, value_map, new_body, used_names)
+            optimized = _try_optimize(binding.value, value_map, new_body, used_names, binding.name)
             if optimized is not None:
                 binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
                 changed = True
@@ -135,31 +135,36 @@ def _optimize_method(method: ANFMethod, properties) -> None:
 
 def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
                   prelude: list[ANFBinding],
-                  used_names: set[str]) -> Optional[ANFValue]:
+                  used_names: set[str],
+                  name: str = "") -> Optional[ANFValue]:
     if v.kind != "call" or v.func is None or v.args is None:
         return None
 
     func = v.func
     args = v.args
 
-    # Rule 1: ecAdd(x, INFINITY) -> x
+    # Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
     if func == "ecAdd" and len(args) == 2:
         if _is_infinity(args[1], vm):
+            _emit_operand_gate(False, name, args[0], vm, prelude, used_names)
             return _make_ref(args[0])
 
-    # Rule 2: ecAdd(INFINITY, x) -> x
+    # Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
     if func == "ecAdd" and len(args) == 2:
         if _is_infinity(args[0], vm):
+            _emit_operand_gate(False, name, args[1], vm, prelude, used_names)
             return _make_ref(args[1])
 
-    # Rule 3: ecMul(x, 1) -> x
+    # Rule 3: ecMul(x, 1) -> x, keeping ecMul's operand gate (N-104)
     if func == "ecMul" and len(args) == 2:
         if _is_const_int(args[1], 1, vm):
+            _emit_operand_gate(True, name, args[0], vm, prelude, used_names)
             return _make_ref(args[0])
 
-    # Rule 4: ecMul(x, 0) -> INFINITY
+    # Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
     if func == "ecMul" and len(args) == 2:
         if _is_const_int(args[1], 0, vm):
+            _emit_operand_gate(True, name, args[0], vm, prelude, used_names)
             return _make_const_hex(INFINITY_HEX)
 
     # Rule 5: ecMulGen(0) -> INFINITY
@@ -345,6 +350,52 @@ def _make_const_int(n: int) -> ANFValue:
 
 def _make_call(func: str, args: list[str]) -> ANFValue:
     return ANFValue(kind="call", func=func, args=args)
+
+
+FIELD_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+
+def _emit_operand_gate(of_mul: bool, base: str, q: str, vm: dict[str, ANFValue],
+                       prelude: list[ANFBinding], used_names: set[str]) -> None:
+    """N-104 -- the operand gate a rewrite must leave behind.
+
+    Byte-for-byte the TS reference (emitAddOperandGate / emitMulOperandGate in
+    packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries in
+    optimizer/ec-rules.json::
+
+        ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)  width (CL-BUG-095) + canonicity (R-117)
+        ecMul: assert(q === O || ecOnCurve(q))              on-curve-or-O (R-157)
+
+    R1-R4 replace a builtin whose first act is to validate q; without this a
+    malformed or off-curve q was accepted by the default compile and aborted
+    under disableEcOptimizer. Built only from forms no rule matches, so the
+    fixed-point loop cannot rewrite it on a later pass. Names follow the TS
+    ``freshName``: ``<base><suffix>``, else the first unused ``..._<i>``.
+    """
+    def add(suffix: str, value: ANFValue) -> str:
+        name = base + suffix
+        i = 1
+        while name in used_names:
+            name = f"{base}{suffix}_{i}"
+            i += 1
+        used_names.add(name)
+        vm[name] = value
+        prelude.append(ANFBinding(name=name, value=value))
+        return name
+
+    if not of_mul:
+        px = add("_px", _make_call("ecPointX", [q]))
+        py = add("_py", _make_call("ecPointY", [q]))
+        fp = add("_fp", _make_const_int(FIELD_P))
+        x_ok = add("_pxok", ANFValue(kind="bin_op", op="<", left=px, right=fp))
+        y_ok = add("_pyok", ANFValue(kind="bin_op", op="<", left=py, right=fp))
+        ok = add("_ok", ANFValue(kind="bin_op", op="&&", left=x_ok, right=y_ok))
+    else:
+        inf = add("_inf", _make_const_hex(INFINITY_HEX))
+        is_inf = add("_isinf", ANFValue(kind="bin_op", op="===", left=q, right=inf, result_type="bytes"))
+        on_curve = add("_oncurve", _make_call("ecOnCurve", [q]))
+        ok = add("_ok", ANFValue(kind="bin_op", op="||", left=is_inf, right=on_curve))
+    add("_gate", ANFValue(kind="assert", raw_value=ok, value_ref=ok))
 
 
 # Counter for generating fresh constant binding names

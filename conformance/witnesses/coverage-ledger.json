@@ -158,26 +158,6 @@
       }
     },
     {
-      "fixture": "ec-demo",
-      "cause": "crypto-witness-infeasible",
-      "reason": "secp256k1 EC primitives — EC point witness",
-      "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/ec_isolation_test.zig",
-        "note": "real deploy + spend on a live regtest node: ECIsolation_Call_CheckOnCurve, _CheckMulGenOnCurve and _CheckNegateRoundtrip (accepts). Compiled output for examples/zig/ec-demo/ECDemo.runar.zig verified byte-identical to this fixture's expected-script.hex (1,328,331 bytes)."
-      }
-    },
-    {
-      "fixture": "ec-primitives",
-      "cause": "crypto-witness-infeasible",
-      "reason": "secp256k1 EC primitives — EC point witness",
-      "coveredBy": {
-        "kind": "go-script-exec",
-        "fixture": "ec-primitives",
-        "note": "compileRúnar(\"ec-primitives\", ...) is executed by ~16 TestECPrimitives_* functions in script_execution_test.go, including _Fail variants (reject)."
-      }
-    },
-    {
       "fixture": "intent-output-p2pkh",
       "cause": "stateful-harness-gap",
       "reason": "payBond() is a TERMINAL StatefulSmartContract method that asserts output 0 is a bond P2PKH via requireOutputP2PKH(0, ...) with no state mutation, so there is no state continuation and output 0 is free. The SDK deploy->call->Spend path does not compose an external bond output, so there is no go-script-exec accept/reject differential; covered instead by the ANF interpreter (1 accept + 2 reject: correct witness, wrong PKH bytes, wrong hashOutputs) across all 7 tiers. NOTE: the earlier variant that mixed requireOutputP2PKH(0) with a state mutation (the implicit single-output continuation ALSO claiming output 0, making it permanently unspendable) is now a COMPILE-TIME ERROR — see the guard in packages/runar-compiler/src/passes/03-typecheck.ts and TestIntentOutputP2PKH_GuardRejectsMutatingVariant in conformance/script_execution_test.go.",

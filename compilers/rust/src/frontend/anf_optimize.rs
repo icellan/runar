@@ -231,6 +231,52 @@ fn fresh_name(base: String, used_names: &mut HashSet<String>) -> String {
     name
 }
 
+/// secp256k1 field prime.
+const FIELD_P_HEX: &str = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f";
+
+/// N-104 — the operand gate a rewrite must leave behind. Byte-for-byte the TS
+/// reference (`emitAddOperandGate` / `emitMulOperandGate` in
+/// packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries in
+/// optimizer/ec-rules.json:
+///
+///   ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+///   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+///
+/// R1-R4 replace a builtin whose first act is to validate q; without this a
+/// malformed or off-curve q was accepted by the default compile and aborted
+/// under disableEcOptimizer. Built only from forms no rule matches, so the
+/// fixed-point loop below cannot rewrite it on a later pass. Each gate ends in
+/// an assert, which DCE keeps along with what it reads.
+fn emit_operand_gate(of_mul: bool, base: &str, q: &str, out: &mut Vec<ANFBinding>, used_names: &mut HashSet<String>) {
+    let mut add = |suffix: &str, value: ANFValue, out: &mut Vec<ANFBinding>| -> String {
+        let name = fresh_name(format!("{}{}", base, suffix), used_names);
+        out.push(ANFBinding { name: name.clone(), value, source_loc: None });
+        name
+    };
+    let call = |func: &str, arg: &str| ANFValue::Call { func: func.to_string(), args: vec![arg.to_string()] };
+    let bin = |op: &str, l: &str, r: &str, t: Option<&str>| ANFValue::BinOp {
+        op: op.to_string(),
+        left: l.to_string(),
+        right: r.to_string(),
+        result_type: t.map(|s| s.to_string()),
+    };
+    let ok = if !of_mul {
+        let px = add("_px", call("ecPointX", q), out);
+        let py = add("_py", call("ecPointY", q), out);
+        let p = BigInt::from_str_radix(FIELD_P_HEX, 16).expect("field prime");
+        let fp = add("_fp", make_load_const_int(&p), out);
+        let x_ok = add("_pxok", bin("<", &px, &fp, None), out);
+        let y_ok = add("_pyok", bin("<", &py, &fp, None), out);
+        add("_ok", bin("&&", &x_ok, &y_ok, None), out)
+    } else {
+        let inf = add("_inf", make_load_const_hex(INFINITY_HEX), out);
+        let is_inf = add("_isinf", bin("===", q, &inf, Some("bytes")), out);
+        let on_curve = add("_oncurve", call("ecOnCurve", q), out);
+        add("_ok", bin("||", &is_inf, &on_curve, None), out)
+    };
+    add("_gate", ANFValue::Assert { value: ok, is_auto_injected_state_check: false }, out);
+}
+
 /// Try to rewrite a single binding. Returns Some(new_value) if rewritten.
 /// May push extra bindings (e.g., computed scalars) into `extra_bindings`.
 fn try_rewrite(
@@ -274,13 +320,15 @@ fn try_rewrite(
             let scalar_arg = &args[1];
             let scalar_val = value_map.get(scalar_arg.as_str())?;
 
-            // Rule 4: ecMul(x, 0) -> INFINITY
+            // Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
             if is_const_int(scalar_val, 0) {
+                emit_operand_gate(true, &binding.name, point_arg, extra_bindings, used_names);
                 return Some(make_load_const_hex(INFINITY_HEX));
             }
 
-            // Rule 3: ecMul(x, 1) -> x (alias)
+            // Rule 3: ecMul(x, 1) -> x (alias), keeping ecMul's operand gate (N-104)
             if is_const_int(scalar_val, 1) {
+                emit_operand_gate(true, &binding.name, point_arg, extra_bindings, used_names);
                 return Some(make_alias(point_arg));
             }
 
@@ -329,13 +377,15 @@ fn try_rewrite(
             let left_arg = &args[0];
             let right_arg = &args[1];
 
-            // Rule 1: ecAdd(x, INFINITY) -> x
+            // Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
             if arg_is_infinity(right_arg, value_map) {
+                emit_operand_gate(false, &binding.name, left_arg, extra_bindings, used_names);
                 return Some(make_alias(left_arg));
             }
 
-            // Rule 2: ecAdd(INFINITY, x) -> x
+            // Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
             if arg_is_infinity(left_arg, value_map) {
+                emit_operand_gate(false, &binding.name, right_arg, extra_bindings, used_names);
                 return Some(make_alias(right_arg));
             }
 
@@ -1204,5 +1254,130 @@ mod tests {
             }
             other => panic!("method2 t1: expected LoadConst(G), got {other:?}"),
         }
+    }
+}
+
+/// N-104: the EC identity rewrites R1-R4 must leave the replaced builtin's
+/// operand validation in place of the call. Pins the exact gate bindings —
+/// names, kinds, operands, order — that every tier emits (the "gate" entries in
+/// optimizer/ec-rules.json), so the seven tiers stay ANF- and hex-identical.
+/// Proves this tier emits the gate; the gate's script semantics are executed on
+/// the real Spend engine by
+/// packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts.
+#[cfg(test)]
+mod n104_tests {
+    use super::*;
+
+    const FIELD_P_DEC: &str =
+        "115792089237316195423570985008687907853269984665640564039457584007908834671663";
+
+    fn bnd(name: &str, value: ANFValue) -> ANFBinding {
+        ANFBinding { name: name.to_string(), value, source_loc: None }
+    }
+
+    fn describe(b: &ANFBinding) -> String {
+        let d = match &b.value {
+            ANFValue::LoadParam { name } => format!("load_param {name}"),
+            ANFValue::LoadConst { value } => match value {
+                serde_json::Value::String(s) if s == INFINITY_HEX => "const INFINITY".to_string(),
+                serde_json::Value::String(s) if s.starts_with("@ref:") => format!("ref {}", &s[5..]),
+                serde_json::Value::String(s) => format!("const {}", s.trim_end_matches('n')),
+                other => format!("const {other}"),
+            },
+            ANFValue::Call { func, args } => format!("call {func} {}", args.join(" ")),
+            ANFValue::BinOp { op, left, right, result_type } => match result_type {
+                Some(t) => format!("bin_op {op} {left} {right} {t}"),
+                None => format!("bin_op {op} {left} {right}"),
+            },
+            ANFValue::Assert { value, .. } => format!("assert {value}"),
+            _ => "other".to_string(),
+        };
+        format!("{} = {}", b.name, d)
+    }
+
+    fn program(scalar_or_inf: ANFBinding, call: ANFValue) -> ANFProgram {
+        ANFProgram {
+            contract_name: "Test".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "test".to_string(),
+                params: vec![],
+                body: vec![
+                    bnd("p", ANFValue::LoadParam { name: "pt".to_string() }),
+                    scalar_or_inf,
+                    bnd("t", call),
+                    bnd("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+                ],
+                is_public: true,
+                sighash_type: None,
+            }],
+        }
+    }
+
+    fn call(func: &str, args: &[&str]) -> ANFValue {
+        ANFValue::Call { func: func.to_string(), args: args.iter().map(|s| s.to_string()).collect() }
+    }
+
+    fn add_gate() -> Vec<String> {
+        vec![
+            "t_px = call ecPointX p".to_string(),
+            "t_py = call ecPointY p".to_string(),
+            format!("t_fp = const {FIELD_P_DEC}"),
+            "t_pxok = bin_op < t_px t_fp".to_string(),
+            "t_pyok = bin_op < t_py t_fp".to_string(),
+            "t_ok = bin_op && t_pxok t_pyok".to_string(),
+            "t_gate = assert t_ok".to_string(),
+        ]
+    }
+
+    fn mul_gate() -> Vec<String> {
+        vec![
+            "t_inf = const INFINITY".to_string(),
+            "t_isinf = bin_op === p t_inf bytes".to_string(),
+            "t_oncurve = call ecOnCurve p".to_string(),
+            "t_ok = bin_op || t_isinf t_oncurve".to_string(),
+            "t_gate = assert t_ok".to_string(),
+        ]
+    }
+
+    fn expect(gate: Vec<String>, result: &str) -> Vec<String> {
+        let mut v = vec!["p = load_param pt".to_string()];
+        v.extend(gate);
+        v.push(format!("t = {result}"));
+        v.push("a = assert t".to_string());
+        v
+    }
+
+    fn run(p: ANFProgram) -> Vec<String> {
+        optimize_ec(p).methods[0].body.iter().map(describe).collect()
+    }
+
+    fn inf() -> ANFBinding {
+        bnd("inf", ANFValue::LoadConst { value: serde_json::Value::String(INFINITY_HEX.to_string()) })
+    }
+
+    fn int(name: &str, n: i64) -> ANFBinding {
+        bnd(name, ANFValue::LoadConst { value: serde_json::json!(n) })
+    }
+
+    #[test]
+    fn n104_ec_add_identity_right_keeps_gate() {
+        assert_eq!(run(program(inf(), call("ecAdd", &["p", "inf"]))), expect(add_gate(), "ref p"));
+    }
+
+    #[test]
+    fn n104_ec_add_identity_left_keeps_gate() {
+        assert_eq!(run(program(inf(), call("ecAdd", &["inf", "p"]))), expect(add_gate(), "ref p"));
+    }
+
+    #[test]
+    fn n104_ec_mul_one_keeps_gate() {
+        assert_eq!(run(program(int("one", 1), call("ecMul", &["p", "one"]))), expect(mul_gate(), "ref p"));
+    }
+
+    #[test]
+    fn n104_ec_mul_zero_keeps_gate() {
+        assert_eq!(run(program(int("zero", 0), call("ecMul", &["p", "zero"]))), expect(mul_gate(), "const INFINITY"));
     }
 }

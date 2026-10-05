@@ -2,22 +2,30 @@
   {
     "name": "ec-add-identity-right",
     "match": { "func": "ecAdd", "args": ["$x", { "const": "INFINITY" }] },
-    "replace": "$x"
+    "replace": "$x",
+    "gate": { "of": "ecAdd", "operand": "$x" },
+    "note": "N-104 OPERAND GATE: ecAdd validates q before it adds - exactly 64 bytes (CL-BUG-095) and both coordinates below p (R-117) - and the identity answer q is only ecAdd's answer for a q that passes. The rewrite keeps that validation, ahead of the alias, as plain ANF built only from forms no rule here matches (so the fixed-point tiers cannot rewrite it on a later pass): <b>_px = ecPointX($x); <b>_py = ecPointY($x); <b>_fp = p; <b>_pxok = <b>_px < <b>_fp; <b>_pyok = <b>_py < <b>_fp; <b>_ok = <b>_pxok && <b>_pyok; <b>_gate = assert(<b>_ok), where <b> is the rewritten binding's name. Without it a malformed q was accepted by the default compile and aborted under disableEcOptimizer. ecAdd deliberately does NOT require on-curve (R-157), so neither does this gate. Pinned by packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts (execution, both modes) and each tier's N-104 optimizer test."
   },
   {
     "name": "ec-add-identity-left",
     "match": { "func": "ecAdd", "args": [{ "const": "INFINITY" }, "$x"] },
-    "replace": "$x"
+    "replace": "$x",
+    "gate": { "of": "ecAdd", "operand": "$x" },
+    "note": "N-104 OPERAND GATE: ecAdd validates q before it adds - exactly 64 bytes (CL-BUG-095) and both coordinates below p (R-117) - and the identity answer q is only ecAdd's answer for a q that passes. The rewrite keeps that validation, ahead of the alias, as plain ANF built only from forms no rule here matches (so the fixed-point tiers cannot rewrite it on a later pass): <b>_px = ecPointX($x); <b>_py = ecPointY($x); <b>_fp = p; <b>_pxok = <b>_px < <b>_fp; <b>_pyok = <b>_py < <b>_fp; <b>_ok = <b>_pxok && <b>_pyok; <b>_gate = assert(<b>_ok), where <b> is the rewritten binding's name. Without it a malformed q was accepted by the default compile and aborted under disableEcOptimizer. ecAdd deliberately does NOT require on-curve (R-157), so neither does this gate. Pinned by packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts (execution, both modes) and each tier's N-104 optimizer test."
   },
   {
     "name": "ec-mul-one",
     "match": { "func": "ecMul", "args": ["$x", 1] },
-    "replace": "$x"
+    "replace": "$x",
+    "gate": { "of": "ecMul", "operand": "$x" },
+    "note": "N-104 OPERAND GATE: ecMul aborts unless q is on the curve or is the all-zero O (R-157, emitPointGate), and the answer this rule substitutes is only ecMul's answer for such a q. The rewrite keeps that validation, ahead of the rewritten binding, as plain ANF built only from forms no rule here matches: <b>_inf = INFINITY; <b>_isinf = $x === <b>_inf (bytes); <b>_oncurve = ecOnCurve($x); <b>_ok = <b>_isinf || <b>_oncurve; <b>_gate = assert(<b>_ok), where <b> is the rewritten binding's name - the same predicate, in the same order, as emitPointGate. ecOnCurve carries the width and canonicity checks, so this subsumes the ecAdd gate exactly as R-157 does. Pinned by packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts (execution, both modes) and each tier's N-104 optimizer test."
   },
   {
     "name": "ec-mul-zero",
     "match": { "func": "ecMul", "args": ["$x", 0] },
-    "replace": { "const": "INFINITY" }
+    "replace": { "const": "INFINITY" },
+    "gate": { "of": "ecMul", "operand": "$x" },
+    "note": "N-104 OPERAND GATE: ecMul aborts unless q is on the curve or is the all-zero O (R-157, emitPointGate), and the answer this rule substitutes is only ecMul's answer for such a q. The rewrite keeps that validation, ahead of the rewritten binding, as plain ANF built only from forms no rule here matches: <b>_inf = INFINITY; <b>_isinf = $x === <b>_inf (bytes); <b>_oncurve = ecOnCurve($x); <b>_ok = <b>_isinf || <b>_oncurve; <b>_gate = assert(<b>_ok), where <b> is the rewritten binding's name - the same predicate, in the same order, as emitPointGate. ecOnCurve carries the width and canonicity checks, so this subsumes the ecAdd gate exactly as R-157 does. Pinned by packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts (execution, both modes) and each tier's N-104 optimizer test."
   },
   {
     "name": "ec-mulgen-zero",

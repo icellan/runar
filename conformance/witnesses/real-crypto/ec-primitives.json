@@ -1,0 +1,72 @@
+{
+  "fixture": "ec-primitives",
+  "kind": "stateless-signed",
+  "note": "N-104 / R30 route A. ECPrimitives.checkMulIdentity() computes ecMul(this.pt, 1n), which the always-on EC optimizer rewrites to this.pt (ec-mul-one). The rewrite used to drop the operand validation ecMul performs first (R-157: on the curve, or exactly O), so a deployer-supplied off-curve or non-canonical pt made checkMulIdentity() SUCCEED with the optimizer on and ABORT with it off: one source, two meanings. The rewrite now keeps that gate (assert(pt === O || ecOnCurve(pt))) ahead of the alias, in all seven tiers, which is what moved this fixture's golden. Every spend below executes the fixture's actual compiled locking script on @bsv/sdk Spend. The two 'attack' rejects are the forced near-misses: both were ACCEPTED by the pre-fix compiler (measured, remediation-logs/N-104/witness-prefix.txt) and are rejected now, exactly as the unoptimized ecMul rejects them. The O accept pins that O is exempt from the gate, as it is inside ecMul.",
+  "constructorArgs": {
+    "pt": "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+  },
+  "spends": [
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "expect": "accept",
+      "note": "pt = G: on the curve, so ecMul's gate passes and 1*G = G"
+    },
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": "accept",
+      "note": "pt = O (the all-zero point): exempt from the R-157 gate inside ecMul, and so from the kept gate; 1*O = O"
+    },
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0x00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss): off-curve canonical pt = (5, 7). Pre-fix the rewrite returned pt unchecked and this spend was ACCEPTED; the unoptimized ecMul aborts on it. Now rejected by the kept on-curve-or-O gate. cryptoNearMiss: the TestContract source interpreter models ecMul as bare curve arithmetic with no R-157 operand gate, so it cannot model this script-only rejection (a pre-existing interpreter gap, reported with N-104); the row instead asserts the rejection reached the Spend engine",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc300000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss): non-canonical pt = (p+1, 2), x >= p. Pre-fix ACCEPTED; ecOnCurve rejects a non-canonical coordinate, so the kept gate rejects it as ecMul does. cryptoNearMiss: the TestContract source interpreter models ecMul as bare curve arithmetic with no R-157 operand gate, so it cannot model this script-only rejection (a pre-existing interpreter gap, reported with N-104); the row instead asserts the rejection reached the Spend engine",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "checkOnCurve",
+      "args": [],
+      "expect": "accept",
+      "note": "control on another method of the same script: G is on the curve"
+    },
+    {
+      "method": "checkX",
+      "args": [
+        "55066263022277343669578718895168534326250603453777594175500187360389116729240n"
+      ],
+      "expect": "accept",
+      "note": "control: ecPointX(G) == Gx"
+    },
+    {
+      "method": "checkX",
+      "args": [
+        "55066263022277343669578718895168534326250603453777594175500187360389116729241n"
+      ],
+      "expect": "reject",
+      "note": "control: ecPointX(G) != Gx + 1, so the accepts are not vacuous"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "7e2fa1bef5b3ca203ad886d81446ea0c4afd2d422df731d54530f0002931fd81",
+    "expected-ir.json": "00c928d72428ff69c185be83375728d50c4b661ede10e1a48d4e3806c7ecb751"
+  },
+  "goldenHashesNote": "N-104 moved both goldens: checkMulIdentity's ecMul(pt, 1n) rewrite now carries ecMul's operand gate (t2_inf, t2_isinf, t2_oncurve, t2_ok, t2_gate in expected-ir.json; +877 bytes of script). Nothing else in the fixture changed. The pin is self-invalidating: any later change to either golden must come back through this witness, whose spends re-execute the fixture's compiled locking script on the real @bsv/sdk Spend engine. All seven tiers produce these bytes (conformance multi-format, both fold modes)."
+}

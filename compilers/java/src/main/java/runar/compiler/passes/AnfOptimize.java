@@ -184,7 +184,7 @@ public final class AnfOptimize {
             List<AnfBinding> next = new ArrayList<>(body.size());
             boolean changed = false;
             for (AnfBinding b : body) {
-                AnfValue optimized = tryOptimize(b.value(), valueMap, next, usedNames);
+                AnfValue optimized = tryOptimize(b.name(), b.value(), valueMap, next, usedNames);
                 AnfBinding rebound = b;
                 if (optimized != null) {
                     rebound = new AnfBinding(b.name(), optimized, b.sourceLoc());
@@ -254,26 +254,30 @@ public final class AnfOptimize {
      * combining two scalars into one). Those are appended to {@code prelude}
      * so the rewritten call can reference them.
      */
-    private static AnfValue tryOptimize(AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude, Set<String> usedNames) {
+    private static AnfValue tryOptimize(String name, AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude, Set<String> usedNames) {
         if (!(v instanceof Call call)) return null;
         String func = call.func();
         List<String> args = call.args();
         if (func == null || args == null) return null;
 
-        // Rule 1: ecAdd(x, INFINITY) -> x
+        // Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
         if ("ecAdd".equals(func) && args.size() == 2 && isInfinity(args.get(1), vm)) {
+            emitOperandGate(false, name, args.get(0), vm, prelude, usedNames);
             return makeRef(args.get(0));
         }
-        // Rule 2: ecAdd(INFINITY, x) -> x
+        // Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
         if ("ecAdd".equals(func) && args.size() == 2 && isInfinity(args.get(0), vm)) {
+            emitOperandGate(false, name, args.get(1), vm, prelude, usedNames);
             return makeRef(args.get(1));
         }
-        // Rule 3: ecMul(x, 1) -> x
+        // Rule 3: ecMul(x, 1) -> x, keeping ecMul's operand gate (N-104)
         if ("ecMul".equals(func) && args.size() == 2 && isConstInt(args.get(1), BigInteger.ONE, vm)) {
+            emitOperandGate(true, name, args.get(0), vm, prelude, usedNames);
             return makeRef(args.get(0));
         }
-        // Rule 4: ecMul(x, 0) -> INFINITY
+        // Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
         if ("ecMul".equals(func) && args.size() == 2 && isConstInt(args.get(1), BigInteger.ZERO, vm)) {
+            emitOperandGate(true, name, args.get(0), vm, prelude, usedNames);
             return makeConstHex(INFINITY_HEX);
         }
         // Rule 5: ecMulGen(0) -> INFINITY
@@ -439,6 +443,55 @@ public final class AnfOptimize {
 
     private static AnfValue makeConstHex(String hex) {
         return new LoadConst(new BytesConst(hex));
+    }
+
+    /** secp256k1 field prime. */
+    private static final BigInteger FIELD_P = new BigInteger(
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16);
+
+    /**
+     * N-104 — the operand gate a rewrite must leave behind. Byte-for-byte the
+     * TS reference ({@code emitAddOperandGate} / {@code emitMulOperandGate} in
+     * packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries
+     * in optimizer/ec-rules.json:
+     *
+     * <pre>
+     *   ecAdd: assert(ecPointX(q) &lt; p &amp;&amp; ecPointY(q) &lt; p)   width (CL-BUG-095) + canonicity (R-117)
+     *   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+     * </pre>
+     *
+     * <p>R1-R4 replace a builtin whose first act is to validate q; without
+     * this a malformed or off-curve q was accepted by the default compile and
+     * aborted under disableEcOptimizer. Built only from forms no rule matches,
+     * so the fixed-point loop cannot rewrite it on a later pass. Names follow
+     * the TS {@code freshName}: {@code <base><suffix>}, else the first unused
+     * {@code ..._<i>}.
+     */
+    private static void emitOperandGate(boolean ofMul, String base, String q, Map<String, AnfValue> vm,
+                                        List<AnfBinding> prelude, Set<String> usedNames) {
+        java.util.function.BiFunction<String, AnfValue, String> add = (suffix, value) -> {
+            String n = base + suffix;
+            for (int i = 1; usedNames.contains(n); i++) n = base + suffix + "_" + i;
+            usedNames.add(n);
+            vm.put(n, value);
+            prelude.add(new AnfBinding(n, value, null));
+            return n;
+        };
+        String ok;
+        if (ofMul) {
+            String inf = add.apply("_inf", makeConstHex(INFINITY_HEX));
+            String isInf = add.apply("_isinf", new BinOp("===", q, inf, "bytes"));
+            String onCurve = add.apply("_oncurve", new Call("ecOnCurve", List.of(q)));
+            ok = add.apply("_ok", new BinOp("||", isInf, onCurve, null));
+        } else {
+            String px = add.apply("_px", new Call("ecPointX", List.of(q)));
+            String py = add.apply("_py", new Call("ecPointY", List.of(q)));
+            String fp = add.apply("_fp", new LoadConst(new BigIntConst(FIELD_P)));
+            String xOk = add.apply("_pxok", new BinOp("<", px, fp, null));
+            String yOk = add.apply("_pyok", new BinOp("<", py, fp, null));
+            ok = add.apply("_ok", new BinOp("&&", xOk, yOk, null));
+        }
+        add.apply("_gate", new Assert(ok));
     }
 
     /**

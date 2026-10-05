@@ -187,6 +187,9 @@ func TestOptimizeEC_RawOutputReachesEmittedScript(t *testing.T) {
 		loadConstHex("script", "76a914000000000000000000000000000000000000000088ac"),
 		addRawOutputBinding("raw", "sats", "script"),
 	})
+	// N-104: ec-mul-one now keeps ecMul's operand gate, which reads `p`, so the
+	// method must actually declare the parameter its load_param names.
+	prog.Methods[0].Params = []ir.ANFParam{{Name: "p", Type: "Point"}}
 	OptimizeEC(prog)
 
 	methods, err := codegen.LowerToStack(prog)

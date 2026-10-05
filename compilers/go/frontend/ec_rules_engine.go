@@ -29,6 +29,14 @@
 //                                the curve order; otherwise emitted as a
 //                                runtime bin_op).
 //
+//   gate (optional): { "of": "ecAdd" | "ecMul", "operand": "$name" }
+//                                N-104: the rewrite replaces a builtin that
+//                                validates the bound operand first; emit that
+//                                validation (as plain ANF, before the
+//                                rewritten binding) so the rewrite cannot
+//                                accept an operand the builtin would reject.
+//                                See emitOperandGate.
+//
 // A rule may carry an optional "supported" list of compiler targets. If
 // present and it does not contain "go", the rule is skipped by this engine.
 // This lets the JSON list rules that only some compilers implement (rules
@@ -61,7 +69,15 @@ type ecRule struct {
 	Name      string
 	Match     ecPattern
 	Replace   ecReplace
+	Gate      *ecGate  // N-104: operand validation the rewrite must keep, or nil
 	Supported []string // empty = supported by all compilers
+}
+
+// ecGate names the builtin whose operand validation a rewrite keeps, and the
+// pattern variable bound to that operand.
+type ecGate struct {
+	Of      string // "ecAdd" or "ecMul"
+	Operand string // pattern variable name, without the '$'
 }
 
 // ecPattern represents a single match pattern element.
@@ -185,6 +201,22 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rule %q: replace: %w", name, err)
 		}
+		var gate *ecGate
+		if gateRaw, ok := rr["gate"]; ok {
+			gm, ok := gateRaw.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("rule %q: gate must be an object", name)
+			}
+			of, _ := gm["of"].(string)
+			if of != "ecAdd" && of != "ecMul" {
+				return nil, fmt.Errorf("rule %q: gate.of must be ecAdd or ecMul, got %q", name, of)
+			}
+			operand, _ := gm["operand"].(string)
+			if len(operand) < 2 || operand[0] != '$' {
+				return nil, fmt.Errorf("rule %q: gate.operand must be a $var", name)
+			}
+			gate = &ecGate{Of: of, Operand: operand[1:]}
+		}
 		var supported []string
 		if supRaw, ok := rr["supported"]; ok {
 			sl, ok := supRaw.([]interface{})
@@ -202,6 +234,7 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 			Name:      name,
 			Match:     match,
 			Replace:   replace,
+			Gate:      gate,
 			Supported: supported,
 		})
 	}
@@ -591,8 +624,58 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[str
 		if !opOperandsAreConst(rule, binds, lookup) {
 			continue
 		}
+		var gate []ir.ANFBinding
+		if rule.Gate != nil {
+			gate = emitOperandGate(rule.Gate.Of, b.Name, binds[rule.Gate.Operand], lookup, used)
+		}
 		extra := applyReplace(rule, b, binds, lookup, used)
-		return extra, true
+		return append(gate, extra...), true
 	}
 	return nil, false
+}
+
+// ---------------------------------------------------------------------------
+// N-104 operand gate
+// ---------------------------------------------------------------------------
+
+// fieldP is the secp256k1 field prime.
+var fieldP, _ = new(big.Int).SetString("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16)
+
+// emitOperandGate returns the bindings that re-check, at runtime, what the
+// builtin `of` would have checked about operand q before computing anything.
+// Byte-for-byte the TS reference (emitAddOperandGate / emitMulOperandGate in
+// packages/runar-compiler/src/optimizer/anf-ec.ts):
+//
+//	ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+//	ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+//
+// Built only from forms no rule matches, because this engine runs to a fixed
+// point and TS makes one pass: a gate a later pass could rewrite would split
+// the tiers. Each gate ends in an assert, which DCE keeps along with what it
+// reads.
+func emitOperandGate(of, base, q string, lookup map[string]*ir.ANFValue, used map[string]bool) []ir.ANFBinding {
+	var out []ir.ANFBinding
+	add := func(suffix string, v ir.ANFValue) string {
+		name := nextTempName(base+suffix, lookup, used)
+		out = append(out, ir.ANFBinding{Name: name, Value: v})
+		return name
+	}
+	if of == "ecAdd" {
+		px := add("_px", ir.ANFValue{Kind: "call", Func: "ecPointX", Args: []string{q}})
+		py := add("_py", ir.ANFValue{Kind: "call", Func: "ecPointY", Args: []string{q}})
+		fp := add("_fp", ir.ANFValue{Kind: "load_const", RawValue: ir.BigIntToRawJSON(fieldP), ConstBigInt: new(big.Int).Set(fieldP)})
+		xOk := add("_pxok", ir.ANFValue{Kind: "bin_op", Op: "<", Left: px, Right: fp})
+		yOk := add("_pyok", ir.ANFValue{Kind: "bin_op", Op: "<", Left: py, Right: fp})
+		ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "&&", Left: xOk, Right: yOk})
+		add("_gate", makeAssert(ok))
+		return out
+	}
+	infHex := infinityHex
+	rawInf, _ := json.Marshal(infHex)
+	inf := add("_inf", ir.ANFValue{Kind: "load_const", RawValue: rawInf, ConstString: &infHex})
+	isInf := add("_isinf", ir.ANFValue{Kind: "bin_op", Op: "===", Left: q, Right: inf, ResultType: "bytes"})
+	onCurve := add("_oncurve", ir.ANFValue{Kind: "call", Func: "ecOnCurve", Args: []string{q}})
+	ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "||", Left: isInf, Right: onCurve})
+	add("_gate", makeAssert(ok))
+	return out
 }

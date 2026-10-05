@@ -989,6 +989,49 @@
           }
         },
         {
+          "name": "t2_inf",
+          "value": {
+            "kind": "load_const",
+            "value": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "name": "t2_isinf",
+          "value": {
+            "kind": "bin_op",
+            "left": "t0",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2_inf"
+          }
+        },
+        {
+          "name": "t2_oncurve",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2_ok",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2_isinf",
+            "op": "||",
+            "right": "t2_oncurve"
+          }
+        },
+        {
+          "name": "t2_gate",
+          "value": {
+            "kind": "assert",
+            "value": "t2_ok"
+          }
+        },
+        {
           "name": "t2",
           "value": {
             "kind": "load_const",
