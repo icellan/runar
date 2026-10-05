@@ -7,9 +7,6 @@ import (
 	"unicode"
 )
 
-// openTagRegex matches Mustache section open tags: {{#key}} or {{^key}}
-var openTagRegex = regexp.MustCompile(`\{\{([#^])(\w+)\}\}`)
-
 // ---------------------------------------------------------------------------
 // GenerateGo — produce a typed Go wrapper from a compiled RunarArtifact
 // ---------------------------------------------------------------------------
@@ -417,121 +414,112 @@ func buildCodegenContext(artifact *RunarArtifact) map[string]interface{} {
 // ---------------------------------------------------------------------------
 // Supports: {{var}}, {{#section}}...{{/section}}, {{^section}}...{{/section}}
 // No HTML escaping, no partials, no lambdas.
-// Go's RE2 engine does not support backreferences, so section matching is
-// done with manual string scanning rather than a single regex.
+//
+// The template is rendered in a single left-to-right pass. A section's body
+// is rendered against a context STACK: entering an array item or map pushes
+// it, and every lookup walks the stack from the innermost context outwards,
+// so {{#isTerminal}} inside {{#methods}} resolves against the current method
+// first and falls back to the root. Go's RE2 engine does not support
+// backreferences, so the matching close tag is found by scanning tags with a
+// depth counter rather than with a single regex.
 
-// varRegex matches variable interpolation tags.
-var varRegex = regexp.MustCompile(`\{\{(\w+)\}\}`)
+// tagRegex matches {{key}}, {{#key}}, {{^key}} and {{/key}}.
+var tagRegex = regexp.MustCompile(`\{\{([#^/]?)(\w+)\}\}`)
 
 func renderMustache(template string, context map[string]interface{}) string {
-	return renderSection(template, context)
+	return renderSection(template, []map[string]interface{}{context})
 }
 
-// findInnermostSection finds the innermost {{#key}}/{{^key}}...{{/key}} section
-// in the template. Returns the start/end offsets in the template string,
-// the section type ("#" or "^"), the key name, and the body content.
-// Returns start=-1 if no section is found.
-func findInnermostSection(template string) (start, end int, sectionType, key, body string) {
-	// Find all open tags and pick the last one whose matching close tag
-	// appears before any other open tag. This gives us an innermost section.
-	matches := openTagRegex.FindAllStringSubmatchIndex(template, -1)
-	if len(matches) == 0 {
-		return -1, 0, "", "", ""
+// lookupContext resolves key against the context stack, innermost first.
+func lookupContext(stack []map[string]interface{}, key string) (interface{}, bool) {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if v, ok := stack[i][key]; ok {
+			return v, true
+		}
 	}
+	return nil, false
+}
 
-	// Iterate open tags from last to first — the last open tag without a
-	// nested open tag before its close is innermost.
-	for i := len(matches) - 1; i >= 0; i-- {
-		m := matches[i]
-		openStart := m[0]
-		openEnd := m[1]
-		st := template[m[2]:m[3]]  // "#" or "^"
-		k := template[m[4]:m[5]]   // key name
-
-		closeTag := "{{/" + k + "}}"
-		closeIdx := strings.Index(template[openEnd:], closeTag)
-		if closeIdx < 0 {
+// findSectionClose returns the [start, end) offsets of the {{/key}} tag that
+// closes a section of the given key whose body starts at from, honouring
+// nested sections of the same key. Returns -1, -1 if it is unclosed.
+func findSectionClose(template string, from int, key string) (int, int) {
+	depth := 0
+	for _, m := range tagRegex.FindAllStringSubmatchIndex(template[from:], -1) {
+		if template[from+m[4]:from+m[5]] != key {
 			continue
 		}
-		closeStart := openEnd + closeIdx
-		closeEnd := closeStart + len(closeTag)
-
-		// Check that there's no other open tag between openEnd and closeStart
-		// that would make this NOT the innermost section.
-		nested := false
-		for j := i + 1; j < len(matches); j++ {
-			if matches[j][0] >= openEnd && matches[j][0] < closeStart {
-				nested = true
-				break
+		switch template[from+m[2] : from+m[3]] {
+		case "#", "^":
+			depth++
+		case "/":
+			if depth == 0 {
+				return from + m[0], from + m[1]
 			}
+			depth--
 		}
-		if nested {
-			continue
-		}
-
-		return openStart, closeEnd, st, k, template[openEnd:closeStart]
 	}
-	return -1, 0, "", "", ""
+	return -1, -1
 }
 
-func renderSection(template string, context map[string]interface{}) string {
-	result := template
-
-	// Repeatedly process sections from innermost out
-	for {
-		start, end, sectionType, key, body := findInnermostSection(result)
-		if start < 0 {
+func renderSection(template string, stack []map[string]interface{}) string {
+	var out strings.Builder
+	pos := 0
+	for pos < len(template) {
+		m := tagRegex.FindStringSubmatchIndex(template[pos:])
+		if m == nil {
+			out.WriteString(template[pos:])
 			break
 		}
+		tagStart, tagEnd := pos+m[0], pos+m[1]
+		sigil := template[pos+m[2] : pos+m[3]]
+		key := template[pos+m[4] : pos+m[5]]
+		out.WriteString(template[pos:tagStart])
 
-		var replacement string
-		value, exists := context[key]
-
-		if sectionType == "^" {
-			// Inverted section: render if falsy/empty
-			if !exists || isFalsy(value) {
-				replacement = renderSection(body, context)
+		switch sigil {
+		case "":
+			// Variable interpolation.
+			if value, exists := lookupContext(stack, key); exists && value != nil {
+				out.WriteString(fmt.Sprintf("%v", value))
 			}
-		} else {
-			// Normal section
-			if exists && !isFalsy(value) {
-				// Array: iterate
+			pos = tagEnd
+		case "#", "^":
+			closeStart, closeEnd := findSectionClose(template, tagEnd, key)
+			if closeStart < 0 {
+				// Unclosed section: emit the tag literally.
+				out.WriteString(template[tagStart:tagEnd])
+				pos = tagEnd
+				continue
+			}
+			body := template[tagEnd:closeStart]
+			value, exists := lookupContext(stack, key)
+			if sigil == "^" {
+				// Inverted section: render if falsy/empty
+				if !exists || isFalsy(value) {
+					out.WriteString(renderSection(body, stack))
+				}
+			} else if exists && !isFalsy(value) {
 				if arr, ok := toSliceOfMaps(value); ok {
-					var parts []string
+					// Array: iterate, each item on top of the stack
 					for _, item := range arr {
-						merged := mergeContexts(context, item)
-						parts = append(parts, renderSection(body, merged))
+						out.WriteString(renderSection(body, append(stack[:len(stack):len(stack)], item)))
 					}
-					replacement = strings.Join(parts, "")
-				} else if m, ok := value.(map[string]interface{}); ok {
-					// Object (map): merge into context
-					merged := mergeContexts(context, m)
-					replacement = renderSection(body, merged)
+				} else if obj, ok := value.(map[string]interface{}); ok {
+					// Object (map): push onto the stack
+					out.WriteString(renderSection(body, append(stack[:len(stack):len(stack)], obj)))
 				} else {
 					// Truthy scalar: render body with current context
-					replacement = renderSection(body, context)
+					out.WriteString(renderSection(body, stack))
 				}
 			}
+			pos = closeEnd
+		default:
+			// Stray close tag: emit literally.
+			out.WriteString(template[tagStart:tagEnd])
+			pos = tagEnd
 		}
-
-		result = result[:start] + replacement + result[end:]
 	}
-
-	// Replace variables: {{key}}
-	result = varRegex.ReplaceAllStringFunc(result, func(match string) string {
-		sub := varRegex.FindStringSubmatch(match)
-		if len(sub) < 2 {
-			return match
-		}
-		key := sub[1]
-		value, exists := context[key]
-		if !exists || value == nil {
-			return ""
-		}
-		return fmt.Sprintf("%v", value)
-	})
-
-	return result
+	return out.String()
 }
 
 // isFalsy returns true if the value should be considered falsy for Mustache
@@ -577,19 +565,6 @@ func toSliceOfMaps(value interface{}) ([]map[string]interface{}, bool) {
 		return result, true
 	}
 	return nil, false
-}
-
-// mergeContexts creates a new context map with all entries from parent,
-// overridden by entries from child.
-func mergeContexts(parent, child map[string]interface{}) map[string]interface{} {
-	merged := make(map[string]interface{}, len(parent)+len(child))
-	for k, v := range parent {
-		merged[k] = v
-	}
-	for k, v := range child {
-		merged[k] = v
-	}
-	return merged
 }
 
 // ---------------------------------------------------------------------------
@@ -729,8 +704,9 @@ func (c *{{contractName}}Contract) Prepare{{capitalizedName}}({{#prepareUserPara
 }
 
 // Finalize{{capitalizedName}} completes a prepared call with external signatures.
-func (c *{{contractName}}Contract) Finalize{{capitalizedName}}(prepared *runar.PreparedCall{{#sigParams}}, {{name}} string{{/sigParams}}) (string, *runar.TransactionData, error) {
-	return c.inner.FinalizeCall(prepared, map[int]string{ {{sigEntriesExpr}} })
+// A nil provider falls back to the one stored by Connect.
+func (c *{{contractName}}Contract) Finalize{{capitalizedName}}(prepared *runar.PreparedCall{{#sigParams}}, {{name}} string{{/sigParams}}, provider runar.Provider) (string, *runar.TransactionData, error) {
+	return c.inner.FinalizeCall(prepared, map[int]string{ {{sigEntriesExpr}} }, provider)
 }
 
 {{/hasSigParams}}

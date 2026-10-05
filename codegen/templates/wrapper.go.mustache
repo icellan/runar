@@ -131,8 +131,9 @@ func (c *{{contractName}}Contract) Prepare{{capitalizedName}}({{#prepareUserPara
 }
 
 // Finalize{{capitalizedName}} completes a prepared call with external signatures.
-func (c *{{contractName}}Contract) Finalize{{capitalizedName}}(prepared *runar.PreparedCall{{#sigParams}}, {{name}} string{{/sigParams}}) (string, *runar.TransactionData, error) {
-	return c.inner.FinalizeCall(prepared, map[int]string{ {{sigEntriesExpr}} })
+// A nil provider falls back to the one stored by Connect.
+func (c *{{contractName}}Contract) Finalize{{capitalizedName}}(prepared *runar.PreparedCall{{#sigParams}}, {{name}} string{{/sigParams}}, provider runar.Provider) (string, *runar.TransactionData, error) {
+	return c.inner.FinalizeCall(prepared, map[int]string{ {{sigEntriesExpr}} }, provider)
 }
 
 {{/hasSigParams}}
