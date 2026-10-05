@@ -119,6 +119,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// F-183: --source and --ir are mutually exclusive input modes. The old
+	// code picked --source silently whenever both were set (no diagnostic);
+	// refuse the combination instead.
+	if *sourceFile != "" && *irFile != "" {
+		fmt.Fprintln(os.Stderr, "Error: --source and --ir are mutually exclusive; pass exactly one")
+		os.Exit(1)
+	}
+
+	// F-183: --hex and --asm are mutually exclusive output modes. The old
+	// code picked --hex silently whenever both were set; refuse instead.
+	if *hexOnly && *asmOnly {
+		fmt.Fprintln(os.Stderr, "Error: --hex and --asm are mutually exclusive; pass exactly one")
+		os.Exit(1)
+	}
+
 	// Handle --parse-only: read source, run parser + validator, print "parser ok"
 	// on success, exit non-zero with diagnostics on failure. Used by the
 	// `--parser-only` mode of conformance/runner/runner.ts to assert universal
@@ -151,7 +166,18 @@ func main() {
 		return
 	}
 
-	// Handle --emit-ir: dump ANF IR JSON and exit
+	// Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS
+	// --emit-source-map was also requested. The source map (GAP-011's
+	// SourceMapData) is only populated by the full compile (stack-lowering
+	// + emit), which this IR-only snapshot (passes 1-4) never runs, so an
+	// unconditional return here used to silently drop the --emit-source-map
+	// file with no diagnostic (F-183). When --emit-source-map is also set we
+	// fall through — the same way --emit-ir-to already does — into the
+	// normal compile below so SourceMapData gets populated and the
+	// --emit-source-map block further down can write it; emitIRHandled then
+	// stops us before the final hex/asm/artifact output, since --emit-ir's
+	// contract is "stdout carries only the IR".
+	emitIRHandled := false
 	if *emitIR {
 		if *sourceFile == "" {
 			fmt.Fprintln(os.Stderr, "--emit-ir requires --source")
@@ -163,7 +189,10 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(string(irJSON))
-		return
+		if *emitSourceMap == "" {
+			return
+		}
+		emitIRHandled = true
 	}
 
 	// Handle --emit-ir-to: write the SAME bytes --emit-ir would print to a
@@ -230,6 +259,13 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Source map written to %s\n", *emitSourceMap)
+	}
+
+	// --emit-ir already printed the IR above; having fallen through only to
+	// populate and write the source map, stop here rather than also print
+	// the full hex/asm/artifact output.
+	if emitIRHandled {
+		return
 	}
 
 	// Determine output
