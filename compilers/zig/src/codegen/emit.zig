@@ -829,81 +829,86 @@ pub fn emitArtifact(
     // script
     try w.writeAll("\"script\":");
     try writeJsonString(w, script_hex);
-    try w.writeByte(',');
 
     // asm
-    try w.writeAll("\"asm\":");
+    try w.writeAll(",\"asm\":");
     try writeJsonString(w, asm_text);
-    try w.writeByte(',');
 
-    // constructorSlots
-    try w.writeAll("\"constructorSlots\":[");
-    for (ctx.constructor_slots.items, 0..) |slot, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("{{\"paramIndex\":{d},\"byteOffset\":{d}}}", .{ slot.param_index, slot.byte_offset });
+    // constructorSlots — N-147: omitted when empty, matching the TS
+    // assembler (`if (options?.constructorSlots && options.constructorSlots.length > 0)`).
+    // Used to always write `"constructorSlots":[]` for contracts with no
+    // constructor-arg placeholders (e.g. a zero-arg stateful contract).
+    if (ctx.constructor_slots.items.len > 0) {
+        try w.writeAll(",\"constructorSlots\":[");
+        for (ctx.constructor_slots.items, 0..) |slot, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"paramIndex\":{d},\"byteOffset\":{d}}}", .{ slot.param_index, slot.byte_offset });
+        }
+        try w.writeAll("]");
     }
-    try w.writeAll("],");
 
     // codeSepIndexSlots — OP_0 placeholders for codeSeparatorIndex values
     if (ctx.code_sep_index_slots.items.len > 0) {
-        try w.writeAll("\"codeSepIndexSlots\":[");
+        try w.writeAll(",\"codeSepIndexSlots\":[");
         for (ctx.code_sep_index_slots.items, 0..) |slot, i| {
             if (i > 0) try w.writeByte(',');
             try w.print("{{\"byteOffset\":{d},\"codeSepIndex\":{d}}}", .{ slot.byte_offset, slot.code_sep_index });
         }
-        try w.writeAll("],");
+        try w.writeAll("]");
     }
 
     // codePartLenSlots — N-051 deploy-time `verify_code_part_len` length
     // fields (omitted when every pin is exact at compile time).
     if (ctx.code_part_len_slots.items.len > 0) {
-        try w.writeAll("\"codePartLenSlots\":[");
+        try w.writeAll(",\"codePartLenSlots\":[");
         for (ctx.code_part_len_slots.items, 0..) |slot, i| {
             if (i > 0) try w.writeByte(',');
             try w.print("{{\"byteOffset\":{d}}}", .{slot.byte_offset});
         }
-        try w.writeAll("],");
+        try w.writeAll("]");
     }
 
     // stateFields — mutable (non-readonly) properties, with synthetic
     // FixedArray runs re-grouped into a single logical entry via the
-    // iterative marker-driven regrouper (mirrors the TS assembler).
-    try w.writeAll("\"stateFields\":[");
+    // iterative marker-driven regrouper (mirrors the TS assembler). N-147:
+    // omitted entirely when there are no mutable properties, matching TS
+    // (`if (stateFields.length > 0) artifact.stateFields = stateFields;`) —
+    // used to always write `"stateFields":[]` for stateless contracts.
     {
         const regrouped = try regroupStateFields(allocator, anf_program.properties);
         defer freeRegroupedEntries(allocator, regrouped);
-        for (regrouped, 0..) |entry, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.writeAll("{\"name\":");
-            try writeJsonString(w, entry.name);
-            try w.writeAll(",\"type\":");
-            try writeJsonString(w, entry.type_str);
-            try w.print(",\"index\":{d}", .{entry.index});
-            if (entry.fixed_array) |fa| {
-                try w.writeAll(",\"fixedArray\":{\"elementType\":");
-                try writeJsonString(w, fa.element_type);
-                try w.print(",\"length\":{d},\"syntheticNames\":[", .{fa.length});
-                for (fa.synthetic_names, 0..) |sn, j| {
-                    if (j > 0) try w.writeByte(',');
-                    try writeJsonString(w, sn);
+        if (regrouped.len > 0) {
+            try w.writeAll(",\"stateFields\":[");
+            for (regrouped, 0..) |entry, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, entry.name);
+                try w.writeAll(",\"type\":");
+                try writeJsonString(w, entry.type_str);
+                try w.print(",\"index\":{d}", .{entry.index});
+                if (entry.fixed_array) |fa| {
+                    try w.writeAll(",\"fixedArray\":{\"elementType\":");
+                    try writeJsonString(w, fa.element_type);
+                    try w.print(",\"length\":{d},\"syntheticNames\":[", .{fa.length});
+                    for (fa.synthetic_names, 0..) |sn, j| {
+                        if (j > 0) try w.writeByte(',');
+                        try writeJsonString(w, sn);
+                    }
+                    try w.writeAll("]}");
                 }
-                try w.writeAll("]}");
+                try w.writeByte('}');
             }
-            try w.writeByte('}');
+            try w.writeAll("]");
         }
     }
-    try w.writeAll("],");
 
-    // codeSeparatorIndex — byte offset of the first OP_CODESEPARATOR
-    try w.writeAll("\"codeSeparatorIndex\":");
+    // codeSeparatorIndex / codeSeparatorIndices — byte offset(s) of
+    // OP_CODESEPARATOR. N-147: omitted together when no OP_CODESEPARATOR was
+    // emitted, matching TS (`codeSeparatorIndex` stays `undefined` unless
+    // `OP_CODESEPARATOR` was emitted) — used to default `codeSeparatorIndex`
+    // to 0 for stateless contracts instead of omitting the key.
     if (ctx.code_separator_indices.items.len > 0) {
-        try w.print("{d}", .{ctx.code_separator_indices.items[0]});
-    } else {
-        try w.writeAll("0");
-    }
-
-    // codeSeparatorIndices — per-method byte offsets
-    if (ctx.code_separator_indices.items.len > 0) {
+        try w.print(",\"codeSeparatorIndex\":{d}", .{ctx.code_separator_indices.items[0]});
         try w.writeAll(",\"codeSeparatorIndices\":[");
         for (ctx.code_separator_indices.items, 0..) |idx, i| {
             if (i > 0) try w.writeByte(',');
@@ -1775,8 +1780,17 @@ test "emitArtifact — simple contract" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Ripemd160\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"methods\":[{\"name\":\"unlock\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"isPublic\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"codeSeparatorIndex\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\":[]") != null);
+
+    // N-147: this fixture is stateless (no mutable properties), emits no
+    // OP_CODESEPARATOR, and its hand-built `body` records no constructor-slot
+    // placeholder — so, matching the TS assembler's omit-when-empty rule
+    // (`packages/runar-compiler/src/artifact/assembler.ts`), `stateFields`,
+    // `codeSeparatorIndex`, and `constructorSlots` must be ABSENT from the
+    // artifact entirely, not present with an empty array / default 0. Zig
+    // used to always emit all three.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"codeSeparatorIndex\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"constructorSlots\"") == null);
 
     // Single-method contract: no dispatch table, just the body opcodes
     // 76 a9 88 ac = OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG
