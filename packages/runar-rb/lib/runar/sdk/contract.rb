@@ -522,7 +522,12 @@ module Runar
           if @current_utxo
             interp_args['txPreimage'] = @current_utxo.satoshis.to_i
             if method_needs_new_amount
-              interp_args['_newAmount'] = (opts.satoshis.positive? ? opts.satoshis : @current_utxo.satoshis).to_i
+              # opts.satoshis is nil for a hand-built CallOptions, or a
+              # generated typed wrapper's default options (N-143) — same
+              # "unspecified" meaning as 0 (TS parity: `options?.satoshis ??
+              # currentUtxo.satoshis`).
+              interp_args['_newAmount'] =
+                (opts.satoshis && opts.satoshis.positive? ? opts.satoshis : @current_utxo.satoshis).to_i
             end
           end
           computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
@@ -1645,7 +1650,9 @@ module Runar
           anf_ordered_outputs.length == 1 && state_entries.length == 1 ? state_entries.first[:satoshis] : nil
 
         new_satoshis =
-          if opts.satoshis.positive?
+          # opts.satoshis may be nil (N-143: see interp_args['_newAmount'] above) --
+          # same "unspecified" meaning as 0.
+          if opts.satoshis && opts.satoshis.positive?
             opts.satoshis
           elsif !single_explicit_state_sats.nil?
             single_explicit_state_sats

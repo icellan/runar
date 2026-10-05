@@ -338,7 +338,7 @@ module Runar
 
               def to_call_options
                 Runar::SDK::CallOptions.new(
-                  satoshis: satoshis.positive? ? satoshis : nil,
+                  satoshis: satoshis,
                   change_address: change_address.empty? ? nil : change_address,
                   change_pub_key: change_pub_key.empty? ? nil : change_pub_key,
                   new_state: new_state,
