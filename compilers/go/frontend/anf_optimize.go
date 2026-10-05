@@ -156,15 +156,16 @@ func collectUsedNames(method *ir.ANFMethod, properties []ir.ANFProperty) map[str
 
 // nextTempName generates a unique temp binding name not already in lookup nor
 // in used (F-086), and reserves it in used. Used by the rule engine when
-// emitting synthetic helper bindings.
+// emitting synthetic helper bindings. N-112: same scheme as TS anf-ec.ts
+// freshName — `base`, else the first unused `base_<i>` from i = 1.
 func nextTempName(base string, lookup map[string]*ir.ANFValue, used map[string]bool) string {
 	taken := func(name string) bool {
 		_, exists := lookup[name]
 		return exists || used[name]
 	}
 	name := base
-	for i := 0; taken(name); i++ {
-		name = fmt.Sprintf("%s_r10_%d", base, i)
+	for i := 1; taken(name); i++ {
+		name = fmt.Sprintf("%s_%d", base, i)
 	}
 	used[name] = true
 	return name

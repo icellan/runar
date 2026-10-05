@@ -33,7 +33,7 @@
  * NOT reserved, and why:
  *   - `<name>@<n>` / `<name>@local` (04-anf-lower alpha-renaming): `@` is not an
  *     identifier character in any of the nine surfaces.
- *   - EC-optimizer names (`<binding>_k`, `__ec_opt_<n>`, ...): F-086 allocates
+ *   - EC-optimizer names (`<binding>_k`, `<binding>_k_<i>`, ...): F-086 allocates
  *     them against every name the method already uses, so they cannot collide.
  *   - codegen-module slot names (`_p2s<i>`, `fs<i>`, `xsig<i>`, ...): they live in
  *     the module's private stack tracker, never in the method's name map.

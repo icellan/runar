@@ -575,7 +575,8 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool) (string, ir.ANFBinding) {
 	lhsName := binds[op.Lhs]
 	rhsName := binds[op.Rhs]
-	helperName := nextTempName(b.Name+"_sum", lookup, used)
+	// N-112: `<binding>_k`, the TS anf-ec.ts freshName(`${binding.name}_k`, usedNames).
+	helperName := nextTempName(b.Name+"_k", lookup, used)
 
 	lhsVal := resolveConstBigInt(lhsName, lookup)
 	rhsVal := resolveConstBigInt(rhsName, lookup)
@@ -592,14 +593,12 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 		folded = new(big.Int).Mul(lhsVal, rhsVal)
 		folded.Mod(folded, curveN)
 	}
-	raw, _ := json.Marshal(folded.String())
+	// N-112: the canonical bigint encoding (a JSON number, or "<n>n" when
+	// wider than 2^53) every other load_const uses. It used to be a bare "5"
+	// string in --emit-ir, unlike TS and the other tiers.
 	return helperName, ir.ANFBinding{
-		Name: helperName,
-		Value: ir.ANFValue{
-			Kind:        "load_const",
-			RawValue:    raw,
-			ConstBigInt: folded,
-		},
+		Name:  helperName,
+		Value: makeLoadConstInt(folded),
 	}
 }
 

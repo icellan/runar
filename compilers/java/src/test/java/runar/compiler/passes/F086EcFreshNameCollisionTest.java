@@ -24,7 +24,8 @@ import runar.compiler.ir.anf.LoadConst;
  * method already uses.
  *
  * <p>The scalar-fusing rules (9, 10, 11) bind the folded scalar under a
- * generated name ({@code __ec_opt_N} in this tier) just before the rewritten
+ * generated name ({@code <binding>_k} since F-185, as in TS; {@code __ec_opt_N}
+ * before) just before the rewritten
  * binding. {@code freshConstName} never checked whether that name was taken.
  * ANF is single-assignment and stack lowering resolves a name to its
  * shallowest slot, so when {@code __ec_opt_N} is already a body binding or a

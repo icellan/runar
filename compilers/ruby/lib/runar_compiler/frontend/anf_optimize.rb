@@ -36,14 +36,6 @@ module RunarCompiler
         ecModReduce ecEncodeCompressed ecMakePoint ecPointX ecPointY
       ].to_set.freeze
 
-      # Counter for generating fresh constant binding names
-      @fresh_counter = 0
-
-      class << self
-        # @return [Integer]
-        attr_accessor :fresh_counter
-      end
-
       # -----------------------------------------------------------------
       # Public API
       # -----------------------------------------------------------------
@@ -291,7 +283,7 @@ module RunarCompiler
             k1 = get_const_int(inner.args[1], vm)
             if k1
               combined = (k1 * k2) % CURVE_N
-              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm, prelude, used_names)])
+              return make_call("ecMul", [inner.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
             end
           end
         end
@@ -307,7 +299,7 @@ module RunarCompiler
             k2 = get_const_int(right_v.args[0], vm)
             if k1 && k2
               combined = (k1 + k2) % CURVE_N
-              return make_call("ecMulGen", [fresh_const_name(combined, vm, prelude, used_names)])
+              return make_call("ecMulGen", [fresh_const_name(name, combined, vm, prelude, used_names)])
             end
           end
         end
@@ -324,7 +316,7 @@ module RunarCompiler
               k2 = get_const_int(right_v.args[1], vm)
               if k1 && k2
                 combined = (k1 + k2) % CURVE_N
-                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm, prelude, used_names)])
+                return make_call("ecMul", [left_v.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
               end
             end
           end
@@ -516,18 +508,22 @@ module RunarCompiler
       # registered in the value map. Registering it in the value map alone is
       # not enough: stack lowering walks the body, so a call referencing a name
       # that never got a binding dies with
-      # <tt>value "__ec_opt_N" not found on stack</tt>. Mirrors
+      # <tt>value "<name>" not found on stack</tt>. Mirrors
       # AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
       # +newBindings+ list in anf-ec.ts (TypeScript).
       #
-      # F-086: the name skips every +__ec_opt_N+ the method already uses
-      # (+used_names+, see collect_used_names) and is reserved there.
-      def self.fresh_const_name(value, vm, prelude, used_names)
-        self.fresh_counter += 1
-        name = "__ec_opt_#{fresh_counter}"
+      # The name follows the TS +freshName(`${binding.name}_k`, usedNames)+:
+      # +<base>_k+, else the first unused +<base>_k_<i>+ (F-086: against every
+      # name the method already uses, see collect_used_names), and is reserved
+      # there. N-112: it is derived from the program alone -- no class-level
+      # counter -- so the same program always gets the same names.
+      def self.fresh_const_name(base, value, vm, prelude, used_names)
+        stem = "#{base}_k"
+        name = stem
+        i = 1
         while used_names.include?(name)
-          self.fresh_counter += 1
-          name = "__ec_opt_#{fresh_counter}"
+          name = "#{stem}_#{i}"
+          i += 1
         end
         used_names << name
         const = make_const_int(value)

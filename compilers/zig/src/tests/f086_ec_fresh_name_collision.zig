@@ -2,7 +2,7 @@
 //! the method already uses.
 //!
 //! The scalar-fusing rules (9, 10, 11) bind the folded scalar under a
-//! generated name (`__ec_opt_N`, per-method counter, in this tier) just before
+//! generated name (`<binding>_k` since N-112, as in TS; `__ec_opt_N` before) just before
 //! the rewritten binding. `freshConstName` never checked whether that name was
 //! taken. ANF is single-assignment and stack lowering resolves a name to its
 //! shallowest slot, so when `__ec_opt_N` is already a body binding or a method
@@ -121,31 +121,31 @@ fn scriptHex(alloc: std.mem.Allocator, src: []const u8) ![]const u8 {
     return compiler_api.extractArtifactScript(try emit.emitArtifact(alloc, optimized, program));
 }
 
-test "F-086 control: no collision keeps the historical __ec_opt_1 name" {
+test "F-086 control: no collision keeps the historical s_k name" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const m = try optimizedUnlock(alloc, try programJson(alloc, "", "k"));
     var found = false;
-    for (m.body) |b| found = found or std.mem.eql(u8, b.name, "__ec_opt_1");
+    for (m.body) |b| found = found or std.mem.eql(u8, b.name, "s_k");
     try std.testing.expect(found);
     try std.testing.expectEqual(@as(i128, 5), try fusedScalar(m));
 }
 
-test "F-086: a pre-existing body binding __ec_opt_1 is not shadowed" {
+test "F-086: a pre-existing body binding s_k is not shadowed" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const m = try optimizedUnlock(alloc, try programJson(alloc, "__ec_opt_1", "k"));
+    const m = try optimizedUnlock(alloc, try programJson(alloc, "s_k", "k"));
     try expectSingleAssignment(m);
     try std.testing.expectEqual(@as(i128, 5), try fusedScalar(m));
 }
 
-test "F-086: a method param named __ec_opt_1 is not shadowed" {
+test "F-086: a method param named s_k is not shadowed" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const m = try optimizedUnlock(alloc, try programJson(alloc, "", "__ec_opt_1"));
+    const m = try optimizedUnlock(alloc, try programJson(alloc, "", "s_k"));
     try expectSingleAssignment(m);
     try std.testing.expectEqual(@as(i128, 5), try fusedScalar(m));
 }
@@ -158,11 +158,11 @@ test "F-086: colliding programs compile like their renamed twins" {
     try std.testing.expect(std.mem.eql(
         u8,
         try scriptHex(alloc, try programJson(alloc, "zz_unused", "k")),
-        try scriptHex(alloc, try programJson(alloc, "__ec_opt_1", "k")),
+        try scriptHex(alloc, try programJson(alloc, "s_k", "k")),
     ));
     try std.testing.expect(std.mem.eql(
         u8,
         try scriptHex(alloc, try programJson(alloc, "", "zz")),
-        try scriptHex(alloc, try programJson(alloc, "", "__ec_opt_1")),
+        try scriptHex(alloc, try programJson(alloc, "", "s_k")),
     ));
 }

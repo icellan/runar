@@ -210,7 +210,7 @@ class TestN028ECFreshConstBinding < Minitest::Test
       end
       ir = JSON.parse(out)
       folded = ir["methods"].flat_map { |m| m["body"] }
-                            .select { |b| b["name"].start_with?("__ec_opt_") }
+                            .select { |b| b["name"].end_with?("_k") } # TS-style <binding>_k (N-112)
       refute_empty folded, "expected the EC optimizer to emit a folded-scalar binding"
       value = folded[0]["value"]["value"]
       assert_equal "123456789012345678901234567897n", value,

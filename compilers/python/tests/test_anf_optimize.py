@@ -533,7 +533,7 @@ class TestRule10EcAddMulGen:
 
         Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N).
         The optimizer rewrites t4 from ecAdd to ecMulGen and binds the combined
-        constant under a fresh name (e.g. '__ec_opt_N') inserted into the method
+        constant under a fresh name (TS-style '<binding>_k', here 't4_k') inserted into the method
         body just before t4. We verify t4 becomes ecMulGen with exactly 1 arg;
         tests/test_n028_ec_fresh_const_binding.py pins the fresh binding itself.
         """

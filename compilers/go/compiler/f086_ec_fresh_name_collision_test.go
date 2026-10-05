@@ -4,7 +4,7 @@ package compiler
 // method already uses.
 //
 // The scalar-fusing rules bind the folded scalar under a generated name
-// (`<binding>_sum`, disambiguated by nextTempName) just before the rewritten
+// (`<binding>_k` since N-112, `<binding>_sum` before; disambiguated by nextTempName) just before the rewritten
 // binding. nextTempName only consulted the top-level body bindings, so a method
 // PARAM named `<binding>_sum` was shadowed: stack lowering resolves a name to
 // its shallowest slot, and a later `load_param` of that param read the folded
@@ -137,10 +137,10 @@ func TestF086_EcOptimizer_NoCollisionKeepsHistoricalName(t *testing.T) {
 	method := f086OptimizedUnlock(t, f086ProgramJSON(t, "", "k"))
 	found := false
 	for _, b := range method.Body {
-		found = found || b.Name == "s_sum"
+		found = found || b.Name == "s_k"
 	}
 	if !found {
-		t.Errorf("expected helper binding s_sum, got %+v", method.Body)
+		t.Errorf("expected helper binding s_k, got %+v", method.Body)
 	}
 	if got := f086FusedScalar(t, method); got != "5" {
 		t.Errorf("fused scalar = %s, want 5", got)
@@ -148,7 +148,7 @@ func TestF086_EcOptimizer_NoCollisionKeepsHistoricalName(t *testing.T) {
 }
 
 func TestF086_EcOptimizer_BodyBindingNotShadowed(t *testing.T) {
-	method := f086OptimizedUnlock(t, f086ProgramJSON(t, "s_sum", "k"))
+	method := f086OptimizedUnlock(t, f086ProgramJSON(t, "s_k", "k"))
 	f086AssertSingleAssignment(t, method)
 	if got := f086FusedScalar(t, method); got != "5" {
 		t.Errorf("fused scalar = %s, want 5", got)
@@ -156,7 +156,7 @@ func TestF086_EcOptimizer_BodyBindingNotShadowed(t *testing.T) {
 }
 
 func TestF086_EcOptimizer_ParamNotShadowed(t *testing.T) {
-	method := f086OptimizedUnlock(t, f086ProgramJSON(t, "", "s_sum"))
+	method := f086OptimizedUnlock(t, f086ProgramJSON(t, "", "s_k"))
 	f086AssertSingleAssignment(t, method)
 	if got := f086FusedScalar(t, method); got != "5" {
 		t.Errorf("fused scalar = %s, want 5", got)
@@ -171,10 +171,10 @@ func TestF086_EcOptimizer_CollidingProgramsCompileLikeRenamedTwins(t *testing.T)
 		}
 		return art.Script
 	}
-	if hex(f086ProgramJSON(t, "s_sum", "k")) != hex(f086ProgramJSON(t, "zz_unused", "k")) {
+	if hex(f086ProgramJSON(t, "s_k", "k")) != hex(f086ProgramJSON(t, "zz_unused", "k")) {
 		t.Error("body-binding collision changed the script")
 	}
-	if hex(f086ProgramJSON(t, "", "s_sum")) != hex(f086ProgramJSON(t, "", "zz")) {
+	if hex(f086ProgramJSON(t, "", "s_k")) != hex(f086ProgramJSON(t, "", "zz")) {
 		t.Error("param collision changed the script")
 	}
 }

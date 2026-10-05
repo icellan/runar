@@ -4,7 +4,8 @@
 # method already uses.
 #
 # The scalar-fusing rules (9, 10, 11) bind the folded scalar under a generated
-# name (+__ec_opt_N+ in this tier) just before the rewritten binding.
+# name (+<binding>_k+ since N-112, as in TS; +__ec_opt_N+ before) just before
+# the rewritten binding.
 # +fresh_const_name+ never checked whether that name was taken. ANF is
 # single-assignment and stack lowering resolves a name to its shallowest slot,
 # so when +__ec_opt_N+ is already a body binding or a method param the two
@@ -26,12 +27,6 @@ require "runar_compiler/frontend/anf_optimize"
 
 class TestF086ECFreshNameCollision < Minitest::Test
   OPT = RunarCompiler::Frontend::ANFOptimize
-
-  def setup
-    # The counter is process-global; pin it so the first minted name is the
-    # one the colliding programs below already use.
-    OPT.fresh_counter = 0
-  end
 
   def program_json(body_name, k_param)
     body = []
@@ -92,28 +87,27 @@ class TestF086ECFreshNameCollision < Minitest::Test
 
   def test_no_collision_keeps_historical_name
     m = optimized_unlock(program_json(nil, "k"))
-    assert(m.body.any? { |b| b.name == "__ec_opt_1" })
+    assert(m.body.any? { |b| b.name == "s_k" })
     assert_equal 5, fused_scalar(m)
   end
 
   def test_preexisting_body_binding_is_not_shadowed
-    m = optimized_unlock(program_json("__ec_opt_1", "k"))
+    m = optimized_unlock(program_json("s_k", "k"))
     assert_single_assignment(m)
     assert_equal 5, fused_scalar(m)
   end
 
   def test_param_is_not_shadowed
-    m = optimized_unlock(program_json(nil, "__ec_opt_1"))
+    m = optimized_unlock(program_json(nil, "s_k"))
     assert_single_assignment(m)
     assert_equal 5, fused_scalar(m)
   end
 
   def test_colliding_programs_compile_like_their_renamed_twins
     hex = lambda do |src|
-      OPT.fresh_counter = 0
       RunarCompiler.compile_from_ir_bytes(src).script
     end
-    assert_equal hex.call(program_json("zz_unused", "k")), hex.call(program_json("__ec_opt_1", "k"))
-    assert_equal hex.call(program_json(nil, "zz")), hex.call(program_json(nil, "__ec_opt_1"))
+    assert_equal hex.call(program_json("zz_unused", "k")), hex.call(program_json("s_k", "k"))
+    assert_equal hex.call(program_json(nil, "zz")), hex.call(program_json(nil, "s_k"))
   end
 end
