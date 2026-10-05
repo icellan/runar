@@ -19,12 +19,12 @@ final class SigAnalyzer {
                 null, null, p.description));
         }
         // CHECKSIG_RESULT_DROPPED: walk linearly, flag CHECKSIG/MULTISIG
-        // followed immediately by OP_DROP.
+        // followed immediately by OP_DROP or OP_2DROP.
         for (int i = 0; i + 1 < ops.size(); i++) {
             OpStep a = ops.get(i);
             OpStep b = ops.get(i + 1);
             if ((a.opcode == Opcodes.OP_CHECKSIG || a.opcode == Opcodes.OP_CHECKMULTISIG)
-                && b.opcode == Opcodes.OP_DROP) {
+                && (b.opcode == Opcodes.OP_DROP || b.opcode == Opcodes.OP_2DROP)) {
                 out.add(new Finding(
                     "warning", "CHECKSIG_RESULT_DROPPED",
                     a.name + " result is dropped by " + b.name

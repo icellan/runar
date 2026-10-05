@@ -28,12 +28,12 @@ def analyze_sig_hygiene(
             )
 
     # CHECKSIG_RESULT_DROPPED: OP_CHECKSIG/CHECKMULTISIG immediately
-    # followed by OP_DROP.
+    # followed by OP_DROP or OP_2DROP.
     for i in range(len(opcodes) - 1):
         op = opcodes[i]
         if op.opcode in (0xac, 0xae):  # OP_CHECKSIG, OP_CHECKMULTISIG
             nxt = opcodes[i + 1]
-            if nxt.opcode == 0x75:  # OP_DROP
+            if nxt.opcode in (0x75, 0x6d):  # OP_DROP, OP_2DROP
                 findings.append(
                     Finding(
                         severity="warning",

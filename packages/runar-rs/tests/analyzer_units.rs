@@ -81,6 +81,29 @@ fn checksig_result_dropped() {
     assert!(!codes(&r).contains(&"NO_SIG_CHECK"));
 }
 
+// F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+// `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+// OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+// removes the item BELOW the result) is not. Does not prove that longer
+// discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+// only looks at the next opcode.
+#[test]
+fn checksig_result_dropped_by_2drop() {
+    for (hex, want, offset) in [
+        ("0000ac6d51", "OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect", 2),
+        ("000000ae6d51", "OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect", 3),
+    ] {
+        let r = analyze_script(hex).unwrap();
+        let got: Vec<_> = r.findings.iter().filter(|f| f.code == "CHECKSIG_RESULT_DROPPED").collect();
+        assert_eq!(got.len(), 1, "{hex}: {:?}", codes(&r));
+        assert_eq!(got[0].message, want);
+        assert_eq!(got[0].offset, Some(offset));
+    }
+    // OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+    let r = analyze_script("0000ac77").unwrap();
+    assert!(!codes(&r).contains(&"CHECKSIG_RESULT_DROPPED"));
+}
+
 #[test]
 fn checksigverify_not_flagged_when_dropped() {
     // Spec §9 explicitly excludes OP_CHECKSIGVERIFY (0xad).

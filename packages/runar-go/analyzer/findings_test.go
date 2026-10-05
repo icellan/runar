@@ -133,6 +133,38 @@ func TestChecksigResultDropped(t *testing.T) {
 	}
 }
 
+// F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+// `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+// OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+// removes the item BELOW the result) is not. Does not prove that longer
+// discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+// only looks at the next opcode.
+func TestChecksigResultDroppedBy2Drop(t *testing.T) {
+	cases := []struct{ hex, want string }{
+		{"0000ac6d51", "OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect"},
+		{"000000ae6d51", "OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect"},
+	}
+	for _, c := range cases {
+		r, _ := AnalyzeScript(c.hex)
+		var got []Finding
+		for _, f := range r.Findings {
+			if f.Code == "CHECKSIG_RESULT_DROPPED" {
+				got = append(got, f)
+			}
+		}
+		if len(got) != 1 || got[0].Message != c.want || got[0].Severity != SeverityWarning || !got[0].HasOffset {
+			t.Fatalf("%s: expected one CHECKSIG_RESULT_DROPPED %q, got %+v", c.hex, c.want, r.Findings)
+		}
+	}
+	if r, _ := AnalyzeScript("0000ac6d51"); r.Findings[0].Offset != 2 || r.Findings[0].Opcode != "OP_CHECKSIG" {
+		t.Fatalf("expected offset 2 / OP_CHECKSIG, got %+v", r.Findings)
+	}
+	// OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+	if r, _ := AnalyzeScript("0000ac77"); containsCode(r, "CHECKSIG_RESULT_DROPPED") {
+		t.Fatalf("OP_NIP must not be flagged, got %+v", r.Findings)
+	}
+}
+
 func TestCodeSeparatorPresent(t *testing.T) {
 	r, _ := AnalyzeScript("ab")
 	if !containsCode(r, "CODESEPARATOR_PRESENT") {

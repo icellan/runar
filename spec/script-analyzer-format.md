@@ -253,7 +253,7 @@ Severity is assigned per code (never varies by context).
 | `UNREACHABLE_AFTER_RETURN`    | warning  | Opcode appears after OP_RETURN in linear flow.    |
 | `UNCONDITIONALLY_SUCCEEDS`    | warning  | A path contains no verification opcode.            |
 | `NO_SIG_CHECK`                | warning  | A reachable path has no CHECKSIG/CHECKMULTISIG.    |
-| `CHECKSIG_RESULT_DROPPED`     | warning  | OP_CHECKSIG immediately followed by OP_DROP.       |
+| `CHECKSIG_RESULT_DROPPED`     | warning  | OP_CHECKSIG immediately followed by OP_DROP/OP_2DROP. |
 | `CODESEPARATOR_PRESENT`       | info     | OP_CODESEPARATOR present (expected for stateful). |
 | `INEFFICIENT_PUSH`            | info     | A push uses a longer encoding than necessary.      |
 | `LARGE_SCRIPT`                | info     | Script size exceeds the LARGE_SCRIPT threshold.    |
@@ -668,8 +668,14 @@ negative — see §14.
   emit one finding (severity `warning`).
 - **CHECKSIG_RESULT_DROPPED**: Walk the opcode list linearly. For each
   index `i` where `i+1 < opcodes.length`, if `opcodes[i]` is `OP_CHECKSIG`
-  or `OP_CHECKMULTISIG` AND `opcodes[i+1]` is `OP_DROP`, emit one finding
-  with `offset = opcodes[i].offset`, `opcode = opcodes[i].name`.
+  or `OP_CHECKMULTISIG` AND `opcodes[i+1]` is `OP_DROP` (0x75) or
+  `OP_2DROP` (0x6d), emit one finding with `offset = opcodes[i].offset`,
+  `opcode = opcodes[i].name`.
+
+  Both discarding opcodes pop the result without reading it. `OP_NIP` and
+  similar opcodes that leave the result on top are NOT flagged, and the
+  rule inspects only `opcodes[i+1]`: a result discarded by a longer
+  sequence (e.g. `OP_SWAP OP_NIP`, `OP_TOALTSTACK`) is not detected.
 
   Note: only `OP_CHECKSIG` and `OP_CHECKMULTISIG` are flagged (NOT the
   `*VERIFY` variants — they don't leave a result on the stack).
@@ -865,9 +871,15 @@ avoid them:
 
 ## 15. Version
 
-Spec version: 1.3 (2026-10-05). All goldens at
+Spec version: 1.4 (2026-10-05). All goldens at
 `conformance/analyzer/*/expected-analyzer-report.json` were produced
 under this version.
+
+**1.4 (2026-10-05).** `CHECKSIG_RESULT_DROPPED` (§9) also fires when
+the next opcode is `OP_2DROP`, which discards the signature result just
+as `OP_DROP` does; before, `OP_CHECKSIG OP_2DROP OP_1` produced no
+finding (F-234). No golden contains that pair, so all eight goldens are
+byte-identical.
 
 **1.3 (2026-10-05).** Adds the Chronicle opcodes `OP_2MUL` (0x8d),
 `OP_2DIV` (0x8e), `OP_SUBSTR` (0xb3), `OP_LEFT` (0xb4), `OP_RIGHT`

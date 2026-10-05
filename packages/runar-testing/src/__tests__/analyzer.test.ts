@@ -133,6 +133,34 @@ describe('Analyzer: crafted bad scripts', () => {
     ).toBe(true);
   });
 
+  // F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+  // `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+  // OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+  // removes the item BELOW the result) is not. Does not prove that longer
+  // discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+  // only looks at the next opcode.
+  it('OP_CHECKSIG / OP_CHECKMULTISIG followed by OP_2DROP — CHECKSIG_RESULT_DROPPED (F-234)', () => {
+    // OP_0 OP_0 OP_CHECKSIG OP_2DROP OP_1
+    const r1 = analyzeScript('0000ac6d51');
+    expect(r1.findings.filter((f) => f.code === 'CHECKSIG_RESULT_DROPPED')).toEqual([
+      {
+        severity: 'warning',
+        code: 'CHECKSIG_RESULT_DROPPED',
+        message: 'OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect',
+        offset: 2,
+        opcode: 'OP_CHECKSIG',
+      },
+    ]);
+    // OP_0 OP_0 OP_0 OP_CHECKMULTISIG OP_2DROP OP_1
+    const r2 = analyzeScript('000000ae6d51');
+    expect(
+      r2.findings.filter((f) => f.code === 'CHECKSIG_RESULT_DROPPED').map((f) => f.message),
+    ).toEqual(['OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect']);
+    // OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+    const r3 = analyzeScript('0000ac77');
+    expect(r3.findings.some((f) => f.code === 'CHECKSIG_RESULT_DROPPED')).toBe(false);
+  });
+
   it('OP_PUSHDATA1 for 2-byte data — INEFFICIENT_PUSH', () => {
     // OP_PUSHDATA1 (4c) length=2 (02) data=aabb
     // Direct push 0x02 would be more efficient

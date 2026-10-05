@@ -544,3 +544,34 @@ test "Chronicle opcodes carry their real names and stack effects" {
     try std.testing.expectEqual(@as(i32, 0), ue.pops);
     try std.testing.expectEqual(@as(i32, 0), ue.pushes);
 }
+
+// F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+// `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+// OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+// removes the item BELOW the result) is not. Does not prove that longer
+// discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+// only looks at the next opcode.
+test "CHECKSIG_RESULT_DROPPED fires for OP_2DROP, not OP_NIP" {
+    const a = std.testing.allocator;
+    const Case = struct { hex: []const u8, msg: []const u8, offset: i64 };
+    const cases = [_]Case{
+        .{ .hex = "0000ac6d51", .msg = "OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect", .offset = 2 },
+        .{ .hex = "000000ae6d51", .msg = "OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect", .offset = 3 },
+    };
+    for (cases) |c| {
+        const r = try analyzeScript(a, c.hex, .{});
+        defer r.deinit(a);
+        var n: usize = 0;
+        for (r.findings) |f| {
+            if (f.code != Code.CHECKSIG_RESULT_DROPPED) continue;
+            n += 1;
+            try std.testing.expectEqualStrings(c.msg, f.message);
+            try std.testing.expectEqual(@as(?i64, c.offset), f.offset);
+        }
+        try std.testing.expectEqual(@as(usize, 1), n);
+    }
+    // OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+    const r = try analyzeScript(a, "0000ac77", .{});
+    defer r.deinit(a);
+    for (r.findings) |f| try std.testing.expect(f.code != Code.CHECKSIG_RESULT_DROPPED);
+}

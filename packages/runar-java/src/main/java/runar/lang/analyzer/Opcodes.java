@@ -23,6 +23,7 @@ final class Opcodes {
     static final int OP_VERIFY = 0x69;
     static final int OP_RETURN = 0x6a;
 
+    static final int OP_2DROP = 0x6d;
     static final int OP_DROP = 0x75;
     static final int OP_EQUALVERIFY = 0x88;
     static final int OP_NUMEQUALVERIFY = 0x9d;

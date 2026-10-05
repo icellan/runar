@@ -35,14 +35,15 @@ export function analyzeSigHygiene(
   }
 
   // Check for OP_CHECKSIG results not being verified
-  // Look for patterns where OP_CHECKSIG is immediately followed by OP_DROP
+  // Look for patterns where OP_CHECKSIG is immediately followed by an opcode
+  // that pops the result without reading it: OP_DROP or OP_2DROP (spec §9).
   for (let i = 0; i < opcodes.length - 1; i++) {
     const op = opcodes[i]!;
     const next = opcodes[i + 1]!;
 
     if (
       (op.opcode === Opcode.OP_CHECKSIG || op.opcode === Opcode.OP_CHECKMULTISIG) &&
-      next.opcode === Opcode.OP_DROP
+      (next.opcode === Opcode.OP_DROP || next.opcode === Opcode.OP_2DROP)
     ) {
       findings.push({
         severity: 'warning',
