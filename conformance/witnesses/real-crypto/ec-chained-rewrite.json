@@ -1,0 +1,30 @@
+{
+  "fixture": "ec-chained-rewrite",
+  "kind": "stateless-signed",
+  "note": "F-115 / R30 route A. unlock(p) asserts ecAdd(ecMulGen(n - 7), ecMulGen(7)) === p. The always-on EC optimizer rewrites that ecAdd twice on the same binding: ec-mulgen-add fuses it to ecMulGen(0), and ec-mulgen-zero then folds it to the 64-zero-byte point at infinity. The TS tier used to stop after the first rewrite (single pass) and emit a runtime ecMulGen(0); the other six tiers ran to a fixed point. Before the TS fix the six native tiers already emitted these exact bytes (sha256 of the hex 54b126fe...fcc3, measured in remediation-logs/F-115/repro/head-foldoff), so the golden is the peers' independent answer, not TS's own. Every spend below executes the fixture's actual compiled locking script on @bsv/sdk Spend: (n - 7)G + 7G = nG = O, so only the all-zero point is accepted.",
+  "constructorArgs": {},
+  "spends": [
+    {
+      "method": "unlock",
+      "args": ["0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"],
+      "expect": "accept",
+      "note": "p = O, the all-zero point: (n - 7)G + 7G = nG"
+    },
+    {
+      "method": "unlock",
+      "args": ["0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"],
+      "expect": "reject",
+      "note": "near-miss: p = G, what the chain would yield if the fused scalar were off by one (ecMulGen(1) -> G under ec-mulgen-one)"
+    },
+    {
+      "method": "unlock",
+      "args": ["0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"],
+      "expect": "reject",
+      "note": "near-miss: one bit away from O"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "c2ee240a15294a547c1b8f0227630c35f7699fc218e1553b1d5cf679a1e182c4",
+    "expected-ir.json": "2cea29ac338bbc53609aa01ddb3a55eee13bb13d979ba61da8a9a96cb3558d25"
+  }
+}

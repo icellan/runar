@@ -163,9 +163,9 @@ function freshName(base: string, usedNames: Set<string>): string {
  * assert keeps everything it reads.
  *
  * The gate is built only from forms no EC rule matches (ecPointX/Y, ecOnCurve,
- * bin_op, assert). The other six tiers run this optimizer to a fixed point
- * while TS makes one pass; a gate a later pass could rewrite
- * (an `ecNegate(q)`, say, under ec-negate-negate) would split the tiers.
+ * bin_op, assert). Every tier runs this optimizer to a fixed point (TS since
+ * F-115), so a gate a later sweep could rewrite (an `ecNegate(q)`, say, under
+ * ec-negate-negate) would be rewritten again rather than kept as emitted.
  *
  * `ecAdd` operand gate (CL-BUG-095 width + R-117 coordinate canonicity):
  * `assert(ecPointX(q) < p && ecPointY(q) < p)`. ecPointX/Y abort unless q is
@@ -395,13 +395,17 @@ function tryRewrite(
 // Method optimizer
 // ---------------------------------------------------------------------------
 
-function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string }[]): ANFMethod {
+/**
+ * One left-to-right sweep: each binding is tried once, against the values of
+ * the bindings before it as already rewritten in this sweep. Returns null when
+ * no rule fired.
+ */
+function optimizeBodyOnce(body: readonly ANFBinding[], usedNames: Set<string>): ANFBinding[] | null {
   const valueMap: ValueMap = new Map();
-  const usedNames = collectUsedNames(method, properties);
   const result: ANFBinding[] = [];
   let changed = false;
 
-  for (const binding of method.body) {
+  for (const binding of body) {
     // Register binding value for lookups
     valueMap.set(binding.name, binding.value);
 
@@ -423,8 +427,31 @@ function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string
     }
   }
 
-  if (!changed) return method;
-  return { ...method, body: result };
+  return changed ? result : null;
+}
+
+/**
+ * F-115: sweep until no rule fires, as the other six tiers do (Go's
+ * `for changed {}` in frontend/anf_optimize.go). `tryRewrite` applies one rule
+ * per binding per sweep, and a rewritten value can match another rule — e.g.
+ * Rule 10's `ecMulGen(k1+k2)` with k1+k2 ≡ 0 is Rule 5's `ecMulGen(0)` — so a
+ * single sweep left that binding half-reduced in TS only. `usedNames` spans all
+ * sweeps so a later sweep never re-mints an earlier helper's name.
+ */
+function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string }[]): ANFMethod {
+  const usedNames = collectUsedNames(method, properties);
+  let body: ANFBinding[] = method.body;
+  let anyChanged = false;
+
+  for (;;) {
+    const next = optimizeBodyOnce(body, usedNames);
+    if (next === null) break;
+    body = next;
+    anyChanged = true;
+  }
+
+  if (!anyChanged) return method;
+  return { ...method, body };
 }
 
 // ---------------------------------------------------------------------------

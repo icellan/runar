@@ -1,0 +1,106 @@
+{
+  "contractName": "EcChainedRewrite",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_const",
+            "value": "115792089237316195423570985008687907852837564279074904382605163141518161494330n"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecMulGen",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_const",
+            "value": 7
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t2"
+            ],
+            "func": "ecMulGen",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_const",
+            "value": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "name": "r",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t4"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "p"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "r",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "unlock",
+      "params": [
+        {
+          "name": "p",
+          "type": "Point"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": []
+}

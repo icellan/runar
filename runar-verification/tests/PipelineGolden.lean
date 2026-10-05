@@ -607,6 +607,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"babybear", .regenLive, "v1:63f:7164411b:4cf2cd284cfca657"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
+  ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
@@ -774,6 +775,11 @@ number. It is pinned from both sides:
 -- 2026-10-05 (N-090, measured): N-090 added `hex-to-bytes-initializer`
 -- (byte-exact, baselineMatches) with no Lean model change: 68 =
 -- baselineMatches (65) + (21 - 18).
+--
+-- 2026-10-05 (F-115): F-115 added `ec-chained-rewrite` as an INERT
+-- (unpopulated) crypto anchor in cryptoAxiomPending + cryptoAnchorGaps, with no
+-- Lean model change, so the gate does not move: 68 = baselineMatches (65) +
+-- (22 - 19).
 def expectedByteExact : Nat := 68
 
 /--
@@ -789,8 +795,9 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-09-30 (N-007): 83 -> 84 for N-007's `param-shadow-branch-arm` fixture.
 2026-09-30 (N-044): 84 -> 85 for N-044's `annotated-vault` fixture.
 2026-10-05 (N-090): 85 -> 86 for N-090's `hex-to-bytes-initializer` fixture.
+2026-10-05 (F-115): 86 -> 87 for F-115's `ec-chained-rewrite` fixture.
 -/
-def expectedFixtureTotal : Nat := 86
+def expectedFixtureTotal : Nat := 87
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -901,7 +908,7 @@ Per primitive:
     reference user-facing tiers, but the Lean verification port DOES
     ship `Stack/BabyBear.lean`.)
   * EC (secp256k1):       ec-demo, ec-primitives, ec-unit, schnorr-zkp,
-                          convergence-proof
+                          convergence-proof, ec-chained-rewrite
   * NIST P-256:           p256-primitives, p256-wallet, r1-k1-wallet
   * NIST P-384:           p384-primitives, p384-wallet
   * SLH-DSA (FIPS 205):   post-quantum-slhdsa, sphincs-wallet
@@ -911,7 +918,8 @@ Per primitive:
     `Stack/Merkle.lean` because the verified-pipeline byte-exact theorem
     benefits from covering those fixtures.)
 
-Count: 15. (`blake3` was promoted out of this bucket once
+Count: 22 (2026-10-05, F-115: `ec-chained-rewrite` added; the figure here had
+drifted to 15 while the list held 21). (`blake3` was promoted out of this bucket once
 `RunarVerification/Stack/Blake3.lean` landed; see Step-6 Item 4.
 `post-quantum-wots` and `post-quantum-wallet` were promoted out
 once `RunarVerification/Stack/Wots.lean` landed; see Step-6 Item 5.
@@ -924,6 +932,7 @@ def cryptoAxiomPending : List String := [
   "babybear",
   "babybear-ext4",
   "convergence-proof",
+  "ec-chained-rewrite",
   "ec-demo",
   "ec-primitives",
   "ec-unit",
@@ -971,7 +980,7 @@ the live inert set (unpopulated ∪ stale) EXACTLY equals this inventory:
 Populating an entry (turning it from a gap into a live anchor) requires the
 multi-hour offline crypto regen — see the header docstring and the
 `runar-verification-regen.yml` anti-paste workflow (`workflow_dispatch`).
-Count: 18 (cryptoAxiomPending minus the three 2026-09 live anchors
+Count: 19 (cryptoAxiomPending minus the three 2026-09 live anchors
 `babybear`, `merkle-proof`, `state-covenant` whose compileHexSafe now
 matches the goldens after the R-119 / R-120 / R-095 ports).
 -/
@@ -1005,6 +1014,11 @@ def cryptoAnchorGaps : List String := [
   -- with the other synthesized crypto fixtures and must never be replaced by
   -- pasting the TypeScript golden into the stored-constant table.
   "r1-k1-wallet",
+  -- unpopulated (F-115, 2026-10-05): two runtime ecMulGen calls through the
+  -- same EC emitter whose ec-demo / ec-primitives / ec-unit anchors are stale;
+  -- no stored constant. Populate only from a live RUNAR_VERIFICATION_REGEN=1
+  -- compile — never paste the golden.
+  "ec-chained-rewrite",
   -- unpopulated: no stored constant yet (SLH-DSA *f/*s parameter sets)
   "post-quantum-slhdsa-128f",
   "post-quantum-slhdsa-192f",
@@ -1183,7 +1197,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 86 := by rfl
+        + lowerDivergencePending.length = 87 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 
