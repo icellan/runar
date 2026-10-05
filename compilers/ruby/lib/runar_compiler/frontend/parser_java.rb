@@ -31,6 +31,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "input_limits"
 
 module RunarCompiler
   module Frontend
