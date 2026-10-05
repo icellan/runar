@@ -26,15 +26,74 @@
 //! by the caller; only the hook's banner is suppressed, and only inside a
 //! boundary that already treats every panic as a diagnostic.
 //!
-//! The hook is process-global. The compiler drives these passes from one
-//! thread, so the swap is not observable elsewhere; do not call this from a
-//! parallel pipeline without revisiting that.
-
-use std::cell::RefCell;
+//! The hook IS process-global, but the swap is not: `catch_refusal` never
+//! calls `panic::take_hook` / `panic::set_hook` itself (F-158 / CL-BUG-027 /
+//! CX-BUG-094 — doing that on every call raced two overlapping callers
+//! against each other, e.g. one call's `take_hook` could observe the OTHER
+//! call's in-flight "no-op" hook as "the previous hook" and restore that
+//! no-op process-wide once both calls returned, or could leave an unrelated
+//! panic on another thread suppressed for the brief window the no-op was
+//! installed). Instead, ONE hook is installed, once, via `Once`, the first
+//! time `catch_refusal` runs; it delegates to whichever hook was already
+//! installed at that moment unless the CURRENT THREAD is inside a
+//! `catch_refusal` call, which it tracks with a thread-local flag. Only that
+//! flag is toggled per call — per-thread state, so overlapping calls on
+//! different threads never race each other, and a panic on a thread that is
+//! not inside `catch_refusal` always reaches the delegate hook.
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::Once;
 
 use crate::frontend::ast::SourceLocation;
+
+thread_local! {
+    /// Set for the duration of this thread's `catch_refusal` call so the
+    /// process-wide hook installed by `install_suppressing_hook_once` knows
+    /// to swallow a panic on THIS thread without affecting any other thread.
+    static SUPPRESS_ON_THIS_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Installs the one process-wide panic hook `catch_refusal` ever needs, the
+/// first time any thread calls `catch_refusal`. The hook it replaces (the
+/// default hook, or whatever the embedder installed before compiling) is
+/// captured once and delegated to for every panic except one that happens on
+/// a thread currently inside `catch_refusal`.
+fn install_suppressing_hook_once() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let delegate = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let suppress = SUPPRESS_ON_THIS_THREAD.with(|c| c.get());
+            if !suppress {
+                delegate(info);
+            }
+        }));
+    });
+}
+
+/// RAII guard that marks the current thread as "inside `catch_refusal`" for
+/// its lifetime, restoring whatever the flag held before (so nested calls on
+/// the same thread behave correctly) when it is dropped — including when the
+/// call panics, since `catch_unwind` below only unwinds the FRAMES INSIDE
+/// IT; this guard lives in `catch_refusal`'s own frame, outside that
+/// boundary, so its `Drop` still runs normally once `catch_unwind` returns.
+struct SuppressGuard {
+    previous: bool,
+}
+
+impl SuppressGuard {
+    fn new() -> Self {
+        let previous = SUPPRESS_ON_THIS_THREAD.with(|c| c.replace(true));
+        SuppressGuard { previous }
+    }
+}
+
+impl Drop for SuppressGuard {
+    fn drop(&mut self) {
+        SUPPRESS_ON_THIS_THREAD.with(|c| c.set(self.previous));
+    }
+}
 
 thread_local! {
     /// Where the pass currently is (R-138).
@@ -47,8 +106,9 @@ thread_local! {
     /// `ANFBinding` and therefore its `source_loc`, and the ANF lowerer's
     /// statement dispatch — and `catch_refusal` reads it on the error path.
     ///
-    /// Thread-local, not global: the same single-threaded-pipeline assumption
-    /// the panic-hook swap above already documents, scoped one step tighter.
+    /// Thread-local, not global: each thread running its own `catch_refusal`
+    /// call publishes and reads only its own location, so concurrent calls on
+    /// different threads never see each other's in-flight position.
     static REFUSAL_LOCATION: RefCell<Option<SourceLocation>> = const { RefCell::new(None) };
 }
 
@@ -102,10 +162,9 @@ impl std::ops::Deref for Refusal {
 /// without letting the default panic hook print its banner first.
 pub fn catch_refusal<T>(prefix: &str, f: impl FnOnce() -> T) -> Result<T, Refusal> {
     set_refusal_location(None);
-    let previous = panic::take_hook();
-    panic::set_hook(Box::new(|_| {}));
+    install_suppressing_hook_once();
+    let _guard = SuppressGuard::new();
     let outcome = panic::catch_unwind(AssertUnwindSafe(f));
-    panic::set_hook(previous);
 
     outcome.map_err(|e| {
         let message = if let Some(s) = e.downcast_ref::<String>() {
