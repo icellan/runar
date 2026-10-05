@@ -393,6 +393,72 @@ class TypedContractGeneratorTest {
     }
 
     // ---------------------------------------------------------------------
+    // F-245: intent-intrinsic witness params are SDK-supplied
+    // ---------------------------------------------------------------------
+
+    /**
+     * F-245. {@code _prevOutScript_<i>} / {@code _serialisedOutputs} are
+     * filled by the SDK from {@code setPrevOutScript} /
+     * {@code setSerialisedOutputs} and excluded from
+     * {@code RunarContract.call}'s arity check, so the generated wrapper must
+     * neither declare nor forward them.
+     *
+     * <p>Proves: the generated wrapper compiles, exposes
+     * {@code advance(BigInteger)} only, and a call through it on a
+     * validating MockProvider is accepted by the SDK's arity check and
+     * broadcast with the witness pushes in the unlocking script.
+     * Does not prove: script validity (the Java tier has no Script VM;
+     * MockProvider checks outpoints and value conservation only).
+     */
+    @Test
+    void generatedWrapperExcludesIntentWitnessParams() throws Exception {
+        RunarArtifact artifact = new RunarArtifact(
+            "runar-v0.1.0", "0.1.0", "IntentWitness",
+            new ABI(new ABIConstructor(List.of()), List.of(new ABIMethod(
+                "advance",
+                List.of(
+                    new ABIParam("amount", "bigint", null),
+                    new ABIParam("_prevOutScript_0", "ByteString", null),
+                    new ABIParam("_serialisedOutputs", "ByteString", null)
+                ),
+                true,
+                null,
+                null
+            ))),
+            "51",
+            "OP_1",
+            "2026-04-24T00:00:00Z",
+            null, null, null, null, null
+        );
+        String src = TypedContractGenerator.generate(artifact, "runar.generated.intentwitness");
+        assertFalse(src.contains("_prevOutScript_0"), "wrapper declares/forwards _prevOutScript_0:\n" + src);
+        assertFalse(src.contains("_serialisedOutputs"), "wrapper declares/forwards _serialisedOutputs:\n" + src);
+
+        Class<?> cls = compileInMemory("runar.generated.intentwitness.IntentWitnessContract", src);
+        Method advance = cls.getDeclaredMethod("advance", BigInteger.class);
+        Object wrapper = cls.getConstructor(RunarArtifact.class).newInstance(artifact);
+        runar.lang.sdk.RunarContract inner =
+            (runar.lang.sdk.RunarContract) cls.getMethod("contract").invoke(wrapper);
+
+        runar.lang.sdk.MockProvider provider = new runar.lang.sdk.MockProvider();
+        runar.lang.sdk.MockSigner signer = new runar.lang.sdk.MockSigner();
+        provider.addUtxo(signer.address(), new runar.lang.sdk.UTXO("ee".repeat(32), 0, 100_000L,
+            runar.lang.sdk.ScriptUtils.buildP2PKHScript(signer.address())));
+        runar.lang.sdk.UTXO contractUtxo = new runar.lang.sdk.UTXO("ab".repeat(32), 0, 10_000L, "51");
+        provider.addKnownOutpoint(contractUtxo);
+        inner.setCurrentUtxo(contractUtxo);
+        inner.setPrevOutScript(0, "aa");
+        inner.setSerialisedOutputs("cc");
+        cls.getMethod("connect", runar.lang.sdk.Provider.class, runar.lang.sdk.Signer.class)
+            .invoke(wrapper, provider, signer);
+
+        advance.invoke(wrapper, BigInteger.valueOf(123L));
+        assertEquals(1, provider.getBroadcastedTxs().size(), "call through the wrapper must broadcast");
+        String txHex = provider.getBroadcastedTxs().get(0);
+        assertTrue(txHex.contains("01aa") && txHex.contains("01cc"), "witness pushes missing: " + txHex);
+    }
+
+    // ---------------------------------------------------------------------
     // No-args contract — confirms parameterless constructor path.
     // ---------------------------------------------------------------------
 

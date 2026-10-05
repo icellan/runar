@@ -107,6 +107,28 @@ module Runar
       h.downcase
     end
 
+    # Intent-intrinsic witness params the compiler auto-injects
+    # (extractPrevOutputScript -> `_prevOutScript_<i>`, requireOutputP2PKH ->
+    # `_serialisedOutputs`). Their values come from set_prev_out_script /
+    # set_serialised_outputs.
+    def self.intent_witness_param?(name)
+      name.start_with?('_prevOutScript_') || name == '_serialisedOutputs'
+    end
+
+    # True when the SDK supplies this param itself, so it is never part of the
+    # caller's args: the intent witnesses always, plus the stateful
+    # continuation params (SigHashPreimage, _changePKH, _changeAmount,
+    # _newAmount) on stateful contracts. Single source of truth for
+    # RunarContract#prepare_call's arity check and the typed-wrapper codegen.
+    def self.sdk_supplied_param?(name, type, is_stateful)
+      return true if intent_witness_param?(name)
+
+      is_stateful && (
+        type == 'SigHashPreimage' ||
+        %w[_changePKH _changeAmount _newAmount].include?(name)
+      )
+    end
+
     class WitnessValueMissingError < StandardError
       attr_reader :param_name, :method_name, :contract_name
 

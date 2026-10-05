@@ -8,6 +8,7 @@
 
 require 'set'
 require_relative 'types'
+require_relative 'errors'
 
 module Runar
   module SDK
@@ -143,13 +144,7 @@ module Runar
 
       def classify_params(method, is_stateful)
         method.params.map do |p|
-          hidden = p.type == 'Sig' ||
-                   (is_stateful && (
-                     p.type == 'SigHashPreimage' ||
-                     p.name == '_changePKH' ||
-                     p.name == '_changeAmount' ||
-                     p.name == '_newAmount'
-                   ))
+          hidden = p.type == 'Sig' || SDK.sdk_supplied_param?(p.name, p.type, is_stateful)
           {
             'name'     => p.name,
             'abi_type' => p.type,
@@ -163,15 +158,11 @@ module Runar
         classify_params(method, is_stateful).reject { |p| p['hidden'] }
       end
 
+      # Same predicate as RunarContract#prepare_call's arity check, so the
+      # generated args can never drift from what the SDK accepts (F-245).
       def get_sdk_arg_params(method, is_stateful)
-        classified = classify_params(method, is_stateful)
-        return classified unless is_stateful
-
-        classified.reject do |p|
-          p['abi_type'] == 'SigHashPreimage' ||
-            p['name'] == '_changePKH' ||
-            p['name'] == '_changeAmount' ||
-            p['name'] == '_newAmount'
+        classify_params(method, is_stateful).reject do |p|
+          SDK.sdk_supplied_param?(p['name'], p['abi_type'], is_stateful)
         end
       end
 

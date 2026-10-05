@@ -45,6 +45,7 @@ import { encodeArg, encodePushData, encodeScriptNumber } from './contract.js';
 import { assertFixedWidthValue } from './state.js';
 import type { Signer } from './signers/index.js';
 import type { UTXO } from './types.js';
+import { isAutoInjectedWitnessParam } from './sdk-params.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -115,8 +116,6 @@ export interface AssembledMultiContractCall {
 // ---------------------------------------------------------------------------
 
 const AUTO_PARAM_NAMES = new Set(['_changePKH', '_changeAmount', '_newAmount']);
-const isWitnessParam = (name: string): boolean =>
-  name.startsWith('_prevOutScript_') || name === '_serialisedOutputs';
 
 /**
  * Build and sign a transaction whose inputs are N covenant UTXOs from N
@@ -194,7 +193,7 @@ export async function assembleMultiContractCall(
     }
     const method = publicMethods[methodIndex]!;
 
-    const witnessParams = method.params.filter((p) => isWitnessParam(p.name));
+    const witnessParams = method.params.filter((p) => isAutoInjectedWitnessParam(p.name));
     if (witnessParams.length > 0) {
       throw new Error(
         `assembleMultiContractCall: input ${i}: method '${inp.method}' declares intent-intrinsic witness params ` +

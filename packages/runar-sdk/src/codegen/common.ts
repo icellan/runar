@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ABIMethod, RunarArtifact } from 'runar-ir-schema';
+import { isSdkSuppliedParam } from '../sdk-params.js';
 
 // ---------------------------------------------------------------------------
 // Param classification
@@ -45,23 +46,18 @@ export function mapTypeToTS(abiType: string): string {
  * Hidden params are:
  * - Sig: always auto-computed from the connected signer (two-pass signing)
  * - SigHashPreimage: auto-computed for stateful contracts
- * - _changePKH, _changeAmount: auto-injected by SDK for stateful contracts
+ * - _changePKH, _changeAmount, _newAmount: auto-injected by SDK for stateful contracts
+ * - _prevOutScript_<i>, _serialisedOutputs: intent-intrinsic witnesses, set
+ *   on the contract via setPrevOutScript / setSerialisedOutputs
  *
  * Hidden params don't appear in the generated method signature.
  * Of these, Sig params are included in the args array as `null` (the SDK
- * auto-computes them), while SigHashPreimage/_changePKH/_changeAmount are
- * entirely SDK-internal and excluded from the args array.
+ * auto-computes them), while the rest are entirely SDK-internal and excluded
+ * from the args array.
  */
 export function classifyParams(method: ABIMethod, isStateful: boolean): ClassifiedParam[] {
   return method.params.map((p) => {
-    const hidden =
-      p.type === 'Sig' ||
-      (isStateful && (
-        p.type === 'SigHashPreimage' ||
-        p.name === '_changePKH' ||
-        p.name === '_changeAmount' ||
-        p.name === '_newAmount'
-      ));
+    const hidden = p.type === 'Sig' || isSdkSuppliedParam(p, isStateful);
     return {
       name: p.name,
       abiType: p.type,
@@ -80,17 +76,18 @@ export function getUserParams(method: ABIMethod, isStateful: boolean): Classifie
 
 /**
  * Get params that match the SDK's args array — all params except the ones
- * the SDK handles entirely internally (SigHashPreimage, _changePKH,
- * _changeAmount) for stateful contracts.
+ * the SDK handles entirely internally: the intent-intrinsic witnesses
+ * (`_prevOutScript_<i>`, `_serialisedOutputs`) always, plus SigHashPreimage,
+ * _changePKH, _changeAmount, _newAmount for stateful contracts.
  *
  * Sig params ARE included (passed as null for auto-computation by the SDK).
- * This matches the SDK's `userParams` filtering in `call()`/`prepareCall()`.
+ * Uses the same `isSdkSuppliedParam` predicate as `prepareCall()`'s
+ * `userParams` filter, so the two cannot drift.
  */
 export function getSdkArgParams(method: ABIMethod, isStateful: boolean): ClassifiedParam[] {
-  return classifyParams(method, isStateful).filter((p) => {
-    if (!isStateful) return true;
-    return p.abiType !== 'SigHashPreimage' && p.name !== '_changePKH' && p.name !== '_changeAmount' && p.name !== '_newAmount';
-  });
+  return classifyParams(method, isStateful).filter(
+    (p) => !isSdkSuppliedParam({ name: p.name, type: p.abiType }, isStateful),
+  );
 }
 
 // ---------------------------------------------------------------------------

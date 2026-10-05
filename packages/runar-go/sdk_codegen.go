@@ -118,18 +118,16 @@ type classifiedParam struct {
 //   - Sig: auto-computed from the connected signer (two-pass signing)
 //   - SigHashPreimage: auto-computed for stateful contracts
 //   - _changePKH, _changeAmount, _newAmount: auto-injected by SDK for stateful contracts
+//   - _prevOutScript_<i>, _serialisedOutputs: intent-intrinsic witnesses, set
+//     via SetPrevOutScript / SetSerialisedOutputs
 //
 // Of these, Sig params are included in the args array as nil (the SDK
-// auto-computes them), while SigHashPreimage/_changePKH/_changeAmount/_newAmount
-// are entirely SDK-internal and excluded from the args array.
+// auto-computes them), while the rest are entirely SDK-internal and excluded
+// from the args array (isSdkSuppliedParam, shared with PrepareCall).
 func classifyParams(params []ABIParam, isStateful bool) []classifiedParam {
 	result := make([]classifiedParam, len(params))
 	for i, p := range params {
-		hidden := p.Type == "Sig" ||
-			(isStateful && (p.Type == "SigHashPreimage" ||
-				p.Name == "_changePKH" ||
-				p.Name == "_changeAmount" ||
-				p.Name == "_newAmount"))
+		hidden := p.Type == "Sig" || isSdkSuppliedParam(p.Name, p.Type, isStateful)
 		result[i] = classifiedParam{
 			name:    p.Name,
 			abiType: p.Type,
@@ -153,21 +151,14 @@ func getUserParams(params []ABIParam, isStateful bool) []classifiedParam {
 }
 
 // getSdkArgParams returns params that match the SDK's args array: all params
-// except the ones the SDK handles entirely internally (SigHashPreimage,
-// _changePKH, _changeAmount, _newAmount) for stateful contracts.
+// except the ones the SDK handles entirely internally (isSdkSuppliedParam —
+// the same predicate PrepareCall's arity check uses).
 // Sig params ARE included (passed as nil for auto-computation by the SDK).
 func getSdkArgParams(params []ABIParam, isStateful bool) []classifiedParam {
 	classified := classifyParams(params, isStateful)
 	var result []classifiedParam
 	for _, p := range classified {
-		if !isStateful {
-			result = append(result, p)
-			continue
-		}
-		if p.abiType != "SigHashPreimage" &&
-			p.name != "_changePKH" &&
-			p.name != "_changeAmount" &&
-			p.name != "_newAmount" {
+		if !isSdkSuppliedParam(p.name, p.abiType, isStateful) {
 			result = append(result, p)
 		}
 	}

@@ -190,6 +190,28 @@ def _is_likely_or_checksig(artifact) -> bool:
 AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts'
 
 
+def is_intent_witness_param(name: str) -> bool:
+    """Intent-intrinsic witness params the compiler auto-injects
+    (``extractPrevOutputScript`` -> ``_prevOutScript_<i>``,
+    ``requireOutputP2PKH`` -> ``_serialisedOutputs``). Their values come from
+    ``set_prev_out_script`` / ``set_serialised_outputs``."""
+    return name.startswith('_prevOutScript_') or name == '_serialisedOutputs'
+
+
+def is_sdk_supplied_param(name: str, type_: str, is_stateful: bool) -> bool:
+    """True when the SDK supplies this param itself, so it is never part of
+    the caller's args: the intent witnesses always, plus the stateful
+    continuation params (SigHashPreimage, ``_changePKH``, ``_changeAmount``,
+    ``_newAmount``) on stateful contracts. Single source of truth for
+    ``prepare_call``'s arity check and the typed-wrapper codegen."""
+    if is_intent_witness_param(name):
+        return True
+    return is_stateful and (
+        type_ == 'SigHashPreimage'
+        or name in ('_changePKH', '_changeAmount', '_newAmount')
+    )
+
+
 def _is_auto_prevouts_param(param) -> bool:
     """Is a ``None`` arg for ``param`` the SDK's auto-compute sentinel?
 
@@ -661,20 +683,11 @@ class RunarContract:
         # params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
         # user-facing arg count check. Witness values come from
         # set_prev_out_script / set_serialised_outputs, not from the args list.
-        def _is_intent_witness_param(name: str) -> bool:
-            return name.startswith('_prevOutScript_') or name == '_serialisedOutputs'
-
-        if is_stateful:
-            user_params = [
-                p for p in method.params
-                if p.type != 'SigHashPreimage'
-                and p.name != '_changePKH'
-                and p.name != '_changeAmount'
-                and p.name != '_newAmount'
-                and not _is_intent_witness_param(p.name)
-            ]
-        else:
-            user_params = [p for p in method.params if not _is_intent_witness_param(p.name)]
+        # Shared with the typed-wrapper codegen (F-245).
+        user_params = [
+            p for p in method.params
+            if not is_sdk_supplied_param(p.name, p.type, is_stateful)
+        ]
 
         if len(user_params) != len(args):
             raise ValueError(
@@ -878,6 +891,16 @@ class RunarContract:
                 # known before the tx is built, and the state the script
                 # re-derives must match.
                 interp_args = dict(named_args)
+                # Intent-intrinsic witnesses the caller set via
+                # set_prev_out_script / set_serialised_outputs: the method body
+                # loads them as params, so the interpreter needs them too.
+                for wp in method.params:
+                    if wp.name.startswith('_prevOutScript_'):
+                        idx_str = wp.name[len('_prevOutScript_'):]
+                        if idx_str.isdigit() and int(idx_str) in self._prev_out_scripts:
+                            interp_args[wp.name] = self._prev_out_scripts[int(idx_str)]
+                    elif wp.name == '_serialisedOutputs' and self._serialised_outputs is not None:
+                        interp_args[wp.name] = self._serialised_outputs
                 if self._current_utxo is not None:
                     interp_args['txPreimage'] = int(self._current_utxo.satoshis)
                     if method_needs_new_amount:

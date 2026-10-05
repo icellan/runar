@@ -22,6 +22,7 @@ import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScr
 import { WalletProvider } from './providers/wallet-provider.js';
 import { detachUnlockingScript } from './spend-safety.js';
 import { assertUnsoundPrimitivesAcknowledged } from './unsound-primitives.js';
+import { isSdkSuppliedParam } from './sdk-params.js';
 
 /**
  * Deep-review finding C8: opt-out for `finalizeCall`'s pre-broadcast local
@@ -1000,18 +1001,8 @@ export class RunarContract {
     // params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
     // user-facing arg count check. Witness values come from
     // setPrevOutScript / setSerialisedOutputs, not from the args array.
-    const isAutoInjectedWitnessParam = (name: string): boolean =>
-      name.startsWith('_prevOutScript_') || name === '_serialisedOutputs';
-    const userParams = isStateful
-      ? method.params.filter(
-          (p) =>
-            p.type !== 'SigHashPreimage' &&
-            p.name !== '_changePKH' &&
-            p.name !== '_changeAmount' &&
-            p.name !== '_newAmount' &&
-            !isAutoInjectedWitnessParam(p.name),
-        )
-      : method.params.filter((p) => !isAutoInjectedWitnessParam(p.name));
+    // Shared with the typed-wrapper codegen (F-245).
+    const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
 
     if (userParams.length !== args.length) {
       throw new Error(

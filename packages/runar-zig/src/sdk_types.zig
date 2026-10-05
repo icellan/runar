@@ -533,6 +533,28 @@ pub const ABIMethod = struct {
 };
 
 /// ABIParam describes a single parameter.
+/// Intent-intrinsic witness params the compiler auto-injects
+/// (`extractPrevOutputScript` -> `_prevOutScript_<i>`, `requireOutputP2PKH` ->
+/// `_serialisedOutputs`). Their values come from setPrevOutScript /
+/// setSerialisedOutputs.
+pub fn isIntentWitnessParam(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "_prevOutScript_") or
+        std.mem.eql(u8, name, "_serialisedOutputs");
+}
+
+/// True when the SDK supplies this param itself, so it is never part of the
+/// caller's args: the intent witnesses always, plus the stateful continuation
+/// params (SigHashPreimage, `_changePKH`, `_changeAmount`, `_newAmount`) on
+/// stateful contracts. Single source of truth for RunarContract.call's arity
+/// check and the typed-wrapper codegen (F-245).
+pub fn isSdkSuppliedParam(p: ABIParam, is_stateful: bool) bool {
+    if (isIntentWitnessParam(p.name)) return true;
+    return is_stateful and (std.mem.eql(u8, p.type_name, "SigHashPreimage") or
+        std.mem.eql(u8, p.name, "_changePKH") or
+        std.mem.eql(u8, p.name, "_changeAmount") or
+        std.mem.eql(u8, p.name, "_newAmount"));
+}
+
 pub const ABIParam = struct {
     name: []const u8 = &.{},
     type_name: []const u8 = &.{},

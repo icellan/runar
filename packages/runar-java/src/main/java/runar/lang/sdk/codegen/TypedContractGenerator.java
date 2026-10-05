@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 
 import runar.lang.sdk.RunarArtifact;
+import runar.lang.sdk.RunarContract;
 import runar.lang.sdk.RunarArtifact.ABIMethod;
 import runar.lang.sdk.RunarArtifact.ABIParam;
 import runar.lang.sdk.RunarArtifact.StateField;
@@ -575,11 +576,9 @@ public final class TypedContractGenerator {
         for (ABIParam p : params) {
             boolean hidden = "Sig".equals(p.type())
                 || (isStateful && "SigHashPreimage".equals(p.type()));
-            boolean internal = isStateful
-                && ("SigHashPreimage".equals(p.type())
-                    || "_changePKH".equals(p.name())
-                    || "_changeAmount".equals(p.name())
-                    || "_newAmount".equals(p.name()));
+            // Same predicate as RunarContract.call's arity check (F-245):
+            // stateful continuation params + intent-intrinsic witnesses.
+            boolean internal = RunarContract.isSdkSuppliedParam(p.name(), p.type(), isStateful);
             out.add(new ClassifiedParam(p.name(), p.type(), hidden, internal));
         }
         return out;

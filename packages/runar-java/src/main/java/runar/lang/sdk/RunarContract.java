@@ -1915,16 +1915,25 @@ public final class RunarContract {
     private static List<RunarArtifact.ABIParam> userParams(RunarArtifact.ABIMethod m, boolean isStateful) {
         List<RunarArtifact.ABIParam> out = new ArrayList<>();
         for (RunarArtifact.ABIParam p : m.params()) {
-            String n = p.name();
-            String t = p.type();
-            if (isAutoInjectedWitnessParam(n)) continue;
-            if (isStateful) {
-                if ("SigHashPreimage".equals(t)) continue;
-                if ("_changePKH".equals(n) || "_changeAmount".equals(n) || "_newAmount".equals(n)) continue;
-            }
+            if (isSdkSuppliedParam(p.name(), p.type(), isStateful)) continue;
             out.add(p);
         }
         return out;
+    }
+
+    /**
+     * True when the SDK supplies this param itself, so it is never part of
+     * the caller's args: the intent-intrinsic witnesses
+     * ({@code _prevOutScript_<i>}, {@code _serialisedOutputs}) always, plus
+     * the stateful continuation params ({@code SigHashPreimage},
+     * {@code _changePKH}, {@code _changeAmount}, {@code _newAmount}) on
+     * stateful contracts. Single source of truth for {@link #call}'s arity
+     * check and the typed-wrapper codegen (F-245).
+     */
+    public static boolean isSdkSuppliedParam(String name, String type, boolean isStateful) {
+        if (isAutoInjectedWitnessParam(name)) return true;
+        return isStateful && ("SigHashPreimage".equals(type)
+            || "_changePKH".equals(name) || "_changeAmount".equals(name) || "_newAmount".equals(name));
     }
 
     /** True if {@code paramName} is an auto-injected intent-intrinsic

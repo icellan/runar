@@ -11,6 +11,7 @@ import re
 from typing import Any, Dict, List, Union
 
 from runar.sdk.types import RunarArtifact, AbiMethod, AbiParam
+from runar.sdk.contract import is_sdk_supplied_param
 
 # ---------------------------------------------------------------------------
 # Minimal Mustache renderer
@@ -161,15 +162,7 @@ def _classify_params(method: AbiMethod, is_stateful: bool) -> List[Dict[str, Any
     """Classify method params into user-visible and hidden (auto-computed)."""
     result: List[Dict[str, Any]] = []
     for p in method.params:
-        hidden = (
-            p.type == 'Sig' or
-            (is_stateful and (
-                p.type == 'SigHashPreimage' or
-                p.name == '_changePKH' or
-                p.name == '_changeAmount' or
-                p.name == '_newAmount'
-            ))
-        )
+        hidden = p.type == 'Sig' or is_sdk_supplied_param(p.name, p.type, is_stateful)
         result.append({
             'name': p.name,
             'abi_type': p.type,
@@ -187,18 +180,14 @@ def _get_user_params(method: AbiMethod, is_stateful: bool) -> List[Dict[str, Any
 def _get_sdk_arg_params(method: AbiMethod, is_stateful: bool) -> List[Dict[str, Any]]:
     """Get params that match the SDK's args array.
 
-    All params except SigHashPreimage, _changePKH, _changeAmount, _newAmount
-    for stateful contracts.  Sig params ARE included (passed as None).
+    All params except the SDK-supplied ones (``is_sdk_supplied_param``, the
+    same predicate ``prepare_call``'s arity check uses): the intent witnesses,
+    plus SigHashPreimage, _changePKH, _changeAmount, _newAmount for stateful
+    contracts.  Sig params ARE included (passed as None).
     """
-    classified = _classify_params(method, is_stateful)
-    if not is_stateful:
-        return classified
     return [
-        p for p in classified
-        if p['abi_type'] != 'SigHashPreimage'
-        and p['name'] != '_changePKH'
-        and p['name'] != '_changeAmount'
-        and p['name'] != '_newAmount'
+        p for p in _classify_params(method, is_stateful)
+        if not is_sdk_supplied_param(p['name'], p['abi_type'], is_stateful)
     ]
 
 

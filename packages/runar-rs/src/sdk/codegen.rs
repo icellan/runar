@@ -3,6 +3,7 @@
 //! Generates typed Rust wrapper structs from compiled Runar artifacts,
 //! using an embedded Mustache template and a minimal template renderer.
 
+use super::contract::is_sdk_supplied_param;
 use super::types::*;
 use std::collections::HashMap;
 
@@ -125,29 +126,14 @@ fn is_terminal_method(method: &AbiMethod, is_stateful: bool) -> bool {
 
 /// Whether a param is hidden (auto-computed by SDK).
 fn is_hidden_param(p: &AbiParam, is_stateful: bool) -> bool {
-    if p.param_type == "Sig" {
-        return true;
-    }
-    if is_stateful {
-        if p.param_type == "SigHashPreimage" {
-            return true;
-        }
-        if p.name == "_changePKH" || p.name == "_changeAmount" || p.name == "_newAmount" {
-            return true;
-        }
-    }
-    false
+    p.param_type == "Sig" || is_sdk_supplied_param(p, is_stateful)
 }
 
 /// Whether a param should be excluded from the SDK args array entirely.
+/// Same predicate as `RunarContract::prepare_call`'s arity check, so the
+/// generated args can never drift from what the SDK accepts.
 fn is_excluded_from_sdk_args(p: &AbiParam, is_stateful: bool) -> bool {
-    if !is_stateful {
-        return false;
-    }
-    p.param_type == "SigHashPreimage"
-        || p.name == "_changePKH"
-        || p.name == "_changeAmount"
-        || p.name == "_newAmount"
+    is_sdk_supplied_param(p, is_stateful)
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +254,8 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
                 has_big_int_params = true;
             }
 
-            // SDK args (all params except SigHashPreimage/_changePKH/_changeAmount/_newAmount for stateful)
+            // SDK args (all params except the SDK-supplied ones: intent witnesses,
+            // plus SigHashPreimage/_changePKH/_changeAmount/_newAmount for stateful)
             let sdk_args_raw: Vec<&AbiParam> = method
                 .params
                 .iter()
@@ -1153,6 +1140,55 @@ mod tests {
         // Hidden params should not appear as user params
         assert!(!output.contains("tx_preimage: String"));
         assert!(!output.contains("_change_pkh"));
+    }
+
+    // -----------------------------------------------------------------------
+    // F-245: intent-intrinsic witness params are SDK-supplied
+    // -----------------------------------------------------------------------
+
+    /// Proves: the generated wrapper neither declares nor forwards the
+    /// auto-injected `_prevOutScript_<i>` / `_serialisedOutputs` witness params
+    /// (RunarContract::prepare_call excludes them from its arity check and
+    /// fills them from set_prev_out_script / set_serialised_outputs), and the
+    /// only user arg forwarded is `amount`.
+    /// Does not prove: that the generated wrapper compiles or that a call
+    /// through it spends on-chain.
+    #[test]
+    fn test_generate_excludes_intent_witness_params() {
+        let p = |name: &str, ty: &str| AbiParam {
+            name: name.to_string(),
+            param_type: ty.to_string(), fixed_array: None,
+        };
+        let artifact = make_artifact(
+            "IntentWitnessTest",
+            vec![p("count", "bigint")],
+            vec![AbiMethod {
+                name: "advance".to_string(),
+                params: vec![
+                    p("amount", "bigint"),
+                    p("_changePKH", "Ripemd160"),
+                    p("_changeAmount", "bigint"),
+                    p("_newAmount", "bigint"),
+                    p("txPreimage", "SigHashPreimage"),
+                    p("_prevOutScript_0", "ByteString"),
+                    p("_serialisedOutputs", "ByteString"),
+                ],
+                is_public: true,
+                is_terminal: Some(false), uses_code_part: None,
+                sig_hash_type: None,
+            }],
+            Some(vec![StateField {
+                name: "count".to_string(),
+                field_type: "bigint".to_string(),
+                index: 0,
+                initial_value: None, fixed_array: None ,
+            }]),
+        );
+        let output = generate_rust(&artifact);
+        assert!(output.contains("pub fn advance("), "{}", output);
+        assert!(!output.contains("prev_out_script"), "witness forwarded/declared:\n{}", output);
+        assert!(!output.contains("serialised_outputs"), "witness forwarded/declared:\n{}", output);
+        assert!(output.contains("let args = vec![SdkValue::BigInt(amount)];"), "{}", output);
     }
 
     // -----------------------------------------------------------------------

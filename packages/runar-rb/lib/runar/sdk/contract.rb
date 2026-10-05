@@ -408,21 +408,10 @@ module Runar
         # params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
         # user-facing arg count check. Witness values come from
         # set_prev_out_script / set_serialised_outputs, not from the args array.
-        is_auto_injected_witness = ->(name) {
-          name.start_with?('_prevOutScript_') || name == '_serialisedOutputs'
-        }
-
-        user_params = if is_stateful
-                        method.params.reject do |p|
-                          p.type == 'SigHashPreimage' ||
-                            p.name == '_changePKH' ||
-                            p.name == '_changeAmount' ||
-                            p.name == '_newAmount' ||
-                            is_auto_injected_witness.call(p.name)
-                        end
-                      else
-                        method.params.reject { |p| is_auto_injected_witness.call(p.name) }
-                      end
+        # Shared with the typed-wrapper codegen (F-245).
+        user_params = method.params.reject do |p|
+          SDK.sdk_supplied_param?(p.name, p.type, is_stateful)
+        end
 
         if user_params.length != args.length
           raise ArgumentError,

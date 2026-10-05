@@ -29,7 +29,8 @@ const types = @import("sdk_types.zig");
 //
 // `Sig` and `SigHashPreimage` parameters are elided from the user-visible
 // signature (auto-resolved by the SDK at call time). Stateful internals
-// (`_changePKH`, `_changeAmount`, `_newAmount`) are entirely hidden.
+// (`_changePKH`, `_changeAmount`, `_newAmount`) and the intent-intrinsic
+// witnesses (`_prevOutScript_<i>`, `_serialisedOutputs`) are entirely hidden.
 
 /// Map a Rúnar ABI type to a Zig type for the user-visible signature.
 fn mapTypeToZig(abi_type: []const u8) []const u8 {
@@ -65,12 +66,9 @@ const ParamRole = enum {
 
 fn classifyParam(p: types.ABIParam, is_stateful: bool) ParamRole {
     if (std.mem.eql(u8, p.type_name, "Sig")) return .hidden_in_args;
-    if (is_stateful) {
-        if (std.mem.eql(u8, p.type_name, "SigHashPreimage")) return .internal;
-        if (std.mem.eql(u8, p.name, "_changePKH")) return .internal;
-        if (std.mem.eql(u8, p.name, "_changeAmount")) return .internal;
-        if (std.mem.eql(u8, p.name, "_newAmount")) return .internal;
-    } else if (std.mem.eql(u8, p.type_name, "SigHashPreimage")) {
+    // Same predicate as RunarContract.call's arity check (F-245).
+    if (types.isSdkSuppliedParam(p, is_stateful)) return .internal;
+    if (!is_stateful and std.mem.eql(u8, p.type_name, "SigHashPreimage")) {
         return .hidden_in_args;
     }
     return .user_visible;
@@ -594,6 +592,52 @@ test "generateZig emits prepare/finalize for Sig-bearing P2PKH unlock" {
     try std.testing.expect(std.mem.indexOf(u8, src, "StatefulCallOptions") == null);
     // Stateless terminal ⇒ TerminalOutput record emitted
     try std.testing.expect(std.mem.indexOf(u8, src, "pub const TerminalOutput = struct") != null);
+}
+
+// F-245: the intent-intrinsic witness params (`_prevOutScript_<i>`,
+// `_serialisedOutputs`) are supplied by the SDK from setPrevOutScript /
+// setSerialisedOutputs and excluded from RunarContract.call's arity check.
+// Proves: the generated wrapper neither declares nor forwards them; the only
+// forwarded user arg is `amount`. Does not prove: that the generated source
+// compiles, or that a call through it spends on-chain.
+test "generateZig excludes intent-intrinsic witness params from signature and args" {
+    const allocator = std.testing.allocator;
+
+    var params = [_]types.ABIParam{
+        .{ .name = "amount", .type_name = "bigint" },
+        .{ .name = "_changePKH", .type_name = "Ripemd160" },
+        .{ .name = "_changeAmount", .type_name = "bigint" },
+        .{ .name = "_newAmount", .type_name = "bigint" },
+        .{ .name = "txPreimage", .type_name = "SigHashPreimage" },
+        .{ .name = "_prevOutScript_0", .type_name = "ByteString" },
+        .{ .name = "_serialisedOutputs", .type_name = "ByteString" },
+    };
+    var methods = [_]types.ABIMethod{.{
+        .name = "advance",
+        .params = &params,
+        .is_public = true,
+        .is_terminal = false,
+    }};
+    var ctor_params = [_]types.ABIParam{.{ .name = "count", .type_name = "bigint" }};
+    var state_fields = [_]types.StateField{.{ .name = "count", .type_name = "bigint", .index = 0 }};
+
+    const artifact = types.RunarArtifact{
+        .allocator = allocator,
+        .contract_name = "IntentWitnessTest",
+        .abi = .{
+            .constructor = .{ .params = &ctor_params },
+            .methods = &methods,
+        },
+        .state_fields = &state_fields,
+    };
+
+    const src = try generateZig(allocator, &artifact);
+    defer allocator.free(src);
+
+    try std.testing.expect(std.mem.indexOf(u8, src, "pub fn advance(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "amount: i64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "_prevOutScript_0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "_serialisedOutputs") == null);
 }
 
 test "generateZig with no constructor params emits parameterless init" {

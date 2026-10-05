@@ -331,6 +331,30 @@ impl std::fmt::Debug for RunarContract {
     }
 }
 
+/// Intent-intrinsic witness params the compiler auto-injects
+/// (`extractPrevOutputScript` -> `_prevOutScript_<i>`, `requireOutputP2PKH` ->
+/// `_serialisedOutputs`). Their values come from `set_prev_out_script` /
+/// `set_serialised_outputs`.
+pub(crate) fn is_auto_injected_witness_param(name: &str) -> bool {
+    name.starts_with("_prevOutScript_") || name == "_serialisedOutputs"
+}
+
+/// Whether the SDK supplies this param itself, so it is never part of the
+/// caller's args: the intent witnesses always, plus the stateful continuation
+/// params (SigHashPreimage, `_changePKH`, `_changeAmount`, `_newAmount`) on
+/// stateful contracts. Single source of truth for `prepare_call`'s arity check
+/// and the typed-wrapper codegen.
+pub(crate) fn is_sdk_supplied_param(p: &AbiParam, is_stateful: bool) -> bool {
+    if is_auto_injected_witness_param(&p.name) {
+        return true;
+    }
+    is_stateful
+        && (p.param_type == "SigHashPreimage"
+            || p.name == "_changePKH"
+            || p.name == "_changeAmount"
+            || p.name == "_newAmount")
+}
+
 impl RunarContract {
     /// Create a new RunarContract from an artifact and constructor arguments.
     pub fn new(artifact: RunarArtifact, constructor_args: Vec<SdkValue>) -> Self {
@@ -780,20 +804,12 @@ impl RunarContract {
         // params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
         // user-facing arg count check. Witness values come from
         // set_prev_out_script / set_serialised_outputs, not from the args slice.
-        let is_auto_injected_witness_param = |name: &str| -> bool {
-            name.starts_with("_prevOutScript_") || name == "_serialisedOutputs"
-        };
-        let user_params: Vec<&AbiParam> = if is_stateful {
-            method.params.iter().filter(|p| {
-                p.param_type != "SigHashPreimage"
-                    && p.name != "_changePKH"
-                    && p.name != "_changeAmount"
-                    && p.name != "_newAmount"
-                    && !is_auto_injected_witness_param(&p.name)
-            }).collect()
-        } else {
-            method.params.iter().filter(|p| !is_auto_injected_witness_param(&p.name)).collect()
-        };
+        // Shared with the typed-wrapper codegen (F-245).
+        let user_params: Vec<&AbiParam> = method
+            .params
+            .iter()
+            .filter(|p| !is_sdk_supplied_param(p, is_stateful))
+            .collect();
 
         if user_params.len() != args.len() {
             return Err(format!(

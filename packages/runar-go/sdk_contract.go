@@ -319,6 +319,29 @@ func (c *RunarContract) Connect(provider Provider, signer Signer) {
 	c.signer = signer
 }
 
+// isAutoInjectedWitnessParam reports whether a param is an intent-intrinsic
+// witness the compiler auto-injects (`_prevOutScript_<i>` from
+// extractPrevOutputScript, `_serialisedOutputs` from requireOutputP2PKH).
+// Its value comes from SetPrevOutScript / SetSerialisedOutputs.
+func isAutoInjectedWitnessParam(name string) bool {
+	return strings.HasPrefix(name, "_prevOutScript_") || name == "_serialisedOutputs"
+}
+
+// isSdkSuppliedParam reports whether the SDK supplies a param itself, so it is
+// never part of the caller's args slice: the intent witnesses always, plus the
+// stateful continuation params (SigHashPreimage, _changePKH, _changeAmount,
+// _newAmount) on stateful contracts. Single source of truth for PrepareCall's
+// arity check and the typed-wrapper codegen.
+func isSdkSuppliedParam(name, typ string, isStateful bool) bool {
+	if isAutoInjectedWitnessParam(name) {
+		return true
+	}
+	return isStateful && (typ == "SigHashPreimage" ||
+		name == "_changePKH" ||
+		name == "_changeAmount" ||
+		name == "_newAmount")
+}
+
 // SetPrevOutScript supplies the prev-output locking-script witness for input
 // `inputIndex`. Required for methods that call `extractPrevOutputScript(inputIndex)`,
 // which the compiler lowers into an auto-injected `_prevOutScript_<inputIndex>`
@@ -783,21 +806,11 @@ func (c *RunarContract) PrepareCall(
 	// params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
 	// user-facing arg count check. Witness values come from
 	// SetPrevOutScript / SetSerialisedOutputs, not from the args slice.
-	isAutoInjectedWitnessParam := func(name string) bool {
-		return strings.HasPrefix(name, "_prevOutScript_") || name == "_serialisedOutputs"
-	}
+	// Shared with the typed-wrapper codegen (F-245).
 	var userParams []ABIParam
-	if isStateful {
-		for _, p := range method.Params {
-			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" && p.Name != "_newAmount" && !isAutoInjectedWitnessParam(p.Name) {
-				userParams = append(userParams, p)
-			}
-		}
-	} else {
-		for _, p := range method.Params {
-			if !isAutoInjectedWitnessParam(p.Name) {
-				userParams = append(userParams, p)
-			}
+	for _, p := range method.Params {
+		if !isSdkSuppliedParam(p.Name, p.Type, isStateful) {
+			userParams = append(userParams, p)
 		}
 	}
 	if len(userParams) != len(args) {

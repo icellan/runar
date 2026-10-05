@@ -648,29 +648,10 @@ pub const RunarContract = struct {
         // witness params (`_prevOutScript_<i>`, `_serialisedOutputs`) from
         // the user-facing arg count check. Witness values come from
         // setPrevOutScript / setSerialisedOutputs, not the args slice.
-        const isAutoInjectedWitness = struct {
-            fn check(name: []const u8) bool {
-                return std.mem.startsWith(u8, name, "_prevOutScript_") or
-                    std.mem.eql(u8, name, "_serialisedOutputs");
-            }
-        }.check;
-
+        // Shared with the typed-wrapper codegen (F-245).
         var user_param_count: usize = 0;
-        if (is_stateful) {
-            for (abi_method.params) |p| {
-                if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
-                    !std.mem.eql(u8, p.name, "_changePKH") and
-                    !std.mem.eql(u8, p.name, "_changeAmount") and
-                    !std.mem.eql(u8, p.name, "_newAmount") and
-                    !isAutoInjectedWitness(p.name))
-                {
-                    user_param_count += 1;
-                }
-            }
-        } else {
-            for (abi_method.params) |p| {
-                if (!isAutoInjectedWitness(p.name)) user_param_count += 1;
-            }
+        for (abi_method.params) |p| {
+            if (!types.isSdkSuppliedParam(p, is_stateful)) user_param_count += 1;
         }
 
         if (args.len != user_param_count) return ContractError.ArgCountMismatch;
@@ -687,24 +668,10 @@ pub const RunarContract = struct {
         defer self.allocator.free(user_params);
         {
             var idx: usize = 0;
-            if (is_stateful) {
-                for (abi_method.params) |p| {
-                    if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
-                        !std.mem.eql(u8, p.name, "_changePKH") and
-                        !std.mem.eql(u8, p.name, "_changeAmount") and
-                        !std.mem.eql(u8, p.name, "_newAmount") and
-                        !isAutoInjectedWitness(p.name))
-                    {
-                        user_params[idx] = p;
-                        idx += 1;
-                    }
-                }
-            } else {
-                for (abi_method.params) |p| {
-                    if (!isAutoInjectedWitness(p.name)) {
-                        user_params[idx] = p;
-                        idx += 1;
-                    }
+            for (abi_method.params) |p| {
+                if (!types.isSdkSuppliedParam(p, is_stateful)) {
+                    user_params[idx] = p;
+                    idx += 1;
                 }
             }
         }
