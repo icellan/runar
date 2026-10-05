@@ -699,8 +699,13 @@ public final class Cli {
     // Or to terminate: {"id": <int>, "shutdown": true}
     //
     // Response shape (one JSON object per line):
-    //   {"id": <int>, "ok": true, "ir": "<canonical-json>", "hex": "<hex>"}
+    //   {"id": <int>, "ok": true, "ir": "<canonical-json>", "hex": "<hex>",
+    //    "warnings": ["<message>", ...]}
     //   {"id": <int>, "ok": false, "error": "<message>"}
+    // "warnings" (F-187 / CX-BUG-048) carries Validate.run's advisory
+    // messages verbatim (no "warning: " prefix — that's a CLI stderr-line
+    // convention, not part of the message). Omitted entirely when there are
+    // none; present on the --parse-only response shape too.
     //
     // The daemon uses ONLY ASCII / UTF-8 in JSON values; strings are escaped
     // with the minimal set required by RFC 8259 (\\, \", \n, \r, \t, control
@@ -747,7 +752,10 @@ public final class Cli {
         return 0;
     }
 
-    private String serveRequest(DaemonRequest req) {
+    // Package-private (not private) so CliWarningsTest can drive it directly
+    // with a hand-built DaemonRequest instead of a real stdin/stdout round
+    // trip through runDaemon()'s hardcoded System.in.
+    String serveRequest(DaemonRequest req) {
         if (req.source == null || req.source.isEmpty()) {
             return "{\"id\":" + req.id + ",\"ok\":false,\"error\":"
                 + jsonString("missing source path") + "}";
@@ -755,14 +763,22 @@ public final class Cli {
         try {
             String src = Files.readString(Path.of(req.source));
             ContractNode contract = ParserDispatch.parse(src, req.source);
-            Validate.run(contract);
+            // F-187 (CX-BUG-048): Validate.run returns its warnings the same
+            // way the CLI path above (CL-BUG-104) already consumes them; this
+            // call used to discard the return value, so a daemon client had
+            // no way to see e.g. a "StatefulSmartContract has no mutable
+            // properties" advisory. Carried through to both response shapes
+            // below via the "warnings" field.
+            List<String> warnings = Validate.run(contract);
             // parseOnly short-circuit: skip everything past validate. Used
             // by the conformance runner's --parser-only mode so the
             // universal frontend coverage check doesn't pay for the full
             // pipeline.
             if (req.parseOnly) {
                 StringBuilder b = new StringBuilder(96);
-                b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true}");
+                b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true");
+                appendWarnings(b, warnings);
+                b.append('}');
                 return b.toString();
             }
             // N-106: same order as compileSource above — Typecheck first, then
@@ -785,12 +801,35 @@ public final class Cli {
             b.append("{\"id\":").append(req.id).append(",\"ok\":true");
             if (req.emitIr || (!req.hex)) b.append(",\"ir\":").append(jsonString(irJson));
             if (req.hex) b.append(",\"hex\":").append(jsonString(hexStr));
+            appendWarnings(b, warnings);
             b.append('}');
             return b.toString();
         } catch (Throwable t) {
             String msg = t.getClass().getSimpleName() + ": " + (t.getMessage() == null ? "(no message)" : t.getMessage());
             return "{\"id\":" + req.id + ",\"ok\":false,\"error\":" + jsonString(msg) + "}";
         }
+    }
+
+    /**
+     * Appends a {@code ,"warnings":[...]} field to a daemon response being
+     * built, or nothing if there are no warnings — so existing consumers
+     * that don't look for the field see no change in shape. Strings are the
+     * raw {@link Validate#run} messages, with no "warning: " prefix: that
+     * prefix is a stderr-line convention from the CLI path (matching the
+     * Rust/Zig tiers' log output), not part of the message text itself.
+     */
+    private static void appendWarnings(StringBuilder b, List<String> warnings) {
+        if (warnings.isEmpty()) {
+            return;
+        }
+        b.append(",\"warnings\":[");
+        for (int i = 0; i < warnings.size(); i++) {
+            if (i > 0) {
+                b.append(',');
+            }
+            b.append(jsonString(warnings.get(i)));
+        }
+        b.append(']');
     }
 
     /** Minimal JSON string escaper. */
