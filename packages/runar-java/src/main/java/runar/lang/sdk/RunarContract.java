@@ -551,14 +551,21 @@ public final class RunarContract {
                     Map<String, Object> flatState =
                         StateSerializer.flattenFixedArrayState(artifact.stateFields(), state);
                     // F-024 (R14): a default single-output continuation reads
-                    // its own satoshis (`continuationAmount()` = `_newAmount`;
-                    // this SDK always continues at the input's value) and the
-                    // spent UTXO's (`extractAmount(txPreimage)`); the state
-                    // the script re-derives must match.
+                    // its own satoshis (`continuationAmount()` = `_newAmount`)
+                    // and the spent UTXO's (`extractAmount(txPreimage)`); the
+                    // state the script re-derives must match. N-144: an
+                    // explicit CallOptions.satoshis override (TS parity:
+                    // `options?.satoshis`) replaces the input's value here too
+                    // — otherwise a contract whose body reads `_newAmount`
+                    // would compute its off-chain state against the WRONG
+                    // amount while the actual continuation output (below)
+                    // carries the override.
                     Map<String, Object> interpArgs = new java.util.LinkedHashMap<>(namedArgs);
                     interpArgs.put("txPreimage", java.math.BigInteger.valueOf(currentUtxo.satoshis()));
                     if (hasParam(m, "_newAmount")) {
-                        interpArgs.put("_newAmount", java.math.BigInteger.valueOf(currentUtxo.satoshis()));
+                        long newAmountForInterp = (options != null && options.satoshis != null)
+                            ? options.satoshis : currentUtxo.satoshis();
+                        interpArgs.put("_newAmount", java.math.BigInteger.valueOf(newAmountForInterp));
                     }
                     AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
                         artifact.anf(), methodName, flatState, interpArgs, constructorArgs
@@ -824,9 +831,16 @@ public final class RunarContract {
             // continuation) orderedOutputs is empty and the input-value default holds.
             long stateEntryCount = orderedOutputs.stream()
                 .filter(o -> "state".equals(o.kind())).count();
-            newSats = (orderedOutputs.size() == 1 && stateEntryCount == 1)
-                ? orderedOutputs.get(0).satoshis()
-                : currentUtxo.satoshis();
+            // N-144: an explicit CallOptions.satoshis override (TS parity:
+            // `options?.satoshis ?? singleExplicitStateSats ?? currentUtxo.satoshis`)
+            // wins over both the auto-computed addOutput amount and the
+            // spent UTXO's value. The generated typed wrapper's
+            // {Contract}StatefulCallOptions.satoshis flows in through here.
+            newSats = (options != null && options.satoshis != null)
+                ? options.satoshis
+                : (orderedOutputs.size() == 1 && stateEntryCount == 1)
+                    ? orderedOutputs.get(0).satoshis()
+                    : currentUtxo.satoshis();
         }
 
         // Finding G1: a method that calls this.addRawOutput(...) folds the raw

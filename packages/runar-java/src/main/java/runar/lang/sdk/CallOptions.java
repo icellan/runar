@@ -129,6 +129,16 @@ public final class CallOptions {
      */
     public final List<List<Object>> additionalContractInputArgs;
 
+    /**
+     * Explicit continuation-satoshis override for a non-terminal stateful
+     * call (TS parity: {@code options?.satoshis}). {@code null} → the
+     * method's own explicit {@code this.addOutput(<sats>, ...)} (if it has
+     * exactly one, with no raw output) wins, else the spent UTXO's satoshis
+     * carry forward unchanged. Ignored on terminal calls, which have no
+     * continuation.
+     */
+    public final Long satoshis;
+
     public CallOptions(
         Map<String, Object> newState,
         List<TerminalOutput> terminalOutputs,
@@ -161,7 +171,7 @@ public final class CallOptions {
             maxFundingInputs, fundingSigner, feeUtxo, null, null);
     }
 
-    /** Canonical all-fields constructor. */
+    /** Pre-satoshis-override all-fields constructor; kept for source compatibility. */
     public CallOptions(
         Map<String, Object> newState,
         List<TerminalOutput> terminalOutputs,
@@ -174,6 +184,25 @@ public final class CallOptions {
         List<UTXO> additionalContractInputs,
         List<List<Object>> additionalContractInputArgs
     ) {
+        this(newState, terminalOutputs, fundingUtxos, locktime, sequence,
+            maxFundingInputs, fundingSigner, feeUtxo, additionalContractInputs,
+            additionalContractInputArgs, null);
+    }
+
+    /** Canonical all-fields constructor. */
+    public CallOptions(
+        Map<String, Object> newState,
+        List<TerminalOutput> terminalOutputs,
+        List<UTXO> fundingUtxos,
+        Integer locktime,
+        Integer sequence,
+        Integer maxFundingInputs,
+        Signer fundingSigner,
+        UTXO feeUtxo,
+        List<UTXO> additionalContractInputs,
+        List<List<Object>> additionalContractInputArgs,
+        Long satoshis
+    ) {
         this.newState = newState;
         this.terminalOutputs = terminalOutputs;
         this.fundingUtxos = fundingUtxos;
@@ -184,6 +213,7 @@ public final class CallOptions {
         this.feeUtxo = feeUtxo;
         this.additionalContractInputs = additionalContractInputs;
         this.additionalContractInputArgs = additionalContractInputArgs;
+        this.satoshis = satoshis;
     }
 
     /** Convenience factory for the common terminal-call case. */
@@ -199,49 +229,56 @@ public final class CallOptions {
     public CallOptions withLocktime(Integer locktime) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /** Copy with {@link #sequence} set (issue #131). */
     public CallOptions withSequence(Integer sequence) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /** Copy with {@link #maxFundingInputs} set (issue #133). */
     public CallOptions withMaxFundingInputs(Integer maxFundingInputs) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /** Copy with {@link #fundingSigner} set (issue #134). */
     public CallOptions withFundingSigner(Signer fundingSigner) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /** Copy with {@link #feeUtxo} set (issue #118). */
     public CallOptions withFeeUtxo(UTXO feeUtxo) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /** Copy with {@link #additionalContractInputs} set (merge / multi-input calls). */
     public CallOptions withAdditionalContractInputs(List<UTXO> additionalContractInputs) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /** Copy with {@link #additionalContractInputArgs} set (merge / multi-input calls). */
     public CallOptions withAdditionalContractInputArgs(List<List<Object>> additionalContractInputArgs) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs);
+            additionalContractInputs, additionalContractInputArgs, satoshis);
+    }
+
+    /** Copy with {@link #satoshis} set (continuation-amount override). */
+    public CallOptions withSatoshis(Long satoshis) {
+        return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
+            sequence, maxFundingInputs, fundingSigner, feeUtxo,
+            additionalContractInputs, additionalContractInputArgs, satoshis);
     }
 
     /**

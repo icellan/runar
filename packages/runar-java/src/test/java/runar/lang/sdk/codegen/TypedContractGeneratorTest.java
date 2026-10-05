@@ -218,6 +218,104 @@ class TypedContractGeneratorTest {
         assertNotNull(cls);
     }
 
+    // ------------------------------------------------------------------
+    // N-144: the generated {Contract}StatefulCallOptions.satoshis field used
+    // to be read nowhere (generator emitted `inner.call(...)` with only
+    // newState()), so setting it was a silent no-op. End-to-end through a
+    // compiled-and-loaded wrapper against MockProvider, using the REAL
+    // compiled Counter artifact (not the synthetic fixtures above) because
+    // RunarContract.call needs a real OP_CODESEPARATOR-bearing script to lay
+    // out the continuation.
+    // ------------------------------------------------------------------
+
+    @Test
+    void generatedWrapperStatefulCallOptionsSatoshisSetsContinuationAmount() throws Exception {
+        RunarArtifact artifact = loadRealCounterArtifact();
+        String src = TypedContractGenerator.generate(artifact, "runar.generated.countersatexplicit");
+        Class<?> cls = compileInMemory("runar.generated.countersatexplicit.CounterContract", src);
+
+        runar.lang.sdk.MockProvider provider = new runar.lang.sdk.MockProvider();
+        runar.lang.sdk.LocalSigner signer = new runar.lang.sdk.LocalSigner(
+            "18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+        Object wrapper = newWrapperInstance(cls, artifact, provider, signer, 5_000L);
+
+        Class<?> optsCls = cls.getDeclaredClasses()[indexOfNested(cls, "CounterStatefulCallOptions")];
+        // (BigInteger satoshis, String changeAddress, String changePubKey, Map<String,Object> newState, List<OutputSpec> outputs)
+        Object options = optsCls.getDeclaredConstructor(
+            BigInteger.class, String.class, String.class, Map.class, List.class
+        ).newInstance(BigInteger.valueOf(9_999L), null, null, null, null);
+
+        Method increment = cls.getDeclaredMethod("increment", optsCls);
+        runar.lang.sdk.RunarContract.CallOutcome outcome =
+            (runar.lang.sdk.RunarContract.CallOutcome) increment.invoke(wrapper, options);
+
+        assertEquals(9_999L, outcome.nextContractUtxo().satoshis(),
+            "generated StatefulCallOptions.satoshis must reach the continuation output through "
+                + "the wrapper — this used to be a silent no-op");
+    }
+
+    @Test
+    void generatedWrapperStatefulCallDefaultOptionsKeepUtxoSatoshis() throws Exception {
+        RunarArtifact artifact = loadRealCounterArtifact();
+        String src = TypedContractGenerator.generate(artifact, "runar.generated.countersatdefault");
+        Class<?> cls = compileInMemory("runar.generated.countersatdefault.CounterContract", src);
+
+        runar.lang.sdk.MockProvider provider = new runar.lang.sdk.MockProvider();
+        runar.lang.sdk.LocalSigner signer = new runar.lang.sdk.LocalSigner(
+            "18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+        Object wrapper = newWrapperInstance(cls, artifact, provider, signer, 5_000L);
+
+        // No-options convenience overload (emitted because increment is a
+        // non-terminal stateful method).
+        Method increment = cls.getDeclaredMethod("increment");
+        runar.lang.sdk.RunarContract.CallOutcome outcome =
+            (runar.lang.sdk.RunarContract.CallOutcome) increment.invoke(wrapper);
+
+        assertEquals(5_000L, outcome.nextContractUtxo().satoshis(),
+            "with no satoshis override, the continuation must keep the spent UTXO's value "
+                + "(unaffected by N-144, asserted as a companion guard)");
+    }
+
+    private static RunarArtifact loadRealCounterArtifact() throws Exception {
+        try (java.io.InputStream in = TypedContractGeneratorTest.class.getClassLoader()
+                .getResourceAsStream("artifacts/stateful-counter.runar.json")) {
+            assertNotNull(in, "test artifact not found on classpath: artifacts/stateful-counter.runar.json");
+            return RunarArtifact.fromJson(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+        }
+    }
+
+    /** Builds a connected wrapper instance with a deployed UTXO at {@code utxoSats}. */
+    private static Object newWrapperInstance(
+        Class<?> cls,
+        RunarArtifact artifact,
+        runar.lang.sdk.MockProvider provider,
+        runar.lang.sdk.LocalSigner signer,
+        long utxoSats
+    ) throws Exception {
+        Class<?> ctorArgsCls = cls.getDeclaredClasses()[indexOfNested(cls, "CounterConstructorArgs")];
+        Object ctorArgs = ctorArgsCls.getDeclaredConstructor(BigInteger.class).newInstance(BigInteger.ZERO);
+        Object wrapper = cls.getDeclaredConstructor(RunarArtifact.class, ctorArgsCls)
+            .newInstance(artifact, ctorArgs);
+
+        cls.getMethod("connect", runar.lang.sdk.Provider.class, runar.lang.sdk.Signer.class)
+            .invoke(wrapper, provider, signer);
+
+        runar.lang.sdk.RunarContract inner =
+            (runar.lang.sdk.RunarContract) cls.getMethod("contract").invoke(wrapper);
+        runar.lang.sdk.UTXO currentUtxo =
+            new runar.lang.sdk.UTXO("cc".repeat(32), 0, utxoSats, inner.lockingScript());
+        inner.setCurrentUtxo(currentUtxo);
+        // Phase A5 non-vacuity: the fail-closed MockProvider must also know the
+        // spent outpoint, or validation checks nothing and passes vacuously.
+        provider.addKnownOutpoint(currentUtxo);
+        provider.addUtxo(signer.address(), new runar.lang.sdk.UTXO(
+            "ab".repeat(32), 0, 200_000L,
+            runar.lang.sdk.ScriptUtils.buildP2PKHScript(signer.address())));
+        return wrapper;
+    }
+
     @Test
     void counterIncrementHasPrepareAndFinalizeBecauseSigParamPresent() throws Exception {
         // The Counter increment() method here has a Sig param to exercise

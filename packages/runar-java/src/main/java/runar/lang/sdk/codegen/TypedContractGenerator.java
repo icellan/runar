@@ -412,11 +412,22 @@ public final class TypedContractGenerator {
             b.append("        return inner.callWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else if (isStateful) {
+            // Non-terminal stateful: thread both newState and satoshis
+            // (continuation-amount override, N-144) through to the rich
+            // CallOptions overload so StatefulCallOptions.satoshis is no
+            // longer a silent no-op.
             b.append("        java.util.Map<String, Object> stateUpdates = ")
                 .append(optionsArgName).append(" != null ? ")
                 .append(optionsArgName).append(".newState() : null;\n");
-            b.append("        return inner.call(\"").append(methodName)
-                .append("\", callArgs, stateUpdates, provider, signer);\n");
+            b.append("        Long satoshisOverride = ")
+                .append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".satoshis() != null ? ")
+                .append(optionsArgName).append(".satoshis().longValueExact() : null;\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null)\n");
+            b.append("            ? null\n");
+            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride);\n");
+            b.append("        return inner.callWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
             // Stateless terminal — outputs is optional. When non-null,
             // route through the rich CallOptions overload; otherwise the
