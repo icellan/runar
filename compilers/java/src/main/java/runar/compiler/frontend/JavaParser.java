@@ -630,7 +630,7 @@ public final class JavaParser {
             return convertExpression(pt.getExpression(), filename, cu);
         }
         if (e instanceof LiteralTree lt) {
-            return convertLiteral(lt, filename);
+            return convertLiteral(lt, filename, cu);
         }
         if (e instanceof IdentifierTree id) {
             return new Identifier(id.getName().toString());
@@ -775,16 +775,35 @@ public final class JavaParser {
         throw new ParseException("unsupported expression kind " + e.getKind() + " in " + filename);
     }
 
-    private static Expression convertLiteral(LiteralTree lt, String filename) {
+    /**
+     * F-189: javac's parser folds a minus in front of a decimal integer literal
+     * into the literal ({@code -5} is one literal of value -5; JLS 3.10.1 needs
+     * that for {@code -2147483648}). The literal's tree then starts at the
+     * {@code -}. The TS reference parses the same text as negation applied to
+     * the literal, which emits different bytes, so the minus is restored here.
+     */
+    private static boolean negatedLiteral(LiteralTree lt, Unit cu) {
+        long start = cu.positions().getStartPosition(cu.cu(), lt);
+        if (start < 0) return false;
+        try {
+            CharSequence text = cu.cu().getSourceFile().getCharContent(true);
+            return start < text.length() && text.charAt((int) start) == '-';
+        } catch (IOException e) {
+            throw new ParseException("cannot read source text: " + e.getMessage());
+        }
+    }
+
+    private static Expression convertLiteral(LiteralTree lt, String filename, Unit cu) {
         Object value = lt.getValue();
         if (value == null) {
             throw new ParseException("null literals are unsupported in " + filename);
         }
-        if (value instanceof Integer i) {
-            return new BigIntLiteral(BigInteger.valueOf(i));
-        }
-        if (value instanceof Long l) {
-            return new BigIntLiteral(BigInteger.valueOf(l));
+        if (value instanceof Integer || value instanceof Long) {
+            BigInteger v = BigInteger.valueOf(((Number) value).longValue());
+            if (negatedLiteral(lt, cu)) {
+                return new UnaryExpr(Expression.UnaryOp.NEG, new BigIntLiteral(v.negate()));
+            }
+            return new BigIntLiteral(v);
         }
         if (value instanceof Boolean b) {
             return new BoolLiteral(b);
@@ -844,7 +863,7 @@ public final class JavaParser {
             // (`Bigint.of(1e3)`, `BigInteger.valueOf(1.5)`) used to be
             // truncated here by longValue(); it now falls through to
             // convertLiteral, which refuses it.
-            return new BigIntLiteral(BigInteger.valueOf(((Number) n.getValue()).longValue()));
+            return convertLiteral(n, filename, cu);
         }
         // Bigint.of(<arbitrary expression>) — wrapping a BigInteger-typed value
         // (e.g. the result of a builtin like `percentOf` or `extractLocktime`)
