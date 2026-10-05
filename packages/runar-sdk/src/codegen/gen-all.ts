@@ -23,14 +23,28 @@ function loadTemplate(lang: TargetLang): string {
   const cached = templateCache.get(lang);
   if (cached) return cached;
 
-  // Resolve template path relative to this file:
-  // packages/runar-sdk/src/codegen/gen-all.ts → codegen/templates/
-  const thisDir = path.dirname(fileURLToPath(import.meta.url));
-  const templateDir = path.resolve(thisDir, '../../../../codegen/templates');
+  // Built (dist/codegen/gen-all.js): the build copies the templates next to
+  // this module, into dist/codegen/templates, and that copy is what npm
+  // publishes. Source (src/codegen/gen-all.ts under tsx/vitest): read the
+  // canonical repo-root codegen/templates directly. No fallback between the
+  // two — a fixed '../../../../' from an installed package lands in the
+  // consumer's project root (F-246).
+  const thisFile = fileURLToPath(import.meta.url);
+  const thisDir = path.dirname(thisFile);
+  const templateDir = thisFile.endsWith('.ts')
+    ? path.resolve(thisDir, '../../../../codegen/templates')
+    : path.join(thisDir, 'templates');
   const ext = lang === 'python' ? 'py' : lang === 'rust' ? 'rs' : lang === 'zig' ? 'zig' : lang;
   const templatePath = path.join(templateDir, `wrapper.${ext}.mustache`);
 
-  const content = fs.readFileSync(templatePath, 'utf8');
+  let content: string;
+  try {
+    content = fs.readFileSync(templatePath, 'utf8');
+  } catch (e) {
+    throw new Error(
+      `runar-sdk: cannot load codegen template ${templatePath}: ${(e as Error).message}`,
+    );
+  }
   templateCache.set(lang, content);
   return content;
 }
