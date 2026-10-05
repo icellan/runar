@@ -1719,14 +1719,16 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
             // the two consistent.
             // N-016: a property-named local is bound under `localName`.
             const local = ctx.localTarget(assign.target);
+            // N-129: a parameter is rebound like a local (TS `lowerAssignment`).
+            const rebinds = ctx.isLocal(local) or ctx.isParam(assign.target);
             const writes_property = assign.target_is_property or
-                (!ctx.isLocal(local) and ctx.isProperty(assign.target));
+                (!rebinds and ctx.isProperty(assign.target));
             if (writes_property) {
                 _ = try ctx.emit(.{ .update_prop = .{
                     .name = assign.target,
                     .value = value_ref,
                 } });
-            } else if (ctx.isLocal(local)) {
+            } else if (rebinds) {
                 try ctx.emitNamed(local, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
                 _ = try lowerExprToRef(ctx, .{ .identifier = assign.target });

@@ -80,6 +80,7 @@ test {
     _ = @import("tests/sighash_codegen.zig");
     _ = @import("tests/sighash_validate_test.zig");
     _ = @import("tests/local_shadowing_property.zig");
+    _ = @import("tests/param_reassignment.zig");
     _ = @import("tests/shadowing_local_continuation_shape.zig");
     _ = @import("tests/sol_bare_property_write_continuation.zig");
     _ = @import("tests/n059_fixed_array_write_continuation.zig");
