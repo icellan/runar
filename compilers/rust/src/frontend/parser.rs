@@ -1213,9 +1213,11 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
         }
 
         Expr::Lit(Lit::Num(num)) => {
-            // Plain numeric literal -- treat as bigint for Rúnar
+            // Plain numeric literal -- treat as bigint for Rúnar. N-028: read
+            // the exact source text, never swc's f64 `value`. An invalid
+            // literal was already refused by the F-026 pre-pass.
             Expression::BigIntLiteral {
-                value: BigInt::from(num.value as i128),
+                value: ts_num_literal_value(num).unwrap_or_else(|| BigInt::from(0)),
             }
         }
 
@@ -1734,6 +1736,26 @@ fn encode_asm_array_body(
     hex_str
 }
 
+/// N-028: the exact value of a plain `.runar.ts` number literal, read from its
+/// source text as the TS reference does (`tsLiteralValue`). swc's `value` is an
+/// f64 and rounds anything above 2^53.
+fn ts_num_literal_value(num: &swc::Number) -> Option<BigInt> {
+    num.raw.as_ref().and_then(|raw| parse_int_literal("ts", raw)).map(|l| l.value)
+}
+
+/// A `push(<number>)` value, or `None` with the TS reference's diagnostic.
+fn asm_push_num_value(num: &swc::Number, errors: &mut Vec<Diagnostic>) -> Option<BigInt> {
+    let v = ts_num_literal_value(num);
+    if v.is_none() {
+        let text = num.raw.as_ref().map(|r| r.to_string()).unwrap_or_else(|| num.value.to_string());
+        errors.push(Diagnostic::error(
+            format!("push() numeric argument must be an integer, got '{}'", text),
+            None,
+        ));
+    }
+    v
+}
+
 /// Encode a literal argument passed to push(...) inside an asm() body array.
 /// Returns the encoded hex string, or `None` if the literal is unrecognised
 /// (with a diagnostic pushed).
@@ -1741,7 +1763,8 @@ fn encode_asm_push_literal(expr: &Expr, errors: &mut Vec<Diagnostic>) -> Option<
     use crate::codegen::emit::encode_push_int;
     match expr {
         Expr::Lit(Lit::Num(num)) => {
-            let (h, _) = encode_push_int(&BigInt::from(num.value as i128));
+            let v = asm_push_num_value(num, errors)?;
+            let (h, _) = encode_push_int(&v);
             Some(h)
         }
         Expr::Lit(Lit::BigInt(bi)) => {
@@ -1752,7 +1775,8 @@ fn encode_asm_push_literal(expr: &Expr, errors: &mut Vec<Diagnostic>) -> Option<
         Expr::Unary(unary) if unary.op == swc::UnaryOp::Minus => {
             match unary.arg.as_ref() {
                 Expr::Lit(Lit::Num(num)) => {
-                    let (h, _) = encode_push_int(&BigInt::from(-(num.value as i128)));
+                    let v = asm_push_num_value(num, errors)?;
+                    let (h, _) = encode_push_int(&(-v));
                     Some(h)
                 }
                 Expr::Lit(Lit::BigInt(bi)) => {

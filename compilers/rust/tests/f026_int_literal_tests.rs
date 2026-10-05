@@ -121,13 +121,6 @@ fn f026_every_tokenizer_applies_the_table() {
                     }
                 }
                 Some(want) => {
-                    // N-028 (a separate item, not fixed here): this tier's swc
-                    // path reads a plain `.runar.ts` number through f64, so an
-                    // unsuffixed value above 2^53 is rounded. Acceptance is
-                    // still checked; the exact value is left to N-028.
-                    if surf == "ts" && !lit.ends_with('n') && want.len() > 15 && errs.is_empty() && vals.len() == 1 {
-                        continue;
-                    }
                     if !errs.is_empty() || vals != vec![want.to_string()] {
                         bad.push(format!("{surf} {lit}: want [{want}], got {vals:?} {errs:?}"));
                     }
