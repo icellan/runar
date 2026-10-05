@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -289,6 +290,76 @@ func TestOpcodeName_Unknown(t *testing.T) {
 	}
 	if got := opcodeName(0x89); got != "OP_UNKNOWN(0x89)" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// chronicleOps are the seven Chronicle opcodes the compiler emits, with the
+// (pops, pushes) the @bsv/sdk interpreter (Spend.ts) gives them.
+var chronicleOps = []struct {
+	b      string
+	name   string
+	pops   int
+	pushes int
+}{
+	{"8d", "OP_2MUL", 1, 1},
+	{"8e", "OP_2DIV", 1, 1},
+	{"b3", "OP_SUBSTR", 3, 1},
+	{"b4", "OP_LEFT", 2, 1},
+	{"b5", "OP_RIGHT", 2, 1},
+	{"b6", "OP_LSHIFTNUM", 2, 1},
+	{"b7", "OP_RSHIFTNUM", 2, 1},
+}
+
+// TestChronicleOpcodes_NamesAndEffects (F-131) proves the Chronicle opcodes
+// are named per spec §4.1 and modelled with their real stack effect, in the
+// lookup and in the observable report (underflow message, stackDepthAtEnd,
+// maxStackDepth). It does not prove runtime semantics (the analyzer is
+// static) and does not re-derive the arities from the interpreter.
+func TestChronicleOpcodes_NamesAndEffects(t *testing.T) {
+	for _, c := range chronicleOps {
+		ops, err := parseScript(c.b)
+		if err != nil || len(ops) != 1 {
+			t.Fatalf("%s: parse: %v", c.b, err)
+		}
+		if ops[0].Name != c.name {
+			t.Errorf("0x%s: name %q, want %q", c.b, ops[0].Name, c.name)
+		}
+		if p, q := stackEffect(ops[0]); p != c.pops || q != c.pushes {
+			t.Errorf("%s: effect (%d,%d), want (%d,%d)", c.name, p, q, c.pops, c.pushes)
+		}
+
+		// OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+		dropThen, _ := parseScript("75" + c.b)
+		lin := analyzeStackLinear(dropThen, 1)
+		want := fmt.Sprintf("%s requires %d stack item(s) but only 0 available", c.name, c.pops)
+		found := false
+		for _, f := range lin.findings {
+			if f.Code == "STACK_UNDERFLOW" && f.Message == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: missing underflow %q in %+v", c.name, want, lin.findings)
+		}
+
+		// `pops` pushes of OP_1 then the opcode leave exactly `pushes` items.
+		r, err := AnalyzeScript(strings.Repeat("51", c.pops) + c.b)
+		if err != nil {
+			t.Fatalf("%s: analyze: %v", c.name, err)
+		}
+		if r.Paths[0].StackDepthAtEnd != c.pushes || r.Summary.MaxStackDepth != c.pushes {
+			t.Errorf("%s: depthAtEnd=%d maxStackDepth=%d, want %d", c.name,
+				r.Paths[0].StackDepthAtEnd, r.Summary.MaxStackDepth, c.pushes)
+		}
+	}
+
+	// A genuinely unknown byte keeps the OP_UNKNOWN name and (0,0) effect.
+	ops, _ := parseScript("b8")
+	if ops[0].Name != "OP_UNKNOWN(0xb8)" {
+		t.Errorf("0xb8 name %q", ops[0].Name)
+	}
+	if p, q := stackEffect(ops[0]); p != 0 || q != 0 {
+		t.Errorf("0xb8 effect (%d,%d), want (0,0)", p, q)
 	}
 }
 

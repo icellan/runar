@@ -81,6 +81,8 @@ _OPCODE_NAMES: dict = {
     0x88: "OP_EQUALVERIFY",
     0x8b: "OP_1ADD",
     0x8c: "OP_1SUB",
+    0x8d: "OP_2MUL",  # Chronicle
+    0x8e: "OP_2DIV",  # Chronicle
     0x8f: "OP_NEGATE",
     0x90: "OP_ABS",
     0x91: "OP_NOT",
@@ -114,6 +116,12 @@ _OPCODE_NAMES: dict = {
     0xad: "OP_CHECKSIGVERIFY",
     0xae: "OP_CHECKMULTISIG",
     0xaf: "OP_CHECKMULTISIGVERIFY",
+    # Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+    0xb3: "OP_SUBSTR",
+    0xb4: "OP_LEFT",
+    0xb5: "OP_RIGHT",
+    0xb6: "OP_LSHIFTNUM",
+    0xb7: "OP_RSHIFTNUM",
 }
 
 

@@ -64,6 +64,8 @@ pub fn stackEffect(op: Opcode) StackEffect {
         0x88 => .{ .pops = 2, .pushes = 0 }, // OP_EQUALVERIFY
         0x8b => .{ .pops = 1, .pushes = 1 }, // OP_1ADD
         0x8c => .{ .pops = 1, .pushes = 1 }, // OP_1SUB
+        0x8d => .{ .pops = 1, .pushes = 1 }, // OP_2MUL (Chronicle)
+        0x8e => .{ .pops = 1, .pushes = 1 }, // OP_2DIV (Chronicle)
         0x8f => .{ .pops = 1, .pushes = 1 }, // OP_NEGATE
         0x90 => .{ .pops = 1, .pushes = 1 }, // OP_ABS
         0x91 => .{ .pops = 1, .pushes = 1 }, // OP_NOT
@@ -96,6 +98,11 @@ pub fn stackEffect(op: Opcode) StackEffect {
         0xad => .{ .pops = 2, .pushes = 0 }, // OP_CHECKSIGVERIFY
         0xae => .{ .pops = 3, .pushes = 1 }, // OP_CHECKMULTISIG
         0xaf => .{ .pops = 3, .pushes = 0 }, // OP_CHECKMULTISIGVERIFY
+        0xb3 => .{ .pops = 3, .pushes = 1 }, // OP_SUBSTR (Chronicle): buf, offset, len -> substring
+        0xb4 => .{ .pops = 2, .pushes = 1 }, // OP_LEFT (Chronicle): buf, len -> prefix
+        0xb5 => .{ .pops = 2, .pushes = 1 }, // OP_RIGHT (Chronicle): buf, len -> suffix
+        0xb6 => .{ .pops = 2, .pushes = 1 }, // OP_LSHIFTNUM (Chronicle): value, bits -> value << bits
+        0xb7 => .{ .pops = 2, .pushes = 1 }, // OP_RSHIFTNUM (Chronicle): value, bits -> value >> bits
         else => .{ .pops = 0, .pushes = 0 },
     };
 }

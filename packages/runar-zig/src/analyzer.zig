@@ -473,3 +473,74 @@ test "analyzeScript basic-p2pkh — matches golden" {
     ;
     try std.testing.expectEqualStrings(expected, buf.items);
 }
+
+// F-131. The seven Chronicle opcodes the compiler emits, with the
+// (pops, pushes) the @bsv/sdk interpreter (Spend.ts) gives them.
+// Proves: each is named per spec §4.1 and modelled with its real stack
+// effect, in the lookup and in the observable report (underflow message,
+// stackDepthAtEnd, maxStackDepth). Does not prove runtime semantics (the
+// analyzer is static) and does not re-derive the arities from the interpreter.
+test "Chronicle opcodes carry their real names and stack effects" {
+    const a = std.testing.allocator;
+    const Case = struct { b: []const u8, name: []const u8, pops: i32, pushes: i32 };
+    const cases = [_]Case{
+        .{ .b = "8d", .name = "OP_2MUL", .pops = 1, .pushes = 1 },
+        .{ .b = "8e", .name = "OP_2DIV", .pops = 1, .pushes = 1 },
+        .{ .b = "b3", .name = "OP_SUBSTR", .pops = 3, .pushes = 1 },
+        .{ .b = "b4", .name = "OP_LEFT", .pops = 2, .pushes = 1 },
+        .{ .b = "b5", .name = "OP_RIGHT", .pops = 2, .pushes = 1 },
+        .{ .b = "b6", .name = "OP_LSHIFTNUM", .pops = 2, .pushes = 1 },
+        .{ .b = "b7", .name = "OP_RSHIFTNUM", .pops = 2, .pushes = 1 },
+    };
+    for (cases) |c| {
+        const ops = try script_parser.parseScript(a, c.b);
+        defer {
+            for (ops) |op| op.deinit(a);
+            a.free(ops);
+        }
+        try std.testing.expectEqualStrings(c.name, ops[0].name);
+        const e = stack_mod.stackEffect(ops[0]);
+        try std.testing.expectEqual(c.pops, e.pops);
+        try std.testing.expectEqual(c.pushes, e.pushes);
+
+        // OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+        const drop_hex = try std.fmt.allocPrint(a, "75{s}", .{c.b});
+        defer a.free(drop_hex);
+        const drop_ops = try script_parser.parseScript(a, drop_hex);
+        defer {
+            for (drop_ops) |op| op.deinit(a);
+            a.free(drop_ops);
+        }
+        const lin = try stack_mod.analyzeStackLinear(a, drop_ops, 1);
+        defer lin.deinit(a);
+        const want = try std.fmt.allocPrint(a, "{s} requires {d} stack item(s) but only 0 available", .{ c.name, c.pops });
+        defer a.free(want);
+        var found = false;
+        for (lin.findings) |f| {
+            if (f.code == Code.STACK_UNDERFLOW and std.mem.eql(u8, f.message, want)) found = true;
+        }
+        try std.testing.expect(found);
+
+        // `pops` pushes of OP_1 then the opcode leave exactly `pushes` items.
+        var hex = std.ArrayList(u8).empty;
+        defer hex.deinit(a);
+        var i: i32 = 0;
+        while (i < c.pops) : (i += 1) try hex.appendSlice(a, "51");
+        try hex.appendSlice(a, c.b);
+        const r = try analyzeScript(a, hex.items, .{});
+        defer r.deinit(a);
+        try std.testing.expectEqual(@as(i64, c.pushes), r.paths[0].stack_depth_at_end);
+        try std.testing.expectEqual(@as(i64, c.pushes), r.summary.max_stack_depth);
+    }
+
+    // A genuinely unknown byte keeps the OP_UNKNOWN name and (0, 0) effect.
+    const unk = try script_parser.parseScript(a, "b8");
+    defer {
+        for (unk) |op| op.deinit(a);
+        a.free(unk);
+    }
+    try std.testing.expectEqualStrings("OP_UNKNOWN(0xb8)", unk[0].name);
+    const ue = stack_mod.stackEffect(unk[0]);
+    try std.testing.expectEqual(@as(i32, 0), ue.pops);
+    try std.testing.expectEqual(@as(i32, 0), ue.pushes);
+}

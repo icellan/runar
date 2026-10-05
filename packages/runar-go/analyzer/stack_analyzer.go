@@ -81,6 +81,8 @@ func stackEffect(op Opcode) (int, int) {
 		return 2, 0
 	case 0x8b, 0x8c: // OP_1ADD, OP_1SUB
 		return 1, 1
+	case 0x8d, 0x8e: // OP_2MUL, OP_2DIV (Chronicle)
+		return 1, 1
 	case 0x8f, 0x90, 0x91, 0x92: // NEGATE, ABS, NOT, 0NOTEQUAL
 		return 1, 1
 	case 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
@@ -102,6 +104,12 @@ func stackEffect(op Opcode) (int, int) {
 		return 3, 1
 	case 0xaf: // OP_CHECKMULTISIGVERIFY
 		return 3, 0
+	case 0xb3: // OP_SUBSTR (Chronicle): buf, offset, len -> substring
+		return 3, 1
+	case 0xb4, 0xb5: // OP_LEFT, OP_RIGHT (Chronicle): buf, len -> slice
+		return 2, 1
+	case 0xb6, 0xb7: // OP_LSHIFTNUM, OP_RSHIFTNUM (Chronicle): value, bits -> shifted
+		return 2, 1
 	}
 	return 0, 0
 }

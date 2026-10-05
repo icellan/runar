@@ -2342,7 +2342,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 524
+      "stackDepthAtEnd": 269
     },
     {
       "id": 1,
@@ -27750,7 +27750,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 515
+      "stackDepthAtEnd": 260
     },
     {
       "id": 33,
@@ -53158,7 +53158,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 516
+      "stackDepthAtEnd": 261
     },
     {
       "id": 65,
@@ -78566,7 +78566,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 515
+      "stackDepthAtEnd": 260
     },
     {
       "id": 97,
@@ -129382,7 +129382,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 515
+      "stackDepthAtEnd": 260
     },
     {
       "id": 161,
@@ -154790,7 +154790,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 516
+      "stackDepthAtEnd": 261
     },
     {
       "id": 193,
@@ -180198,7 +180198,7 @@
       ],
       "reachable": true,
       "hasCheckSig": false,
-      "stackDepthAtEnd": 515
+      "stackDepthAtEnd": 260
     },
     {
       "id": 225,
@@ -204820,7 +204820,7 @@
     "reachablePaths": 256,
     "pathsWithCheckSig": 0,
     "pathsWithoutCheckSig": 256,
-    "maxStackDepth": 524,
+    "maxStackDepth": 269,
     "scriptSizeBytes": 1336466
   }
 }

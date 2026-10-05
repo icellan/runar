@@ -108,6 +108,8 @@ pub fn opcode_name(byte: u8) -> String {
         0x88 => "OP_EQUALVERIFY".to_string(),
         0x8b => "OP_1ADD".to_string(),
         0x8c => "OP_1SUB".to_string(),
+        0x8d => "OP_2MUL".to_string(), // Chronicle
+        0x8e => "OP_2DIV".to_string(), // Chronicle
         0x8f => "OP_NEGATE".to_string(),
         0x90 => "OP_ABS".to_string(),
         0x91 => "OP_NOT".to_string(),
@@ -141,6 +143,12 @@ pub fn opcode_name(byte: u8) -> String {
         0xad => "OP_CHECKSIGVERIFY".to_string(),
         0xae => "OP_CHECKMULTISIG".to_string(),
         0xaf => "OP_CHECKMULTISIGVERIFY".to_string(),
+        // Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+        0xb3 => "OP_SUBSTR".to_string(),
+        0xb4 => "OP_LEFT".to_string(),
+        0xb5 => "OP_RIGHT".to_string(),
+        0xb6 => "OP_LSHIFTNUM".to_string(),
+        0xb7 => "OP_RSHIFTNUM".to_string(),
         b => format!("OP_UNKNOWN(0x{:02x})", b),
     }
 }

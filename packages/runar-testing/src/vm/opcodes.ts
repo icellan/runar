@@ -94,6 +94,8 @@ export enum Opcode {
   // -------------------------------------------------------------------------
   OP_1ADD = 0x8b,
   OP_1SUB = 0x8c,
+  OP_2MUL = 0x8d, // Chronicle
+  OP_2DIV = 0x8e, // Chronicle
   OP_NEGATE = 0x8f,
   OP_ABS = 0x90,
   OP_NOT = 0x91,
@@ -131,6 +133,15 @@ export enum Opcode {
   OP_CHECKSIGVERIFY = 0xad,
   OP_CHECKMULTISIG = 0xae,
   OP_CHECKMULTISIGVERIFY = 0xaf,
+
+  // -------------------------------------------------------------------------
+  // Chronicle (2026): re-allocated from OP_NOP4..OP_NOP8
+  // -------------------------------------------------------------------------
+  OP_SUBSTR = 0xb3,
+  OP_LEFT = 0xb4,
+  OP_RIGHT = 0xb5,
+  OP_LSHIFTNUM = 0xb6,
+  OP_RSHIFTNUM = 0xb7,
 }
 
 /**

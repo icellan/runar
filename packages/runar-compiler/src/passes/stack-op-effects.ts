@@ -68,6 +68,10 @@ const OPCODE_EFFECTS: Readonly<Record<string, readonly [number, number]>> = {
   OP_HASH160: [1, 1], OP_HASH256: [1, 1],
   OP_CHECKSIG: [2, 1], OP_CHECKSIGVERIFY: [2, 0],
   OP_CHECKMULTISIG: [3, 1], OP_CHECKMULTISIGVERIFY: [3, 0],
+
+  // Chronicle splice / numeric shift (arities per the @bsv/sdk interpreter).
+  OP_SUBSTR: [3, 1], OP_LEFT: [2, 1], OP_RIGHT: [2, 1],
+  OP_LSHIFTNUM: [2, 1], OP_RSHIFTNUM: [2, 1],
 };
 
 /** Opcode names this module knows. Exported so tests can diff the table. */

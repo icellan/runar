@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { analyzeScript, analyzeStackLinear, parseScript } from '../analyzer/index.js';
+import { analyzeScript, analyzeStackLinear, getStackEffect, parseScript } from '../analyzer/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -296,5 +296,53 @@ describe('Analyzer: edge cases', () => {
     const errors = result.findings.filter((f) => f.severity === 'error');
     expect(errors).toEqual([]);
     expect(result.paths.some((p) => p.hasCheckSig)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Chronicle opcodes (F-131)
+// ---------------------------------------------------------------------------
+
+describe('Analyzer: Chronicle opcodes carry their real names and stack effects', () => {
+  // Proves: the seven Chronicle opcodes the compiler emits (06-emit.ts) are
+  // named per spec §4.1 and modelled with the (pops, pushes) the @bsv/sdk
+  // interpreter (Spend.ts) gives them, both in the per-opcode lookup and in
+  // the observable report (underflow message, stackDepthAtEnd, maxStackDepth).
+  // Does not prove: anything about runtime semantics (the analyzer is static),
+  // and it does not re-derive the arities from the interpreter at test time.
+  const CHRONICLE: Array<[byte: string, name: string, pops: number, pushes: number]> = [
+    ['8d', 'OP_2MUL', 1, 1],
+    ['8e', 'OP_2DIV', 1, 1],
+    ['b3', 'OP_SUBSTR', 3, 1],
+    ['b4', 'OP_LEFT', 2, 1],
+    ['b5', 'OP_RIGHT', 2, 1],
+    ['b6', 'OP_LSHIFTNUM', 2, 1],
+    ['b7', 'OP_RSHIFTNUM', 2, 1],
+  ];
+
+  it.each(CHRONICLE)('0x%s is %s with effect (%i, %i)', (byte, name, pops, pushes) => {
+    const [op] = parseScript(byte);
+    expect(op!.name).toBe(name);
+    expect(getStackEffect(op!)).toEqual([pops, pushes]);
+  });
+
+  it.each(CHRONICLE)('0x%s (%s) underflows a known-empty stack', (byte, name, pops) => {
+    // OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+    const result = analyzeStackLinear(parseScript(`75${byte}`), 1);
+    const underflow = result.findings.find((f) => f.code === 'STACK_UNDERFLOW');
+    expect(underflow?.message).toBe(`${name} requires ${pops} stack item(s) but only 0 available`);
+  });
+
+  it.each(CHRONICLE)('0x%s (%s) consumes its operands in the report', (byte, _name, pops, pushes) => {
+    // `pops` pushes of OP_1 followed by the opcode leave exactly `pushes` items.
+    const result = analyzeScript('51'.repeat(pops) + byte);
+    expect(result.paths[0]!.stackDepthAtEnd).toBe(pushes);
+    expect(result.summary.maxStackDepth).toBe(pushes);
+  });
+
+  it('a genuinely unknown byte keeps the OP_UNKNOWN name and (0, 0) effect', () => {
+    const [op] = parseScript('b8');
+    expect(op!.name).toBe('OP_UNKNOWN(0xb8)');
+    expect(getStackEffect(op!)).toEqual([0, 0]);
   });
 });

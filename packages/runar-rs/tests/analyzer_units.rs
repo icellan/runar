@@ -294,3 +294,49 @@ fn serializer_omits_optional_fields() {
     assert!(!s.contains("\"opcode\""));
     assert!(!s.contains("\"path\""));
 }
+
+/// The seven Chronicle opcodes the compiler emits, with the (pops, pushes)
+/// the @bsv/sdk interpreter (Spend.ts) gives them.
+const CHRONICLE: [(&str, &str, i64, i64); 7] = [
+    ("8d", "OP_2MUL", 1, 1),
+    ("8e", "OP_2DIV", 1, 1),
+    ("b3", "OP_SUBSTR", 3, 1),
+    ("b4", "OP_LEFT", 2, 1),
+    ("b5", "OP_RIGHT", 2, 1),
+    ("b6", "OP_LSHIFTNUM", 2, 1),
+    ("b7", "OP_RSHIFTNUM", 2, 1),
+];
+
+/// F-131. Proves: the Chronicle opcodes are named per spec §4.1 and modelled
+/// with their real stack effect, in the lookup and in the observable report
+/// (underflow message, stackDepthAtEnd, maxStackDepth). Does not prove runtime
+/// semantics (the analyzer is static) and does not re-derive the arities from
+/// the interpreter.
+#[test]
+fn chronicle_opcodes_names_and_effects() {
+    use runar_lang::analyzer::stack_analyzer::{analyze_stack_linear, stack_effect};
+    for (b, name, pops, pushes) in CHRONICLE {
+        let ops = script_parser::parse_script(b);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].name, name, "0x{b} name");
+        assert_eq!(stack_effect(&ops[0]), (pops, pushes), "{name} effect");
+
+        // OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+        let lin = analyze_stack_linear(&script_parser::parse_script(&format!("75{b}")), 1);
+        let want = format!("{name} requires {pops} stack item(s) but only 0 available");
+        assert!(
+            lin.findings.iter().any(|f| f.code == "STACK_UNDERFLOW" && f.message == want),
+            "{name}: missing underflow {want:?}"
+        );
+
+        // `pops` pushes of OP_1 then the opcode leave exactly `pushes` items.
+        let r = analyze_script(&format!("{}{b}", "51".repeat(pops as usize))).unwrap();
+        assert_eq!(r.paths[0].stack_depth_at_end, pushes, "{name} depth at end");
+        assert_eq!(r.summary.max_stack_depth, pushes, "{name} maxStackDepth");
+    }
+
+    // A genuinely unknown byte keeps the OP_UNKNOWN name and (0, 0) effect.
+    let ops = script_parser::parse_script("b8");
+    assert_eq!(ops[0].name, "OP_UNKNOWN(0xb8)");
+    assert_eq!(stack_effect(&ops[0]), (0, 0));
+}
