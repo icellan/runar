@@ -917,6 +917,17 @@ pub fn emitArtifact(
         try w.writeAll("]");
     }
 
+    // rawScriptSpans — N-151: asm() raw-bytes spans for the analyzer,
+    // omitted when empty (matches the TS assembler).
+    if (ctx.raw_script_spans.items.len > 0) {
+        try w.writeAll(",\"rawScriptSpans\":[");
+        for (ctx.raw_script_spans.items, 0..) |span, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"offset\":{d},\"length\":{d},\"inArity\":{d},\"outArity\":{d}}}", .{ span.offset, span.length, span.in_arity, span.out_arity });
+        }
+        try w.writeAll("]");
+    }
+
     // sourceMap — opcode-to-source-location mappings.
     // Wrapped in {"mappings":[...]} to match the canonical schema declared
     // in packages/runar-ir-schema/src/schemas/artifact.schema.json#SourceMap.

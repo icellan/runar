@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ALL_TIER_IDS, BrokenTier, REPO, Tier, buildSourceTiers } from './tier-harness.js';
@@ -41,9 +41,9 @@ import { ALL_TIER_IDS, BrokenTier, REPO, Tier, buildSourceTiers } from './tier-h
  * (feature not ported to any other tier); `sourceMap` is omitted by Go/Java
  * unless their CLI's `--emit-source-map` flag is passed (a CLI-default
  * difference, not an artifact-shape bug); `ir` is Rust-only (its CLI embeds a
- * debug IR snapshot by default); `rawScriptSpans` is never emitted by
- * Go/Java/Zig even when non-empty (data loss, not an omit-when-empty bug —
- * a real but separate gap); and Zig never emits `buildTimestamp` at all.
+ * debug IR snapshot by default); and Zig never emits `buildTimestamp` at all.
+ * (`rawScriptSpans`, once never emitted by Go/Java/Zig, was fixed by N-151 —
+ * see the third describe block below.)
  */
 
 type Flags = {
@@ -215,7 +215,6 @@ const KNOWN_KEY_EXCEPTIONS: Record<string, KeyException> = {
     missing: [
       'sourceMap', // written only via --emit-source-map, not passed here
       'templateDigest', // TS-only enrichment of constructorSlots; not ported
-      'rawScriptSpans', // never emitted, even when non-empty (separate gap)
     ],
   },
   rust: {
@@ -232,14 +231,12 @@ const KNOWN_KEY_EXCEPTIONS: Record<string, KeyException> = {
     missing: [
       'sourceMap',
       'templateDigest',
-      'rawScriptSpans',
       'asm', // Java's artifact JSON never includes a human-readable ASM field
     ],
   },
   zig: {
     missing: [
       'templateDigest',
-      'rawScriptSpans',
       'buildTimestamp', // not emitted by compilers/zig/src/codegen/emit.zig at all
     ],
   },
@@ -308,6 +305,101 @@ describe('N-147: artifact top-level + per-method key set matches TS (7 tiers)', 
             Object.keys(tierMethod!),
             Object.keys(tsMethod),
             methodExceptions,
+          );
+        }
+      });
+    }
+  }
+});
+
+/**
+ * N-151 — `rawScriptSpans` VALUE parity against TS, all 7 tiers.
+ *
+ * Go, Java and Zig recorded a span per asm() raw-bytes op in their emitters
+ * but never wrote them into the artifact, so the key was missing even for
+ * real raw-script contracts (data loss for the analyzer / SDKs). The
+ * key-set check above could not see it: none of its fixtures uses asm().
+ *
+ * Proves: for the asm-raw-script, stateful-counter and all-readonly-cleanstack
+ * conformance fixtures and the four TS
+ * reference shapes (packages/runar-compiler/src/__tests__/raw-script-spans.test.ts:
+ * single span, consecutive spans, non-default arities, multi-byte body),
+ * every available tier's `rawScriptSpans` array is deep-equal to TS's, TS's
+ * is non-empty (so the comparison is not vacuous), and the asm-raw-script
+ * top-level key set matches TS's under the exceptions above. Does not prove
+ * how any SDK or analyzer consumes the spans, or the `--ir` path.
+ */
+const RAW_SHAPES: Array<{ name: string; params: string; body: string }> = [
+  { name: 'single', params: '', body: "asm({ body: '51', in_arity: 0, out_arity: 1 });" },
+  {
+    name: 'consecutive',
+    params: '',
+    body: "asm({ body: '51', in_arity: 0, out_arity: 1 });\n    asm({ body: '6151', in_arity: 1, out_arity: 1 });",
+  },
+  { name: 'arity', params: 'a: bigint, b: bigint', body: "asm({ body: '87', in_arity: 2, out_arity: 1 });" },
+  { name: 'multibyte', params: '', body: "asm({ body: '76a90051', in_arity: 0, out_arity: 1 });" },
+];
+
+const RAW_SRC_DIR = mkdtempSync(join(OUT, 'raw-shapes-'));
+const RAW_CASES: Array<{ label: string; src: string }> = [
+  { label: 'asm-raw-script', src: tsSource('asm-raw-script') },
+  // Stateful contracts carry compiler-emitted raw spans too (TS records two
+  // 428-byte spans for stateful-counter, one for all-readonly-cleanstack).
+  { label: 'stateful-counter', src: tsSource('stateful-counter') },
+  { label: 'all-readonly-cleanstack', src: tsSource('all-readonly-cleanstack') },
+  ...RAW_SHAPES.map((s) => {
+    const src = join(RAW_SRC_DIR, s.name, 'WithAsm.runar.ts');
+    mkdirSync(join(RAW_SRC_DIR, s.name));
+    writeFileSync(
+      src,
+      `import { UnsafeSmartContract, asm } from 'runar-lang';
+
+class WithAsm extends UnsafeSmartContract {
+  constructor() {
+    super();
+  }
+
+  public unlock(${s.params}) {
+    ${s.body}
+  }
+}
+`,
+    );
+    return { label: `shape:${s.name}`, src };
+  }),
+];
+
+const tsRawCache = new Map<string, Record<string, any>>();
+function tsRawArtifact(src: string): Record<string, any> {
+  let art = tsRawCache.get(src);
+  if (!art) {
+    art = compileArtifact(TS_TIER, src);
+    tsRawCache.set(src, art);
+  }
+  return art;
+}
+
+describe('N-151: rawScriptSpans values match TS (7 tiers)', () => {
+  for (const c of RAW_CASES) {
+    it(`ts: ${c.label} emits a non-empty rawScriptSpans`, () => {
+      const spans = tsRawArtifact(c.src).rawScriptSpans as unknown[] | undefined;
+      expect(Array.isArray(spans) && spans.length > 0).toBe(true);
+    });
+  }
+
+  for (const tier of available.filter((t) => t.id !== 'ts')) {
+    for (const c of RAW_CASES) {
+      it(`${tier.id}: ${c.label} rawScriptSpans`, () => {
+        const tsArtifact = tsRawArtifact(c.src);
+        const tierArtifact = compileArtifact(tier, c.src);
+        expect(tierArtifact.script).toBe(tsArtifact.script);
+        expect(tierArtifact.rawScriptSpans).toEqual(tsArtifact.rawScriptSpans);
+        if (c.label === 'asm-raw-script') {
+          assertKeysMatch(
+            `${tier.id}/asm-raw-script top-level`,
+            Object.keys(tierArtifact),
+            Object.keys(tsArtifact),
+            KNOWN_KEY_EXCEPTIONS[tier.id] ?? {},
           );
         }
       });

@@ -95,6 +95,9 @@ type CodePartLenSlot = codegen.CodePartLenSlot
 // SourceMapping is re-exported from codegen.
 type SourceMapping = codegen.SourceMapping
 
+// RawScriptSpan is re-exported from codegen (N-151).
+type RawScriptSpan = codegen.RawScriptSpan
+
 // SourceMap holds the source-level debug mappings (opcode index -> source location).
 type SourceMap struct {
 	Mappings []SourceMapping `json:"mappings"`
@@ -146,6 +149,7 @@ type Artifact struct {
 	CodePartLenSlots     []CodePartLenSlot  `json:"codePartLenSlots,omitempty"`
 	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
+	RawScriptSpans       []RawScriptSpan    `json:"rawScriptSpans,omitempty"`
 	BuildTimestamp       string             `json:"buildTimestamp"`
 	ANF                  *ir.ANFProgram     `json:"anf,omitempty"`
 	SourceMapData        *SourceMap         `json:"sourceMap,omitempty"`
@@ -307,7 +311,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, emitResult.RawScriptSpans, stackMethods, o)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +319,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 }
 
 // assembleArtifact builds the final output artifact from the compilation products.
-func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codePartLenSlots []CodePartLenSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
+func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codePartLenSlots []CodePartLenSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, rawScriptSpans []RawScriptSpan, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
 	// ---------------------------------------------------------------------
 	// Build ABI
 	// ---------------------------------------------------------------------
@@ -470,6 +474,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		CodePartLenSlots:     codePartLenSlots,
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
+		RawScriptSpans:       rawScriptSpans, // N-151: omitempty, matching the TS assembler
 		BuildTimestamp:       buildTimestamp(),
 	}
 
@@ -912,7 +917,7 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			return
 		}
 
-		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, emitResult.RawScriptSpans, stackMethods, o)
 		if aerr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
 				aerr.Error(),

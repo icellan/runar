@@ -566,6 +566,20 @@ public final class Cli {
                 }
                 b.append("],\n");
             }
+            // N-151: asm() raw-bytes spans for the analyzer, omitted when empty
+            // (matches the TS assembler).
+            if (!emit.rawScriptSpans().isEmpty()) {
+                List<String> spans = new ArrayList<>();
+                for (Emit.RawScriptSpan s : emit.rawScriptSpans()) {
+                    spans.add("{\"offset\": " + s.offset()
+                        + ", \"length\": " + s.length()
+                        + ", \"inArity\": " + s.inArity()
+                        + ", \"outArity\": " + s.outArity() + "}");
+                }
+                b.append("  \"rawScriptSpans\": [");
+                appendJoined(b, spans);
+                b.append("],\n");
+            }
             b.append("  \"buildTimestamp\": ").append(jsonString(buildTimestamp()));
             // Stateful artifacts always carry the ANF so the SDK can auto-compute
             // state transitions without a hand-written newState (matches Go).
