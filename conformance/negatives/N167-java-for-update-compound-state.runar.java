@@ -6,7 +6,7 @@
 // `this.count += 1` from the script. Every tier must refuse it; TS, Go, Rust,
 // Python, Ruby and Zig with:
 //   For loop update must advance the loop variable by one ...
-// (Java refuses the `+=` expression kind in its parser.) The bare-name
+// (Java too, once N-130 lowered `+=` to `i = i + e`.) The bare-name
 // spelling `count += Bigint.ONE` is the same hole.
 package runar.examples.forupdate;
 

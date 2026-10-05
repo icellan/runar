@@ -7,6 +7,7 @@ import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.CompoundAssignmentTree;
 import com.sun.source.tree.ConditionalExpressionTree;
 import com.sun.source.tree.ExpressionStatementTree;
 import com.sun.source.tree.ExpressionTree;
@@ -568,6 +569,17 @@ public final class JavaParser {
                     loc
                 );
             }
+            if (inner instanceof CompoundAssignmentTree ct) {
+                // `t op= e` lowers to `t = t op e`, like the TS reference
+                // (01-parse-java.ts finishExpressionStatement).
+                Expression.BinaryOp op = mapCompoundOp(ct.getKind(), filename);
+                Expression target = convertExpression(ct.getVariable(), filename, cu);
+                return new AssignmentStatement(
+                    target,
+                    new BinaryExpr(op, target, convertExpression(ct.getExpression(), filename, cu)),
+                    loc
+                );
+            }
             return new ExpressionStatement(convertExpression(inner, filename, cu), loc);
         }
         if (s instanceof IfTree it) {
@@ -1057,6 +1069,23 @@ public final class JavaParser {
             case LEFT_SHIFT -> Expression.BinaryOp.SHL;
             case RIGHT_SHIFT -> Expression.BinaryOp.SHR;
             default -> throw new ParseException("unsupported binary operator " + kind + " in " + filename);
+        };
+    }
+
+    /** The compound-assignment set the TS reference accepts: + - * / % & | ^ << >>. */
+    private static Expression.BinaryOp mapCompoundOp(Tree.Kind kind, String filename) {
+        return switch (kind) {
+            case PLUS_ASSIGNMENT -> Expression.BinaryOp.ADD;
+            case MINUS_ASSIGNMENT -> Expression.BinaryOp.SUB;
+            case MULTIPLY_ASSIGNMENT -> Expression.BinaryOp.MUL;
+            case DIVIDE_ASSIGNMENT -> Expression.BinaryOp.DIV;
+            case REMAINDER_ASSIGNMENT -> Expression.BinaryOp.MOD;
+            case AND_ASSIGNMENT -> Expression.BinaryOp.BIT_AND;
+            case OR_ASSIGNMENT -> Expression.BinaryOp.BIT_OR;
+            case XOR_ASSIGNMENT -> Expression.BinaryOp.BIT_XOR;
+            case LEFT_SHIFT_ASSIGNMENT -> Expression.BinaryOp.SHL;
+            case RIGHT_SHIFT_ASSIGNMENT -> Expression.BinaryOp.SHR;
+            default -> throw new ParseException("unsupported compound assignment operator " + kind + " in " + filename);
         };
     }
 

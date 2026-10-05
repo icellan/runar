@@ -5,7 +5,7 @@
 // `i++` loop. Every tier must refuse it; TS, Go, Rust, Python, Ruby and Zig
 // with:
 //   For loop update must advance the loop variable by one ...
-// (Java refuses the `+=` expression kind in its parser.)
+// (Java too, once N-130 lowered `+=` to `i = i + e`.)
 package runar.examples.forstep;
 
 import runar.lang.StatefulSmartContract;

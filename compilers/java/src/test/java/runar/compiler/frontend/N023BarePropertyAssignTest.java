@@ -18,8 +18,8 @@ import org.junit.jupiter.api.Test;
  * nested), inside an if arm or a for update, in any method including the
  * constructor, with the reference text; and it still accepts {@code this.x}
  * writes plus local, parameter and for-variable shadowing, honouring Java
- * block scope. A compound {@code count += ...} is refused too, but by this
- * tier's pre-existing refusal of every compound assignment, not this rule.
+ * block scope. Since N-130 lowers compound assignment, a bare
+ * {@code count += ...} reaches this rule and gets the same diagnostic.
  *
  * <p>What it does NOT prove: the other tiers (their own suites and
  * conformance/negatives/N166), or anything about bare reads, which R49
@@ -81,10 +81,8 @@ class N023BarePropertyAssignTest {
         }
         assertRefusedWithMsg("constructor",
             src("this.count = this.count.plus(Bigint.ONE);", "", "c", "super(c);\n        count = c;"));
-        // Compound assignment: refused, by this tier's blanket compound refusal.
-        if (refusal(src("count += Bigint.ONE;", "", "count", CTOR)) == null) {
-            fail("bare compound property write accepted");
-        }
+        // Compound assignment (N-130 lowers it to `count = count + 1`).
+        assertRefusedWithMsg("count += Bigint.ONE;", src("count += Bigint.ONE;", "", "count", CTOR));
     }
 
     @Test
