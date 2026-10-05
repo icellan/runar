@@ -11,55 +11,88 @@ import (
 // Constructor arg extraction
 // ---------------------------------------------------------------------------
 
-// readScriptElement reads a Bitcoin Script push data element at the given hex
-// offset. Returns the pushed data hex, total hex chars consumed, and the opcode.
-func readScriptElement(hexStr string, offset int) (dataHex string, totalHexChars int, opcode int) {
-	if offset+2 > len(hexStr) {
-		return "", 0, 0
+// MalformedScriptError is returned when a provider-supplied script cannot be
+// parsed as a sequence of Bitcoin Script push elements (F-238).
+//
+// readScriptElement used to silently clamp a push whose declared length ran
+// past the remaining bytes to a SHORT dataHex instead of erroring — which
+// corrupts every later constructor slot's offset in the same walk. A script
+// fetched via a Provider (FromUtxo / FromTxId) is untrusted input and needs a
+// typed, specific rejection, not a quietly wrong value.
+type MalformedScriptError struct {
+	Message string
+}
+
+func (e *MalformedScriptError) Error() string { return e.Message }
+
+func needHexChars(hexStr string, offset, chars int, what string) error {
+	if offset+chars > len(hexStr) {
+		remaining := len(hexStr) - offset
+		if remaining < 0 {
+			remaining = 0
+		}
+		return &MalformedScriptError{Message: fmt.Sprintf(
+			"readScriptElement: truncated script — %s runs past the end "+
+				"(needs %d byte(s) at hex offset %d, only %d remain)",
+			what, chars/2, offset, remaining/2,
+		)}
 	}
-	op, _ := strconv.ParseUint(hexStr[offset:offset+2], 16, 8)
+	return nil
+}
+
+// readScriptElement reads a Bitcoin Script push data element at the given hex
+// offset. Returns the pushed data hex, total hex chars consumed, and the
+// opcode, or a *MalformedScriptError (F-238) if the opcode byte itself, an
+// OP_PUSHDATA1/2/4 length prefix, or the declared push payload runs past the
+// end of hexStr.
+func readScriptElement(hexStr string, offset int) (dataHex string, totalHexChars int, opcode int, err error) {
+	if err = needHexChars(hexStr, offset, 2, "push opcode"); err != nil {
+		return "", 0, 0, err
+	}
+	op, parseErr := strconv.ParseUint(hexStr[offset:offset+2], 16, 8)
+	if parseErr != nil {
+		return "", 0, 0, &MalformedScriptError{Message: fmt.Sprintf(
+			"readScriptElement: non-hex byte at hex offset %d", offset)}
+	}
 	opcode = int(op)
 
 	if opcode == 0x00 {
-		return "", 2, opcode
+		return "", 2, opcode, nil
 	}
 	if opcode >= 0x01 && opcode <= 0x4b {
 		dataLen := opcode * 2
-		end := offset + 2 + dataLen
-		if end > len(hexStr) {
-			end = len(hexStr)
+		if err = needHexChars(hexStr, offset, 2+dataLen, "push payload"); err != nil {
+			return "", 0, 0, err
 		}
-		return hexStr[offset+2 : end], 2 + dataLen, opcode
+		return hexStr[offset+2 : offset+2+dataLen], 2 + dataLen, opcode, nil
 	}
 	if opcode == 0x4c { // OP_PUSHDATA1
-		if offset+4 > len(hexStr) {
-			return "", 2, opcode
+		if err = needHexChars(hexStr, offset, 4, "OP_PUSHDATA1 length prefix"); err != nil {
+			return "", 0, 0, err
 		}
 		length, _ := strconv.ParseUint(hexStr[offset+2:offset+4], 16, 8)
 		dataLen := int(length) * 2
-		end := offset + 4 + dataLen
-		if end > len(hexStr) {
-			end = len(hexStr)
+		if err = needHexChars(hexStr, offset, 4+dataLen, "OP_PUSHDATA1 payload"); err != nil {
+			return "", 0, 0, err
 		}
-		return hexStr[offset+4 : end], 4 + dataLen, opcode
+		return hexStr[offset+4 : offset+4+dataLen], 4 + dataLen, opcode, nil
 	}
 	if opcode == 0x4d { // OP_PUSHDATA2
-		if offset+6 > len(hexStr) {
-			return "", 2, opcode
+		if err = needHexChars(hexStr, offset, 6, "OP_PUSHDATA2 length prefix"); err != nil {
+			return "", 0, 0, err
 		}
 		lo, _ := strconv.ParseUint(hexStr[offset+2:offset+4], 16, 8)
 		hi, _ := strconv.ParseUint(hexStr[offset+4:offset+6], 16, 8)
 		length := int(lo) | (int(hi) << 8)
 		dataLen := length * 2
-		end := offset + 6 + dataLen
-		if end > len(hexStr) {
-			end = len(hexStr)
+		if err = needHexChars(hexStr, offset, 6+dataLen, "OP_PUSHDATA2 payload"); err != nil {
+			return "", 0, 0, err
 		}
-		return hexStr[offset+6 : end], 6 + dataLen, opcode
+		return hexStr[offset+6 : offset+6+dataLen], 6 + dataLen, opcode, nil
 	}
 	if opcode == 0x4e { // OP_PUSHDATA4
-		if offset+10 > len(hexStr) {
-			return "", 2, opcode
+		if err = needHexChars(hexStr, offset, 10, "OP_PUSHDATA4 length prefix"); err != nil {
+			return "", 0, 0, err
 		}
 		b0, _ := strconv.ParseUint(hexStr[offset+2:offset+4], 16, 8)
 		b1, _ := strconv.ParseUint(hexStr[offset+4:offset+6], 16, 8)
@@ -67,14 +100,13 @@ func readScriptElement(hexStr string, offset int) (dataHex string, totalHexChars
 		b3, _ := strconv.ParseUint(hexStr[offset+8:offset+10], 16, 8)
 		length := int(b0) | (int(b1) << 8) | (int(b2) << 16) | (int(b3) << 24)
 		dataLen := length * 2
-		end := offset + 10 + dataLen
-		if end > len(hexStr) {
-			end = len(hexStr)
+		if err = needHexChars(hexStr, offset, 10+dataLen, "OP_PUSHDATA4 payload"); err != nil {
+			return "", 0, 0, err
 		}
-		return hexStr[offset+10 : end], 10 + dataLen, opcode
+		return hexStr[offset+10 : offset+10+dataLen], 10 + dataLen, opcode, nil
 	}
 	// All other opcodes (OP_1..OP_16, etc.)
-	return "", 2, opcode
+	return "", 2, opcode, nil
 }
 
 // decodeScriptNumber decodes a minimally-encoded Bitcoin Script number from hex.
@@ -197,9 +229,12 @@ func interpretScriptElement(opcode int, dataHex string, typeName string) interfa
 // on-chain script. Uses artifact.ConstructorSlots to locate each constructor
 // arg at its byte offset, reads the push data, and deserializes according to
 // the ABI param type.
-func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) map[string]interface{} {
+//
+// Returns a *MalformedScriptError (F-238) if scriptHex is not a well-formed
+// sequence of push elements at the offsets the artifact expects.
+func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) (map[string]interface{}, error) {
 	if artifact.ConstructorSlots == nil || len(artifact.ConstructorSlots) == 0 {
-		return map[string]interface{}{}
+		return map[string]interface{}{}, nil
 	}
 
 	codeHex := scriptHex
@@ -228,7 +263,10 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) map[strin
 
 	for _, slot := range slots {
 		adjustedHexOffset := (slot.ByteOffset + cumulativeShift) * 2
-		dataHex, totalHexChars, opcode := readScriptElement(codeHex, adjustedHexOffset)
+		dataHex, totalHexChars, opcode, err := readScriptElement(codeHex, adjustedHexOffset)
+		if err != nil {
+			return nil, err
+		}
 		// Template placeholders are exactly 1 byte, so the shift contributed by
 		// each occurrence is its encoded width minus that byte.
 		cumulativeShift += totalHexChars/2 - 1
@@ -244,7 +282,7 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) map[strin
 		result[param.Name] = interpretScriptElement(opcode, dataHex, param.Type)
 	}
 
-	return result
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +298,10 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) map[strin
 // code part (everything before the state section, inscription envelope
 // included). codeSepIndex placeholders are, like constructor placeholders,
 // read as one script element rather than compared literally.
-func MatchesArtifact(artifact *RunarArtifact, scriptHex string) bool {
+//
+// Returns a *MalformedScriptError (F-238) if scriptHex is not a well-formed
+// sequence of push elements at the offsets the artifact expects.
+func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 	codeHex := scriptHex
 	if artifact.StateFields != nil && len(artifact.StateFields) > 0 {
 		opReturnPos := FindLastOpReturn(scriptHex)
@@ -272,7 +313,7 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) bool {
 	template := artifact.Script
 
 	if artifact.ConstructorSlots == nil || len(artifact.ConstructorSlots) == 0 {
-		return codeHex == template
+		return codeHex == template, nil
 	}
 
 	// Deduplicate placeholder offsets (constructor + codeSepIndex), ascending.
@@ -326,17 +367,20 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) bool {
 		slotHexOffset := offset * 2
 		segLen := slotHexOffset - templatePos
 		if codePos+segLen > len(codeHex) {
-			return false
+			return false, nil
 		}
 		if !segmentMatches(templatePos, slotHexOffset, codePos) {
-			return false
+			return false, nil
 		}
 		templatePos = slotHexOffset + 2
 		elemOffset := codePos + segLen
-		_, totalHexChars, _ := readScriptElement(codeHex, elemOffset)
+		_, totalHexChars, _, err := readScriptElement(codeHex, elemOffset)
+		if err != nil {
+			return false, err
+		}
 		codePos = elemOffset + totalHexChars
 	}
 
 	return len(codeHex)-codePos == len(template)-templatePos &&
-		segmentMatches(templatePos, len(template), codePos)
+		segmentMatches(templatePos, len(template), codePos), nil
 }

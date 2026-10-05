@@ -13,54 +13,60 @@ const ScriptElement = struct {
     opcode: u8,
 };
 
-/// Read a single Bitcoin Script element (opcode + data) at the given hex offset.
-fn readScriptElement(hex: []const u8, offset: usize) ScriptElement {
-    if (offset + 2 > hex.len) return .{ .data_hex = "", .total_hex_chars = 0, .opcode = 0 };
+/// Read a single Bitcoin Script element (opcode + data) at the given hex
+/// offset, or `error.MalformedScript` (F-238) if the opcode byte itself, an
+/// OP_PUSHDATA1/2/4 length prefix, or the declared push payload runs past
+/// the end of `hex` (or is not valid hex). A provider-supplied script is
+/// untrusted input; a truncated push must never come back as a short,
+/// silently-wrong `data_hex` — it would also desynchronise every later
+/// slot's offset in the caller's walk.
+fn readScriptElement(hex: []const u8, offset: usize) error{MalformedScript}!ScriptElement {
+    if (offset + 2 > hex.len) return error.MalformedScript;
 
-    const opcode = hexByteAt(hex, offset) orelse return .{ .data_hex = "", .total_hex_chars = 2, .opcode = 0 };
+    const opcode = hexByteAt(hex, offset) orelse return error.MalformedScript;
 
     if (opcode == 0x00) return .{ .data_hex = "", .total_hex_chars = 2, .opcode = opcode };
 
     if (opcode >= 0x01 and opcode <= 0x4b) {
         const data_len = @as(usize, opcode) * 2;
         const start = offset + 2;
-        if (start + data_len > hex.len) return .{ .data_hex = "", .total_hex_chars = 2, .opcode = opcode };
+        if (start + data_len > hex.len) return error.MalformedScript;
         return .{ .data_hex = hex[start .. start + data_len], .total_hex_chars = 2 + data_len, .opcode = opcode };
     }
 
     if (opcode == 0x4c) {
         // OP_PUSHDATA1
-        if (offset + 4 > hex.len) return .{ .data_hex = "", .total_hex_chars = 4, .opcode = opcode };
-        const len = hexByteAt(hex, offset + 2) orelse return .{ .data_hex = "", .total_hex_chars = 4, .opcode = opcode };
+        if (offset + 4 > hex.len) return error.MalformedScript;
+        const len = hexByteAt(hex, offset + 2) orelse return error.MalformedScript;
         const data_len = @as(usize, len) * 2;
         const start = offset + 4;
-        if (start + data_len > hex.len) return .{ .data_hex = "", .total_hex_chars = 4, .opcode = opcode };
+        if (start + data_len > hex.len) return error.MalformedScript;
         return .{ .data_hex = hex[start .. start + data_len], .total_hex_chars = 4 + data_len, .opcode = opcode };
     }
 
     if (opcode == 0x4d) {
         // OP_PUSHDATA2
-        if (offset + 6 > hex.len) return .{ .data_hex = "", .total_hex_chars = 6, .opcode = opcode };
-        const lo = hexByteAt(hex, offset + 2) orelse return .{ .data_hex = "", .total_hex_chars = 6, .opcode = opcode };
-        const hi = hexByteAt(hex, offset + 4) orelse return .{ .data_hex = "", .total_hex_chars = 6, .opcode = opcode };
+        if (offset + 6 > hex.len) return error.MalformedScript;
+        const lo = hexByteAt(hex, offset + 2) orelse return error.MalformedScript;
+        const hi = hexByteAt(hex, offset + 4) orelse return error.MalformedScript;
         const len = @as(usize, lo) | (@as(usize, hi) << 8);
         const data_len = len * 2;
         const start = offset + 6;
-        if (start + data_len > hex.len) return .{ .data_hex = "", .total_hex_chars = 6, .opcode = opcode };
+        if (start + data_len > hex.len) return error.MalformedScript;
         return .{ .data_hex = hex[start .. start + data_len], .total_hex_chars = 6 + data_len, .opcode = opcode };
     }
 
     if (opcode == 0x4e) {
         // OP_PUSHDATA4
-        if (offset + 10 > hex.len) return .{ .data_hex = "", .total_hex_chars = 10, .opcode = opcode };
-        const b0 = hexByteAt(hex, offset + 2) orelse return .{ .data_hex = "", .total_hex_chars = 10, .opcode = opcode };
-        const b1 = hexByteAt(hex, offset + 4) orelse return .{ .data_hex = "", .total_hex_chars = 10, .opcode = opcode };
-        const b2 = hexByteAt(hex, offset + 6) orelse return .{ .data_hex = "", .total_hex_chars = 10, .opcode = opcode };
-        const b3 = hexByteAt(hex, offset + 8) orelse return .{ .data_hex = "", .total_hex_chars = 10, .opcode = opcode };
+        if (offset + 10 > hex.len) return error.MalformedScript;
+        const b0 = hexByteAt(hex, offset + 2) orelse return error.MalformedScript;
+        const b1 = hexByteAt(hex, offset + 4) orelse return error.MalformedScript;
+        const b2 = hexByteAt(hex, offset + 6) orelse return error.MalformedScript;
+        const b3 = hexByteAt(hex, offset + 8) orelse return error.MalformedScript;
         const len = @as(usize, b0) | (@as(usize, b1) << 8) | (@as(usize, b2) << 16) | (@as(usize, b3) << 24);
         const data_len = len * 2;
         const start = offset + 10;
-        if (start + data_len > hex.len) return .{ .data_hex = "", .total_hex_chars = 10, .opcode = opcode };
+        if (start + data_len > hex.len) return error.MalformedScript;
         return .{ .data_hex = hex[start .. start + data_len], .total_hex_chars = 10 + data_len, .opcode = opcode };
     }
 
@@ -281,9 +287,12 @@ pub fn extractConstructorArgs(
     for (indices) |idx| {
         const slot = cs[idx];
         const adjusted_hex_offset: usize = @intCast((@as(i64, slot.byte_offset) + cumulative_shift) * 2);
-        if (adjusted_hex_offset >= code_hex.len) continue;
-
-        const elem = readScriptElement(code_hex, adjusted_hex_offset);
+        // F-238: a slot offset at or past the end of the script is itself a
+        // malformed/mismatched provider script (every push needs at least an
+        // opcode byte) — readScriptElement already rejects it; it used to be
+        // silently skipped here instead, dropping the param from the result
+        // with no error.
+        const elem = try readScriptElement(code_hex, adjusted_hex_offset);
         // Template placeholders are exactly 1 byte, so the shift contributed by
         // each occurrence is its encoded width minus that byte. This must
         // accumulate for EVERY occurrence, including the ones whose value we
@@ -307,10 +316,13 @@ pub fn extractConstructorArgs(
 
 /// Determine whether a given on-chain script was produced from the given
 /// contract artifact (regardless of what constructor args were used).
+///
+/// Returns `error.MalformedScript` (F-238) if `script_hex` is not a
+/// well-formed sequence of push elements at the offsets the artifact expects.
 pub fn matchesArtifact(
     artifact: *const types.RunarArtifact,
     script_hex: []const u8,
-) bool {
+) error{MalformedScript}!bool {
     // Strip state suffix for stateful contracts
     var code_hex = script_hex;
     if (artifact.state_fields.len > 0) {
@@ -399,7 +411,7 @@ pub fn matchesArtifact(
 
         // Read the actual element in the code script
         const elem_offset = code_pos + template_segment_len;
-        const elem = readScriptElement(code_hex, elem_offset);
+        const elem = try readScriptElement(code_hex, elem_offset);
         code_pos = elem_offset + elem.total_hex_chars;
     }
 
@@ -503,8 +515,8 @@ test "matchesArtifact matches identical script" {
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
 
-    try std.testing.expect(matchesArtifact(&artifact, "5100"));
-    try std.testing.expect(!matchesArtifact(&artifact, "5200"));
+    try std.testing.expect(try matchesArtifact(&artifact, "5100"));
+    try std.testing.expect(!try matchesArtifact(&artifact, "5200"));
 }
 
 test "matchesArtifact with constructor slots" {
@@ -521,11 +533,96 @@ test "matchesArtifact with constructor slots" {
     // On-chain script with a 20-byte push at offset 0: 14 + 20 bytes + "88ac"
     // OP_PUSH20 (0x14) + 20 zero bytes + OP_EQUALVERIFY + OP_CHECKSIG
     const on_chain = "14" ++ "00" ** 20 ++ "88ac";
-    try std.testing.expect(matchesArtifact(&artifact, on_chain));
+    try std.testing.expect(try matchesArtifact(&artifact, on_chain));
 
     // Different suffix should not match
     const bad = "14" ++ "00" ** 20 ++ "88ad";
-    try std.testing.expect(!matchesArtifact(&artifact, bad));
+    try std.testing.expect(!try matchesArtifact(&artifact, bad));
+}
+
+// ---------------------------------------------------------------------------
+// F-238 — readScriptElement must refuse malformed provider-supplied scripts
+// instead of silently truncating.
+//
+// Before this fix, a push whose declared length (a direct push opcode
+// 0x01-0x4b, or an OP_PUSHDATA1/2/4 length prefix) ran past the remaining
+// bytes returned an EMPTY data_hex with a total_hex_chars that did not
+// account for the missing payload, instead of erroring — extractConstructorArgs
+// / matchesArtifact then treat that as a valid (wrong) element, corrupting
+// every later slot's offset in the same walk.
+//
+// PROVES: extractConstructorArgs / matchesArtifact return error.MalformedScript
+// for every vector in the brief's testable assertion, and a valid push of
+// every pushdata flavour still decodes unchanged.
+// DOES NOT PROVE: fail-closed behaviour of any other script reader in this
+// package.
+// ---------------------------------------------------------------------------
+
+const f238_malformed_vectors = [_][]const u8{
+    "", // no opcode byte at all
+    "f", // odd-length hex, can't even form an opcode byte
+    "05aabb", // direct push declares 5 bytes, only 2 remain
+    "4c", // OP_PUSHDATA1 with no length byte
+    "4c05aa", // OP_PUSHDATA1 declares 5 bytes, only 1 remains
+    "4d0100", // OP_PUSHDATA2 length prefix present, 0 of the 1 declared bytes remain
+    "4e01000000", // OP_PUSHDATA4 length prefix present, 0 of the 1 declared bytes remain
+};
+
+fn f238OneSlotArtifact(allocator: std.mem.Allocator) !types.RunarArtifact {
+    const json =
+        \\{"contractName":"Test","version":"1","compilerVersion":"1.0","script":"00ac","asm":"",
+        \\"abi":{"constructor":{"params":[{"name":"x","type":"bigint"}]},"methods":[{"name":"unlock","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[{"paramIndex":0,"byteOffset":0}],"buildTimestamp":"2024-01-01"}
+    ;
+    return types.RunarArtifact.fromJson(allocator, json);
+}
+
+test "F-238: extractConstructorArgs refuses every malformed vector" {
+    const allocator = std.testing.allocator;
+    var artifact = try f238OneSlotArtifact(allocator);
+    defer artifact.deinit();
+
+    for (f238_malformed_vectors) |hex| {
+        const result = extractConstructorArgs(&artifact, hex, allocator);
+        try std.testing.expectError(error.MalformedScript, result);
+    }
+}
+
+test "F-238: matchesArtifact refuses every malformed vector" {
+    const allocator = std.testing.allocator;
+    var artifact = try f238OneSlotArtifact(allocator);
+    defer artifact.deinit();
+
+    for (f238_malformed_vectors) |hex| {
+        const result = matchesArtifact(&artifact, hex);
+        try std.testing.expectError(error.MalformedScript, result);
+    }
+}
+
+test "F-238: a valid OP_PUSHDATA1/2/4 push with exact length still decodes" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"Test","version":"1","compilerVersion":"1.0","script":"00ac","asm":"",
+        \\"abi":{"constructor":{"params":[{"name":"x","type":"ByteString"}]},"methods":[{"name":"unlock","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[{"paramIndex":0,"byteOffset":0}],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    const cases = [_][]const u8{ "012aac", "4c012aac", "4d01002aac", "4e010000002aac" };
+    for (cases) |script_hex| {
+        var result = try extractConstructorArgs(&artifact, script_hex, allocator);
+        defer {
+            var it = result.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                entry.value_ptr.deinit(allocator);
+            }
+            result.deinit();
+        }
+        const got = result.get("x").?;
+        try std.testing.expectEqualStrings("2a", got.bytes);
+    }
 }
 
 test "extractConstructorArgs extracts int param" {

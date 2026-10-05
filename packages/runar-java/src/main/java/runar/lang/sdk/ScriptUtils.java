@@ -189,9 +189,24 @@ public final class ScriptUtils {
      * {@code opcode <= 75} branch and correctly decodes as the empty byte
      * array, since the encoder no longer emits {@code OP_0} for a 1-byte
      * {@code 0x00} payload.
+     *
+     * @throws IllegalArgumentException if the opcode byte itself, an
+     *     OP_PUSHDATA1/2/4 length prefix, or the declared push payload runs
+     *     past the end of {@code hex} (F-238 — this used to throw a raw
+     *     {@link StringIndexOutOfBoundsException} or silently return a
+     *     short/empty payload, like {@link #decodePushDataState} did before
+     *     C2; a provider-supplied deployed script is untrusted input and a
+     *     truncated push must never come back as a quietly-wrong value).
      */
     public static DecodedPush decodePushData(String hex, int offset) {
-        int opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
+        need(hex, offset, 2, "push opcode");
+        int opcode;
+        try {
+            opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                "decodePushData: non-hex byte at hex offset " + offset);
+        }
         if (opcode >= 0x51 && opcode <= 0x60) {  // OP_1..OP_16
             return new DecodedPush(String.format("%02x", opcode - 0x50), 2);
         }
@@ -200,27 +215,34 @@ public final class ScriptUtils {
         }
         if (opcode <= 75) {
             int dataLen = opcode * 2;
+            need(hex, offset, 2 + dataLen, "push payload");
             return new DecodedPush(hex.substring(offset + 2, offset + 2 + dataLen), 2 + dataLen);
         }
         if (opcode == 0x4c) {
+            need(hex, offset, 4, "OP_PUSHDATA1 length prefix");
             int length = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
             int dataLen = length * 2;
+            need(hex, offset, 4 + dataLen, "OP_PUSHDATA1 payload");
             return new DecodedPush(hex.substring(offset + 4, offset + 4 + dataLen), 4 + dataLen);
         }
         if (opcode == 0x4d) {
+            need(hex, offset, 6, "OP_PUSHDATA2 length prefix");
             int lo = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
             int hi = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
             int length = lo | (hi << 8);
             int dataLen = length * 2;
+            need(hex, offset, 6 + dataLen, "OP_PUSHDATA2 payload");
             return new DecodedPush(hex.substring(offset + 6, offset + 6 + dataLen), 6 + dataLen);
         }
         if (opcode == 0x4e) {
+            need(hex, offset, 10, "OP_PUSHDATA4 length prefix");
             int b0 = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
             int b1 = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
             int b2 = Integer.parseInt(hex.substring(offset + 6, offset + 8), 16);
             int b3 = Integer.parseInt(hex.substring(offset + 8, offset + 10), 16);
             int length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
             int dataLen = length * 2;
+            need(hex, offset, 10 + dataLen, "OP_PUSHDATA4 payload");
             return new DecodedPush(hex.substring(offset + 10, offset + 10 + dataLen), 10 + dataLen);
         }
         return new DecodedPush("", 2);

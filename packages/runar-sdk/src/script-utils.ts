@@ -6,6 +6,7 @@ import { Hash, Utils } from '@bsv/sdk';
 import type { RunarArtifact } from 'runar-ir-schema';
 import { abiValueEncoding } from 'runar-ir-schema';
 import { findLastOpReturn } from './state.js';
+import { MalformedScriptError } from './errors.js';
 
 /**
  * Hash a 66- or 130-char hex secp256k1 public key into its 40-char hex
@@ -95,36 +96,63 @@ export function buildP2PKHScript(addressOrPubKey: string): string {
 // Constructor arg extraction
 // ---------------------------------------------------------------------------
 
+/**
+ * Throw {@link MalformedScriptError} unless `chars` hex chars are available
+ * from `offset` (F-238). Mirrors the Java tier's `ScriptUtils.need` guard —
+ * already used for the on-chain state-section reader — applied here to the
+ * push-data reader used by constructor-arg extraction and artifact matching.
+ */
+function need(hex: string, offset: number, chars: number, what: string): void {
+  if (offset + chars > hex.length) {
+    const remaining = Math.max(0, hex.length - offset);
+    throw new MalformedScriptError(
+      `readScriptElement: truncated script — ${what} runs past the end ` +
+        `(needs ${chars / 2} byte(s) at hex offset ${offset}, only ${remaining / 2} remain)`,
+    );
+  }
+}
+
 function readScriptElement(
   hex: string,
   offset: number,
 ): { dataHex: string; totalHexChars: number; opcode: number } {
+  need(hex, offset, 2, 'push opcode');
   const opcode = parseInt(hex.slice(offset, offset + 2), 16);
+  if (Number.isNaN(opcode)) {
+    throw new MalformedScriptError(`readScriptElement: non-hex byte at hex offset ${offset}`);
+  }
 
   if (opcode === 0x00) return { dataHex: '', totalHexChars: 2, opcode };
   if (opcode >= 0x01 && opcode <= 0x4b) {
     const dataLen = opcode * 2;
+    need(hex, offset, 2 + dataLen, 'push payload');
     return { dataHex: hex.slice(offset + 2, offset + 2 + dataLen), totalHexChars: 2 + dataLen, opcode };
   }
   if (opcode === 0x4c) {
+    need(hex, offset, 4, 'OP_PUSHDATA1 length prefix');
     const len = parseInt(hex.slice(offset + 2, offset + 4), 16);
     const dataLen = len * 2;
+    need(hex, offset, 4 + dataLen, 'OP_PUSHDATA1 payload');
     return { dataHex: hex.slice(offset + 4, offset + 4 + dataLen), totalHexChars: 4 + dataLen, opcode };
   }
   if (opcode === 0x4d) {
+    need(hex, offset, 6, 'OP_PUSHDATA2 length prefix');
     const lo = parseInt(hex.slice(offset + 2, offset + 4), 16);
     const hi = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const len = lo | (hi << 8);
     const dataLen = len * 2;
+    need(hex, offset, 6 + dataLen, 'OP_PUSHDATA2 payload');
     return { dataHex: hex.slice(offset + 6, offset + 6 + dataLen), totalHexChars: 6 + dataLen, opcode };
   }
   if (opcode === 0x4e) {
+    need(hex, offset, 10, 'OP_PUSHDATA4 length prefix');
     const b0 = parseInt(hex.slice(offset + 2, offset + 4), 16);
     const b1 = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(hex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(hex.slice(offset + 8, offset + 10), 16);
     const len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     const dataLen = len * 2;
+    need(hex, offset, 10 + dataLen, 'OP_PUSHDATA4 payload');
     return { dataHex: hex.slice(offset + 10, offset + 10 + dataLen), totalHexChars: 10 + dataLen, opcode };
   }
   return { dataHex: '', totalHexChars: 2, opcode };

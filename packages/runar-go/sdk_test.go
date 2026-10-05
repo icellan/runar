@@ -32,6 +32,31 @@ func makeArtifact(script string, abi ABI, overrides ...func(*RunarArtifact)) *Ru
 	return a
 }
 
+// mustExtractConstructorArgs wraps ExtractConstructorArgs for existing tests
+// that assume a well-formed script and only want the result (F-238 added an
+// error return to catch malformed provider-supplied scripts; see
+// sdk_f238_malformed_script_test.go for the tests that exercise the error
+// path directly).
+func mustExtractConstructorArgs(t *testing.T, artifact *RunarArtifact, scriptHex string) map[string]interface{} {
+	t.Helper()
+	args, err := ExtractConstructorArgs(artifact, scriptHex)
+	if err != nil {
+		t.Fatalf("ExtractConstructorArgs(%q): unexpected error: %v", scriptHex, err)
+	}
+	return args
+}
+
+// mustMatchesArtifact wraps MatchesArtifact for existing tests that assume a
+// well-formed script and only want the bool result.
+func mustMatchesArtifact(t *testing.T, artifact *RunarArtifact, scriptHex string) bool {
+	t.Helper()
+	matched, err := MatchesArtifact(artifact, scriptHex)
+	if err != nil {
+		t.Fatalf("MatchesArtifact(%q): unexpected error: %v", scriptHex, err)
+	}
+	return matched
+}
+
 func makeUtxo(satoshis int64, outputIndex int) UTXO {
 	return UTXO{
 		Txid:        strings.Repeat("ab", 32), // 64 hex chars = 32 bytes

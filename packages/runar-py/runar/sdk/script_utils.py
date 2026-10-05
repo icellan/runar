@@ -5,6 +5,7 @@ Ports extractConstructorArgs() and matchesArtifact() from the TypeScript SDK.
 
 from __future__ import annotations
 
+from runar.sdk.errors import MalformedScriptError
 from runar.sdk.types import RunarArtifact
 from runar.sdk.state import find_last_op_return
 
@@ -13,37 +14,72 @@ from runar.sdk.state import find_last_op_return
 # Script element reading
 # ---------------------------------------------------------------------------
 
+def _need(hex_str: str, offset: int, chars: int, what: str) -> None:
+    """Raise :class:`MalformedScriptError` unless ``chars`` hex chars are
+    available from ``offset`` (F-238). Mirrors the Java tier's
+    ``ScriptUtils.need`` guard -- the pattern already used for the on-chain
+    state-section reader, applied here to the push-data reader used by
+    constructor-arg extraction and artifact matching.
+    """
+    if offset + chars > len(hex_str):
+        remaining = max(0, len(hex_str) - offset)
+        raise MalformedScriptError(
+            f"_read_script_element: truncated script -- {what} runs past the end "
+            f"(needs {chars // 2} byte(s) at hex offset {offset}, only {remaining // 2} remain)"
+        )
+
+
 def _read_script_element(
     hex_str: str, offset: int
 ) -> tuple[str, int, int]:
     """Read a single script element at the given hex offset.
 
     Returns (data_hex, total_hex_chars, opcode).
+
+    Raises :class:`MalformedScriptError` (F-238) if the opcode byte itself,
+    an OP_PUSHDATA1/2/4 length prefix, or the declared push payload runs past
+    the end of ``hex_str`` -- a provider-supplied script is untrusted input,
+    and a truncated push must never come back as a short, silently-wrong
+    ``data_hex`` (it would also desynchronise every later slot's offset in
+    the caller's walk).
     """
-    opcode = int(hex_str[offset:offset + 2], 16)
+    _need(hex_str, offset, 2, 'push opcode')
+    try:
+        opcode = int(hex_str[offset:offset + 2], 16)
+    except ValueError as exc:
+        raise MalformedScriptError(
+            f"_read_script_element: non-hex byte at hex offset {offset}"
+        ) from exc
 
     if opcode == 0x00:
         return '', 2, opcode
     if 0x01 <= opcode <= 0x4B:
         data_len = opcode * 2
+        _need(hex_str, offset, 2 + data_len, 'push payload')
         return hex_str[offset + 2:offset + 2 + data_len], 2 + data_len, opcode
     if opcode == 0x4C:
+        _need(hex_str, offset, 4, 'OP_PUSHDATA1 length prefix')
         length = int(hex_str[offset + 2:offset + 4], 16)
         data_len = length * 2
+        _need(hex_str, offset, 4 + data_len, 'OP_PUSHDATA1 payload')
         return hex_str[offset + 4:offset + 4 + data_len], 4 + data_len, opcode
     if opcode == 0x4D:
+        _need(hex_str, offset, 6, 'OP_PUSHDATA2 length prefix')
         lo = int(hex_str[offset + 2:offset + 4], 16)
         hi = int(hex_str[offset + 4:offset + 6], 16)
         length = lo | (hi << 8)
         data_len = length * 2
+        _need(hex_str, offset, 6 + data_len, 'OP_PUSHDATA2 payload')
         return hex_str[offset + 6:offset + 6 + data_len], 6 + data_len, opcode
     if opcode == 0x4E:
+        _need(hex_str, offset, 10, 'OP_PUSHDATA4 length prefix')
         b0 = int(hex_str[offset + 2:offset + 4], 16)
         b1 = int(hex_str[offset + 4:offset + 6], 16)
         b2 = int(hex_str[offset + 6:offset + 8], 16)
         b3 = int(hex_str[offset + 8:offset + 10], 16)
         length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         data_len = length * 2
+        _need(hex_str, offset, 10 + data_len, 'OP_PUSHDATA4 payload')
         return hex_str[offset + 10:offset + 10 + data_len], 10 + data_len, opcode
 
     # Single-byte opcode (no data)

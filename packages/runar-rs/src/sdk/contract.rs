@@ -2363,7 +2363,7 @@ impl RunarContract {
         // Recover the real constructor args baked into the deployed script
         // (issue #119). Filling zeros made restored stateful spends compute the
         // wrong state continuation and codesep/OP_PUSH_TX offset — unspendable.
-        let restored_args = restore_constructor_args(&artifact, &utxo.script);
+        let restored_args = restore_constructor_args(&artifact, &utxo.script)?;
 
         let mut contract = RunarContract::new(artifact, restored_args);
 
@@ -2982,16 +2982,19 @@ fn revive_json_value(value: &serde_json::Value, field_type: &str) -> SdkValue {
 /// constructor slot (mutable state fields — their value lives in the OP_RETURN
 /// state section, restored separately by `extract_state_from_script`) are absent
 /// from the map and fall back to `0`, matching the prior placeholder behaviour.
-fn restore_constructor_args(artifact: &RunarArtifact, script_hex: &str) -> Vec<SdkValue> {
+fn restore_constructor_args(artifact: &RunarArtifact, script_hex: &str) -> Result<Vec<SdkValue>, String> {
     let params = &artifact.abi.constructor.params;
     if params.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let extracted = extract_constructor_args(artifact, script_hex).unwrap_or_default();
-    params
+    // F-238: propagate a malformed-script rejection rather than swallowing it
+    // with `.unwrap_or_default()` — a truncated/corrupt provider script must
+    // fail `from_utxo` / `from_tx_id`, not silently restore 0-placeholders.
+    let extracted = extract_constructor_args(artifact, script_hex)?;
+    Ok(params
         .iter()
         .map(|p| extracted.get(&p.name).cloned().unwrap_or(SdkValue::Int(0)))
-        .collect()
+        .collect())
 }
 
 /// Build a named-args map from user ABI params and resolved arg values.

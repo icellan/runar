@@ -1821,12 +1821,15 @@ func (c *RunarContract) FinalizeCall(
 // the OP_RETURN state section, restored separately by ExtractStateFromScript)
 // are absent from the extracted map; they fall back to int64(0), matching the
 // prior placeholder behaviour.
-func restoreConstructorArgs(artifact *RunarArtifact, scriptHex string) []interface{} {
+func restoreConstructorArgs(artifact *RunarArtifact, scriptHex string) ([]interface{}, error) {
 	params := artifact.ABI.Constructor.Params
 	if len(params) == 0 {
-		return []interface{}{}
+		return []interface{}{}, nil
 	}
-	extracted := ExtractConstructorArgs(artifact, scriptHex)
+	extracted, err := ExtractConstructorArgs(artifact, scriptHex)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]interface{}, len(params))
 	for i, p := range params {
 		if v, ok := extracted[p.Name]; ok {
@@ -1835,7 +1838,7 @@ func restoreConstructorArgs(artifact *RunarArtifact, scriptHex string) []interfa
 			out[i] = int64(0)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // FromUtxo reconnects to a deployed contract from a known UTXO.
@@ -1852,7 +1855,11 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) (*RunarContract, error) {
 	// (issue #119). readonly ctor params feed the state-continuation formula and
 	// adjustCodeSepOffset; zeros there yield the wrong continuation and the
 	// wrong OP_CODESEPARATOR offset, making restored stateful spends unspendable.
-	contract := NewRunarContract(artifact, restoreConstructorArgs(artifact, utxo.Script))
+	restoredArgs, err := restoreConstructorArgs(artifact, utxo.Script)
+	if err != nil {
+		return nil, fmt.Errorf("RunarContract.FromUtxo: %w", err)
+	}
+	contract := NewRunarContract(artifact, restoredArgs)
 
 	// Store the code portion of the on-chain script
 	if len(artifact.StateFields) > 0 {
@@ -1929,7 +1936,11 @@ func FromTxId(
 	// Recover the real baked-in constructor args from the deployed script (issue
 	// #119) — see FromUtxo. Params without a constructor slot (mutable state
 	// fields) fall back to 0 and are overwritten by ExtractStateFromScript.
-	contract := NewRunarContract(artifact, restoreConstructorArgs(artifact, output.Script))
+	restoredArgs, err := restoreConstructorArgs(artifact, output.Script)
+	if err != nil {
+		return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
+	}
+	contract := NewRunarContract(artifact, restoredArgs)
 
 	// Store the code portion of the on-chain script.
 	// Use opcode-aware walking to find the real OP_RETURN (not a 0x6a

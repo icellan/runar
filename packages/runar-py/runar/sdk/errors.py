@@ -62,6 +62,20 @@ class BroadcastValidationUnavailable(Exception):
     """
 
 
+class MalformedScriptError(Exception):
+    """Raised when a provider-supplied script cannot be parsed as a sequence
+    of Bitcoin Script push elements (F-238).
+
+    ``_read_script_element`` (``runar/sdk/script_utils.py``) used to raise a
+    bare ``ValueError`` on an empty/odd-length tail (no opcode byte to read)
+    and silently return a SHORT ``data_hex`` when a push's declared length
+    ran past the remaining bytes -- which corrupts every later constructor
+    slot's offset in the same walk. A caller fed an untrusted script by a
+    ``Provider`` (``from_txid`` / ``from_utxo``) needs a typed, specific
+    rejection, not a crash or a quietly wrong value.
+    """
+
+
 class WitnessValueMissingError(Exception):
     """Raised when a method call requires a caller-supplied intent-intrinsic
     witness value (auto-injected ``_prevOutScript_<i>`` or

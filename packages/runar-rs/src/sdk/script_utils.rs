@@ -62,65 +62,77 @@ pub fn build_p2pkh_script(address_or_pub_key: &str) -> String {
 // Constructor arg extraction
 // ---------------------------------------------------------------------------
 
+/// Require `chars` hex chars to be available from `offset`, else return a
+/// [`MalformedScriptError`]-style `String` (F-238). Mirrors the Java tier's
+/// `ScriptUtils.need` guard — already used for the on-chain state-section
+/// reader — applied here to the push-data reader used by constructor-arg
+/// extraction and artifact matching.
+fn need_hex_chars(hex: &str, offset: usize, chars: usize, what: &str) -> Result<(), String> {
+    if offset + chars > hex.len() {
+        let remaining = hex.len().saturating_sub(offset);
+        return Err(format!(
+            "read_script_element: truncated script — {} runs past the end \
+             (needs {} byte(s) at hex offset {}, only {} remain)",
+            what,
+            chars / 2,
+            offset,
+            remaining / 2,
+        ));
+    }
+    Ok(())
+}
+
 /// Read a single Bitcoin Script element (opcode + data) at the given hex offset.
 ///
-/// Returns the pushed data hex, total hex chars consumed, and the opcode byte.
-fn read_script_element(hex: &str, offset: usize) -> (String, usize, u8) {
-    if offset + 2 > hex.len() {
-        return (String::new(), 2, 0);
-    }
-    let opcode = u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap_or(0);
+/// Returns the pushed data hex, total hex chars consumed, and the opcode
+/// byte, or an `Err` (F-238) if the opcode byte itself, an OP_PUSHDATA1/2/4
+/// length prefix, or the declared push payload runs past the end of `hex`.
+fn read_script_element(hex: &str, offset: usize) -> Result<(String, usize, u8), String> {
+    need_hex_chars(hex, offset, 2, "push opcode")?;
+    let opcode = u8::from_str_radix(&hex[offset..offset + 2], 16)
+        .map_err(|_| format!("read_script_element: non-hex byte at hex offset {}", offset))?;
 
     if opcode == 0x00 {
-        return (String::new(), 2, opcode);
+        return Ok((String::new(), 2, opcode));
     }
     if opcode >= 0x01 && opcode <= 0x4b {
         let data_len = opcode as usize * 2;
-        let data = safe_slice(hex, offset + 2, data_len);
-        return (data, 2 + data_len, opcode);
+        need_hex_chars(hex, offset, 2 + data_len, "push payload")?;
+        return Ok((hex[offset + 2..offset + 2 + data_len].to_string(), 2 + data_len, opcode));
     }
     if opcode == 0x4c {
         // OP_PUSHDATA1
-        if offset + 4 > hex.len() { return (String::new(), 2, opcode); }
+        need_hex_chars(hex, offset, 4, "OP_PUSHDATA1 length prefix")?;
         let len = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let data_len = len * 2;
-        let data = safe_slice(hex, offset + 4, data_len);
-        return (data, 4 + data_len, opcode);
+        need_hex_chars(hex, offset, 4 + data_len, "OP_PUSHDATA1 payload")?;
+        return Ok((hex[offset + 4..offset + 4 + data_len].to_string(), 4 + data_len, opcode));
     }
     if opcode == 0x4d {
         // OP_PUSHDATA2
-        if offset + 6 > hex.len() { return (String::new(), 2, opcode); }
+        need_hex_chars(hex, offset, 6, "OP_PUSHDATA2 length prefix")?;
         let lo = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let hi = u8::from_str_radix(&hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
         let len = lo | (hi << 8);
         let data_len = len * 2;
-        let data = safe_slice(hex, offset + 6, data_len);
-        return (data, 6 + data_len, opcode);
+        need_hex_chars(hex, offset, 6 + data_len, "OP_PUSHDATA2 payload")?;
+        return Ok((hex[offset + 6..offset + 6 + data_len].to_string(), 6 + data_len, opcode));
     }
     if opcode == 0x4e {
         // OP_PUSHDATA4
-        if offset + 10 > hex.len() { return (String::new(), 2, opcode); }
+        need_hex_chars(hex, offset, 10, "OP_PUSHDATA4 length prefix")?;
         let b0 = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let b1 = u8::from_str_radix(&hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
         let b2 = u8::from_str_radix(&hex[offset + 6..offset + 8], 16).unwrap_or(0) as usize;
         let b3 = u8::from_str_radix(&hex[offset + 8..offset + 10], 16).unwrap_or(0) as usize;
         let len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
         let data_len = len * 2;
-        let data = safe_slice(hex, offset + 10, data_len);
-        return (data, 10 + data_len, opcode);
+        need_hex_chars(hex, offset, 10 + data_len, "OP_PUSHDATA4 payload")?;
+        return Ok((hex[offset + 10..offset + 10 + data_len].to_string(), 10 + data_len, opcode));
     }
 
     // All other opcodes
-    (String::new(), 2, opcode)
-}
-
-/// Safely slice a hex string, returning empty if out of bounds.
-fn safe_slice(hex: &str, start: usize, len: usize) -> String {
-    if start + len <= hex.len() {
-        hex[start..start + len].to_string()
-    } else {
-        String::new()
-    }
+    Ok((String::new(), 2, opcode))
 }
 
 /// Decode a Bitcoin Script number from hex (little-endian sign-magnitude).
@@ -292,7 +304,7 @@ pub fn extract_constructor_args(
 
     for slot in &sorted_slots {
         let adjusted_hex_offset = ((slot.byte_offset as isize) + cumulative_shift) as usize * 2;
-        let (data_hex, total_hex_chars, opcode) = read_script_element(&code_hex, adjusted_hex_offset);
+        let (data_hex, total_hex_chars, opcode) = read_script_element(&code_hex, adjusted_hex_offset)?;
         // Template placeholders are exactly 1 byte, so the shift contributed by
         // each occurrence is its encoded width minus that byte.
         cumulative_shift += (total_hex_chars as isize) / 2 - 1;
@@ -323,7 +335,7 @@ pub fn extract_constructor_args(
 /// code-part length, not the template's compile-time value, so it must equal
 /// the length of the code part being matched (everything before the state
 /// section, inscription envelope included).
-pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
+pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bool, String> {
     let mut code_hex = script_hex.to_string();
     if let Some(ref state_fields) = artifact.state_fields {
         if !state_fields.is_empty() {
@@ -337,7 +349,7 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
 
     let slots = match artifact.constructor_slots.as_ref() {
         Some(s) if !s.is_empty() => s,
-        _ => return code_hex == *template,
+        _ => return Ok(code_hex == *template),
     };
 
     // Deduplicate by byteOffset and sort. codeSepIndex placeholders are
@@ -389,24 +401,24 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
     for byte_offset in &placeholder_offsets {
         let slot_hex_offset = byte_offset * 2;
         if slot_hex_offset < template_pos || slot_hex_offset + 2 > template.len() {
-            return false;
+            return Ok(false);
         }
         let seg_len = slot_hex_offset - template_pos;
         if code_pos + seg_len > code_hex.len() {
-            return false;
+            return Ok(false);
         }
         if !segment_matches(template_pos, slot_hex_offset, code_pos) {
-            return false;
+            return Ok(false);
         }
         template_pos = slot_hex_offset + 2;
         let elem_offset = code_pos + seg_len;
-        let (_, total_hex_chars, _) = read_script_element(&code_hex, elem_offset);
+        let (_, total_hex_chars, _) = read_script_element(&code_hex, elem_offset)?;
         code_pos = elem_offset + total_hex_chars;
     }
 
-    code_pos <= code_hex.len()
+    Ok(code_pos <= code_hex.len()
         && code_hex.len() - code_pos == template.len() - template_pos
-        && segment_matches(template_pos, template.len(), code_pos)
+        && segment_matches(template_pos, template.len(), code_pos))
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +642,86 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // F-238 — read_script_element must refuse malformed provider-supplied
+    // scripts instead of silently truncating.
+    //
+    // Before this fix, a push whose declared length (a direct push opcode
+    // 0x01-0x4b, or an OP_PUSHDATA1/2/4 length prefix) ran past the
+    // remaining bytes was handed to `safe_slice`, which silently returned an
+    // EMPTY string instead of erroring — extract_constructor_args /
+    // matches_artifact then treat that as a valid (wrong) element, which
+    // corrupts every later slot's offset in the same walk.
+    //
+    // PROVES: extract_constructor_args / matches_artifact return Err for
+    // every vector in the brief's testable assertion, and a valid push of
+    // every pushdata flavour still decodes unchanged.
+    // DOES NOT PROVE: fail-closed behaviour of any other script reader in
+    // this crate.
+    // -----------------------------------------------------------------------
+
+    const F238_MALFORMED_VECTORS: &[&str] = &[
+        "",           // no opcode byte at all
+        "f",          // odd-length hex, can't even form an opcode byte
+        "05aabb",     // direct push declares 5 bytes, only 2 remain
+        "4c",         // OP_PUSHDATA1 with no length byte
+        "4c05aa",     // OP_PUSHDATA1 declares 5 bytes, only 1 remains
+        "4d0100",     // OP_PUSHDATA2 length prefix present, 0 of the 1 declared bytes remain
+        "4e01000000", // OP_PUSHDATA4 length prefix present, 0 of the 1 declared bytes remain
+    ];
+
+    fn f238_one_slot_artifact() -> RunarArtifact {
+        make_artifact(
+            "00ac",
+            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+        )
+    }
+
+    #[test]
+    fn extract_constructor_args_refuses_malformed_script_f238() {
+        let artifact = f238_one_slot_artifact();
+        for hex in F238_MALFORMED_VECTORS {
+            assert!(
+                extract_constructor_args(&artifact, hex).is_err(),
+                "extract_constructor_args({:?}): want Err, got Ok",
+                hex
+            );
+        }
+    }
+
+    #[test]
+    fn matches_artifact_refuses_malformed_script_f238() {
+        let artifact = f238_one_slot_artifact();
+        for hex in F238_MALFORMED_VECTORS {
+            assert!(
+                matches_artifact(&artifact, hex).is_err(),
+                "matches_artifact({:?}): want Err, got Ok",
+                hex
+            );
+        }
+    }
+
+    #[test]
+    fn valid_pushes_still_decode_unchanged_f238() {
+        let artifact = make_artifact(
+            "00ac",
+            vec![AbiParam { name: "x".to_string(), param_type: "ByteString".to_string(), fixed_array: None }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+        );
+        let cases: &[(&str, &str)] = &[
+            ("012a", "2a"),             // direct push
+            ("4c012a", "2a"),           // OP_PUSHDATA1 exact length
+            ("4d01002a", "2a"),         // OP_PUSHDATA2 exact length
+            ("4e010000002a", "2a"),     // OP_PUSHDATA4 exact length
+        ];
+        for (script, want) in cases {
+            let full = format!("{}ac", script);
+            let args = extract_constructor_args(&artifact, &full).unwrap();
+            assert_eq!(args.get("x"), Some(&SdkValue::Bytes(want.to_string())), "script {:?}", full);
+        }
+    }
+
     #[test]
     fn extract_args_reads_bytes() {
         let artifact = make_artifact(
@@ -722,8 +814,8 @@ mod tests {
             anf: None,
             unsound_primitives: None,
         };
-        assert!(matches_artifact(&artifact, "5151"));
-        assert!(!matches_artifact(&artifact, "5152"));
+        assert!(matches_artifact(&artifact, "5151").unwrap());
+        assert!(!matches_artifact(&artifact, "5152").unwrap());
     }
 
     #[test]
@@ -735,11 +827,11 @@ mod tests {
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         // Script with different arg (push 1 byte: 42) then OP_ADD
-        assert!(matches_artifact(&artifact, "012a93"));
+        assert!(matches_artifact(&artifact, "012a93").unwrap());
         // Script with arg=0 (OP_0) then OP_ADD
-        assert!(matches_artifact(&artifact, "0093"));
+        assert!(matches_artifact(&artifact, "0093").unwrap());
         // Different suffix should not match
-        assert!(!matches_artifact(&artifact, "012a94"));
+        assert!(!matches_artifact(&artifact, "012a94").unwrap());
     }
 
     #[test]
@@ -769,9 +861,9 @@ mod tests {
             unsound_primitives: None,
         };
         // Script with code + OP_RETURN + state data
-        assert!(matches_artifact(&artifact, "51516a0000000000000000"));
+        assert!(matches_artifact(&artifact, "51516a0000000000000000").unwrap());
         // Without state should still match
-        assert!(matches_artifact(&artifact, "5151"));
+        assert!(matches_artifact(&artifact, "5151").unwrap());
     }
 
 // -----------------------------------------------------------------------

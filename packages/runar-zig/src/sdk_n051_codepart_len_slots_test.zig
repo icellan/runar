@@ -124,7 +124,7 @@ test "N-051: matchesArtifact compares the pin field against the candidate's own 
     defer artifact.deinit();
 
     const locking = e.str("lockingScriptHex");
-    try std.testing.expect(script_utils.matchesArtifact(&artifact, locking));
+    try std.testing.expect(try script_utils.matchesArtifact(&artifact, locking));
 
     // Tamper with the deployed length field: no longer the code part's length.
     const code_len = e.int("codePartLen");
@@ -134,5 +134,5 @@ test "N-051: matchesArtifact compares the pin field against the candidate's own 
     const tampered = try allocator.dupe(u8, locking);
     defer allocator.free(tampered);
     @memcpy(tampered[at + 2 .. at + 4], "49");
-    try std.testing.expect(!script_utils.matchesArtifact(&artifact, tampered));
+    try std.testing.expect(!try script_utils.matchesArtifact(&artifact, tampered));
 }

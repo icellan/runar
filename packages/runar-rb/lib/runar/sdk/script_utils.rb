@@ -2,6 +2,7 @@
 
 require_relative 'state'
 require_relative 'types'
+require_relative 'errors'
 
 # Script utilities — constructor arg extraction and artifact matching.
 #
@@ -13,37 +14,69 @@ module Runar
     module ScriptUtils
       module_function
 
+      # Require +chars+ hex chars to be available from +offset+, else raise
+      # MalformedScriptError (F-238). Mirrors the Java tier's
+      # +ScriptUtils.need+ guard — already used for the on-chain
+      # state-section reader — applied here to the push-data reader used by
+      # constructor-arg extraction and artifact matching.
+      def need_hex_chars(hex, offset, chars, what)
+        return if offset + chars <= hex.length
+
+        remaining = [hex.length - offset, 0].max
+        raise Runar::SDK::MalformedScriptError,
+              "read_script_element: truncated script — #{what} runs past the end " \
+              "(needs #{chars / 2} byte(s) at hex offset #{offset}, only #{remaining / 2} remain)"
+      end
+
       # Read a single script element (opcode + push data) from a hex string.
       #
       # @param hex [String] full script hex
       # @param offset [Integer] hex-character offset to start reading
       # @return [Hash] { data_hex:, total_hex_chars:, opcode: }
+      # @raise [Runar::SDK::MalformedScriptError] (F-238) if the opcode byte
+      #   itself, an OP_PUSHDATA1/2/4 length prefix, or the declared push
+      #   payload runs past the end of +hex+ — a provider-supplied script is
+      #   untrusted input, and a truncated push must never come back as a
+      #   short, silently-wrong +data_hex+ (it would also desynchronise every
+      #   later slot's offset in the caller's walk).
       def read_script_element(hex, offset)
-        opcode = hex[offset, 2].to_i(16)
+        need_hex_chars(hex, offset, 2, 'push opcode')
+        opcode_str = hex[offset, 2]
+        raise Runar::SDK::MalformedScriptError,
+              "read_script_element: non-hex byte at hex offset #{offset}" unless opcode_str.match?(/\A[0-9a-fA-F]{2}\z/)
+
+        opcode = opcode_str.to_i(16)
 
         if opcode == 0x00
           { data_hex: '', total_hex_chars: 2, opcode: opcode }
         elsif opcode >= 0x01 && opcode <= 0x4B
           data_len = opcode * 2
-          { data_hex: hex[offset + 2, data_len] || '', total_hex_chars: 2 + data_len, opcode: opcode }
+          need_hex_chars(hex, offset, 2 + data_len, 'push payload')
+          { data_hex: hex[offset + 2, data_len], total_hex_chars: 2 + data_len, opcode: opcode }
         elsif opcode == 0x4C
+          need_hex_chars(hex, offset, 4, 'OP_PUSHDATA1 length prefix')
           len = hex[offset + 2, 2].to_i(16)
           data_len = len * 2
-          { data_hex: hex[offset + 4, data_len] || '', total_hex_chars: 4 + data_len, opcode: opcode }
+          need_hex_chars(hex, offset, 4 + data_len, 'OP_PUSHDATA1 payload')
+          { data_hex: hex[offset + 4, data_len], total_hex_chars: 4 + data_len, opcode: opcode }
         elsif opcode == 0x4D
+          need_hex_chars(hex, offset, 6, 'OP_PUSHDATA2 length prefix')
           lo = hex[offset + 2, 2].to_i(16)
           hi = hex[offset + 4, 2].to_i(16)
           len = lo | (hi << 8)
           data_len = len * 2
-          { data_hex: hex[offset + 6, data_len] || '', total_hex_chars: 6 + data_len, opcode: opcode }
+          need_hex_chars(hex, offset, 6 + data_len, 'OP_PUSHDATA2 payload')
+          { data_hex: hex[offset + 6, data_len], total_hex_chars: 6 + data_len, opcode: opcode }
         elsif opcode == 0x4E
+          need_hex_chars(hex, offset, 10, 'OP_PUSHDATA4 length prefix')
           b0 = hex[offset + 2, 2].to_i(16)
           b1 = hex[offset + 4, 2].to_i(16)
           b2 = hex[offset + 6, 2].to_i(16)
           b3 = hex[offset + 8, 2].to_i(16)
           len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
           data_len = len * 2
-          { data_hex: hex[offset + 10, data_len] || '', total_hex_chars: 10 + data_len, opcode: opcode }
+          need_hex_chars(hex, offset, 10 + data_len, 'OP_PUSHDATA4 payload')
+          { data_hex: hex[offset + 10, data_len], total_hex_chars: 10 + data_len, opcode: opcode }
         else
           { data_hex: '', total_hex_chars: 2, opcode: opcode }
         end

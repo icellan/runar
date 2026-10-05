@@ -134,7 +134,7 @@ func TestN051_CorruptedSlotOffsetRefused(t *testing.T) {
 
 func TestN051_MatchesArtifactChecksDeployedLengthField(t *testing.T) {
 	art, exp := loadTaffyTail(t)
-	if !MatchesArtifact(art, exp.LockingScriptHex) {
+	if !mustMatchesArtifact(t, art, exp.LockingScriptHex) {
 		t.Fatalf("MatchesArtifact must accept the honestly deployed TaffyTail locking script")
 	}
 
@@ -145,14 +145,14 @@ func TestN051_MatchesArtifactChecksDeployedLengthField(t *testing.T) {
 		t.Fatalf("test offset does not address the pin field")
 	}
 	tampered := exp.LockingScriptHex[:at] + "ffff0000" + exp.LockingScriptHex[at+8:]
-	if MatchesArtifact(art, tampered) {
+	if mustMatchesArtifact(t, art, tampered) {
 		t.Fatalf("MatchesArtifact must reject a script whose code-part length field is not the code-part length")
 	}
 
 	// A truncated trailing segment must not match either.
 	opRet := FindLastOpReturn(exp.LockingScriptHex)
 	short := exp.LockingScriptHex[:opRet-2] + exp.LockingScriptHex[opRet:]
-	if MatchesArtifact(art, short) {
+	if mustMatchesArtifact(t, art, short) {
 		t.Fatalf("MatchesArtifact must reject a code part shorter than the template")
 	}
 }

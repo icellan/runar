@@ -195,19 +195,19 @@ fn n051_corrupted_slot_offset_is_refused() {
 fn n051_matches_artifact_checks_the_deployed_length_field() {
     let a = artifact();
     let ls = RunarContract::new(a.clone(), args()).get_locking_script();
-    assert!(matches_artifact(&a, &ls), "the deployed script must match its artifact");
+    assert!(matches_artifact(&a, &ls).unwrap(), "the deployed script must match its artifact");
 
     let at = built_len_field_hex(&a);
     let code_len = expected()["codePartLen"].as_u64().unwrap() as usize;
     for wrong in [code_len - 1, code_len + 1, 1350 /* the template's compile-time value */] {
         let tampered = format!("{}{}{}", &ls[..at], le32(wrong), &ls[at + 8..]);
-        assert!(!matches_artifact(&a, &tampered), "length field {wrong} must not match");
+        assert!(!matches_artifact(&a, &tampered).unwrap(), "length field {wrong} must not match");
     }
 
     // A trailing segment of a different length must not match either.
     let op_return = code_len * 2;
     let extended = format!("{}51{}", &ls[..op_return], &ls[op_return..]);
-    assert!(!matches_artifact(&a, &extended));
+    assert!(!matches_artifact(&a, &extended).unwrap());
 }
 
 #[test]

@@ -30,6 +30,19 @@ module Runar
     # fund-safety gate fired, rather than matching on a generic RuntimeError.
     class BroadcastRejected < StandardError; end
 
+    # Raised when a provider-supplied script cannot be parsed as a sequence of
+    # Bitcoin Script push elements (F-238).
+    #
+    # ScriptUtils.read_script_element used to raise a bare
+    # ArgumentError/TypeError on an empty/out-of-range offset (`nil#to_i(16)`
+    # has no `to_i` that takes a radix) and silently return a SHORT data_hex
+    # when a push's declared length ran past the remaining bytes — which
+    # corrupts every later constructor slot's offset in the same walk. A
+    # script fetched via a Provider (from_txid / from_utxo) is untrusted
+    # input and needs a typed, specific rejection, not a crash or a quietly
+    # wrong value.
+    class MalformedScriptError < StandardError; end
+
     # Raise ScriptSizeExceededError if `script_hex` (hex-encoded) exceeds
     # `limit` bytes. Hex is 2 chars per byte; tolerate odd-length defensively.
     def self.assert_script_hex_under_limit(script_hex, limit, context)
