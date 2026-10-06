@@ -5,23 +5,33 @@ import (
 	"testing"
 )
 
-// rabinGolden is the fixed 20-op Rabin verification sequence:
+// rabinGolden is the fixed 29-op Rabin verification sequence:
 // (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey (numeric compare,
 // BUG-011; digest reduced mod pubKey, F-047)
 // AND 0 <= padding < 65536 (BUG-010). See _review/BUG-010-rfc.md.
+// pubKey, padding and sig are each read as unsigned LE integers (F-144).
 var rabinGolden = []struct {
 	op    string
 	code  string
 	value int64  // only meaningful for op="push" kind=bigint
 	bytes []byte // only meaningful for op="push" kind=bytes
 }{
+	{op: "push", bytes: []byte{0x00}}, // F-144: pubKey as unsigned
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
 	{op: "opcode", code: "OP_SWAP"},
+	{op: "push", bytes: []byte{0x00}}, // F-144: padding as unsigned
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
 	{op: "opcode", code: "OP_DUP"},
 	{op: "opcode", code: "OP_0"},
 	{op: "push", value: 65536},
 	{op: "opcode", code: "OP_WITHIN"},
 	{op: "opcode", code: "OP_VERIFY"},
 	{op: "opcode", code: "OP_ROT"},
+	{op: "push", bytes: []byte{0x00}}, // F-144: sig as unsigned
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
 	{op: "opcode", code: "OP_DUP"},
 	{op: "opcode", code: "OP_MUL"},
 	{op: "opcode", code: "OP_ADD"},

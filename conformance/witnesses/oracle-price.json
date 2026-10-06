@@ -2,7 +2,7 @@
   "fixture": "oracle-price",
   "_note": "Execution witness for verifyRabinSig. This fixture had NO witness until 2026-08-28, which is why the BUG-011 digest-encoding defect reached RC: the 72-fixture corpus pinned its BYTES across seven tiers, but nothing ever RAN the emitted script. It had no witness because `settle` calls checkSig and the differential harness could not express a signature; that limitation is lifted by the {\"signWith\"} marker, which fills the arg with a REAL secp256k1 signature over ScriptVM's own synthetic BIP-143 context.",
   "goldenHashes": {
-    "expected-script.hex": "f611d7cb907e25d749fe14adda780dd1b6f82f00c75a3e19d29591e12f79f781"
+    "expected-script.hex": "b02695a2e3ded56a6bc7897e8f8c3ae42bd326598422bd2a46f227263b8dec25"
   },
   "constructorArgs": {
     "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
@@ -47,6 +47,32 @@
       ],
       "expect": "reject",
       "note": "Valid signature over a DIFFERENT price: the oracle attestation must bind to the settled price."
+    },
+    {
+      "method": "settle",
+      "args": [
+        "50004n",
+        "0xc57ad35ff0e4671d2ba9997d92777fa8e94ef748a61246517c4b153e1c8e383f04",
+        "0xc8",
+        {
+          "signWith": "alice"
+        }
+      ],
+      "expect": "accept",
+      "note": "F-144 forced near-miss: honest Rabin signature over num2bin(50004, 8) with the signer's padding chosen as 200 and pushed raw as [0xC8] (high bit set). The interpreter reads unsigned 200; before F-144 the script read the Script number -72 and OP_WITHIN aborted."
+    },
+    {
+      "method": "settle",
+      "args": [
+        "50004n",
+        "0xc67ad35ff0e4671d2ba9997d92777fa8e94ef748a61246517c4b153e1c8e383f04",
+        "0xc8",
+        {
+          "signWith": "alice"
+        }
+      ],
+      "expect": "reject",
+      "note": "F-144 near-miss: sig+1 with the same high-bit padding. Both engines refuse it."
     }
   ]
 }

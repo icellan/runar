@@ -1286,10 +1286,22 @@ export class RunarInterpreter {
 
       case 'verifyRabinSig': {
         // Real Rabin verification: (sig² + padding) mod n === SHA256(msg) mod n
+        // F-144: the emitted script appends 0x00 to each of sig, padding and
+        // pubKey and applies OP_BIN2NUM, i.e. it reads each operand's STACK
+        // BYTES as an unsigned little-endian integer. Mirror that exactly: a raw
+        // unsigned push keeps its unsigned value, a non-negative Script number is
+        // unchanged, and a negative one is read as its bytes' unsigned value.
+        const rabinOperandBytes = (v: RunarValue): Uint8Array =>
+          v.kind === 'bigint' ? (v.scriptBytes ?? encodeScriptNumber(v.value)) : this.toBytes(v);
+        const unsignedLE = (b: Uint8Array): bigint => {
+          let r = 0n;
+          for (let i = b.length - 1; i >= 0; i--) r = (r << 8n) | BigInt(b[i]!);
+          return r;
+        };
         const rabinMsg = this.toBytes(args[0]!);
-        const rabinSig = this.toBigInt(args[1]!);
-        const rabinPad = this.toBytes(args[2]!);
-        const rabinPk = this.toBigInt(args[3]!);
+        const rabinSig = unsignedLE(rabinOperandBytes(args[1]!));
+        const rabinPad = rabinOperandBytes(args[2]!);
+        const rabinPk = unsignedLE(rabinOperandBytes(args[3]!));
         return { kind: 'boolean', value: rabinVerifyImpl(rabinMsg, rabinSig, rabinPad, rabinPk) };
       }
 

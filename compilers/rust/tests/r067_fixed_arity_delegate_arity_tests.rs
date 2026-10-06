@@ -299,7 +299,9 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // (func, arity, op count, FNV-1a of the op vector)
     // F-047: 34 -> 36 top-level ops (OP_ROT OP_MOD reduce the digest mod pubKey;
     // two in-place swaps become OP_OVER / OP_ROT).
-    ("verifyRabinSig", 4, 36, 0xaf209c5d39753afa),
+    // F-144: 36 -> 45 (<push 0x00> OP_CAT OP_BIN2NUM reads pubKey, padding and
+    // sig as unsigned LE integers).
+    ("verifyRabinSig", 4, 45, 0x7611e37581dfb01d),
     // R-135: +3 top-level ops for the exact-signature-length gate (OP_SIZE,
     // push 2144, OP_EQUALVERIFY). 5444 -> 5447, and the fingerprint moves with it.
     ("verifyWOTS", 3, 5447, 0xeb5c21ad8b9fcfb4),

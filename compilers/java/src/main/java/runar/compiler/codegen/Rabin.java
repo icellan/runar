@@ -23,11 +23,15 @@ import runar.compiler.ir.stack.StackOp;
  * to the top in argument order before invoking
  * {@link #emitVerifyRabinSig(Consumer)}.
  *
- * <p>The opcode sequence (post BUG-010, BUG-011, F-047) is:
+ * <p>The opcode sequence (post BUG-010, BUG-011, F-047, F-144) is:
  * <pre>
+ *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // pubkey as unsigned (F-144)
  *   OP_SWAP
+ *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // padding as unsigned (F-144)
  *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536 (BUG-010)
- *   OP_ROT OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+ *   OP_ROT
+ *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+ *   OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
  *   OP_ROT OP_SHA256 &lt;push 0x00&gt; OP_CAT OP_BIN2NUM
  *   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubkey (F-047)
  * </pre>
@@ -36,6 +40,13 @@ import runar.compiler.ir.stack.StackOp;
  * which is the standard Rabin signature check, and additionally enforces
  * the {@code 0 &lt;= padding &lt; 65536} range bound on-chain.
  * See {@code _review/BUG-010-rfc.md}.
+ *
+ * <p>OPERAND SIGN (F-144): off-chain verifiers read padding (and the native
+ * Go/Rust/Python/Ruby/Zig layers also sig and pubkey) as UNSIGNED
+ * little-endian bytes; OP_WITHIN / OP_MUL / OP_MOD read a Script number,
+ * whose last byte's high bit is the sign. Each operand gets an explicit
+ * 0x00 sign byte and OP_BIN2NUM, so a raw unsigned push keeps its unsigned
+ * value and a non-negative Script number is unchanged.
  */
 public final class Rabin {
 
@@ -63,7 +74,13 @@ public final class Rabin {
      * Stack on exit:  {@code [..., bool]} where 1 = signature valid, 0 = invalid.
      */
     public static void emitVerifyRabinSig(Consumer<StackOp> emit) {
+        emit.accept(new PushOp(PushValue.ofHex("00"))); // F-144: pubkey as unsigned
+        emit.accept(new OpcodeOp("OP_CAT"));
+        emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new OpcodeOp("OP_SWAP"));
+        emit.accept(new PushOp(PushValue.ofHex("00"))); // F-144: padding as unsigned
+        emit.accept(new OpcodeOp("OP_CAT"));
+        emit.accept(new OpcodeOp("OP_BIN2NUM"));
         // BUG-010 padding range check: assert 0 <= padding < 65536.
         emit.accept(new OpcodeOp("OP_DUP"));
         emit.accept(new OpcodeOp("OP_0"));
@@ -71,6 +88,9 @@ public final class Rabin {
         emit.accept(new OpcodeOp("OP_WITHIN"));
         emit.accept(new OpcodeOp("OP_VERIFY"));
         emit.accept(new OpcodeOp("OP_ROT"));
+        emit.accept(new PushOp(PushValue.ofHex("00"))); // F-144: sig as unsigned
+        emit.accept(new OpcodeOp("OP_CAT"));
+        emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new OpcodeOp("OP_DUP"));
         emit.accept(new OpcodeOp("OP_MUL"));
         emit.accept(new OpcodeOp("OP_ADD"));

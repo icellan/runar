@@ -2236,9 +2236,13 @@ sequence brings the four args to the top of the stack via
 
 then emits (`emitVerifyRabinSig`, `rabin-codegen.ts:53-70`):
 
+  <push 0x00>  OP_CAT  OP_BIN2NUM               -- F-144 pubKey as unsigned
   OP_SWAP
+  <push 0x00>  OP_CAT  OP_BIN2NUM               -- F-144 padding as unsigned
   OP_DUP  OP_0  <65536>  OP_WITHIN  OP_VERIFY   -- BUG-010 padding gate
-  OP_ROT  OP_DUP  OP_MUL  OP_ADD
+  OP_ROT
+  <push 0x00>  OP_CAT  OP_BIN2NUM               -- F-144 sig as unsigned
+  OP_DUP  OP_MUL  OP_ADD
   OP_OVER  OP_MOD  OP_ROT  OP_SHA256  <push 0x00>  OP_CAT  OP_BIN2NUM
   OP_ROT  OP_MOD  OP_NUMEQUAL                     -- F-047 digest mod pubKey
 
@@ -2265,14 +2269,26 @@ def lowerVerifyRabinSigOpsLive (sm : StackMap) (bindingName : String)
   -- opcode. `push (.bigint 0)` emits the same `0x00` byte the reference's
   -- `OP_0` does (`Script/Emit.encodePushBigInt`), and 65536 emits as
   -- `PUSH3(000001)`.
+  --
+  -- F-144: each operand is read as an UNSIGNED little-endian integer
+  -- (`<push 0x00> OP_CAT OP_BIN2NUM`) before its first numeric use.
   let body : List StackOp :=
-    [ StackOp.swap                    -- msg sig pubKey padding
+    [ StackOp.push (.bytes (ByteArray.mk #[0x00]))  -- F-144 pubKey as unsigned
+    , StackOp.opcode "OP_CAT"
+    , StackOp.opcode "OP_BIN2NUM"
+    , StackOp.swap                    -- msg sig pubKey padding
+    , StackOp.push (.bytes (ByteArray.mk #[0x00]))  -- F-144 padding as unsigned
+    , StackOp.opcode "OP_CAT"
+    , StackOp.opcode "OP_BIN2NUM"
     , StackOp.dup                     -- … padding padding
     , StackOp.push (.bigint 0)        -- … padding padding 0
     , StackOp.push (.bigint rabinPaddingLimit)  -- … 0 65536
     , StackOp.opcode "OP_WITHIN"      -- … padding (0 ≤ padding < 65536)
     , StackOp.opcode "OP_VERIFY"      -- msg sig pubKey padding
     , StackOp.rot                     -- msg pubKey padding sig
+    , StackOp.push (.bytes (ByteArray.mk #[0x00]))  -- F-144 sig as unsigned
+    , StackOp.opcode "OP_CAT"
+    , StackOp.opcode "OP_BIN2NUM"
     , StackOp.dup                     -- msg pubKey padding sig sig
     , StackOp.opcode "OP_MUL"         -- msg pubKey padding sig^2
     , StackOp.opcode "OP_ADD"         -- msg pubKey (sig^2+padding)

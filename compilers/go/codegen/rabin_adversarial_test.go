@@ -572,3 +572,99 @@ func TestEmitVerifyRabinSig_SmallModulusReducesDigest(t *testing.T) {
 		t.Fatalf("emitted Rabin script accepted a wrong padding (n=251)")
 	}
 }
+
+// buildRabinVerifyScriptRaw is buildRabinVerifyScript with every operand pushed
+// as the given RAW bytes, i.e. exactly as an SDK pushes a []byte / hex value.
+func buildRabinVerifyScriptRaw(msg, sig, padding, n []byte) []StackOp {
+	raw := func(b []byte) StackOp {
+		return StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: append([]byte(nil), b...)}}
+	}
+	ops := []StackOp{raw(msg), raw(sig), raw(padding), raw(n)}
+	EmitVerifyRabinSig(func(op StackOp) { ops = append(ops, op) })
+	ops = append(ops, StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	ops = append(ops, StackOp{Op: "opcode", Code: "OP_1"})
+	return ops
+}
+
+// TestEmitVerifyRabinSig_RawUnsignedOperandsWithHighBit (F-144): the native
+// Go verifier (packages/runar-go VerifyRabinSig) reads sig, padding and n as
+// UNSIGNED little-endian bytes. Pushed raw, a last byte >= 0x80 used to be the
+// Script-number sign bit: padding 200 = [0xC8] read as -72 and aborted the
+// OP_WITHIN gate, and a high-bit modulus or signature read as negative.
+//
+// Proves: on the go-sdk interpreter, honest signatures with (a) padding 200
+// pushed as [0xC8] and (b) a modulus and a signature whose raw last bytes have
+// the high bit set are accepted, and sig+1 is refused in both cases.
+// Does not prove: that a NEGATIVE Script-number operand keeps its meaning (it
+// is read as its bytes' unsigned value by design). The Mersenne-product key is
+// not secure; it only fixes the byte shape.
+func TestEmitVerifyRabinSig_RawUnsignedOperandsWithHighBit(t *testing.T) {
+	// (a) padding = 200 under the ~2^260 test key: pick a message for which
+	// SHA256(msg) - 200 is a square mod n, then take the root (the signer's
+	// choice of padding, not a forgery).
+	p, q, n := rabinAdvTestKey(t)
+	pad := big.NewInt(200)
+	var msg []byte
+	var sig *big.Int
+	for i := 0; i < 1000 && sig == nil; i++ {
+		m := []byte{'F', '1', '4', '4', byte(i), byte(i >> 8)}
+		h := sha256.Sum256(m)
+		hashBN := new(big.Int)
+		for j := 0; j < len(h); j++ {
+			hashBN.Add(hashBN, new(big.Int).Lsh(big.NewInt(int64(h[j])), uint(j*8)))
+		}
+		target := new(big.Int).Mod(new(big.Int).Sub(hashBN, pad), n)
+		if root := rabinAdvSqrtModPQ(target, p, q, n); root != nil && rabinAdvVerify(m, root, pad, n) {
+			msg, sig = m, root
+		}
+	}
+	if sig == nil {
+		t.Fatalf("no message with a padding-200 signature found — test setup broken")
+	}
+	scriptNum := func(v *big.Int) []byte {
+		b := bigIntToLEBytesAdv(v)
+		if b[len(b)-1]&0x80 != 0 {
+			b = append(b, 0x00)
+		}
+		return b
+	}
+	if err := BuildAndExecuteOps(buildRabinVerifyScriptRaw(msg, scriptNum(sig), []byte{0xC8}, scriptNum(n))); err != nil {
+		t.Fatalf("honest padding=200 pushed as [0xC8] was refused: %v", err)
+	}
+	sigPlus := new(big.Int).Add(sig, big.NewInt(1))
+	if err := BuildAndExecuteOps(buildRabinVerifyScriptRaw(msg, scriptNum(sigPlus), []byte{0xC8}, scriptNum(n))); err == nil {
+		t.Fatalf("sig+1 with padding [0xC8] was accepted")
+	}
+
+	// (b) n = (2^127-1)(2^89-1): 216 bits, most-significant LE byte 0xFF. Pick a
+	// message whose honest signature also ends in a high-bit byte.
+	one := big.NewInt(1)
+	p2 := new(big.Int).Sub(new(big.Int).Lsh(one, 127), one)
+	q2 := new(big.Int).Sub(new(big.Int).Lsh(one, 89), one)
+	n2 := new(big.Int).Mul(p2, q2)
+	nRaw := bigIntToLEBytesAdv(n2)
+	if nRaw[len(nRaw)-1] != 0xFF {
+		t.Fatalf("modulus last LE byte = %#x, want 0xFF", nRaw[len(nRaw)-1])
+	}
+	for i := 0; i < 1000; i++ {
+		m := []byte{'F', '1', '4', '4', 'n', byte(i), byte(i >> 8)}
+		s, pd := rabinAdvSign(t, m, p2, q2)
+		sRaw := bigIntToLEBytesAdv(s)
+		if sRaw[len(sRaw)-1]&0x80 == 0 || pd.Cmp(big.NewInt(128)) >= 0 {
+			continue
+		}
+		pRaw := bigIntToLEBytesAdv(pd)
+		if !rabinAdvVerify(m, s, pd, n2) {
+			t.Fatalf("off-chain verifier rejected a fresh signature — test setup broken")
+		}
+		if err := BuildAndExecuteOps(buildRabinVerifyScriptRaw(m, sRaw, pRaw, nRaw)); err != nil {
+			t.Fatalf("honest signature with raw high-bit n and sig was refused: %v", err)
+		}
+		bad := bigIntToLEBytesAdv(new(big.Int).Add(s, one))
+		if err := BuildAndExecuteOps(buildRabinVerifyScriptRaw(m, bad, pRaw, nRaw)); err == nil {
+			t.Fatalf("raw sig+1 under the high-bit modulus was accepted")
+		}
+		return
+	}
+	t.Fatalf("no message with a high-bit signature found — test setup broken")
+}

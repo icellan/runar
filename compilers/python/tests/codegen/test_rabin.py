@@ -20,16 +20,26 @@ from __future__ import annotations
 from runar_compiler.codegen.rabin import RABIN_PADDING_LIMIT, emit_verify_rabin_sig
 from runar_compiler.codegen.stack import StackOp
 
-# Position 3 is the push of 65536 (the BUG-010 padding limit); None means
-# "check push value at this index, not opcode code".
+# Position 9 is the push of 65536 (the BUG-010 padding limit); None means
+# "check push value at this index, not opcode code". Positions 0, 4 and 13
+# are the F-144 operand sign bytes, 23 the BUG-011 digest sign byte.
 RABIN_GOLDEN: list[str | None] = [
+    None,  # push 0x00 (F-144: pubKey as unsigned)
+    "OP_CAT",
+    "OP_BIN2NUM",
     "OP_SWAP",
+    None,  # push 0x00 (F-144: padding as unsigned)
+    "OP_CAT",
+    "OP_BIN2NUM",
     "OP_DUP",
     "OP_0",
     None,  # push 65536
     "OP_WITHIN",
     "OP_VERIFY",
     "OP_ROT",
+    None,  # push 0x00 (F-144: sig as unsigned)
+    "OP_CAT",
+    "OP_BIN2NUM",
     "OP_DUP",
     "OP_MUL",
     "OP_ADD",
@@ -56,17 +66,18 @@ def test_emit_verify_rabin_sig_byte_frozen_golden() -> None:
         if expected is None:
             assert op.op == "push", f"op {i}: expected push, got {op.op!r}"
             assert op.value is not None, f"op {i}: push must have value"
-            if i == 3:
+            if i == 9:
                 assert op.value.kind == "bigint", f"op {i}: push kind"
                 assert op.value.big_int == RABIN_PADDING_LIMIT, (
                     f"op {i}: BUG-010 padding limit"
                 )
             else:
-                # BUG-011: the explicit sign byte that makes the digest read as
-                # a non-negative Script number before the numeric compare.
+                # F-144 operand sign bytes and the BUG-011 digest sign byte:
+                # each makes the item below it read as a non-negative Script
+                # number.
                 assert op.value.kind == "bytes", f"op {i}: push kind"
                 assert op.value.bytes_val == b"\x00", (
-                    f"op {i}: BUG-011 digest sign byte"
+                    f"op {i}: sign byte"
                 )
         else:
             assert op.op == "opcode", f"op {i}: expected opcode, got {op.op!r}"

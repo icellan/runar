@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-06T07:08:36.368Z",
+  "generatedAt": "2026-10-06T08:16:08.309Z",
   "compilerVersion": "0.5.0",
   "entries": [
     {
@@ -303,10 +303,10 @@
       "bytes": 83
     },
     {
-      "hex": "53795880537a537a00537a537a537a537a7c760003000001a5697b76959378977ba801007e817b979d7c0350c300a06900ac",
+      "hex": "53795880537a537a00537a537a537a537a01007e817c01007e81760003000001a5697b01007e8176959378977ba801007e817b979d7c0350c300a06900ac",
       "source": "import { SmartContract, assert, PubKey, Sig, ByteString, RabinSig, RabinPubKey, checkSig, verifyRabinSig, num2bin } from 'runar-lang';\n\n/**\n * OraclePriceFeed — A stateless oracle contract for price-triggered payouts.\n *\n * Demonstrates the \"oracle pattern\" where off-chain data (e.g., asset prices)\n * is cryptographically signed by a trusted oracle and verified on-chain using\n * Rabin signatures. Rabin signatures are well-suited for Bitcoin Script because\n * verification requires only modular multiplication and comparison — operations\n * that are cheap in Script.\n *\n * The contract enforces three verification layers:\n *   1. Oracle verification — the price was genuinely signed by the trusted oracle's Rabin key\n *   2. Price threshold — the price must exceed 50,000 (application-specific business logic)\n *   3. Receiver authorization — the receiver must provide a valid ECDSA signature to claim the payout\n *\n * Use cases: derivatives/futures settlement, price-triggered payouts, conditional\n * escrow based on market data, insurance contracts.\n *\n * Contract model: Stateless (SmartContract). The oracle's Rabin public key and the\n * receiver's ECDSA public key are immutable constructor parameters.\n */\nclass OraclePriceFeed extends SmartContract {\n  /** Rabin public key of the trusted oracle (a large integer modulus, typically 128+ bytes). */\n  readonly oraclePubKey: RabinPubKey;\n  /** ECDSA compressed public key (33 bytes) of the authorized payout receiver. */\n  readonly receiver: PubKey;\n\n  constructor(oraclePubKey: RabinPubKey, receiver: PubKey) {\n    super(oraclePubKey, receiver);\n    this.oraclePubKey = oraclePubKey;\n    this.receiver = receiver;\n  }\n\n  /**\n   * Settle the contract by proving a price was signed by the oracle and exceeds\n   * the threshold. The receiver must also sign to authorize the payout.\n   *\n   * @param price - The oracle-attested price value (integer).\n   * @param rabinSig - Rabin signature produced by the oracle over the price (variable length).\n   * @param padding - Rabin signature padding bytes required for verification (variable length).\n   * @param sig - ECDSA signature (~72 bytes) from the receiver authorizing the spend.\n   */\n  public settle(price: bigint, rabinSig: RabinSig, padding: ByteString, sig: Sig) {\n    // Layer 1: Oracle verification — convert the price to its 8-byte little-endian\n    // canonical form (the format the oracle signs), then verify the Rabin signature\n    // against the oracle's public key using modular arithmetic.\n    const msg = num2bin(price, 8n);\n    assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));\n\n    // Layer 2: Price threshold — application-specific business logic requiring\n    // the oracle-attested price to exceed 50,000 before the payout is allowed.\n    assert(price > 50000n);\n\n    // Layer 3: Receiver authorization — the designated receiver must provide a\n    // valid ECDSA signature to claim the payout, preventing front-running.\n    assert(checkSig(sig, this.receiver));\n  }\n}\n",
       "origin": "examples/ts/oracle-price/OraclePriceFeed.runar.ts",
-      "bytes": 50
+      "bytes": 62
     },
     {
       "hex": "76a90088ac",

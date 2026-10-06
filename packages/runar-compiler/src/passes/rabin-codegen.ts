@@ -11,12 +11,24 @@
  *   — i.e. bottom→top: msg sig padding pubKey
  * Output: <boolean>
  *
- * The opcode sequence is a fixed 20 ops:
+ * The opcode sequence is a fixed 29 ops:
+ *   <push 0x00> OP_CAT OP_BIN2NUM                   // pubKey as unsigned (F-144)
  *   OP_SWAP
+ *   <push 0x00> OP_CAT OP_BIN2NUM                   // padding as unsigned (F-144)
  *   OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
- *   OP_ROT OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+ *   OP_ROT
+ *   <push 0x00> OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+ *   OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
  *   OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
  *   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
+ *
+ * OPERAND SIGN (F-144): every off-chain verifier reads padding (and the
+ * native Go/Rust/Python/Ruby/Zig layers also sig and pubKey) as UNSIGNED
+ * little-endian bytes, but OP_WITHIN / OP_MUL / OP_MOD read a Script number,
+ * whose last byte's high bit is the sign. padding = 200 pushed as [0xC8] read
+ * as -72 and aborted an honest spend. Each operand gets an explicit 0x00 sign
+ * byte and OP_BIN2NUM, so a raw unsigned push means its unsigned value, and a
+ * non-negative Script number (what the SDKs emit for a bigint) is unchanged.
  *
  * ENCODING (BUG-011): the final comparison must be NUMERIC, not byte-wise.
  * OP_MOD leaves its result in minimal Script-number encoding — 33 bytes
@@ -51,17 +63,31 @@ type Emit = (op: StackOp) => void;
 export const RABIN_PADDING_LIMIT = 65536n;
 
 /**
+ * F-144: read the stack top as an UNSIGNED little-endian integer. Appending a
+ * 0x00 sign byte and collapsing with OP_BIN2NUM turns a raw unsigned push into
+ * its unsigned value and leaves a non-negative Script number unchanged.
+ */
+function emitUnsignedOperand(emit: Emit): void {
+  emit({ op: 'push', value: new Uint8Array([0x00]) });
+  emit({ op: 'opcode', code: 'OP_CAT' });
+  emit({ op: 'opcode', code: 'OP_BIN2NUM' });
+}
+
+/**
  * Emit the Rabin signature verification opcode sequence.
  *
  * Stack before (bottom→top): msg sig padding pubKey
  * Script:
+ *   <push 0x00> OP_CAT OP_BIN2NUM    -- msg sig padding pubKey   (unsigned, F-144)
  *   OP_SWAP                          -- msg sig pubKey padding
+ *   <push 0x00> OP_CAT OP_BIN2NUM    -- msg sig pubKey padding   (unsigned, F-144)
  *   OP_DUP                           -- msg sig pubKey padding padding   (BUG-010 check)
  *   OP_0                             -- ... padding padding 0
  *   <push 65536>                     -- ... padding padding 0 65536
  *   OP_WITHIN                        -- ... padding (0<=padding<65536)
  *   OP_VERIFY                        -- msg sig pubKey padding           (abort if out of range)
  *   OP_ROT                           -- msg pubKey padding sig
+ *   <push 0x00> OP_CAT OP_BIN2NUM    -- msg pubKey padding sig   (unsigned, F-144)
  *   OP_DUP OP_MUL                    -- msg pubKey padding sig^2
  *   OP_ADD                           -- msg pubKey (sig^2+padding)
  *   OP_OVER                          -- msg pubKey (sig^2+padding) pubKey
@@ -77,7 +103,9 @@ export const RABIN_PADDING_LIMIT = 65536n;
  * Stack after: <boolean>
  */
 export function emitVerifyRabinSig(emit: Emit): void {
+  emitUnsignedOperand(emit); // pubKey (F-144)
   emit({ op: 'opcode', code: 'OP_SWAP' });
+  emitUnsignedOperand(emit); // padding (F-144)
   // BUG-010 padding range check: assert 0 <= padding < 65536.
   emit({ op: 'opcode', code: 'OP_DUP' });
   emit({ op: 'opcode', code: 'OP_0' });
@@ -85,6 +113,7 @@ export function emitVerifyRabinSig(emit: Emit): void {
   emit({ op: 'opcode', code: 'OP_WITHIN' });
   emit({ op: 'opcode', code: 'OP_VERIFY' });
   emit({ op: 'opcode', code: 'OP_ROT' });
+  emitUnsignedOperand(emit); // sig (F-144)
   emit({ op: 'opcode', code: 'OP_DUP' });
   emit({ op: 'opcode', code: 'OP_MUL' });
   emit({ op: 'opcode', code: 'OP_ADD' });

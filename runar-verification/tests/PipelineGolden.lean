@@ -610,15 +610,22 @@ the constants had been honest all along.
 -- regen (`RUNAR_VERIFICATION_REGEN=1`): all three came back `[fresh]` and each
 -- byte-equals its expected-script.hex (none calls verifyRabinSig), so only
 -- their fingerprints move.
+-- 2026-10-06 (F-144 / R46): the model fingerprint moved to
+-- v1:63f:7172593b:14349def5c7b5ac0 (Stack/Lower.lean + Stack/Rabin.lean:
+-- verifyRabinSig reads pubKey, padding and sig as unsigned LE integers, a
+-- 29-op body). A full live regen (`RUNAR_VERIFICATION_REGEN=1`) returned all
+-- three `.regenLive` anchors `[fresh]` and byte-exact against their
+-- expected-script.hex (none calls verifyRabinSig), so only their fingerprints
+-- move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:63f:7166825b:6208f82c15850ef6"⟩,
+  ⟨"babybear", .regenLive, "v1:63f:7172593b:14349def5c7b5ac0"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:63f:7166825b:6208f82c15850ef6"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:63f:7172593b:14349def5c7b5ac0"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -641,7 +648,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:63f:7166825b:6208f82c15850ef6"⟩
+  ⟨"state-covenant", .regenLive, "v1:63f:7172593b:14349def5c7b5ac0"⟩
 ]
 
 /--
