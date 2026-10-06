@@ -1190,7 +1190,11 @@ export class RunarInterpreter {
         const val = this.toBigInt(args[0]!);
         const lo = this.toBigInt(args[1]!);
         const hi = this.toBigInt(args[2]!);
-        return { kind: 'bigint', value: val < lo ? lo : val > hi ? hi : val };
+        // The compiled script is `<val> <lo> OP_MAX <hi> OP_MIN`, i.e.
+        // min(max(val, lo), hi) — which differs from `val < lo ? lo : ...`
+        // once lo > hi (N-029).
+        const m = val > lo ? val : lo;
+        return { kind: 'bigint', value: m < hi ? m : hi };
       }
 
       case 'sign': {
@@ -1252,7 +1256,10 @@ export class RunarInterpreter {
         let b = this.toBigInt(args[1]!);
         a = a < 0n ? -a : a;
         b = b < 0n ? -b : b;
-        while (b !== 0n) {
+        // The compiled script unrolls exactly 256 Euclid steps
+        // (`05-stack-lower.ts#lowerGcd`) and returns `a` after them, which is
+        // a partial remainder, not the gcd, when 256 are not enough (N-029).
+        for (let i = 0; i < 256 && b !== 0n; i++) {
           const temp = b;
           b = a % b;
           a = temp;
@@ -1272,7 +1279,9 @@ export class RunarInterpreter {
         if (n <= 0n) return { kind: 'bigint', value: 0n };
         let bits = 0n;
         let val = n;
-        while (val > 1n) { val >>= 1n; bits++; }
+        // The compiled script unrolls exactly 64 halvings
+        // (`05-stack-lower.ts#lowerLog2`), so it saturates at 64 (N-029).
+        while (val > 1n && bits < 64n) { val >>= 1n; bits++; }
         return { kind: 'bigint', value: bits };
       }
 

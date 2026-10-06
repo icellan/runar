@@ -423,6 +423,14 @@ public final class ConstantFold {
     private static final BigInteger POW_FOLD_EXPONENT_LIMIT =
             BigInteger.valueOf(StackLower.POW_EXPONENT_LIMIT);
 
+    /**
+     * Unroll counts of the emitted {@code log2} and {@code gcd} loops
+     * ({@link StackLower}). Past them the script returns a saturated / partial
+     * value, not the mathematical one, so the folder declines there (N-029).
+     */
+    private static final int LOG2_FOLD_ITERATIONS = 64;
+    private static final int GCD_FOLD_ITERATIONS = 256;
+
     private static ConstSlot evalBuiltinCall(String funcName, List<ConstSlot> args) {
         // All math builtins require integer args.
         List<BigInteger> ints = new ArrayList<>(args.size());
@@ -454,10 +462,10 @@ public final class ConstantFold {
             }
             case "clamp": {
                 if (ints.size() != 3) return null;
+                // The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+                // That differs from `val < lo ? lo : ...` once lo > hi (N-029).
                 BigInteger val = ints.get(0), lo = ints.get(1), hi = ints.get(2);
-                if (val.compareTo(lo) < 0) return ConstSlot.ofInt(lo);
-                if (val.compareTo(hi) > 0) return ConstSlot.ofInt(hi);
-                return ConstSlot.ofInt(val);
+                return ConstSlot.ofInt(val.max(lo).min(hi));
             }
             case "sign": {
                 if (ints.size() != 1) return null;
@@ -508,7 +516,17 @@ public final class ConstantFold {
             }
             case "gcd": {
                 if (ints.size() != 2) return null;
-                return ConstSlot.ofInt(ints.get(0).gcd(ints.get(1)));
+                // The script runs at most GCD_FOLD_ITERATIONS Euclid steps; if
+                // that is not enough it returns a partial remainder, not the
+                // gcd. Decline there (N-029).
+                BigInteger a = ints.get(0).abs(), b = ints.get(1).abs();
+                for (int i = 0; i < GCD_FOLD_ITERATIONS && b.signum() != 0; i++) {
+                    BigInteger t = b;
+                    b = a.remainder(b);
+                    a = t;
+                }
+                if (b.signum() != 0) return null;
+                return ConstSlot.ofInt(a);
             }
             case "divmod": {
                 if (ints.size() != 2 || ints.get(1).signum() == 0) return null;
@@ -518,6 +536,9 @@ public final class ConstantFold {
                 if (ints.size() != 1) return null;
                 BigInteger n = ints.get(0);
                 if (n.signum() <= 0) return ConstSlot.ofInt(BigInteger.ZERO);
+                // The script halves at most LOG2_FOLD_ITERATIONS times, so it
+                // saturates at 64 for n >= 2^65. Decline there (N-029).
+                if (n.bitLength() - 1 > LOG2_FOLD_ITERATIONS) return null;
                 return ConstSlot.ofInt(BigInteger.valueOf(n.bitLength() - 1));
             }
             case "bool": {

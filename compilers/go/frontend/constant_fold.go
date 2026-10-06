@@ -24,6 +24,15 @@ import (
 // OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
 const powFoldExponentLimit = 32
 
+// log2FoldIterations and gcdFoldIterations are the unroll counts of the
+// emitted log2 and gcd loops (codegen/stack.go lowerLog2 / lowerGcd). Past them
+// the script returns a saturated / partial value, so the folder declines
+// (N-029).
+const (
+	log2FoldIterations = 64
+	gcdFoldIterations  = 256
+)
+
 type constKind int
 
 const (
@@ -275,14 +284,17 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 		if len(bigArgs) != 3 {
 			return nil
 		}
+		// The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+		// That differs from `val < lo ? lo : ...` once lo > hi (N-029).
 		val, lo, hi := bigArgs[0], bigArgs[1], bigArgs[2]
-		if val.Cmp(lo) < 0 {
-			return &constValue{kind: constBigInt, bigint: new(big.Int).Set(lo)}
+		m := val
+		if lo.Cmp(m) > 0 {
+			m = lo
 		}
-		if val.Cmp(hi) > 0 {
-			return &constValue{kind: constBigInt, bigint: new(big.Int).Set(hi)}
+		if hi.Cmp(m) < 0 {
+			m = hi
 		}
-		return &constValue{kind: constBigInt, bigint: new(big.Int).Set(val)}
+		return &constValue{kind: constBigInt, bigint: new(big.Int).Set(m)}
 
 	case "sign":
 		if len(bigArgs) != 1 {
@@ -357,9 +369,18 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 		if len(bigArgs) != 2 {
 			return nil
 		}
+		// The script runs at most gcdFoldIterations Euclid steps
+		// (codegen/stack.go lowerGcd); if that is not enough it returns a
+		// partial remainder, not the gcd. Decline there (N-029).
 		a := new(big.Int).Abs(bigArgs[0])
 		b := new(big.Int).Abs(bigArgs[1])
-		return &constValue{kind: constBigInt, bigint: new(big.Int).GCD(nil, nil, a, b)}
+		for i := 0; i < gcdFoldIterations && b.Sign() != 0; i++ {
+			a, b = b, new(big.Int).Rem(a, b)
+		}
+		if b.Sign() != 0 {
+			return nil
+		}
+		return &constValue{kind: constBigInt, bigint: a}
 
 	case "divmod":
 		if len(bigArgs) != 2 || bigArgs[1].Sign() == 0 {
@@ -376,6 +397,12 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 			return &constValue{kind: constBigInt, bigint: big.NewInt(0)}
 		}
 		bits := int64(n.BitLen() - 1)
+		// The script halves at most log2FoldIterations times
+		// (codegen/stack.go lowerLog2), so it saturates at 64 for n >= 2^65.
+		// Decline there (N-029).
+		if bits > log2FoldIterations {
+			return nil
+		}
 		return &constValue{kind: constBigInt, bigint: big.NewInt(bits)}
 
 	case "bool":

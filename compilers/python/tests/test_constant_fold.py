@@ -782,3 +782,46 @@ class TestLargeIntegerPrecision:
         ])])
         result = fold_constants(prog)
         _assert_load_const_int(result.methods[0].body[2].value, -1)
+
+
+# ---------------------------------------------------------------------------
+# N-029: folded values must be what the emitted script computes
+# ---------------------------------------------------------------------------
+# clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
+# differs from max(lo, min(v, hi)) once lo > hi; log2 unrolls 64 halvings and
+# gcd 256 Euclid steps, so past those the script returns a saturated / partial
+# value and the folder must decline. Expected values were executed on @bsv/sdk
+# Spend.validate by
+# packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+# Proves the Python folder's value/decline decisions; not the script itself.
+
+def _n029_fib(n: int) -> int:
+    a, c = 0, 1
+    for _ in range(n):
+        a, c = c, a + c
+    return a
+
+
+def _n029_fold(args: list[int], func: str) -> ANFValue:
+    body = [_b(f"t{i}", _mk_int(a)) for i, a in enumerate(args)]
+    body.append(_b("r", _call_func(func, [f"t{i}" for i in range(len(args))])))
+    r = fold_constants(_make_program([_make_method("m", body)]))
+    return r.methods[0].body[-1].value
+
+
+class TestN029FoldMatchesScript:
+    def test_clamp_lo_above_hi_matches_script(self):
+        _assert_load_const_int(_n029_fold([5, 10, 0], "clamp"), 0)
+        _assert_load_const_int(_n029_fold([0, 3, -3], "clamp"), -3)
+        _assert_load_const_int(_n029_fold([-20, 10, 0], "clamp"), 0)
+
+    def test_log2_declines_past_64_halvings(self):
+        _assert_load_const_int(_n029_fold([1 << 64], "log2"), 64)
+        _assert_load_const_int(_n029_fold([(1 << 65) - 1], "log2"), 64)
+        _assert_not_folded(_n029_fold([1 << 65], "log2"), "call")
+        _assert_not_folded(_n029_fold([1 << 70], "log2"), "call")
+
+    def test_gcd_declines_past_256_steps(self):
+        _assert_load_const_int(_n029_fold([_n029_fib(258), _n029_fib(257)], "gcd"), 1)
+        _assert_not_folded(_n029_fold([_n029_fib(259), _n029_fib(258)], "gcd"), "call")
+        _assert_not_folded(_n029_fold([_n029_fib(300), _n029_fib(299)], "gcd"), "call")

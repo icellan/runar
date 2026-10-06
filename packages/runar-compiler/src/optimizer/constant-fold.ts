@@ -37,6 +37,15 @@ const SQRT_DOMAIN_LIMIT = 1n << 495n;
  */
 const POW_EXPONENT_LIMIT = 32n;
 
+/**
+ * Unroll counts of the emitted `log2` and `gcd` loops
+ * (`passes/05-stack-lower.ts#lowerLog2` / `#lowerGcd`). Past them the script
+ * returns a saturated / partial value, not the mathematical one, so the
+ * folder declines there and leaves the script to compute it (N-029).
+ */
+const LOG2_ITERATIONS = 64n;
+const GCD_ITERATIONS = 256;
+
 // ---------------------------------------------------------------------------
 // Binary operation evaluation
 // ---------------------------------------------------------------------------
@@ -162,7 +171,10 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'clamp': {
       if (bigintArgs.length !== 3) return null;
       const [val, lo, hi] = bigintArgs as [bigint, bigint, bigint];
-      return val < lo ? lo : val > hi ? hi : val;
+      // The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+      // That differs from `val < lo ? lo : ...` once lo > hi (N-029).
+      const m = val > lo ? val : lo;
+      return m < hi ? m : hi;
     }
     case 'sign': {
       if (bigintArgs.length !== 1) return null;
@@ -217,7 +229,10 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
       if (bigintArgs.length !== 2) return null;
       let a = bigintArgs[0]! < 0n ? -bigintArgs[0]! : bigintArgs[0]!;
       let b = bigintArgs[1]! < 0n ? -bigintArgs[1]! : bigintArgs[1]!;
-      while (b !== 0n) { const t = b; b = a % b; a = t; }
+      // The script runs at most GCD_ITERATIONS Euclid steps; if that is not
+      // enough it returns a partial remainder. Decline there (N-029).
+      for (let i = 0; i < GCD_ITERATIONS && b !== 0n; i++) { const t = b; b = a % b; a = t; }
+      if (b !== 0n) return null;
       return a;
     }
     case 'divmod': {
@@ -231,6 +246,9 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
       let bits = 0n;
       let val = n;
       while (val > 1n) { val >>= 1n; bits++; }
+      // The script halves at most LOG2_ITERATIONS times, so it saturates at
+      // 64 for n >= 2^65. Decline there (N-029).
+      if (bits > LOG2_ITERATIONS) return null;
       return bits;
     }
     case 'bool': {

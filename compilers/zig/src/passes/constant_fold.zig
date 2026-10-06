@@ -25,6 +25,12 @@ const Allocator = std.mem.Allocator;
 /// multiplies and enforces the bound with `OP_DUP <0> <33> OP_WITHIN
 /// OP_VERIFY`) and with the reference interpreter.
 const pow_fold_exponent_limit: u32 = 32;
+
+/// Unroll counts of the emitted `log2` and `gcd` loops (`passes/stack_lower.zig`).
+/// Past them the script returns a saturated / partial value, not the
+/// mathematical one, so the folder declines there (N-029).
+const log2_fold_iterations: usize = 64;
+const gcd_fold_iterations: usize = 256;
 const ConstValue = types.ConstValue;
 const ANFValue = types.ANFValue;
 const ANFBinding = types.ANFBinding;
@@ -318,13 +324,14 @@ fn evalBuiltinCall(
             return try const_arith.store(allocator, r);
         },
         .builtin_clamp => {
-            // max(lo, min(val, hi))
+            // The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+            // That differs from max(lo, min(val, hi)) once lo > hi (N-029).
             if (count != 3) return null;
             const val = big_args[0];
             const lo = big_args[1];
             const hi = big_args[2];
-            const upper: usize = if (const_arith.order(val, hi) == .gt) 2 else 0;
-            const clamped = if (const_arith.order(big_args[upper], lo) == .lt) lo else big_args[upper];
+            const m = if (const_arith.order(val, lo) == .gt) val else lo;
+            const clamped = if (const_arith.order(m, hi) == .lt) m else hi;
             return try const_arith.store(allocator, clamped);
         },
         .builtin_sign => {
@@ -417,12 +424,17 @@ fn evalBuiltinCall(
             try b.copy(big_args[1].toConst());
             b.abs();
 
-            while (!const_arith.isZero(b)) {
+            // The script runs at most gcd_fold_iterations Euclid steps; if
+            // that is not enough it returns a partial remainder, not the gcd.
+            // Decline there (N-029).
+            var step: usize = 0;
+            while (step < gcd_fold_iterations and !const_arith.isZero(b)) : (step += 1) {
                 var r = try const_arith.remTrunc(allocator, a, b);
                 defer r.deinit();
                 try a.copy(b.toConst());
                 try b.copy(r.toConst());
             }
+            if (!const_arith.isZero(b)) return null;
             return try const_arith.store(allocator, a);
         },
         .builtin_log2 => {
@@ -432,6 +444,9 @@ fn evalBuiltinCall(
             if (const_arith.isZero(n) or const_arith.isNegative(n)) return .{ .integer = 0 };
             // Bit length - 1. `bitCountAbs` is exact for a positive value.
             const bits = n.toConst().bitCountAbs();
+            // The script halves at most log2_fold_iterations times, so it
+            // saturates at 64 for n >= 2^65. Decline there (N-029).
+            if (bits - 1 > log2_fold_iterations) return null;
             return .{ .integer = @as(i128, @intCast(bits - 1)) };
         },
         .builtin_bool => {
@@ -1180,6 +1195,68 @@ test "fold builtin log2(1024) = 10" {
     const result = try foldBindings(allocator, &bindings, &env);
     defer allocator.free(result);
     try expectConst(.{ .integer = 10 }, result[1]);
+}
+
+// N-029: every folded value must be what the emitted script computes.
+// clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
+// differs from max(lo, min(v, hi)) once lo > hi; log2 unrolls 64 halvings and
+// gcd 256 Euclid steps, so past those the script returns a saturated / partial
+// value and the folder must decline. Expected values were executed on @bsv/sdk
+// Spend.validate by
+// packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+// Proves the Zig folder's value/decline decisions; not the script itself.
+const n029_fib257 = "229265413057075367692743352179590077832064383222590237";
+const n029_fib258 = "370959230771131880927453318055001997489772178180790104";
+const n029_fib259 = "600224643828207248620196670234592075321836561403380341";
+
+/// Fold `func(args...)` over all-constant args; returns the folded value of
+/// the call binding, or null when the folder declined.
+fn n029Fold(arena: Allocator, func: []const u8, args: []const ConstValue) !?ConstValue {
+    var env = ConstEnv.init(arena);
+    const names = [_][]const u8{ "t0", "t1", "t2" };
+    var bindings: [4]ANFBinding = undefined;
+    for (args, 0..) |a, i| bindings[i] = makeBinding(names[i], makeLoadConst(a));
+    bindings[args.len] = makeBinding("r", .{ .call = .{ .func = func, .args = names[0..args.len] } });
+    const result = try foldBindings(arena, bindings[0 .. args.len + 1], &env);
+    return anfValueToConst(result[args.len].value);
+}
+
+test "N-029 clamp with lo > hi folds to min(max(v, lo), hi), as the script computes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { args: [3]i128, want: i128 }{
+        .{ .args = .{ 5, 10, 0 }, .want = 0 },
+        .{ .args = .{ 0, 3, -3 }, .want = -3 },
+        .{ .args = .{ -20, 10, 0 }, .want = 0 },
+    };
+    for (cases) |c| {
+        const args = [_]ConstValue{ .{ .integer = c.args[0] }, .{ .integer = c.args[1] }, .{ .integer = c.args[2] } };
+        const got = (try n029Fold(a, "clamp", &args)) orelse return error.TestExpectedEqual;
+        try testing.expect(got.eql(.{ .integer = c.want }));
+    }
+}
+
+test "N-029 log2 declines past the script's 64 halvings" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const one: i128 = 1;
+    const got64 = (try n029Fold(a, "log2", &.{.{ .integer = one << 64 }})) orelse return error.TestExpectedEqual;
+    try testing.expect(got64.eql(.{ .integer = 64 }));
+    const got64b = (try n029Fold(a, "log2", &.{.{ .integer = (one << 65) - 1 }})) orelse return error.TestExpectedEqual;
+    try testing.expect(got64b.eql(.{ .integer = 64 }));
+    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = one << 65 }})) == null);
+    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = one << 70 }})) == null);
+}
+
+test "N-029 gcd declines past the script's 256 Euclid steps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const exact = (try n029Fold(a, "gcd", &.{ .{ .big_integer = n029_fib258 }, .{ .big_integer = n029_fib257 } })) orelse return error.TestExpectedEqual;
+    try testing.expect(exact.eql(.{ .integer = 1 }));
+    try testing.expect((try n029Fold(a, "gcd", &.{ .{ .big_integer = n029_fib259 }, .{ .big_integer = n029_fib258 } })) == null);
 }
 
 test "fold builtin bool(0) = false" {

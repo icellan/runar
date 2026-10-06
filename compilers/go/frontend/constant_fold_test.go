@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -741,6 +742,57 @@ func TestFoldConstants_Clamp(t *testing.T) {
 	})
 	result := foldConstantsOnly(p)
 	assertLoadConstBigInt(t, result.Methods[0].Body[3], 10)
+}
+
+// N-029: every folded value must be what the emitted script computes.
+// clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
+// differs from `v < lo ? lo : ...` once lo > hi; log2 unrolls 64 halvings and
+// gcd 256 Euclid steps, so past those the script returns a saturated / partial
+// value and the folder must decline. Expected values were executed on
+// @bsv/sdk Spend.validate by
+// packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+// Proves the Go folder's value/decline decisions; not the script itself.
+func n029Fib(n int) *big.Int {
+	a, c := big.NewInt(0), big.NewInt(1)
+	for i := 0; i < n; i++ {
+		a, c = c, new(big.Int).Add(a, c)
+	}
+	return a
+}
+
+func n029Fold(args []*big.Int, fn string) ir.ANFBinding {
+	body := make([]ir.ANFBinding, 0, len(args)+1)
+	names := make([]string, 0, len(args))
+	for i, a := range args {
+		n := fmt.Sprintf("t%d", i)
+		body = append(body, b(n, makeLoadConstInt(a)))
+		names = append(names, n)
+	}
+	body = append(body, b("r", callFunc(fn, names)))
+	p := makeTestANFProgram([]ir.ANFMethod{makeTestMethod("m", body)})
+	out := foldConstantsOnly(p).Methods[0].Body
+	return out[len(out)-1]
+}
+
+func TestFoldConstants_N029_ClampLoAboveHiMatchesScript(t *testing.T) {
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(5), big.NewInt(10), big.NewInt(0)}, "clamp"), 0)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(0), big.NewInt(3), big.NewInt(-3)}, "clamp"), -3)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(-20), big.NewInt(10), big.NewInt(0)}, "clamp"), 0)
+}
+
+func TestFoldConstants_N029_Log2DeclinesPast64Halvings(t *testing.T) {
+	two := big.NewInt(2)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(64), nil)}, "log2"), 64)
+	max64 := new(big.Int).Sub(new(big.Int).Exp(two, big.NewInt(65), nil), big.NewInt(1))
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{max64}, "log2"), 64)
+	assertNotFolded(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(65), nil)}, "log2"), "call")
+	assertNotFolded(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(70), nil)}, "log2"), "call")
+}
+
+func TestFoldConstants_N029_GcdDeclinesPast256Steps(t *testing.T) {
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{n029Fib(258), n029Fib(257)}, "gcd"), 1)
+	assertNotFolded(t, n029Fold([]*big.Int{n029Fib(259), n029Fib(258)}, "gcd"), "call")
+	assertNotFolded(t, n029Fold([]*big.Int{n029Fib(300), n029Fib(299)}, "gcd"), "call")
 }
 
 func TestFoldConstants_Sign(t *testing.T) {

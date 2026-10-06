@@ -21,6 +21,12 @@ module RunarCompiler
       # OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
       POW_FOLD_EXPONENT_LIMIT = 32
 
+      # Unroll counts of the emitted log2 and gcd loops (codegen/stack.rb).
+      # Past them the script returns a saturated / partial value, not the
+      # mathematical one, so the folder declines there (N-029).
+      LOG2_FOLD_ITERATIONS = 64
+      GCD_FOLD_ITERATIONS = 256
+
       # -----------------------------------------------------------------
       # Constant environment
       # -----------------------------------------------------------------
@@ -188,7 +194,9 @@ module RunarCompiler
         when "clamp"
           return nil unless int_args.size == 3
           val, lo, hi = int_args[0], int_args[1], int_args[2]
-          return ["int", [lo, [val, hi].min].max]
+          # The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+          # That differs from [lo, [val, hi].min].max once lo > hi (N-029).
+          return ["int", [[val, lo].max, hi].min]
 
         when "sign"
           return nil unless int_args.size == 1
@@ -248,7 +256,13 @@ module RunarCompiler
         when "gcd"
           return nil unless int_args.size == 2
           a, b = int_args[0].abs, int_args[1].abs
-          a, b = b, a % b while b != 0
+          # The script runs at most GCD_FOLD_ITERATIONS Euclid steps; if that
+          # is not enough it returns a partial remainder. Decline (N-029).
+          GCD_FOLD_ITERATIONS.times do
+            break if b == 0
+            a, b = b, a % b
+          end
+          return nil if b != 0
           return ["int", a]
 
         when "divmod"
@@ -259,6 +273,9 @@ module RunarCompiler
           return nil unless int_args.size == 1
           n = int_args[0]
           return ["int", 0] if n <= 0
+          # The script halves at most LOG2_FOLD_ITERATIONS times, so it
+          # saturates at 64 for n >= 2**65. Decline there (N-029).
+          return nil if n.bit_length - 1 > LOG2_FOLD_ITERATIONS
           return ["int", n.bit_length - 1]
 
         when "bool"

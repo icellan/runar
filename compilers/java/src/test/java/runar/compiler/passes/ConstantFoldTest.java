@@ -583,4 +583,62 @@ class ConstantFoldTest {
         assertCollisionProbeFoldsClean("LoopStale", "t2");
     }
 
+
+    // ---------------------------------------------------------------
+    // N-029: folded values must be what the emitted script computes.
+    // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi),
+    // which differs from `v < lo ? lo : ...` once lo > hi; log2 unrolls 64
+    // halvings and gcd 256 Euclid steps, so past those the script returns a
+    // saturated / partial value and the folder must decline. Expected values
+    // were executed on @bsv/sdk Spend.validate by
+    // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+    // Proves the Java folder's value/decline decisions; not the script itself.
+    // ---------------------------------------------------------------
+
+    private static BigInteger n029Fib(int n) {
+        BigInteger a = BigInteger.ZERO, c = BigInteger.ONE;
+        for (int i = 0; i < n; i++) {
+            BigInteger t = a.add(c);
+            a = c;
+            c = t;
+        }
+        return a;
+    }
+
+    private static AnfValue n029Fold(String func, BigInteger... args) {
+        List<AnfBinding> body = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            body.add(bind("t" + i, new LoadConst(new BigIntConst(args[i]))));
+            names.add("t" + i);
+        }
+        body.add(bind("r", new Call(func, names)));
+        return findBinding(soleMethod(ConstantFold.run(singleMethodProgram(body))), "r").value();
+    }
+
+    private static BigInteger n029Int(long v) {
+        return BigInteger.valueOf(v);
+    }
+
+    @Test
+    void n029ClampLoAboveHiMatchesScript() {
+        assertEquals(n029Int(0), bigInt(n029Fold("clamp", n029Int(5), n029Int(10), n029Int(0))));
+        assertEquals(n029Int(-3), bigInt(n029Fold("clamp", n029Int(0), n029Int(3), n029Int(-3))));
+        assertEquals(n029Int(0), bigInt(n029Fold("clamp", n029Int(-20), n029Int(10), n029Int(0))));
+    }
+
+    @Test
+    void n029Log2DeclinesPast64Halvings() {
+        assertEquals(n029Int(64), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(64))));
+        assertEquals(n029Int(64), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(65).subtract(BigInteger.ONE))));
+        assertTrue(n029Fold("log2", BigInteger.ONE.shiftLeft(65)) instanceof Call);
+        assertTrue(n029Fold("log2", BigInteger.ONE.shiftLeft(70)) instanceof Call);
+    }
+
+    @Test
+    void n029GcdDeclinesPast256Steps() {
+        assertEquals(BigInteger.ONE, bigInt(n029Fold("gcd", n029Fib(258), n029Fib(257))));
+        assertTrue(n029Fold("gcd", n029Fib(259), n029Fib(258)) instanceof Call);
+        assertTrue(n029Fold("gcd", n029Fib(300), n029Fib(299)) instanceof Call);
+    }
 }

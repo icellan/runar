@@ -28,6 +28,12 @@ from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
 # reference interpreter.
 POW_FOLD_EXPONENT_LIMIT = 32
 
+# Unroll counts of the emitted log2 and gcd loops (codegen/stack.py). Past them
+# the script returns a saturated / partial value, not the mathematical one, so
+# the folder declines there (N-029).
+LOG2_FOLD_ITERATIONS = 64
+GCD_FOLD_ITERATIONS = 256
+
 
 # Kinds that fall through ``_fold_value`` unchanged. Listing them explicitly
 # lets us raise UnknownANFKindError on any kind that isn't a known fold case,
@@ -237,7 +243,9 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 3:
             return None
         val, lo, hi = int_args[0], int_args[1], int_args[2]
-        return ("int", max(lo, min(val, hi)))
+        # The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+        # That differs from max(lo, min(val, hi)) once lo > hi (N-029).
+        return ("int", min(max(val, lo), hi))
 
     if func_name == "sign":
         if len(int_args) != 1:
@@ -312,8 +320,14 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 2:
             return None
         a, b = abs(int_args[0]), abs(int_args[1])
-        while b != 0:
+        # The script runs at most GCD_FOLD_ITERATIONS Euclid steps; if that is
+        # not enough it returns a partial remainder. Decline there (N-029).
+        for _ in range(GCD_FOLD_ITERATIONS):
+            if b == 0:
+                break
             a, b = b, a % b
+        if b != 0:
+            return None
         return ("int", a)
 
     if func_name == "divmod":
@@ -330,6 +344,10 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         n = int_args[0]
         if n <= 0:
             return ("int", 0)
+        # The script halves at most LOG2_FOLD_ITERATIONS times, so it saturates
+        # at 64 for n >= 2**65. Decline there (N-029).
+        if n.bit_length() - 1 > LOG2_FOLD_ITERATIONS:
+            return None
         return ("int", n.bit_length() - 1)
 
     if func_name == "bool":

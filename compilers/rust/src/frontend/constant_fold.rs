@@ -23,6 +23,12 @@ type ConstEnv = HashMap<String, ConstValue>;
 /// OP_VERIFY`) and with the reference interpreter.
 const POW_FOLD_EXPONENT_LIMIT: u32 = 32;
 
+/// Unroll counts of the emitted `log2` and `gcd` loops (`codegen/stack.rs`).
+/// Past them the script returns a saturated / partial value, not the
+/// mathematical one, so the folder declines there (N-029).
+const LOG2_FOLD_ITERATIONS: u64 = 64;
+const GCD_FOLD_ITERATIONS: usize = 256;
+
 fn env_clone(env: &ConstEnv) -> ConstEnv {
     env.clone()
 }
@@ -284,10 +290,18 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             }
             let mut a = int_args[0].abs();
             let mut b = int_args[1].abs();
-            while !b.is_zero() {
+            // The script runs at most GCD_FOLD_ITERATIONS Euclid steps
+            // (`codegen/stack.rs` gcd lowering); if that is not enough it
+            // returns a partial remainder, not the gcd. Decline there (N-029).
+            let mut i = 0;
+            while i < GCD_FOLD_ITERATIONS && !b.is_zero() {
                 let t = b.clone();
                 b = &a % &b;
                 a = t;
+                i += 1;
+            }
+            if !b.is_zero() {
+                return None;
             }
             Some(ConstValue::Int(a))
         }
@@ -307,6 +321,12 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             }
             // bits() returns the minimum number of bits to represent |n|;
             // floor(log2(n)) = bits - 1 for n > 0.
+            // The script halves at most LOG2_FOLD_ITERATIONS times
+            // (`codegen/stack.rs` log2 lowering), so it saturates at 64 for
+            // n >= 2^65. Decline there (N-029).
+            if n.bits() - 1 > LOG2_FOLD_ITERATIONS {
+                return None;
+            }
             Some(ConstValue::Int(BigInt::from(n.bits() - 1)))
         }
         "bool" => {
@@ -1339,6 +1359,58 @@ mod tests {
         ])]);
         let r = fold_constants_only(&p);
         assert_load_const_bool(&r.methods[0].body[1].value, false);
+    }
+
+    // N-029: every folded value must be what the emitted script computes.
+    // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi);
+    // log2 unrolls 64 halvings and gcd 256 Euclid steps, so past those the
+    // script returns a saturated / partial value and the folder must decline.
+    // Expected values were executed on @bsv/sdk Spend.validate by
+    // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+    // Proves the Rust folder's value/decline decisions; not the script itself.
+    fn n029_fib(n: u32) -> BigInt {
+        let (mut a, mut c) = (BigInt::from(0), BigInt::from(1));
+        for _ in 0..n {
+            let t = &a + &c;
+            a = c;
+            c = t;
+        }
+        a
+    }
+
+    fn n029_fold(args: Vec<BigInt>, func: &str) -> ANFValue {
+        let mut body = Vec::new();
+        let names: Vec<String> = (0..args.len()).map(|i| format!("t{}", i)).collect();
+        for (n, a) in names.iter().zip(args.iter()) {
+            body.push(b(n, ANFValue::LoadConst { value: bigint_to_json(a) }));
+        }
+        body.push(b("r", call_func(func, names.iter().map(|s| s.as_str()).collect())));
+        let r = fold_constants_only(&make_program(vec![make_method("m", body)]));
+        r.methods[0].body.last().unwrap().value.clone()
+    }
+
+    #[test]
+    fn test_n029_clamp_lo_above_hi_matches_script() {
+        let i = |v: i64| BigInt::from(v);
+        assert_load_const_int(&n029_fold(vec![i(5), i(10), i(0)], "clamp"), 0);
+        assert_load_const_int(&n029_fold(vec![i(0), i(3), i(-3)], "clamp"), -3);
+        assert_load_const_int(&n029_fold(vec![i(-20), i(10), i(0)], "clamp"), 0);
+    }
+
+    #[test]
+    fn test_n029_log2_declines_past_64_halvings() {
+        let one = BigInt::from(1);
+        assert_load_const_int(&n029_fold(vec![&one << 64], "log2"), 64);
+        assert_load_const_int(&n029_fold(vec![(&one << 65) - &one], "log2"), 64);
+        assert_not_folded(&n029_fold(vec![&one << 65], "log2"), "call");
+        assert_not_folded(&n029_fold(vec![&one << 70], "log2"), "call");
+    }
+
+    #[test]
+    fn test_n029_gcd_declines_past_256_steps() {
+        assert_load_const_int(&n029_fold(vec![n029_fib(258), n029_fib(257)], "gcd"), 1);
+        assert_not_folded(&n029_fold(vec![n029_fib(259), n029_fib(258)], "gcd"), "call");
+        assert_not_folded(&n029_fold(vec![n029_fib(300), n029_fib(299)], "gcd"), "call");
     }
 
     // -----------------------------------------------------------------------
