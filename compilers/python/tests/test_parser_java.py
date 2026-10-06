@@ -314,6 +314,51 @@ class TestJavaRejections:
 
 
 # ---------------------------------------------------------------------------
+# F-205 — annotation names: qualified `@pkg.Public` must be read, and an
+# unrecognized annotation must be a loud diagnostic (never a silent
+# visibility downgrade), matching the TS reference
+# (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+# ---------------------------------------------------------------------------
+
+
+class TestJavaAnnotationNames:
+    def test_qualified_public_annotation_is_recognized(self):
+        # Claim (1): a qualified annotation name must be read, not just its
+        # bare final segment rejected with an unrelated "expected type, got
+        # '.'" parse error.
+        src = """
+        import runar.lang.SmartContract;
+        class C extends SmartContract {
+            C() { super(); }
+            @runar.lang.annotations.Public
+            void check() { assert(true); }
+        }
+        """
+        result = parse_source(src, "C.runar.java")
+        assert result.errors == [], result.error_strings()
+        c = result.contract
+        assert c is not None
+        assert len(c.methods) == 1
+        assert c.methods[0].visibility == "public"
+
+    def test_misspelled_annotation_is_a_loud_error_not_a_silent_downgrade(self):
+        # Claim (2): a misspelled annotation (@Publlic) must be refused with
+        # a diagnostic, exactly as the TS reference refuses it
+        # ("unsupported annotation @Publlic"). Before the fix this parsed
+        # with zero errors and the method silently stayed private.
+        src = """
+        import runar.lang.SmartContract;
+        class C extends SmartContract {
+            C() { super(); }
+            @Publlic
+            void check() { assert(true); }
+        }
+        """
+        result = parse_source(src, "C.runar.java")
+        assert [e.message for e in result.errors] == ["unsupported annotation @Publlic"]
+
+
+# ---------------------------------------------------------------------------
 # Literal / call promotion cases.
 # ---------------------------------------------------------------------------
 

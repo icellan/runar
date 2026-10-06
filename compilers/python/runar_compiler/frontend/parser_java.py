@@ -728,16 +728,37 @@ class _JavaParser:
 
     # -- Annotations ---------------------------------------------------------
 
-    def _skip_annotations(self) -> list[str]:
-        """Consume @Foo / @Foo(...) annotations, returning the bare names."""
+    # F-205: the annotation names Rúnar recognizes at member position,
+    # matching the TS reference (01-parse-java.ts, parseMember). Anything
+    # else is a loud "unsupported annotation" diagnostic when `validate`
+    # is requested, rather than a silent visibility downgrade.
+    _KNOWN_ANNOTATIONS = {"Readonly", "Public", "Stateful", "Override", "SuppressWarnings"}
+
+    def _skip_annotations(self, validate: bool = False) -> list[str]:
+        """Consume @Foo / @pkg.Foo(...) annotations, returning the simple
+        (rightmost) names. F-205: a qualified name (@runar.lang.annotations
+        .Public) is read in full, not just its leading segment. With
+        validate=True — member position only, matching the TS reference —
+        an annotation whose simple name is not recognized is reported as
+        "unsupported annotation @<name>" instead of being silently ignored."""
         names: list[str] = []
         while self.check(TOK_AT):
+            start_loc = self.loc()
             self.advance()  # @
+            name = ""
             if self.peek().kind == TOK_IDENT or self.peek().kind in (
                 TOK_PUBLIC, TOK_PRIVATE, TOK_PROTECTED, TOK_STATIC, TOK_FINAL
             ):
-                names.append(self.peek().value)
+                name = self.peek().value
                 self.advance()
+                # Qualified annotation name: keep consuming `.ident` and
+                # take the rightmost segment as the simple name.
+                while self.check(TOK_DOT) and self.peek(1).kind == TOK_IDENT:
+                    self.advance()  # .
+                    name = self.peek().value
+                    self.advance()
+            if name:
+                names.append(name)
             # Optional (...) arguments. We tolerate arbitrary token sequences
             # inside — they're ignored for our subset.
             if self.check(TOK_LPAREN):
@@ -752,6 +773,10 @@ class _JavaParser:
                             self.advance()
                             break
                     self.advance()
+            if validate and name and name not in self._KNOWN_ANNOTATIONS:
+                self.errors.append(Diagnostic(
+                    message=f"unsupported annotation @{name}",
+                    severity=Severity.ERROR, loc=start_loc))
         return names
 
     # -- Class members -------------------------------------------------------
@@ -759,7 +784,7 @@ class _JavaParser:
     def _parse_member(self, class_name: str) -> PropertyNode | MethodNode | None:
         loc = self.loc()
 
-        anns = self._skip_annotations()
+        anns = self._skip_annotations(validate=True)
         readonly = any(a == "Readonly" for a in anns)
         is_public_ann = any(a == "Public" for a in anns)
 
@@ -773,7 +798,7 @@ class _JavaParser:
                 is_static = True
             self.advance()
         # Annotations can also appear between modifiers.
-        more_anns = self._skip_annotations()
+        more_anns = self._skip_annotations(validate=True)
         if any(a == "Readonly" for a in more_anns):
             readonly = True
         if any(a == "Public" for a in more_anns):

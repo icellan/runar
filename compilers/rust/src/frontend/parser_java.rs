@@ -53,6 +53,13 @@ use super::diagnostic::{
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
+// F-205: the annotation names Rúnar recognizes at member position, matching
+// the TS reference (01-parse-java.ts, parseMember). Anything else is a loud
+// "unsupported annotation" diagnostic rather than a silent visibility
+// downgrade.
+const F205_KNOWN_ANNOTATIONS: [&str; 5] =
+    ["Readonly", "Public", "Stateful", "Override", "SuppressWarnings"];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -777,11 +784,23 @@ impl<'a> JavaParser<'a> {
         constructor: &mut Option<MethodNode>,
         methods: &mut Vec<MethodNode>,
     ) {
-        // Collect annotations.
+        // Collect annotations. F-205: a qualified name
+        // (@runar.lang.annotations.Public) is read in full — the rightmost
+        // segment is the simple name — and a simple name Rúnar does not
+        // recognize is a loud "unsupported annotation" diagnostic (matching
+        // the TS reference's parseMember), never a silent visibility
+        // downgrade.
         let mut annotations: Vec<String> = Vec::new();
         while matches!(self.current().typ, TokenType::At) {
+            let at_loc = self.loc();
             self.advance();
-            let name = self.expect_ident();
+            let mut name = self.expect_ident();
+            while matches!(self.current().typ, TokenType::Dot)
+                && matches!(self.peek_at(1).typ, TokenType::Ident(_))
+            {
+                self.advance(); // .
+                name = self.expect_ident();
+            }
             // Annotations may carry arguments (e.g. `@Foo("bar")`).
             if matches!(self.current().typ, TokenType::LParen) {
                 self.advance();
@@ -804,6 +823,12 @@ impl<'a> JavaParser<'a> {
                         }
                     }
                 }
+            }
+            if !F205_KNOWN_ANNOTATIONS.contains(&name.as_str()) {
+                self.errors.push(Diagnostic::error(
+                    format!("unsupported annotation @{name}"),
+                    Some(at_loc),
+                ));
             }
             annotations.push(name);
         }
@@ -3090,5 +3115,49 @@ mod tests {
                 other => panic!("{tok}: expected ForStatement, got {:?}", other),
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-205 — annotation names: a qualified `@pkg.Public` must be read, and
+    // an unrecognized annotation must be a loud diagnostic (never a silent
+    // visibility downgrade), matching the TS reference
+    // (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f205_qualified_public_annotation_is_recognized() {
+        // Claim (1): a qualified annotation name must be read, not rejected
+        // with an unrelated "expected type, got Dot" parse error.
+        let src = r#"
+            import runar.lang.SmartContract;
+            class C extends SmartContract {
+                C() { super(); }
+                @runar.lang.annotations.Public
+                void check() { assertThat(true); }
+            }
+        "#;
+        let r = parse_java(src, Some("C.runar.java"));
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        let c = r.contract.expect("should produce a contract");
+        assert_eq!(c.methods[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn f205_misspelled_annotation_is_a_loud_error_not_a_silent_downgrade() {
+        // Claim (2): a misspelled annotation (@Publlic) must be refused
+        // with a diagnostic, exactly as the TS reference refuses it
+        // ("unsupported annotation @Publlic"). Before the fix this parsed
+        // with zero errors and the method silently stayed private.
+        let src = r#"
+            import runar.lang.SmartContract;
+            class C extends SmartContract {
+                C() { super(); }
+                @Publlic
+                void check() { assertThat(true); }
+            }
+        "#;
+        let r = parse_java(src, Some("C.runar.java"));
+        let messages: Vec<&str> = r.errors.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages, vec!["unsupported annotation @Publlic"]);
     }
 }

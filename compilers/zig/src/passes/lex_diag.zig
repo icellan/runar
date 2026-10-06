@@ -49,6 +49,14 @@ pub const UNSUPPORTED_STATEMENT_FMT = "Unsupported statement starting with '{s}'
 /// name IS the field. Format args: the property name, twice.
 pub const BARE_JAVA_PROPERTY_ASSIGNMENT_FMT = "bare assignment to property '{s}' is not allowed; write `this.{s} = ...`";
 
+/// F-205: a .runar.java member annotation whose simple name (last segment,
+/// for a qualified name like `@runar.lang.annotations.Publlic`) Rúnar does
+/// not recognize (the TS reference's "unsupported annotation @<name>",
+/// 01-parse-java.ts parseMember). Before this diagnostic existed, an
+/// unrecognized annotation was silently ignored and a misspelled `@Public`
+/// left the method at its default `private` visibility with zero errors.
+pub const UNSUPPORTED_ANNOTATION_FMT = "unsupported annotation @{s}";
+
 pub const Pos = struct { line: u32, col: u32 };
 
 var fallback = [_][]const u8{UNTERMINATED_STRING_LITERAL};

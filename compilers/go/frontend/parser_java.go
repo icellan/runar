@@ -892,15 +892,32 @@ func (p *javaParser) readAnnotationName() string {
 // Class-member parsing
 // ---------------------------------------------------------------------------
 
+// javaKnownMemberAnnotations are the annotation names Rúnar recognizes at
+// member position, matching the TS reference (01-parse-java.ts,
+// parseMember). F-205: anything else is a loud "unsupported annotation"
+// diagnostic rather than a silent visibility downgrade.
+var javaKnownMemberAnnotations = map[string]bool{
+	"Readonly": true, "Public": true, "Stateful": true,
+	"Override": true, "SuppressWarnings": true,
+}
+
 // parseClassMember returns *PropertyNode or *MethodNode (or nil on an error
 // that was already reported).
 func (p *javaParser) parseClassMember(className string) interface{} {
 	// Collect annotations
 	annotations := map[string]bool{}
 	for p.current().kind == javaTokAt {
+		atLoc := p.loc()
 		name := p.readAnnotationName()
 		if name != "" {
 			annotations[name] = true
+			if !javaKnownMemberAnnotations[name] {
+				p.errors = append(p.errors, Diagnostic{
+					Message:  fmt.Sprintf("unsupported annotation @%s", name),
+					Severity: SeverityError,
+					Loc:      &atLoc,
+				})
+			}
 		}
 	}
 

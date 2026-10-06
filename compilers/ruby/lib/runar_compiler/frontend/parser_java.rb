@@ -779,16 +779,22 @@ module RunarCompiler
         is_public_annotated = false
         is_stateful_annotated = false
 
-        # Annotations
+        # Annotations. F-205: an annotation whose simple name Rúnar does not
+        # recognize is a loud "unsupported annotation" diagnostic, matching
+        # the TS reference (01-parse-java.ts, parseMember) — never a silent
+        # visibility downgrade.
         while check(TOK_AT)
+          ann_loc = loc
           ann_name = parse_annotation
           case ann_name
           when "Readonly" then readonly = true
           when "Public"   then is_public_annotated = true
           when "Stateful" then is_stateful_annotated = true
-            # Any other annotation is ignored at parse time (parity with
-            # the Java reference, which rejects unknown annotations in a
-            # later pass but accepts them at parse).
+          when "Override", "SuppressWarnings"
+            # accepted but ignored
+          else
+            @errors << Diagnostic.new(message: "unsupported annotation @#{ann_name}",
+                                      severity: Severity::ERROR, loc: ann_loc)
           end
         end
 

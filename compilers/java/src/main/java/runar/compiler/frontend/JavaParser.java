@@ -400,6 +400,7 @@ public final class JavaParser {
     // ---------------------------------------------------------------
 
     private static PropertyNode convertField(VariableTree v, String filename, Unit cu) {
+        validateAnnotations(v.getModifiers());
         boolean readonly = hasAnnotation(v.getModifiers(), "Readonly");
         TypeNode type = convertType(v.getType(), filename);
         Expression init = v.getInitializer() != null ? convertExpression(v.getInitializer(), filename, cu) : null;
@@ -418,6 +419,7 @@ public final class JavaParser {
     // ---------------------------------------------------------------
 
     private static MethodNode convertMethod(MethodTree m, String filename, Unit cu, String className) {
+        validateAnnotations(m.getModifiers());
         boolean isConstructor = m.getName().contentEquals("<init>") || m.getName().contentEquals(className);
 
         Visibility vis;
@@ -1146,6 +1148,25 @@ public final class JavaParser {
             }
         }
         return false;
+    }
+
+    // F-205: the annotation names Rúnar recognizes at member position,
+    // matching the TS reference (01-parse-java.ts, parseMember). Anything
+    // else is a loud "unsupported annotation" diagnostic rather than a
+    // silent visibility downgrade — e.g. a misspelled `@Publlic` used to
+    // parse with no error and leave the method at the default `private`
+    // visibility.
+    private static final java.util.Set<String> KNOWN_MEMBER_ANNOTATIONS =
+        java.util.Set.of("Readonly", "Public", "Stateful", "Override", "SuppressWarnings");
+
+    private static void validateAnnotations(ModifiersTree mods) {
+        if (mods == null) return;
+        for (AnnotationTree a : mods.getAnnotations()) {
+            String name = typeSimpleName(a.getAnnotationType());
+            if (!KNOWN_MEMBER_ANNOTATIONS.contains(name)) {
+                throw new ParseException("unsupported annotation @" + name);
+            }
+        }
     }
 
     private static String typeSimpleName(Tree t) {

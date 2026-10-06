@@ -507,4 +507,41 @@ class TestParserJava < Minitest::Test
       n134_assert_compound(f.update, "i", op)
     end
   end
+
+  # -------------------------------------------------------------------
+  # F-205: annotation names — a qualified `@pkg.Public` must be read, and
+  # an unrecognized annotation must be a loud diagnostic (never a silent
+  # visibility downgrade), matching the TS reference
+  # (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+  # -------------------------------------------------------------------
+
+  def test_qualified_public_annotation_is_recognized
+    source = <<~JAVA
+      class C extends SmartContract {
+          C() { super(); }
+          @runar.lang.annotations.Public
+          void check() { assertThat(true); }
+      }
+    JAVA
+    result = parse(source, "C.runar.java")
+    assert_empty result.errors.map(&:message)
+    assert_equal 1, result.contract.methods.size
+    assert_equal "public", result.contract.methods[0].visibility
+  end
+
+  def test_misspelled_annotation_is_a_loud_error_not_a_silent_downgrade
+    # Claim (2): a misspelled annotation (@Publlic) must be refused with a
+    # diagnostic, exactly as the TS reference refuses it ("unsupported
+    # annotation @Publlic"). Before the fix this parsed with zero errors
+    # and the method silently stayed private.
+    source = <<~JAVA
+      class C extends SmartContract {
+          C() { super(); }
+          @Publlic
+          void check() { assertThat(true); }
+      }
+    JAVA
+    result = parse(source, "C.runar.java")
+    assert_equal ["unsupported annotation @Publlic"], result.errors.map(&:message)
+  end
 end

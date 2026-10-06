@@ -454,6 +454,16 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    /// Like `addErrorFmt`, but positioned at an explicit token rather than
+    /// `self.current` (which has already moved past it by the time some
+    /// errors are discovered to apply, e.g. an annotation's `@`).
+    fn addErrorFmtAt(self: *Parser, tok: Token, comptime fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch return;
+        self.allocator.free(msg);
+        self.errors.append(self.allocator, f) catch {};
+    }
+
     /// Source location of the current token, in the AST's **1-based line /
     /// 1-based column** convention (the same convention `file:line:col`
     /// diagnostics use). `codegen/emit.zig#recordSourceMapping` performs the
@@ -847,7 +857,7 @@ const Parser = struct {
 
         while (true) {
             if (self.current.kind == .at) {
-                _ = self.bump();
+                const at_tok = self.bump();
                 if (self.current.kind != .ident) {
                     self.addError("expected annotation name after '@'");
                     _ = self.bump();
@@ -865,6 +875,17 @@ const Parser = struct {
                 }
                 if (std.mem.eql(u8, simple_name, "Readonly")) is_readonly = true;
                 if (std.mem.eql(u8, simple_name, "Public")) is_public_annotation = true;
+                // F-205: anything other than the names Rúnar recognizes at
+                // member position is a loud diagnostic, matching the TS
+                // reference — never a silent visibility downgrade.
+                if (!(std.mem.eql(u8, simple_name, "Readonly") or
+                    std.mem.eql(u8, simple_name, "Public") or
+                    std.mem.eql(u8, simple_name, "Stateful") or
+                    std.mem.eql(u8, simple_name, "Override") or
+                    std.mem.eql(u8, simple_name, "SuppressWarnings")))
+                {
+                    self.addErrorFmtAt(at_tok, lex_diag.UNSUPPORTED_ANNOTATION_FMT, .{simple_name});
+                }
                 // Optional annotation argument list: @Foo(x = 1)
                 if (self.current.kind == .lparen) self.skipBalancedParens();
                 continue;
@@ -2971,4 +2992,48 @@ test "N-134: compound assignment in a for update parses (Java)" {
         };
         try n134ExpectCompound(f.update.?.*, "i", o.op);
     }
+}
+
+// ---------------------------------------------------------------------------
+// F-205: annotation names — a qualified `@pkg.Public` must be read, and an
+// unrecognized annotation must be a loud diagnostic (never a silent
+// visibility downgrade), matching the TS reference
+// (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+// ---------------------------------------------------------------------------
+
+test "qualified @Public annotation is recognized (Java)" {
+    const source =
+        \\class C extends SmartContract {
+        \\    C() { super(); }
+        \\    @runar.lang.annotations.Public
+        \\    void check() { assertThat(true); }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseJava(arena.allocator(), source, "C.runar.java");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const c = r.contract.?;
+    try std.testing.expectEqual(@as(usize, 1), c.methods.len);
+    try std.testing.expect(c.methods[0].is_public);
+}
+
+test "misspelled annotation is a loud error, not a silent downgrade (Java)" {
+    // Claim (2): a misspelled annotation (@Publlic) must be refused with a
+    // diagnostic, exactly as the TS reference refuses it ("unsupported
+    // annotation @Publlic"). Before the fix this parsed with zero errors
+    // and the method silently stayed private.
+    const source =
+        \\class C extends SmartContract {
+        \\    C() { super(); }
+        \\    @Publlic
+        \\    void check() { assertThat(true); }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseJava(arena.allocator(), source, "C.runar.java");
+    try std.testing.expectEqual(@as(usize, 1), r.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, r.errors[0], "unsupported annotation @Publlic") != null);
 }
