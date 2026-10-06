@@ -716,8 +716,10 @@ class _RustParser:
             else:
                 self.advance()
 
-        # Determine parent class from property mutability
-        if any(not p.readonly for p in properties):
+        # Determine parent class from property mutability. The explicit
+        # `#[runar::unsafe_contract]` attribute is authoritative and must
+        # not be silently overridden by this structural inference (F-204).
+        if parent_class != "UnsafeSmartContract" and any(not p.readonly for p in properties):
             parent_class = "StatefulSmartContract"
 
         if not contract_name:

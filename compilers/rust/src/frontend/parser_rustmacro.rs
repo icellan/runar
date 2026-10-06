@@ -398,8 +398,10 @@ impl RustDslParser {
             }
         }
 
-        // Determine parent class from property mutability
-        if properties.iter().any(|p| !p.readonly) {
+        // Determine parent class from property mutability. The explicit
+        // `#[runar::unsafe_contract]` attribute is authoritative and must
+        // not be silently overridden by this structural inference (F-204).
+        if parent_class != "UnsafeSmartContract" && properties.iter().any(|p| !p.readonly) {
             parent_class = "StatefulSmartContract".to_string();
         }
 
@@ -1559,6 +1561,34 @@ impl Counter {
         let contract = result.contract.unwrap();
         assert_eq!(contract.name, "Counter");
         assert_eq!(contract.parent_class, "StatefulSmartContract");
+    }
+
+    #[test]
+    fn test_unsafe_contract_with_mutable_field_stays_unsafe() {
+        // F-204: `#[runar::unsafe_contract]` must not be silently downgraded
+        // to StatefulSmartContract by the structural mutability inference.
+        // The explicit attribute is authoritative (mirrors the TS reference
+        // parser's ordering, where the attribute override is applied last).
+        let source = r#"
+use runar::prelude::*;
+
+#[runar::unsafe_contract]
+pub struct Counter {
+    count: bigint,
+}
+
+impl Counter {
+    pub fn increment(&mut self) {
+        asm("51", 0, 1);
+    }
+}
+"#;
+
+        let result = parse_rust_dsl(source, Some("Counter.runar.rs"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.name, "Counter");
+        assert_eq!(contract.parent_class, "UnsafeSmartContract");
     }
 
     #[test]
