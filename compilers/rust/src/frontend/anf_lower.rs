@@ -1567,6 +1567,12 @@ fn lower_statement_with_reads(
             }
         }
     }
+
+    // F-211: clear after the statement, as the TS reference does
+    // (04-anf-lower.ts `lowerStatement`), so bindings the compiler appends
+    // after the body (the stateful continuation) are not attributed to the
+    // last user statement.
+    ctx.current_source_loc = None;
 }
 
 /// N-016: suffix of the binding name of a local that shadows a property.

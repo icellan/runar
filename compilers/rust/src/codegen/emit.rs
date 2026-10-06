@@ -751,6 +751,9 @@ fn emit_method_dispatch(
             ctx.pending_source_loc = method.source_locs.get(idx).cloned().flatten();
             emit_stack_op(op, ctx)?;
         }
+        // F-211: the dispatch opcodes that follow belong to no statement of
+        // this method (TS clears after every op in `emitStackOp`).
+        ctx.pending_source_loc = None;
 
         if !is_last {
             ctx.emit_opcode("OP_ELSE")?;
