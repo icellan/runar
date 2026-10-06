@@ -706,10 +706,10 @@ test "verifyRabinSig end-to-end source compiles and emits Rabin opcode sequence"
 test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     // Stronger pin: assert the EXACT Rabin opcode subsequence appears
     // contiguously in the emitted hex. The expected substring is the
-    // byte concatenation of (post BUG-010 + BUG-011, 18 opcodes):
+    // byte concatenation of (post BUG-010 + BUG-011 + F-047, 20 opcodes):
     //   SWAP=7c DUP=76 OP_0=00 PUSH3(65536)=03000001 WITHIN=a5 VERIFY=69
-    //   ROT=7b DUP=76 MUL=95 ADD=93 SWAP=7c MOD=97 SWAP=7c SHA256=a8
-    //   PUSH1(00)=0100 CAT=7e BIN2NUM=81 NUMEQUAL=9c
+    //   ROT=7b DUP=76 MUL=95 ADD=93 OVER=78 MOD=97 ROT=7b SHA256=a8
+    //   PUSH1(00)=0100 CAT=7e BIN2NUM=81 ROT=7b MOD=97 NUMEQUAL=9c
     // The leading 5-opcode prefix (DUP OP_0 PUSH3 65536 WITHIN VERIFY) is
     // the BUG-010 padding range check (0 <= padding < 65536).
     const source =
@@ -748,12 +748,12 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     //   7b          OP_ROT
     //   76 95 93 7c 97 7c a8 87           original tail
     // BUG-011 tail: OP_SHA256=a8 PUSH1(00)=0100 OP_CAT=7e OP_BIN2NUM=81
-    // OP_NUMEQUAL=9c. Verified against the compiler's actual output for THIS
+    // then F-047's digest reduction OP_ROT=7b OP_MOD=97, then OP_NUMEQUAL=9c. Verified against the compiler's actual output for THIS
     // contract, not inferred: although `unlock` wraps the call in runar.assert,
     // the peephole does NOT fuse to OP_NUMEQUALVERIFY here (the oracle-price
     // fixture does fuse, so the fused form is context-dependent and must not be
     // assumed).
-    const rabin_subseq = "7c7600" ++ "03000001" ++ "a5697b" ++ "769593" ++ "7c977c" ++ "a8" ++ "0100" ++ "7e" ++ "81" ++ "9c";
+    const rabin_subseq = "7c7600" ++ "03000001" ++ "a5697b" ++ "769593" ++ "78977b" ++ "a8" ++ "0100" ++ "7e" ++ "81" ++ "7b97" ++ "9c";
     const found = std.mem.indexOf(u8, hex, rabin_subseq);
     if (found == null) {
         std.debug.print(
@@ -764,12 +764,12 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     try std.testing.expect(found != null);
 }
 
-test "verifyRabinSig appendVerifyRabinSig emits exactly 18 opcodes" {
+test "verifyRabinSig appendVerifyRabinSig emits exactly 20 opcodes" {
     // Direct emitter pin: the appendVerifyRabinSig builder helper must
-    // emit exactly 18 instructions (matching the cross-tier reference,
-    // post BUG-010 + BUG-011: 10 original + 5 padding-range-check ops
-    // + 4 digest-encoding-normalization ops, minus the OP_EQUAL that
-    // OP_NUMEQUAL replaced).
+    // emit exactly 20 instructions (matching the cross-tier reference,
+    // post BUG-010 + BUG-011 + F-047: 10 original + 5 padding-range-check
+    // ops + 4 digest-encoding-normalization ops, minus the OP_EQUAL that
+    // OP_NUMEQUAL replaced, + 2 digest-reduction ops).
     const crypto_emitters = @import("passes/helpers/crypto_emitters.zig");
     const registry = @import("passes/helpers/crypto_builtins.zig");
 
@@ -777,7 +777,7 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 18 opcodes" {
     defer list.deinit(std.testing.allocator);
 
     try crypto_emitters.appendBuiltinInstructions(&list, std.testing.allocator, registry.CryptoBuiltin.verify_rabin_sig);
-    try std.testing.expectEqual(@as(usize, 18), list.items.len);
+    try std.testing.expectEqual(@as(usize, 20), list.items.len);
 
     // Pin the exact opcode order (the cross-compiler reference). Position 3
     // is a push of the BUG-010 padding limit (65536) — checked separately.
@@ -792,13 +792,15 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 18 opcodes" {
         "OP_DUP",
         "OP_MUL",
         "OP_ADD",
-        "OP_SWAP",
+        "OP_OVER", // F-047: keep pubKey for the digest reduction
         "OP_MOD",
-        "OP_SWAP",
+        "OP_ROT",
         "OP_SHA256",
         null, // index 14: push_data(0x00) — BUG-011 digest sign byte
         "OP_CAT",
         "OP_BIN2NUM",
+        "OP_ROT", // F-047
+        "OP_MOD", // F-047: SHA256(msg) mod pubKey
         "OP_NUMEQUAL",
     };
     for (expected_opcodes, 0..) |maybe_name, i| {

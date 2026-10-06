@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// rabinGolden is the fixed 18-op Rabin verification sequence:
-// (sig^2 + padding) mod pubKey == SHA256(msg) (numeric compare, BUG-011)
+// rabinGolden is the fixed 20-op Rabin verification sequence:
+// (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey (numeric compare,
+// BUG-011; digest reduced mod pubKey, F-047)
 // AND 0 <= padding < 65536 (BUG-010). See _review/BUG-010-rfc.md.
 var rabinGolden = []struct {
 	op    string
@@ -24,13 +25,15 @@ var rabinGolden = []struct {
 	{op: "opcode", code: "OP_DUP"},
 	{op: "opcode", code: "OP_MUL"},
 	{op: "opcode", code: "OP_ADD"},
-	{op: "opcode", code: "OP_SWAP"},
+	{op: "opcode", code: "OP_OVER"},
 	{op: "opcode", code: "OP_MOD"},
-	{op: "opcode", code: "OP_SWAP"},
+	{op: "opcode", code: "OP_ROT"},
 	{op: "opcode", code: "OP_SHA256"},
 	{op: "push", bytes: []byte{0x00}},
 	{op: "opcode", code: "OP_CAT"},
 	{op: "opcode", code: "OP_BIN2NUM"},
+	{op: "opcode", code: "OP_ROT"},
+	{op: "opcode", code: "OP_MOD"},
 	{op: "opcode", code: "OP_NUMEQUAL"},
 }
 

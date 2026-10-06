@@ -2223,7 +2223,9 @@ def rabinPaddingLimit : Int := 65536
 
 /-- Lowering for `verifyRabinSig(msg, sig, padding, pubKey)`.
 
-Rabin signature verification checks `(sig^2 + padding) mod pubKey == SHA256(msg)`.
+Rabin signature verification checks
+`(sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey` (F-047: the digest is
+reduced by the same modulus, matching every off-chain verifier).
 
 Mirrors `lowerVerifyRabinSig` (TS `05-stack-lower.ts:3884-3931`). The TS
 sequence brings the four args to the top of the stack via
@@ -2237,7 +2239,8 @@ then emits (`emitVerifyRabinSig`, `rabin-codegen.ts:53-70`):
   OP_SWAP
   OP_DUP  OP_0  <65536>  OP_WITHIN  OP_VERIFY   -- BUG-010 padding gate
   OP_ROT  OP_DUP  OP_MUL  OP_ADD
-  OP_SWAP  OP_MOD  OP_SWAP  OP_SHA256  <push 0x00>  OP_CAT  OP_BIN2NUM  OP_NUMEQUAL
+  OP_OVER  OP_MOD  OP_ROT  OP_SHA256  <push 0x00>  OP_CAT  OP_BIN2NUM
+  OP_ROT  OP_MOD  OP_NUMEQUAL                     -- F-047 digest mod pubKey
 
 Net stack-map effect: pop 4 arg slots, push the boolean result under
 `bindingName`. -/
@@ -2273,10 +2276,10 @@ def lowerVerifyRabinSigOpsLive (sm : StackMap) (bindingName : String)
     , StackOp.dup                     -- msg pubKey padding sig sig
     , StackOp.opcode "OP_MUL"         -- msg pubKey padding sig^2
     , StackOp.opcode "OP_ADD"         -- msg pubKey (sig^2+padding)
-    , StackOp.swap                    -- msg (sig^2+padding) pubKey
-    , StackOp.opcode "OP_MOD"         -- msg ((sig^2+padding) mod pubKey)
-    , StackOp.swap                    -- ((sig^2+padding) mod pubKey) msg
-    , StackOp.opcode "OP_SHA256"
+    , StackOp.over                    -- msg pubKey (sig^2+padding) pubKey  (F-047)
+    , StackOp.opcode "OP_MOD"         -- msg pubKey lhs
+    , StackOp.rot                     -- pubKey lhs msg
+    , StackOp.opcode "OP_SHA256"      -- pubKey lhs SHA256(msg)
     -- BUG-011 digest-encoding normalization: the raw 32-byte digest is given an
     -- explicit sign byte, collapsed to minimal form and compared NUMERICALLY.
     -- The old OP_EQUAL was a byte compare against OP_MOD's minimal Script
@@ -2284,7 +2287,10 @@ def lowerVerifyRabinSigOpsLive (sm : StackMap) (bindingName : String)
     -- most-significant byte has its high bit set — ~50% of honest signatures.
     , StackOp.push (.bytes (ByteArray.mk #[0x00]))
     , StackOp.opcode "OP_CAT"
-    , StackOp.opcode "OP_BIN2NUM"
+    , StackOp.opcode "OP_BIN2NUM"     -- pubKey lhs num(SHA256(msg))
+    -- F-047: reduce the digest mod pubKey, as every off-chain verifier does.
+    , StackOp.rot                     -- lhs num(SHA256(msg)) pubKey
+    , StackOp.opcode "OP_MOD"         -- lhs (num(SHA256(msg)) mod pubKey)
     , StackOp.opcode "OP_NUMEQUAL"
     ]
   -- Net: pop 4 args, push 1 result under bindingName.

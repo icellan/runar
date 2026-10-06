@@ -39,12 +39,13 @@ class RabinTest {
     }
 
     @Test
-    void emitsExactly18Ops() {
+    void emitsExactly20Ops() {
         List<StackOp> ops = capture();
-        assertEquals(18, ops.size(),
-            "Rabin verifier must emit exactly 18 opcodes (cross-compiler reference; "
+        assertEquals(20, ops.size(),
+            "Rabin verifier must emit exactly 20 opcodes (cross-compiler reference; "
                 + "10 original + 5 BUG-010 range-check ops + 4 BUG-011 "
-                + "digest-encoding ops, less the OP_EQUAL that OP_NUMEQUAL replaced)");
+                + "digest-encoding ops, less the OP_EQUAL that OP_NUMEQUAL replaced, "
+                + "+ 2 F-047 digest-reduction ops)");
     }
 
     @Test
@@ -81,13 +82,15 @@ class RabinTest {
             "OP_DUP",
             "OP_MUL",
             "OP_ADD",
-            "OP_SWAP",
+            "OP_OVER", // F-047: keep pubKey for the digest reduction
             "OP_MOD",
-            "OP_SWAP",
+            "OP_ROT",
             "OP_SHA256",
             null, // BUG-011 digest sign byte (0x00)
             "OP_CAT",
             "OP_BIN2NUM",
+            "OP_ROT", // F-047
+            "OP_MOD", // F-047: SHA256(msg) mod pubKey
             "OP_NUMEQUAL"
         );
         assertEquals(expected.size(), ops.size());
@@ -128,7 +131,7 @@ class RabinTest {
     void dispatchRoutesKnownName() {
         List<StackOp> ops = new ArrayList<>();
         Rabin.dispatch("verifyRabinSig", ops::add);
-        assertEquals(18, ops.size());
+        assertEquals(20, ops.size());
     }
 
     @Test

@@ -112,8 +112,8 @@ class OraclePriceFeed extends SmartContract {
     // The classification is descriptor-only: it must not move a single
     // template byte (this is the conformance golden for sdk-output/oracle-price).
     expect(artifact.script).toBe(
-      '53795880537a537a00537a537a537a537a7c760003000001a5697b7695937c977ca801007e819d7c0350c300a06900ac',
+      '53795880537a537a00537a537a537a537a7c760003000001a5697b76959378977ba801007e817b979d7c0350c300a06900ac',
     );
-    expect(artifact.constructorSlots!.map(s => s.byteOffset)).toEqual([8, 46]);
+    expect(artifact.constructorSlots!.map(s => s.byteOffset)).toEqual([8, 48]);
   });
 });

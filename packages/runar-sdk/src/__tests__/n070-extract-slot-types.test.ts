@@ -28,7 +28,7 @@ import type { RunarArtifact } from 'runar-ir-schema';
 
 const PK = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
 
-/** The real `examples/ts/oracle-price` template: RabinPubKey slot @8, PubKey @46. */
+/** The real `examples/ts/oracle-price` template: RabinPubKey slot @8, PubKey @48. */
 function oracleArtifact(): RunarArtifact {
   return {
     version: 'runar-v1.0.0-rc.1',
@@ -45,10 +45,10 @@ function oracleArtifact(): RunarArtifact {
       methods: [],
     },
     script:
-      '53795880537a537a00537a537a537a537a7c760003000001a5697b7695937c977ca801007e819d7c0350c300a06900ac',
+      '53795880537a537a00537a537a537a537a7c760003000001a5697b76959378977ba801007e817b979d7c0350c300a06900ac',
     constructorSlots: [
       { paramIndex: 0, byteOffset: 8, name: 'oraclePubKey', type: 'RabinPubKey', valueEncoding: 'scriptnum' },
-      { paramIndex: 1, byteOffset: 46, name: 'receiver', type: 'PubKey', valueEncoding: 'data', fixedValueByteLength: 33, fixedPushHeaderBytes: 1 },
+      { paramIndex: 1, byteOffset: 48, name: 'receiver', type: 'PubKey', valueEncoding: 'data', fixedValueByteLength: 33, fixedPushHeaderBytes: 1 },
     ],
     buildTimestamp: '1970-01-01T00:00:00.000Z',
   } as unknown as RunarArtifact;

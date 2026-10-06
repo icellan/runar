@@ -112,9 +112,10 @@ def rabinBodyOps : List StackOp :=
   , .dup
   , rOpc "OP_MUL"
   , rOpc "OP_ADD"
-  , .swap
+  -- F-047: `.over` (not `.swap`) keeps pubKey for the digest reduction.
+  , .over
   , rOpc "OP_MOD"
-  , .swap
+  , .rot
   , rOpc "OP_SHA256"
   -- BUG-011 digest-encoding normalization (`rabin-codegen.ts`). `OP_MOD` leaves
   -- a MINIMAL Script number, which carries a trailing 0x00 sign byte whenever
@@ -126,6 +127,10 @@ def rabinBodyOps : List StackOp :=
   , .push (.bytes (ByteArray.mk #[0x00]))
   , rOpc "OP_CAT"
   , rOpc "OP_BIN2NUM"
+  -- F-047: reduce the digest mod pubKey (`SHA256(msg) mod n`), matching every
+  -- off-chain verifier.
+  , .rot
+  , rOpc "OP_MOD"
   , rOpc "OP_NUMEQUAL"
   ]
 
@@ -181,10 +186,10 @@ theorem lowerVerifyRabinSigOpsLive_body
         ++ rabinBodyOps := by
   rfl
 
-/-- The body is exactly 18 opcodes long (10 + BUG-010's 5-opcode gate
+/-- The body is exactly 20 opcodes long (10 + BUG-010's 5-opcode gate
 + BUG-011's 4-opcode digest normalization, less the `OP_EQUAL` that
-`OP_NUMEQUAL` replaced). -/
-theorem rabinBodyOps_length : rabinBodyOps.length = 18 := rfl
+`OP_NUMEQUAL` replaced, + F-047's 2-opcode digest reduction). -/
+theorem rabinBodyOps_length : rabinBodyOps.length = 20 := rfl
 
 /-! ## Codegen-to-spec equivalence (theorem, Phase B10)
 
@@ -235,6 +240,14 @@ private theorem applySwap_cons
     (hStk : s.stack = b :: a :: rest) :
     applySwap s = Except.ok { s with stack := a :: b :: rest } := by
   unfold applySwap
+  rw [hStk]
+
+/-- `applyOver` on a 2-element prefix. -/
+private theorem applyOver_cons
+    (s : StackState) (a b : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: rest) :
+    applyOver s = Except.ok { s with stack := b :: a :: b :: rest } := by
+  unfold applyOver
   rw [hStk]
 
 /-- `applyRot` on a 3-element prefix. -/
@@ -513,6 +526,9 @@ private theorem notIfOp_rot : ∀ thn els, (StackOp.rot : StackOp) ≠ .ifOp thn
 private theorem notIfOp_dup : ∀ thn els, (StackOp.dup : StackOp) ≠ .ifOp thn els := by
   intro thn els h; cases h
 
+private theorem notIfOp_over : ∀ thn els, (StackOp.over : StackOp) ≠ .ifOp thn els := by
+  intro thn els h; cases h
+
 private theorem notIfOp_opcode (code : String) :
     ∀ thn els, (StackOp.opcode code : StackOp) ≠ .ifOp thn els := by
   intro thn els h; cases h
@@ -526,11 +542,15 @@ constructor; the `.rot` arm immediately delegates to `applyRot`). -/
 private theorem stepNonIf_rot (s : StackState) :
     stepNonIf .rot s = applyRot s := rfl
 
+/-- `stepNonIf .over s = applyOver s` (same shape as `stepNonIf_rot`). -/
+private theorem stepNonIf_over (s : StackState) :
+    stepNonIf .over s = applyOver s := rfl
+
 end Internal
 
 open Internal
 
-/-- **B10 — Rabin codegen-to-spec.** Running the 15-opcode
+/-- **B10 — Rabin codegen-to-spec.** Running the 20-opcode
 `rabinBodyOps` on a stack whose top four elements are
 `pubKey, padding, sig, msg` (TOS first; `vBigint pubKey` is on top)
 yields `.vBool (verifyRabinSig_spec msg sig padding pubKey)` on top
@@ -625,11 +645,11 @@ theorem runOps_rabinBodyOps_eq (msg : ByteArray)
       stepNonIf_opcode,
       runOpcode_ADD_intInt _ padding (sig * sig) _ rfl]
   simp only [StackState.push]
-  -- Step 11: OP_SWAP.
+  -- Step 11: OP_OVER (F-047: keep pubKey for the digest reduction).
   rw [show (rabinBodyOps.drop 10 : List StackOp)
-        = .swap :: (rabinBodyOps.drop 11) from rfl,
-      runOps_cons_nonIf_eq .swap _ _ notIfOp_swap, stepNonIf_swap,
-      applySwap_cons _ _ _ _ rfl]
+        = .over :: (rabinBodyOps.drop 11) from rfl,
+      runOps_cons_nonIf_eq .over _ _ notIfOp_over, stepNonIf_over,
+      applyOver_cons _ _ _ _ rfl]
   simp only []
   -- Step 12: OP_MOD (gated by `pubKey ≠ 0`).
   rw [show (rabinBodyOps.drop 11 : List StackOp)
@@ -638,11 +658,11 @@ theorem runOps_rabinBodyOps_eq (msg : ByteArray)
       stepNonIf_opcode,
       runOpcode_MOD_intInt_nonzero _ (padding + sig * sig) pubKey _ rfl hPubKey]
   simp only [StackState.push]
-  -- Step 13: OP_SWAP.
+  -- Step 13: OP_ROT (brings msg up; pubKey stays below the residue).
   rw [show (rabinBodyOps.drop 12 : List StackOp)
-        = .swap :: (rabinBodyOps.drop 13) from rfl,
-      runOps_cons_nonIf_eq .swap _ _ notIfOp_swap, stepNonIf_swap,
-      applySwap_cons _ _ _ _ rfl]
+        = .rot :: (rabinBodyOps.drop 13) from rfl,
+      runOps_cons_nonIf_eq .rot _ _ notIfOp_rot, stepNonIf_rot,
+      applyRot_cons _ _ _ _ _ rfl]
   simp only []
   -- Step 14: OP_SHA256.
   rw [show (rabinBodyOps.drop 13 : List StackOp)
@@ -679,16 +699,32 @@ theorem runOps_rabinBodyOps_eq (msg : ByteArray)
       runOpcode_BIN2NUM_bytesLocal _
         (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]) _ rfl]
   simp only [StackState.push]
-  -- Step 18: OP_NUMEQUAL — the numeric compare the spec now states.
+  -- Step 18: OP_ROT (F-047) — bring pubKey up over the decoded digest.
   rw [show (rabinBodyOps.drop 17 : List StackOp)
-        = .opcode "OP_NUMEQUAL" :: (rabinBodyOps.drop 18) from rfl,
+        = .rot :: (rabinBodyOps.drop 18) from rfl,
+      runOps_cons_nonIf_eq .rot _ _ notIfOp_rot, stepNonIf_rot,
+      applyRot_cons _ _ _ _ _ rfl]
+  simp only []
+  -- Step 19: OP_MOD (F-047) — digest mod pubKey, gated by `pubKey ≠ 0`.
+  rw [show (rabinBodyOps.drop 18 : List StackOp)
+        = .opcode "OP_MOD" :: (rabinBodyOps.drop 19) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_MOD") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_MOD_intInt_nonzero _
+        (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]))
+        pubKey _ rfl hPubKey]
+  simp only [StackState.push]
+  -- Step 20: OP_NUMEQUAL — the numeric compare the spec now states.
+  rw [show (rabinBodyOps.drop 19 : List StackOp)
+        = .opcode "OP_NUMEQUAL" :: (rabinBodyOps.drop 20) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_NUMEQUAL") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
       runOpcode_NUMEQUAL_ints _
         ((padding + sig * sig) % pubKey)
-        (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]))
+        (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00])
+          % pubKey)
         _ rfl]
-  rw [show (rabinBodyOps.drop 18 : List StackOp) = [] from rfl]
+  rw [show (rabinBodyOps.drop 20 : List StackOp) = [] from rfl]
   simp only []
   rw [runOps_nil]
   -- Reconcile algebraic form: `padding + sig*sig = sig*sig + padding`.

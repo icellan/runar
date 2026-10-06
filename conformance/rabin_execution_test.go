@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"crypto/sha256"
 	"math/big"
 	"os"
 	"os/exec"
@@ -22,8 +23,13 @@ import (
 //
 // The emitted tail decides it:
 //
-//	pre-fix   ... OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
-//	post-fix  ... OP_MOD OP_SWAP OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_NUMEQUAL
+//	pre-fix   ... OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+//	BUG-011   ... OP_SWAP OP_MOD OP_SWAP OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_NUMEQUAL
+//	F-047     ... OP_OVER OP_MOD OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_ROT OP_MOD OP_NUMEQUAL
+//
+// F-047 additionally reduces the digest mod pubKey, matching every off-chain
+// verifier ((sig^2+padding) mod n == SHA256(msg) mod n). The post-fix tests
+// below run the F-047 tail, which is what the compiler emits today.
 //
 // The signer (packages/runar-go/rabin.go::RabinSign) reads the digest with
 // `leBytesToBigInt` — LITTLE-endian — which already matches script-number byte
@@ -52,9 +58,11 @@ const triggeringMsg = "BSV/USD=50003"
 // OP_MOD OP_SWAP OP_SHA256 OP_EQUAL.
 const rabinTailPreFix = "97" + "7c" + "a8" + "87"
 
-// rabinTailPostFix is the tail PR #146 emits:
-// OP_MOD OP_SWAP OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_NUMEQUAL.
-const rabinTailPostFix = "97" + "7c" + "a8" + "0100" + "7e" + "81" + "9c"
+// rabinTailPostFix is the tail the compiler emits today (BUG-011 numeric
+// compare + F-047 digest reduction), starting right after OP_ADD:
+// OP_OVER OP_MOD OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_ROT OP_MOD OP_NUMEQUAL.
+// It consumes the stack <msg> <pubKey> <sig^2+padding>.
+const rabinTailPostFix = "78" + "97" + "7b" + "a8" + "0100" + "7e" + "81" + "7b" + "97" + "9c"
 
 // pushBigIntLE pushes a big.Int as the little-endian byte string the Rúnar
 // Rabin ABI uses on the stack.
@@ -85,6 +93,14 @@ func buildRabinCheck(msg []byte, sig, padding, pubKey *big.Int, tail string) str
 	// Stack: <lhs> <msg>, then the tail's OP_MOD/OP_SWAP are already accounted
 	// for, so start from the OP_SHA256 step.
 	return pushBigIntLE(lhs) + encodePushBytes(msg) + tail[4:]
+}
+
+// buildRabinCheckPostFix assembles <msg> <pubKey> <sig^2+padding> || rabinTailPostFix:
+// the stack the emitted body reaches after OP_ROT OP_DUP OP_MUL OP_ADD.
+func buildRabinCheckPostFix(msg []byte, sig, padding, pubKey *big.Int) string {
+	sum := new(big.Int).Mul(sig, sig)
+	sum.Add(sum, padding)
+	return encodePushBytes(msg) + pushBigIntLE(pubKey) + pushBigIntLE(sum) + rabinTailPostFix
 }
 
 func rabinTestKey(t *testing.T) (p, q, n *big.Int) {
@@ -126,9 +142,35 @@ func TestRabinVerify_PostFixAcceptsHonestSignature(t *testing.T) {
 		t.Fatal("harness: RabinSign produced no signature")
 	}
 
-	scriptHex := buildRabinCheck(msg, sig, padding, n, rabinTailPostFix)
+	scriptHex := buildRabinCheckPostFix(msg, sig, padding, n)
 	if err := executeScript(scriptHex, ""); err != nil {
 		t.Fatalf("post-fix tail REJECTED an honest signature: %v\nscript: %s", err, scriptHex)
+	}
+}
+
+// F-047: with a modulus below the digest (n = 251), sig = 0 and
+// padding = SHA256(msg) mod n satisfy the off-chain equation by construction.
+// The emitted tail must accept it and refuse padding + 1. Before F-047 the
+// tail compared against the UNREDUCED digest and refused the accept case.
+// A 251 modulus is trivially forgeable; this pins the defined semantics only.
+func TestRabinVerify_PostFixReducesDigestModN(t *testing.T) {
+	n := big.NewInt(251)
+	msg := []byte(triggeringMsg)
+	h := sha256.Sum256(msg)
+	hashLE := new(big.Int)
+	for i := len(h) - 1; i >= 0; i-- {
+		hashLE.Lsh(hashLE, 8)
+		hashLE.Or(hashLE, big.NewInt(int64(h[i])))
+	}
+	padding := new(big.Int).Mod(hashLE, n)
+	zero := big.NewInt(0)
+
+	if err := executeScript(buildRabinCheckPostFix(msg, zero, padding, n), ""); err != nil {
+		t.Fatalf("post-fix tail REJECTED (sig=0, padding=h mod 251), which every off-chain verifier accepts: %v", err)
+	}
+	bad := new(big.Int).Mod(new(big.Int).Add(padding, big.NewInt(1)), n)
+	if err := executeScript(buildRabinCheckPostFix(msg, zero, bad, n), ""); !scriptRejected(err) {
+		t.Fatalf("post-fix tail ACCEPTED a wrong padding under n=251 (err=%v)", err)
 	}
 }
 
@@ -145,7 +187,7 @@ func TestRabinVerify_PostFixRejectsForgedSignature(t *testing.T) {
 
 	// Same padding, wrong root.
 	forged := new(big.Int).Add(sig, big.NewInt(1))
-	scriptHex := buildRabinCheck(msg, forged, padding, n, rabinTailPostFix)
+	scriptHex := buildRabinCheckPostFix(msg, forged, padding, n)
 	if err := executeScript(scriptHex, ""); !scriptRejected(err) {
 		t.Fatalf("post-fix tail ACCEPTED a forged signature (err=%v) — the repair "+
 			"made the comparison vacuous", err)
@@ -163,7 +205,7 @@ func TestRabinVerify_PostFixRejectsWrongMessage(t *testing.T) {
 		t.Fatal("harness: RabinSign produced no signature")
 	}
 
-	scriptHex := buildRabinCheck(other, sig, padding, n, rabinTailPostFix)
+	scriptHex := buildRabinCheckPostFix(other, sig, padding, n)
 	if err := executeScript(scriptHex, ""); !scriptRejected(err) {
 		t.Fatalf("post-fix tail ACCEPTED a signature over a DIFFERENT message (err=%v)", err)
 	}
@@ -183,8 +225,9 @@ func TestRabinVerify_PostFixRejectsWrongMessage(t *testing.T) {
 // `OP_NUMEQUALVERIFY` (0x9d), and pre-fix `OP_EQUAL` likewise became
 // `OP_EQUALVERIFY` (0x88):
 //
-//	pre-fix   a8 88                 OP_SHA256 OP_EQUALVERIFY
-//	post-fix  a8 0100 7e 81 9d      OP_SHA256 <0x00> OP_CAT OP_BIN2NUM OP_NUMEQUALVERIFY
+//	pre-fix   a8 88                    OP_SHA256 OP_EQUALVERIFY
+//	post-fix  78 97 7b a8 0100 7e 81 7b 97 9d
+//	          OP_OVER OP_MOD OP_ROT OP_SHA256 <0x00> OP_CAT OP_BIN2NUM OP_ROT OP_MOD OP_NUMEQUALVERIFY
 //
 // which is the same comparison the unfused tails in this file exercise.
 func TestRabinVerify_CompiledContractCarriesTheNumericTail(t *testing.T) {
@@ -219,7 +262,7 @@ func TestRabinVerify_CompiledContractCarriesTheNumericTail(t *testing.T) {
 		t.Fatal("Go CLI produced no hex — comparison would be vacuous")
 	}
 
-	const fusedPostFix = "a801007e819d" // OP_SHA256 <0x00> OP_CAT OP_BIN2NUM OP_NUMEQUALVERIFY
+	const fusedPostFix = "78977ba801007e817b979d" // F-047 tail, OP_NUMEQUALVERIFY-fused
 	const fusedPreFix = "a888"          // OP_SHA256 OP_EQUALVERIFY
 
 	if !strings.Contains(lockingHex, fusedPostFix) {

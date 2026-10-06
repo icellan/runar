@@ -1,0 +1,47 @@
+{
+  "fixture": "oracle-price",
+  "kind": "stateless-signed",
+  "note": "verifyRabinSig on a real @bsv/sdk Spend with a real ECDSA receiver signature over the real BIP-143 sighash. Pins the F-047 semantics: the on-chain check is (sig^2 + padding) mod n == SHA256(msg) mod n, the definition every off-chain verifier uses (rabinVerify, runar-go RabinVerify). The interpreter verdict (off-chain rabinVerify) is asserted equal to the Spend verdict on every row. receiver = alice.",
+  "goldenHashes": {
+    "expected-script.hex": "f611d7cb907e25d749fe14adda780dd1b6f82f00c75a3e19d29591e12f79f781",
+    "expected-ir.json": "9db6022cc803ef1311c1d212788dd2a78859d16393ba324dfe5d6c2cbc45b79e"
+  },
+  "constructorArgs": {
+    "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
+    "receiver": { "$pubkey": "alice" }
+  },
+  "spends": [
+    {
+      "method": "settle",
+      "args": ["50003n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }],
+      "expect": "accept",
+      "note": "Real Rabin signature from packages/runar-go RabinSign over num2bin(50003, 8) = 53c3000000000000 under the ~2^260 oracle key (n > digest, so the F-047 digest reduction is the identity here). Same vector as witnesses/oracle-price.json."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0x406deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "Forged Rabin signature (sig+1) under the real oracle key: both engines refuse it."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "oraclePubKey": "251n",
+        "receiver": { "$pubkey": "alice" }
+      },
+      "args": ["50003n", "", "0x71", { "$sig": "alice" }],
+      "expect": "accept",
+      "note": "F-047 forced near-miss. n = 251, sig = 0 (empty push), padding = SHA256(53c3000000000000) read little-endian mod 251 = 113 (0x71). The off-chain verifiers accept this by construction ((0 + 113) mod 251 == digest mod 251). Before F-047 the emitted script compared against the UNREDUCED 256-bit digest and refused it on a real Spend while the interpreter accepted it. A modulus of 251 is trivially forgeable: accepting it is the defined semantics, not a security property."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "oraclePubKey": "251n",
+        "receiver": { "$pubkey": "alice" }
+      },
+      "args": ["50003n", "", "0x72", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "F-047 wrong-padding near-miss: padding 114 = residue + 1, so (0 + 114) mod 251 != digest mod 251. Both engines refuse it, so the digest reduction is not vacuous."
+    }
+  ]
+}

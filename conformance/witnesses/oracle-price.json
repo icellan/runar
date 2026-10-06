@@ -2,7 +2,7 @@
   "fixture": "oracle-price",
   "_note": "Execution witness for verifyRabinSig. This fixture had NO witness until 2026-08-28, which is why the BUG-011 digest-encoding defect reached RC: the 72-fixture corpus pinned its BYTES across seven tiers, but nothing ever RAN the emitted script. It had no witness because `settle` calls checkSig and the differential harness could not express a signature; that limitation is lifted by the {\"signWith\"} marker, which fills the arg with a REAL secp256k1 signature over ScriptVM's own synthetic BIP-143 context.",
   "goldenHashes": {
-    "expected-script.hex": "606b482f8c8030dbfcdcbba52c1765cadf15633777da990d7b3bdc05341264e7"
+    "expected-script.hex": "f611d7cb907e25d749fe14adda780dd1b6f82f00c75a3e19d29591e12f79f781"
   },
   "constructorArgs": {
     "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",

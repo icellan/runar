@@ -33,13 +33,15 @@ RABIN_GOLDEN: list[str | None] = [
     "OP_DUP",
     "OP_MUL",
     "OP_ADD",
-    "OP_SWAP",
+    "OP_OVER",  # F-047: keep pubKey for the digest reduction
     "OP_MOD",
-    "OP_SWAP",
+    "OP_ROT",
     "OP_SHA256",
     None,  # push 0x00 (BUG-011 digest sign byte)
     "OP_CAT",
     "OP_BIN2NUM",
+    "OP_ROT",  # F-047
+    "OP_MOD",  # F-047: SHA256(msg) mod pubKey
     "OP_NUMEQUAL",
 ]
 

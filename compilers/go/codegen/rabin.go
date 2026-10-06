@@ -2,14 +2,15 @@
 //
 // EmitVerifyRabinSig: [msg, sig, padding, pubKey] → [bool]
 //
-// Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg)
+// Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
 // AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
-// The emission is a fixed 18-op sequence:
+// The emission is a fixed 20-op sequence:
 //
 //	OP_SWAP
 //	OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
-//	OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD
-//	OP_SWAP OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_NUMEQUAL
+//	OP_ROT OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+//	OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
+//	OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
 //
 // ENCODING (BUG-011): the final comparison is NUMERIC, not byte-wise.
 // OP_MOD leaves a minimal Script number (33 bytes with a trailing 0x00 sign
@@ -47,14 +48,17 @@ func EmitVerifyRabinSig(emit func(StackOp)) {
 	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                        // msg pubKey padding sig sig
 	emit(StackOp{Op: "opcode", Code: "OP_MUL"})                        // msg pubKey padding sig^2
 	emit(StackOp{Op: "opcode", Code: "OP_ADD"})                        // msg pubKey (sig^2+padding)
-	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                       // msg (sig^2+padding) pubKey
-	emit(StackOp{Op: "opcode", Code: "OP_MOD"})                        // msg ((sig^2+padding) mod pubKey)
-	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                       // ((sig^2+padding) mod pubKey) msg
-	emit(StackOp{Op: "opcode", Code: "OP_SHA256"})                     // ((sig^2+padding) mod pubKey) SHA256(msg)
+	emit(StackOp{Op: "opcode", Code: "OP_OVER"})                       // msg pubKey (sig^2+padding) pubKey  (F-047: keep pubKey)
+	emit(StackOp{Op: "opcode", Code: "OP_MOD"})                        // msg pubKey lhs
+	emit(StackOp{Op: "opcode", Code: "OP_ROT"})                        // pubKey lhs msg
+	emit(StackOp{Op: "opcode", Code: "OP_SHA256"})                     // pubKey lhs SHA256(msg)
 	// BUG-011 digest-encoding normalization: raw 32-byte digest -> minimal
 	// non-negative Script number, then numeric compare (see doc comment).
 	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x00}}}) // ... SHA256(msg) 0x00
 	emit(StackOp{Op: "opcode", Code: "OP_CAT"})                        // ... SHA256(msg)||0x00
-	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})                    // ... num(SHA256(msg))
+	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})                    // pubKey lhs num(SHA256(msg))
+	// F-047: reduce the digest mod pubKey, matching every off-chain verifier.
+	emit(StackOp{Op: "opcode", Code: "OP_ROT"})                        // lhs num(SHA256(msg)) pubKey
+	emit(StackOp{Op: "opcode", Code: "OP_MOD"})                        // lhs (num(SHA256(msg)) mod pubKey)
 	emit(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})                   // bool
 }

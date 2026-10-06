@@ -534,3 +534,41 @@ func TestEmitVerifyRabinSig_AcceptsRealSmallPadding(t *testing.T) {
 	}
 }
 
+
+// TestEmitVerifyRabinSig_SmallModulusReducesDigest (F-047): the on-chain check
+// must reduce SHA256(msg) mod n, exactly like every off-chain verifier. With
+// n = 251 every digest exceeds n; sig = 0, padding = SHA256(msg) mod n satisfies
+// the off-chain equation by construction, so the script must accept it, and
+// padding+1 must be refused. Before F-047 the script compared against the
+// UNREDUCED digest and refused the accept case.
+//
+// Proves: the Go emitter's script agrees with the off-chain definition on the
+// go-sdk interpreter when n <= digest. Does not prove anything about negative
+// operands or moduli (F-144). A 251-modulus key is trivially forgeable; this is
+// the defined semantics, not a security property.
+func TestEmitVerifyRabinSig_SmallModulusReducesDigest(t *testing.T) {
+	n := big.NewInt(251)
+	msg := scriptSafeMsg(t)
+	h := sha256.Sum256(msg)
+	hashLE := new(big.Int)
+	for i := 0; i < len(h); i++ {
+		hashLE.Add(hashLE, new(big.Int).Lsh(big.NewInt(int64(h[i])), uint(i*8)))
+	}
+	padding := new(big.Int).Mod(hashLE, n)
+	zero := big.NewInt(0)
+
+	if !rabinAdvVerify(msg, zero, padding, n) {
+		t.Fatalf("off-chain verifier rejected (sig=0, padding=h mod n) — test setup broken")
+	}
+	if err := BuildAndExecuteOps(buildRabinVerifyScript(msg, zero, padding, n)); err != nil {
+		t.Fatalf("emitted Rabin script rejected a signature the off-chain verifier accepts (n=251): %v", err)
+	}
+
+	bad := new(big.Int).Mod(new(big.Int).Add(padding, big.NewInt(1)), n)
+	if rabinAdvVerify(msg, zero, bad, n) {
+		t.Fatalf("off-chain verifier accepted the wrong padding — test setup broken")
+	}
+	if err := BuildAndExecuteOps(buildRabinVerifyScript(msg, zero, bad, n)); err == nil {
+		t.Fatalf("emitted Rabin script accepted a wrong padding (n=251)")
+	}
+}

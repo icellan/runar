@@ -4,18 +4,19 @@
  * Splice into LoweringContext in 05-stack-lower.ts. Entry: lowerVerifyRabinSig()
  * in stack-lower → calls emitVerifyRabinSig().
  *
- * Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg)
+ * Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
  * AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
  *
  * Input stack at entry (top-down): pubKey(0) padding(1) sig(2) msg(3)
  *   — i.e. bottom→top: msg sig padding pubKey
  * Output: <boolean>
  *
- * The opcode sequence is a fixed 18 ops:
+ * The opcode sequence is a fixed 20 ops:
  *   OP_SWAP
  *   OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
- *   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD
- *   OP_SWAP OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_NUMEQUAL
+ *   OP_ROT OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+ *   OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
+ *   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
  *
  * ENCODING (BUG-011): the final comparison must be NUMERIC, not byte-wise.
  * OP_MOD leaves its result in minimal Script-number encoding — 33 bytes
@@ -63,13 +64,15 @@ export const RABIN_PADDING_LIMIT = 65536n;
  *   OP_ROT                           -- msg pubKey padding sig
  *   OP_DUP OP_MUL                    -- msg pubKey padding sig^2
  *   OP_ADD                           -- msg pubKey (sig^2+padding)
- *   OP_SWAP                          -- msg (sig^2+padding) pubKey
- *   OP_MOD                           -- msg ((sig^2+padding) mod pubKey)
- *   OP_SWAP                          -- ((sig^2+padding) mod pubKey) msg
- *   OP_SHA256                        -- ((sig^2+padding) mod pubKey) SHA256(msg)
+ *   OP_OVER                          -- msg pubKey (sig^2+padding) pubKey
+ *   OP_MOD                           -- msg pubKey lhs        (lhs = (sig^2+padding) mod pubKey)
+ *   OP_ROT                           -- pubKey lhs msg
+ *   OP_SHA256                        -- pubKey lhs SHA256(msg)
  *   <push 0x00> OP_CAT               -- ... SHA256(msg)||0x00   (33 B, explicit
  *                                       non-negative sign byte — BUG-011)
- *   OP_BIN2NUM                       -- ... num(SHA256(msg))    (minimal encoding)
+ *   OP_BIN2NUM                       -- pubKey lhs num(SHA256(msg))  (minimal encoding)
+ *   OP_ROT                           -- lhs num(SHA256(msg)) pubKey
+ *   OP_MOD                           -- lhs (num(SHA256(msg)) mod pubKey)   (F-047)
  *   OP_NUMEQUAL                      -- result (numeric compare, never aborts)
  * Stack after: <boolean>
  */
@@ -85,9 +88,11 @@ export function emitVerifyRabinSig(emit: Emit): void {
   emit({ op: 'opcode', code: 'OP_DUP' });
   emit({ op: 'opcode', code: 'OP_MUL' });
   emit({ op: 'opcode', code: 'OP_ADD' });
-  emit({ op: 'opcode', code: 'OP_SWAP' });
+  // F-047: keep pubKey on the stack (OP_OVER, not OP_SWAP) — the digest is
+  // reduced by the same modulus below.
+  emit({ op: 'opcode', code: 'OP_OVER' });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  emit({ op: 'opcode', code: 'OP_SWAP' });
+  emit({ op: 'opcode', code: 'OP_ROT' });
   emit({ op: 'opcode', code: 'OP_SHA256' });
   // BUG-011: digest-encoding normalization. The digest is a raw 32-byte push;
   // the OP_MOD result is a minimal Script number (33 bytes when the digest's
@@ -98,5 +103,10 @@ export function emitVerifyRabinSig(emit: Emit): void {
   emit({ op: 'push', value: new Uint8Array([0x00]) });
   emit({ op: 'opcode', code: 'OP_CAT' });
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
+  // F-047: reduce the digest mod pubKey, matching every off-chain verifier
+  // ((sig^2+padding) mod n == SHA256(msg) mod n). Without it any n <= digest
+  // refused signatures the off-chain verifiers accept.
+  emit({ op: 'opcode', code: 'OP_ROT' });
+  emit({ op: 'opcode', code: 'OP_MOD' });
   emit({ op: 'opcode', code: 'OP_NUMEQUAL' });
 }

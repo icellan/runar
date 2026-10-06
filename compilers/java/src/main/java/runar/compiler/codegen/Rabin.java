@@ -23,12 +23,13 @@ import runar.compiler.ir.stack.StackOp;
  * to the top in argument order before invoking
  * {@link #emitVerifyRabinSig(Consumer)}.
  *
- * <p>The opcode sequence (post BUG-010) is:
+ * <p>The opcode sequence (post BUG-010, BUG-011, F-047) is:
  * <pre>
  *   OP_SWAP
  *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536 (BUG-010)
- *   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD
- *   OP_SWAP OP_SHA256 &lt;push 0x00&gt; OP_CAT OP_BIN2NUM OP_NUMEQUAL
+ *   OP_ROT OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+ *   OP_ROT OP_SHA256 &lt;push 0x00&gt; OP_CAT OP_BIN2NUM
+ *   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubkey (F-047)
  * </pre>
  *
  * <p>It computes {@code (sig*sig + padding) mod pubkey == sha256(msg)},
@@ -73,9 +74,9 @@ public final class Rabin {
         emit.accept(new OpcodeOp("OP_DUP"));
         emit.accept(new OpcodeOp("OP_MUL"));
         emit.accept(new OpcodeOp("OP_ADD"));
-        emit.accept(new OpcodeOp("OP_SWAP"));
+        emit.accept(new OpcodeOp("OP_OVER")); // F-047: keep pubkey for the digest reduction
         emit.accept(new OpcodeOp("OP_MOD"));
-        emit.accept(new OpcodeOp("OP_SWAP"));
+        emit.accept(new OpcodeOp("OP_ROT"));
         emit.accept(new OpcodeOp("OP_SHA256"));
         // BUG-011 digest-encoding normalization: OP_MOD leaves a MINIMAL Script
         // number, which carries a trailing 0x00 sign byte whenever the digest's
@@ -88,6 +89,9 @@ public final class Rabin {
         emit.accept(new PushOp(PushValue.ofHex("00")));
         emit.accept(new OpcodeOp("OP_CAT"));
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
+        // F-047: reduce the digest mod pubkey, matching every off-chain verifier.
+        emit.accept(new OpcodeOp("OP_ROT"));
+        emit.accept(new OpcodeOp("OP_MOD"));
         emit.accept(new OpcodeOp("OP_NUMEQUAL"));
     }
 

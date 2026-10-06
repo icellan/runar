@@ -2,14 +2,15 @@
 
 emit_verify_rabin_sig: [msg, sig, padding, pubKey] -> [bool]
 
-Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg)
+Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
 AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
-The emission is a fixed 15-opcode sequence:
+The emission is a fixed 20-opcode sequence:
 
     OP_SWAP
     OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   # 0 <= padding < 65536 (BUG-010)
-    OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD
-#   OP_SWAP OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM OP_NUMEQUAL
+    OP_ROT OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+    OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
+    OP_ROT OP_MOD OP_NUMEQUAL                       # digest mod pubKey (F-047)
 
 The caller must bring the 4 arguments to the top of the stack in argument
 order (msg sig padding pubKey, pubKey on top) before calling.
@@ -64,10 +65,10 @@ def emit_verify_rabin_sig(emit: Callable[["StackOp"], None]) -> None:
     emit(_opcode("OP_DUP"))                             # msg pubKey padding sig sig
     emit(_opcode("OP_MUL"))                             # msg pubKey padding sig^2
     emit(_opcode("OP_ADD"))                             # msg pubKey (sig^2+padding)
-    emit(_opcode("OP_SWAP"))                            # msg (sig^2+padding) pubKey
-    emit(_opcode("OP_MOD"))                             # msg ((sig^2+padding) mod pubKey)
-    emit(_opcode("OP_SWAP"))                            # ((sig^2+padding) mod pubKey) msg
-    emit(_opcode("OP_SHA256"))                          # ((sig^2+padding) mod pubKey) SHA256(msg)
+    emit(_opcode("OP_OVER"))                            # msg pubKey (sig^2+padding) pubKey (F-047: keep pubKey)
+    emit(_opcode("OP_MOD"))                             # msg pubKey lhs
+    emit(_opcode("OP_ROT"))                             # pubKey lhs msg
+    emit(_opcode("OP_SHA256"))                          # pubKey lhs SHA256(msg)
     # BUG-011 digest-encoding normalization: OP_MOD leaves a MINIMAL Script
     # number, which carries a trailing 0x00 sign byte whenever the digest's
     # most-significant byte has its high bit set (~50% of messages), while
@@ -78,5 +79,8 @@ def emit_verify_rabin_sig(emit: Callable[["StackOp"], None]) -> None:
     # (a false from one key's check rather than a script kill) still works.
     emit(_push_bytes(b"\x00"))                          # ... SHA256(msg) 0x00
     emit(_opcode("OP_CAT"))                             # ... SHA256(msg)||0x00
-    emit(_opcode("OP_BIN2NUM"))                         # ... num(SHA256(msg))
+    emit(_opcode("OP_BIN2NUM"))                         # pubKey lhs num(SHA256(msg))
+    # F-047: reduce the digest mod pubKey, matching every off-chain verifier.
+    emit(_opcode("OP_ROT"))                             # lhs num(SHA256(msg)) pubKey
+    emit(_opcode("OP_MOD"))                             # lhs (num(SHA256(msg)) mod pubKey)
     emit(_opcode("OP_NUMEQUAL"))                        # bool
