@@ -306,9 +306,14 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // push 2144, OP_EQUALVERIFY). 5444 -> 5447, and the fingerprint moves with it.
     ("verifyWOTS", 3, 5447, 0xeb5c21ad8b9fcfb4),
     ("verifySLHDSA_SHA2_128s", 3, 29583, 0xc1296427c5d591c0),
-    ("sha256Compress", 2, 21296, 0x73b8dfa330f7de6f),
-    ("sha256Finalize", 3, 63947, 0xfa3a224e6ba404f0),
-    ("blake3Compress", 2, 10377, 0xdc81c38b475c9e46),
+    // F-114: sha256Compress / blake3Compress +6 ops (OP_SIZE <64>
+    // OP_EQUALVERIFY on the block, OP_SIZE <32> OP_EQUALVERIFY on the state /
+    // chaining value); sha256Finalize +5 (OP_SWAP OP_SIZE <32> OP_EQUALVERIFY
+    // OP_SWAP on its state). A mis-sized operand used to be truncated or
+    // zero-extended into a second preimage of the committed digest.
+    ("sha256Compress", 2, 21302, 0x3e4a7f32cd8d603e),
+    ("sha256Finalize", 3, 63952, 0x47efde1184960a59),
+    ("blake3Compress", 2, 10383, 0x66c78065fba52101),
     ("blake3Hash", 1, 10387, 0x1b9842224c29f196),
     ("__array_access", 2, 10, 0x9fd1122314782f6a),
     ("substr", 3, 10, 0xa6268ef41498ed4a),

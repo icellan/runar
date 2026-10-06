@@ -447,7 +447,7 @@ def _emit_g_call(
 # Full compression ops generator
 # ---------------------------------------------------------------------------
 
-def _generate_compress_ops(block_len_from_alt: bool = False) -> "list[StackOp]":
+def _generate_compress_ops(block_len_from_alt: bool = False, guard_operands: bool = False) -> "list[StackOp]":
     """Generate BLAKE3 compression ops.
     Stack entry: [..., chainingValue(32 LE), block(64 LE)] -- 2 items
     Stack exit:  [..., hash(32 LE)] -- 1 item
@@ -464,8 +464,21 @@ def _generate_compress_ops(block_len_from_alt: bool = False) -> "list[StackOp]":
     ``block_len_from_alt``: when True, v[14] (block_len) is popped from the alt
     stack (blake3Hash provides the real message length); otherwise it is the
     constant 64 (blake3Compress operates on a full 64-byte block).
+
+    ``guard_operands`` (F-114): abort unless the block is exactly 64 bytes and
+    the chaining value exactly 32 bytes. Without it a 65-byte block ``B || x``
+    (the extra byte lands above bit 32 of an addend and is truncated away) or a
+    60..63-byte block (the short last word is zero-extended) yields the same
+    digest as a different 64-byte block. blake3Hash builds its own operands, so
+    only the blake3Compress builtin needs the check.
     """
     em = _Emitter(2)
+
+    if guard_operands:
+        # [CV, block] -> abort unless len(block) == 64
+        em.oc("OP_SIZE"); em.depth += 1
+        em.push_i(64)
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2
 
     # ================================================================
     # Phase 1: Unpack block into 16 LE message words
@@ -482,6 +495,11 @@ def _generate_compress_ops(block_len_from_alt: bool = False) -> "list[StackOp]":
     # ================================================================
     # Move CV to alt (it's below the 16 msg words, at depth 16)
     em.roll(16)
+    if guard_operands:
+        # [m0..m15, CV] -> abort unless len(CV) == 32
+        em.oc("OP_SIZE"); em.depth += 1
+        em.push_i(32)
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2
     em.to_alt()
     em.assert_depth(16, "after CV to alt")
     # Stack: [m0, m1, ..., m15]  Alt: [CV]
@@ -598,7 +616,7 @@ _blake3_compress_ops_cache: "list[StackOp] | None" = None
 def _get_compress_ops() -> "list[StackOp]":
     global _blake3_compress_ops_cache
     if _blake3_compress_ops_cache is None:
-        _blake3_compress_ops_cache = _generate_compress_ops()
+        _blake3_compress_ops_cache = _generate_compress_ops(guard_operands=True)
     return _blake3_compress_ops_cache
 
 
@@ -611,6 +629,7 @@ def emit_blake3_compress(emit: Callable[["StackOp"], None]) -> None:
     Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
     Stack on exit:  [..., hash(32 LE)]
     Net depth: -1
+    Aborts unless the chaining value is 32 bytes and the block 64 bytes (F-114).
 
     Words are little-endian (standard BLAKE3): a 4-byte byte-string is already
     a little-endian word. Uses block_len=64, counter=0, flags=11.

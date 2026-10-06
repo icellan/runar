@@ -1,0 +1,64 @@
+{
+  "fixture": "sha256-finalize",
+  "kind": "stateless-signed",
+  "note": "sha256Finalize on a real @bsv/sdk Spend. No signature: the witness is (state, remaining, msgBitLen). Honest digest: sha256Finalize(IV, 'abc', 24) = node SHA-256('abc'). F-114: the compiled sha256Finalize aborts unless the state is 32 bytes; remaining stays variable-length (0..119, past which the negative OP_NUM2BIN pad aborts). The interpreter verdict is asserted equal to the Spend verdict on every row.",
+  "goldenHashes": {
+    "expected-script.hex": "7fffdeaf4662976c4a99a4dbf0be5314af3114971e78dbe4d327fb74daff1584",
+    "expected-ir.json": "56875eedade5e14af57f6f1da8d6a919d6bdec03f781ff26612cc11703dfb1f3"
+  },
+  "constructorArgs": {
+    "expected": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  },
+  "spends": [
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "616263",
+        "24n"
+      ],
+      "expect": "accept",
+      "note": "Honest: SHA-256 IV, remaining 'abc', 24 bits; expected = SHA-256('abc')."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "616263",
+        "32n"
+      ],
+      "expect": "reject",
+      "note": "Wrong bit length (32 instead of 24): different padded block, digest mismatch."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd1901",
+        "616263",
+        "24n"
+      ],
+      "expect": "reject",
+      "note": "F-114 near-miss: 33-byte state IV || 0x01 with the honest digest: refused by the state-size guard."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd",
+        "616263",
+        "24n"
+      ],
+      "expect": "reject",
+      "note": "F-114 near-miss: 31-byte state with the honest digest: refused by the state-size guard."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+        "960n"
+      ],
+      "expect": "reject",
+      "note": "remaining of 120 bytes is outside the 0..119 domain: refused (negative OP_NUM2BIN pad)."
+    }
+  ]
+}

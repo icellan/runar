@@ -361,15 +361,37 @@ pub fn appendBuiltinInstructions(
     defer emitter.deinit();
 
     switch (builtin) {
-        .compress => try appendCompressProgram(&emitter),
+        .compress => try appendCompressProgram(&emitter, true),
         .finalize => try appendFinalizeProgram(&emitter),
     }
 
     try list.appendSlice(allocator, emitter.instructions.items);
 }
 
-fn appendCompressProgram(emitter: *Emitter) Sha256EmitterError!void {
+/// `guard_operands` (F-114): abort unless the block is exactly 64 bytes and
+/// the state exactly 32 bytes. Without it a mis-sized operand (a 5-byte or
+/// short last word) is truncated / zero-extended by the 32-bit word arithmetic
+/// and yields the same digest as a different 64-byte block. sha256Finalize
+/// builds its blocks itself and checks its state once at entry, so its
+/// compressions run unguarded.
+fn appendCompressProgram(emitter: *Emitter, guard_operands: bool) Sha256EmitterError!void {
+    if (guard_operands) {
+        // [state, block] -> abort unless len(block) == 64
+        try emitter.emitOp("OP_SIZE");
+        emitter.depth += 1;
+        try emitter.emitPushInt(64);
+        try emitter.emitOp("OP_EQUALVERIFY");
+        emitter.depth -= 2;
+    }
     try emitter.swap();
+    if (guard_operands) {
+        // [block, state] -> abort unless len(state) == 32
+        try emitter.emitOp("OP_SIZE");
+        emitter.depth += 1;
+        try emitter.emitPushInt(32);
+        try emitter.emitOp("OP_EQUALVERIFY");
+        emitter.depth -= 2;
+    }
     try emitter.dup();
     try emitter.toAlt();
     try emitter.toAlt();
@@ -463,6 +485,16 @@ fn appendFinalizeProgram(emitter: *Emitter) Sha256EmitterError!void {
     try emitter.toAlt();
     try emitter.assertDepth(2);
 
+    // F-114: abort unless len(state) == 32 (remaining is variable-length; a
+    // remaining past 119 bytes already aborts on the negative OP_NUM2BIN below).
+    try emitter.swap(); // [remaining, state]
+    try emitter.emitOp("OP_SIZE");
+    emitter.depth += 1;
+    try emitter.emitPushInt(32);
+    try emitter.emitOp("OP_EQUALVERIFY");
+    emitter.depth -= 2;
+    try emitter.swap(); // [state, remaining]
+
     try emitter.emitPushData(byte_80[0..]);
     try emitter.binOp("OP_CAT");
 
@@ -485,7 +517,7 @@ fn appendFinalizeProgram(emitter: *Emitter) Sha256EmitterError!void {
     try emitter.binOp("OP_CAT");
     try emitter.fromAlt();
     try emitter.binOp("OP_CAT");
-    try appendCompressProgram(emitter);
+    try appendCompressProgram(emitter, false);
 
     try emitter.emitOp("OP_ELSE");
     emitter.depth = 3;
@@ -505,9 +537,9 @@ fn appendFinalizeProgram(emitter: *Emitter) Sha256EmitterError!void {
     try emitter.split();
     try emitter.toAlt();
 
-    try appendCompressProgram(emitter);
+    try appendCompressProgram(emitter, false);
     try emitter.fromAlt();
-    try appendCompressProgram(emitter);
+    try appendCompressProgram(emitter, false);
 
     try emitter.emitOp("OP_ENDIF");
     try emitter.assertDepth(1);
@@ -583,7 +615,7 @@ test "sha256 compress op-count golden" {
     var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
     defer list.deinit(allocator);
     try appendBuiltinInstructions(&list, allocator, .compress);
-    try std.testing.expectEqual(@as(usize, 21292), list.items.len);
+    try std.testing.expectEqual(@as(usize, 21298), list.items.len);
 }
 
 test "sha256 finalize op-count golden" {
@@ -591,7 +623,7 @@ test "sha256 finalize op-count golden" {
     var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
     defer list.deinit(allocator);
     try appendBuiltinInstructions(&list, allocator, .finalize);
-    try std.testing.expectEqual(@as(usize, 63941), list.items.len);
+    try std.testing.expectEqual(@as(usize, 63946), list.items.len);
 }
 
 test "sha256 compress emits expected opcode families" {
@@ -602,7 +634,15 @@ test "sha256 compress emits expected opcode families" {
     try appendBuiltinInstructions(&list, allocator, .compress);
 
     try std.testing.expect(list.items.len > 100);
-    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_SWAP" }, list.items[0]);
+    // F-114: OP_SIZE <64> OP_EQUALVERIFY (block), OP_SWAP, OP_SIZE <32>
+    // OP_EQUALVERIFY (state).
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_SIZE" }, list.items[0]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .push_int = 64 }, list.items[1]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_EQUALVERIFY" }, list.items[2]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_SWAP" }, list.items[3]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_SIZE" }, list.items[4]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .push_int = 32 }, list.items[5]);
+    try std.testing.expectEqualDeep(Sha256Instruction{ .op_name = "OP_EQUALVERIFY" }, list.items[6]);
     try expectContainsOp(list.items, "OP_LSHIFT");
     try expectContainsOp(list.items, "OP_RSHIFT");
     try expectContainsOp(list.items, "OP_AND");

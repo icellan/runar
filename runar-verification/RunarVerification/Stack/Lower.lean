@@ -3332,10 +3332,20 @@ private def shaSplit4N : Nat → List StackOp
   | n + 1 => [shaPushI 4, shaOpc "OP_SPLIT"] ++ shaSplit4N n
 
 /-- Full SHA-256 compression op list. Stack on entry: [..., state(32 BE), block(64 BE)].
-Stack on exit: [..., newState(32 BE)]. Mirrors TS `generateCompressOps`. -/
-private def shaCompressOps : List StackOp :=
+Stack on exit: [..., newState(32 BE)]. Mirrors TS `generateCompressOps(guardOperands)`.
+
+`guardOperands` (F-114): abort unless the block is exactly 64 bytes and the
+state exactly 32 bytes (`OP_SIZE <n> OP_EQUALVERIFY`). Set for the
+`sha256Compress` builtin; `sha256Finalize` builds its own blocks and checks
+its state once at entry. -/
+private def shaCompressOpsGen (guardOperands : Bool) : List StackOp :=
+  -- F-114: [state, block] → abort unless len(block) == 64
+  (if guardOperands then [shaOpc "OP_SIZE", shaPushI 64, shaOpc "OP_EQUALVERIFY"] else [])
   -- Phase 1: save initial state to alt, unpack block to 16 LE words
-  [.swap, .dup, shaOpc "OP_TOALTSTACK", shaOpc "OP_TOALTSTACK"]
+  ++ [.swap]
+  -- F-114: [block, state] → abort unless len(state) == 32
+  ++ (if guardOperands then [shaOpc "OP_SIZE", shaPushI 32, shaOpc "OP_EQUALVERIFY"] else [])
+  ++ [.dup, shaOpc "OP_TOALTSTACK", shaOpc "OP_TOALTSTACK"]
   ++ shaSplit4N 15
   ++ shaBeWordsToLE 16
   -- Phase 2: W expansion (t = 16..63 ⇒ 48 iterations)
@@ -3358,8 +3368,11 @@ private def shaCompressOps : List StackOp :=
   -- drop the 64 W slots remaining below the result
   ++ shaDropN 64
 
-/-- TS `emitSha256Compress` entry point. -/
-private def shaEmitCompress : List StackOp := shaCompressOps
+/-- Unguarded compression, spliced by `sha256Finalize`. -/
+private def shaCompressOps : List StackOp := shaCompressOpsGen false
+
+/-- TS `emitSha256Compress` entry point (guarded, F-114). -/
+private def shaEmitCompress : List StackOp := shaCompressOpsGen true
 
 /-- TS `emitSha256Finalize` op list. Stack on entry:
 [..., state(32 BE), remaining(var len), msgBitLen(bigint)].
@@ -3373,6 +3386,8 @@ private def shaEmitFinalize : List StackOp :=
   ++ [.swap]
   ++ shaReverseBytes4
   ++ [ shaOpc "OP_CAT", shaOpc "OP_TOALTSTACK" ]
+  -- F-114: abort unless len(state) == 32
+  ++ [ .swap, shaOpc "OP_SIZE", shaPushI 32, shaOpc "OP_EQUALVERIFY", .swap ]
   -- Step 2: pad remaining with 0x80
   ++ [ .push (.bytes (ByteArray.mk #[0x80])), shaOpc "OP_CAT" ]
   -- Get padded length

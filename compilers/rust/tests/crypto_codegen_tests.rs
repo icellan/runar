@@ -332,7 +332,7 @@ fn test_emit_verify_slh_dsa_all_param_sets() {
 #[test]
 fn test_blake3_compress_op_count_golden() {
     let ops = collect(|s| emit_blake3_compress(s));
-    assert_eq!(count_op_tree(&ops), 10373, "blake3_compress op count drift");
+    assert_eq!(count_op_tree(&ops), 10379, "blake3_compress op count drift");
 }
 
 #[test]

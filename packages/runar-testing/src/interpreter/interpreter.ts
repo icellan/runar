@@ -1582,6 +1582,14 @@ export class RunarInterpreter {
       case 'blake3Compress': {
         const cv = this.toBytes(args[0]!);
         const block = this.toBytes(args[1]!);
+        // F-114: the compiled script aborts on a mis-sized operand, so the
+        // interpreter must fail too, not truncate / zero-extend.
+        if (cv.length !== 32) {
+          throw new Error(`blake3Compress: chaining value must be 32 bytes, got ${cv.length}`);
+        }
+        if (block.length !== 64) {
+          throw new Error(`blake3Compress: block must be 64 bytes, got ${block.length}`);
+        }
         return { kind: 'bytes', value: blake3CompressImpl(cv, block) };
       }
 

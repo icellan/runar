@@ -1,0 +1,74 @@
+{
+  "fixture": "sha256-compress",
+  "kind": "stateless-signed",
+  "note": "sha256Compress on a real @bsv/sdk Spend. No signature: the witness is the block. Honest digests are independent of the codegen: sha256Compress(IV, padded 'abc') = node SHA-256('abc') (FIPS 180-4 B.1), and a FIPS 180-4 compress reference in packages/runar-testing/src/__tests__/f114-compress-operand-size-vm.test.ts pinned to that value. F-114: the compiled sha256Compress aborts unless the block is 64 bytes and the state 32 bytes. Before F-114 a 60..63-byte block whose honest 64-byte form ends in zero bytes produced the honest digest and Spend accepted it. The interpreter verdict is asserted equal to the Spend verdict on every row.",
+  "goldenHashes": {
+    "expected-script.hex": "23288be690125ab8a38c0215ac00336b3f0c2929de3272c27caea3c981a09e83",
+    "expected-ir.json": "b78a214362583f90f76c9bbe259e7339c49ae873db00868b949fa8edfcb8973b"
+  },
+  "constructorArgs": {
+    "expected": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  },
+  "spends": [
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "61626380000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018"
+      ],
+      "expect": "accept",
+      "note": "Honest: SHA-256 IV + the FIPS-padded single block of 'abc'; expected = SHA-256('abc')."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "6162638000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001801"
+      ],
+      "expect": "reject",
+      "note": "F-114 near-miss: 65-byte block || 0x01 with the honest digest: refused by the block-size guard."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd1901",
+        "61626380000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018"
+      ],
+      "expect": "reject",
+      "note": "33-byte state IV || 0x01 with the honest digest: refused by the state-size guard."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd",
+        "61626380000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018"
+      ],
+      "expect": "reject",
+      "note": "31-byte state with the honest digest: refused by the state-size guard."
+    },
+    {
+      "method": "verify",
+      "constructorArgs": {
+        "expected": "d9d2ee4aacfe180a2ba2de9a945c266abe8fe19e0925695513322dcc2f660c13"
+      },
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d9200000000"
+      ],
+      "expect": "accept",
+      "note": "Honest zero-tail block (the 64-byte block (i*37+11) mod 256 with its last four bytes zeroed); expected from the FIPS reference compress."
+    },
+    {
+      "method": "verify",
+      "constructorArgs": {
+        "expected": "d9d2ee4aacfe180a2ba2de9a945c266abe8fe19e0925695513322dcc2f660c13"
+      },
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92000000"
+      ],
+      "expect": "reject",
+      "note": "F-114 forced near-miss: the 63-byte prefix of the zero-tail block, which Spend accepted with the honest digest before F-114 (short last word zero-extended). Now refused."
+    }
+  ]
+}

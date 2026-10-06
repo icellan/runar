@@ -42,9 +42,9 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		emit func(func(StackOp))
 		want int
 	}{
-		{"Sha256Compress", EmitSha256Compress, 21292},
-		{"Sha256Finalize", EmitSha256Finalize, 63941},
-		{"Blake3Compress", EmitBlake3Compress, 10373},
+		{"Sha256Compress", EmitSha256Compress, 21298},
+		{"Sha256Finalize", EmitSha256Finalize, 63946},
+		{"Blake3Compress", EmitBlake3Compress, 10379},
 		{"Blake3Hash", EmitBlake3Hash, 10387},
 		// CL-BUG-095 (Point-length validation) deltas below: a Point/pubkey
 		// blob was never checked against its defined width, so surplus bytes

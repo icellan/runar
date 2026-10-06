@@ -269,9 +269,23 @@ export function generateSetupOps(): StackOp[] {
  * `blockLenFromAlt`: when true, v[14] (block_len) is popped from the alt stack
  * (blake3Hash provides the real message length); otherwise it is the constant 64
  * (blake3Compress operates on a full 64-byte block).
+ *
+ * `guardOperands` (F-114): abort unless the block is exactly 64 bytes and the
+ * chaining value exactly 32 bytes. Without it a 65-byte block `B || x` (the
+ * extra byte lands above bit 32 of an addend and is truncated away) or a
+ * 60..63-byte block (the short last word is zero-extended) yields the same
+ * digest as a different 64-byte block. blake3Hash builds its own operands, so
+ * only the blake3Compress builtin needs the check.
  */
-export function generateCompressOps(numRounds = 7, blockLenFromAlt = false): StackOp[] {
+export function generateCompressOps(numRounds = 7, blockLenFromAlt = false, guardOperands = false): StackOp[] {
   const em = new Emitter(2);
+
+  if (guardOperands) {
+    // [CV, block] → abort unless len(block) == 64
+    em.oc('OP_SIZE'); em.depth++;
+    em.pushI(64n);
+    em.oc('OP_EQUALVERIFY'); em.depth -= 2;
+  }
 
   // ================================================================
   // Phase 1: Unpack block into 16 LE message words
@@ -287,6 +301,12 @@ export function generateCompressOps(numRounds = 7, blockLenFromAlt = false): Sta
   // ================================================================
   // Move CV to alt (it's below the 16 msg words, at depth 16)
   em.roll(16);
+  if (guardOperands) {
+    // [m0..m15, CV] → abort unless len(CV) == 32
+    em.oc('OP_SIZE'); em.depth++;
+    em.pushI(32n);
+    em.oc('OP_EQUALVERIFY'); em.depth -= 2;
+  }
   em.toAlt();
   em.assert(16, 'after CV to alt');
   // Stack: [m0, m1, ..., m15]  Alt: [CV]
@@ -406,7 +426,7 @@ export function generateCompressOps(numRounds = 7, blockLenFromAlt = false): Sta
 
 let _compressOpsCache: StackOp[] | null = null;
 function getCompressOps(): StackOp[] {
-  if (!_compressOpsCache) _compressOpsCache = generateCompressOps();
+  if (!_compressOpsCache) _compressOpsCache = generateCompressOps(7, false, /* guardOperands */ true);
   return _compressOpsCache;
 }
 
@@ -415,6 +435,7 @@ function getCompressOps(): StackOp[] {
  * Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
  * Stack on exit:  [..., hash(32 LE)]
  * Net depth: -1
+ * Aborts unless the chaining value is 32 bytes and the block 64 bytes (F-114).
  *
  * Uses block_len=64, counter=0, flags=CHUNK_START|CHUNK_END|ROOT — i.e. compress
  * one full 64-byte block as a single-chunk root. Words are little-endian

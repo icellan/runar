@@ -431,14 +431,21 @@ stack (the real message length supplied by `b3HashOps`); when `false` it is
 the constant 64 (a full-block `blake3Compress`). Mirrors TS
 `generateCompressOps(7, blockLenFromAlt)` (`blake3-codegen.ts:273`). The raw
 4-byte chunks are already little-endian words, so there is NO per-word
-`beWordsToLE` conversion. -/
-def b3CompressOpsGen (blockLenFromAlt : Bool) : List StackOp :=
+`beWordsToLE` conversion.
+
+`guardOperands` (F-114): abort unless the block is exactly 64 bytes and the
+chaining value exactly 32 bytes (`OP_SIZE <n> OP_EQUALVERIFY`). Mirrors TS
+`generateCompressOps(7, blockLenFromAlt, guardOperands)`; only the
+`blake3Compress` builtin path sets it. -/
+def b3CompressOpsGen (blockLenFromAlt : Bool) (guardOperands : Bool := false) : List StackOp :=
+  -- F-114: [CV, block] → abort unless len(block) == 64
+  (if guardOperands then [b3Opc "OP_SIZE", b3PushI 64, b3Opc "OP_EQUALVERIFY"] else [])
   -- ============================================================
   -- Phase 1: Unpack block into 16 LE message words
   -- ============================================================
   -- Split block (64 LE) into 16 × 4-byte little-endian words (raw chunks
   -- are already LE words — no conversion).
-  b3Split4N 15
+  ++ b3Split4N 15
   -- Stack: [CV, m0..m15]   m15=TOS
 
   -- ============================================================
@@ -446,6 +453,8 @@ def b3CompressOpsGen (blockLenFromAlt : Bool) : List StackOp :=
   -- ============================================================
   -- Move CV to alt (currently at depth 16, below the 16 msg words).
   ++ b3Roll 16
+  -- F-114: [m0..m15, CV] → abort unless len(CV) == 32
+  ++ (if guardOperands then [b3Opc "OP_SIZE", b3PushI 32, b3Opc "OP_EQUALVERIFY"] else [])
   ++ [b3Opc "OP_TOALTSTACK"]
   -- Stack: [m0..m15]   Alt: [CV]
 
@@ -491,7 +500,7 @@ def b3CompressOpsGen (blockLenFromAlt : Bool) : List StackOp :=
 
 /-- Full-block compression (block_len = 64 constant). The `blake3Compress`
 builtin path; also pinned by `runOps_b3CompressOps_eq`. -/
-def b3CompressOps : List StackOp := b3CompressOpsGen false
+def b3CompressOps : List StackOp := b3CompressOpsGen false (guardOperands := true)
 
 /-- Compression with block_len taken from the alt stack (the `b3HashOps`
 path, which pushes the real message length there). -/

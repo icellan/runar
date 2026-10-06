@@ -504,9 +504,24 @@ public final class Blake3 {
      * <p>{@code blockLenFromAlt}: when true, v[14] (block_len) is popped from the
      * alt stack (blake3Hash supplies the real message length); otherwise it is
      * the constant 64 (blake3Compress operates on a full 64-byte block).
+     *
+     * <p>{@code guardOperands} (F-114): abort unless the block is exactly 64
+     * bytes and the chaining value exactly 32 bytes. Without it a 65-byte block
+     * {@code B || x} (the extra byte lands above bit 32 of an addend and is
+     * truncated away) or a 60..63-byte block (the short last word is
+     * zero-extended) yields the same digest as a different 64-byte block.
+     * blake3Hash builds its own operands, so only the blake3Compress builtin
+     * needs the check.
      */
-    private static List<StackOp> generateCompressOps(boolean blockLenFromAlt) {
+    private static List<StackOp> generateCompressOps(boolean blockLenFromAlt, boolean guardOperands) {
         Emitter em = new Emitter(2);
+
+        if (guardOperands) {
+            // [CV, block] -> abort unless len(block) == 64
+            em.oc("OP_SIZE"); em.depth += 1;
+            em.pushI(64);
+            em.oc("OP_EQUALVERIFY"); em.depth -= 2;
+        }
 
         // ================================================================
         // Phase 1: Unpack block into 16 LE message words
@@ -522,6 +537,12 @@ public final class Blake3 {
         // ================================================================
         // Move CV to alt (it's below the 16 msg words, at depth 16)
         em.roll(16);
+        if (guardOperands) {
+            // [m0..m15, CV] -> abort unless len(CV) == 32
+            em.oc("OP_SIZE"); em.depth += 1;
+            em.pushI(32);
+            em.oc("OP_EQUALVERIFY"); em.depth -= 2;
+        }
         em.toAlt();
         em.assertDepth(16, "after CV to alt");
         // Stack: [m0, m1, ..., m15]  Alt: [CV]
@@ -649,7 +670,7 @@ public final class Blake3 {
             synchronized (Blake3.class) {
                 local = compressOpsCache;
                 if (local == null) {
-                    local = List.copyOf(generateCompressOps(false));
+                    local = List.copyOf(generateCompressOps(false, true));
                     compressOpsCache = local;
                 }
             }
@@ -666,6 +687,7 @@ public final class Blake3 {
      * Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
      * Stack on exit:  [..., hash(32 LE)]
      * Net depth: -1.
+     * Aborts unless the chaining value is 32 bytes and the block 64 bytes (F-114).
      */
     public static void emitBlake3Compress(Consumer<StackOp> emit) {
         for (StackOp op : getCompressOps()) emit.accept(op);
@@ -713,7 +735,7 @@ public final class Blake3 {
         em.swap(); // [IV(32 LE), paddedMessage(64 LE)]
 
         // Splice compression ops with the real block_len taken from the alt stack.
-        List<StackOp> compressOps = generateCompressOps(true);
+        List<StackOp> compressOps = generateCompressOps(true, false);
         for (StackOp op : compressOps) em.eRaw(op);
         em.depth = 1;
 

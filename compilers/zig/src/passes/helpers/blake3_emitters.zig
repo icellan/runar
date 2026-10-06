@@ -301,7 +301,7 @@ pub fn appendBuiltinInstructions(
     defer emitter.deinit();
 
     switch (builtin) {
-        .compress => try generateCompressOps(&emitter, 7, false),
+        .compress => try generateCompressOps(&emitter, 7, false, true),
         .hash, .blake3 => try generateHashOps(&emitter),
     }
 
@@ -353,12 +353,26 @@ fn generateHashOps(emitter: *Emitter) Blake3EmitterError!void {
     try emitter.swap();
 
     // Compress with the real block_len taken from the alt stack.
-    try generateCompressOps(emitter, 7, true);
+    try generateCompressOps(emitter, 7, true, false);
     emitter.depth = 1;
     try emitter.assertDepth(1);
 }
 
-fn generateCompressOps(emitter: *Emitter, num_rounds: usize, block_len_from_alt: bool) Blake3EmitterError!void {
+/// `guard_operands` (F-114): abort unless the block is exactly 64 bytes and
+/// the chaining value exactly 32 bytes. Without it a 65-byte block `B || x`
+/// (the extra byte lands above bit 32 of an addend and is truncated away) or a
+/// 60..63-byte block (the short last word is zero-extended) yields the same
+/// digest as a different 64-byte block. blake3Hash builds its own operands, so
+/// only the blake3Compress builtin needs the check.
+fn generateCompressOps(emitter: *Emitter, num_rounds: usize, block_len_from_alt: bool, guard_operands: bool) Blake3EmitterError!void {
+    if (guard_operands) {
+        // [CV, block] -> abort unless len(block) == 64
+        try emitter.emitOp("OP_SIZE");
+        emitter.depth += 1;
+        try emitter.emitPushInt(64);
+        try emitter.emitOp("OP_EQUALVERIFY");
+        emitter.depth -= 2;
+    }
     // Split the 64-byte block into 16 little-endian 4-byte words. A raw 4-byte
     // Bitcoin Script byte-string IS a little-endian value — no per-word reversal.
     for (0..15) |_| {
@@ -367,6 +381,14 @@ fn generateCompressOps(emitter: *Emitter, num_rounds: usize, block_len_from_alt:
     try emitter.assertDepth(17);
 
     try emitter.roll(16);
+    if (guard_operands) {
+        // [m0..m15, CV] -> abort unless len(CV) == 32
+        try emitter.emitOp("OP_SIZE");
+        emitter.depth += 1;
+        try emitter.emitPushInt(32);
+        try emitter.emitOp("OP_EQUALVERIFY");
+        emitter.depth -= 2;
+    }
     try emitter.toAlt();
     try emitter.assertDepth(16);
 
@@ -584,9 +606,13 @@ test "blake3 compress emitter emits expected instruction count" {
 
     try appendBlake3CompressInstructions(&list, allocator);
 
-    try std.testing.expectEqual(@as(usize, 10373), list.items.len);
-    try std.testing.expectEqualDeep(Blake3Instruction{ .push_int = 4 }, list.items[0]);
-    try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_SPLIT" }, list.items[1]);
+    try std.testing.expectEqual(@as(usize, 10379), list.items.len);
+    // F-114: block size guard (OP_SIZE <64> OP_EQUALVERIFY) before the splits.
+    try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_SIZE" }, list.items[0]);
+    try std.testing.expectEqualDeep(Blake3Instruction{ .push_int = 64 }, list.items[1]);
+    try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_EQUALVERIFY" }, list.items[2]);
+    try std.testing.expectEqualDeep(Blake3Instruction{ .push_int = 4 }, list.items[3]);
+    try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_SPLIT" }, list.items[4]);
     try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_DROP" }, list.items[list.items.len - 1]);
 }
 

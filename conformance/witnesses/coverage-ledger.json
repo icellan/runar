@@ -126,17 +126,6 @@
         "kind": "go-only-nocodegen"
       }
     },
-    {
-      "fixture": "blake3",
-      "cause": "crypto-witness-infeasible",
-      "reason": "BLAKE3 hash-preimage (blake3Compress/blake3Hash) — not a secp256k1 signature",
-      "coveredBy": {
-        "kind": "go-family-exec",
-        "family": "blake3",
-        "marker": "TestBlake3Compress_",
-        "note": "script_execution_test.go also has func TestBlake3Hash_* real-execution tests; both run inline blake3Compress/blake3Hash contracts through the real Go BSV SDK Spend, not the literal 'blake3' fixture file."
-      }
-    },
         {
       "fixture": "convergence-proof",
       "cause": "crypto-witness-infeasible",
@@ -308,28 +297,6 @@
         "kind": "integration",
         "path": "integration/zig/src/schnorr_zkp_test.zig",
         "note": "real deploy + spend on a live regtest node: SchnorrZKP_SpendValidProof (accept). Compiled output verified byte-identical to expected-script.hex (872,367 bytes)."
-      }
-    },
-    {
-      "fixture": "sha256-compress",
-      "cause": "crypto-witness-infeasible",
-      "reason": "SHA-256 compression preimage (sha256Compress) — hash-preimage witness",
-      "coveredBy": {
-        "kind": "go-family-exec",
-        "family": "sha256",
-        "marker": "TestSha256Compress_",
-        "note": "script_execution_test.go runs an inline sha256Compress contract (not the literal 'sha256-compress' fixture file) through the real Go BSV SDK Spend, including a rejects-wrong-hash case."
-      }
-    },
-    {
-      "fixture": "sha256-finalize",
-      "cause": "crypto-witness-infeasible",
-      "reason": "SHA-256 finalize preimage (sha256Finalize) — hash-preimage witness",
-      "coveredBy": {
-        "kind": "go-family-exec",
-        "family": "sha256",
-        "marker": "TestSha256Finalize_",
-        "note": "script_execution_test.go runs an inline sha256Finalize contract (not the literal 'sha256-finalize' fixture file) through the real Go BSV SDK Spend, including a rejects-wrong-hash case."
       }
     },
     {

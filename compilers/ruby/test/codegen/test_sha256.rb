@@ -110,12 +110,12 @@ class TestSha256Codegen < Minitest::Test
   def test_sha256_compress_op_count_golden
     ops = []
     RunarCompiler::Codegen::SHA256Codegen.emit_sha256_compress(->(op) { ops << op })
-    assert_equal 21292, ops.length, "sha256Compress op count drift"
+    assert_equal 21298, ops.length, "sha256Compress op count drift"
   end
 
   def test_sha256_finalize_op_count_golden
     ops = []
     RunarCompiler::Codegen::SHA256Codegen.emit_sha256_finalize(->(op) { ops << op })
-    assert_equal 63941, ops.length, "sha256Finalize op count drift"
+    assert_equal 63946, ops.length, "sha256Finalize op count drift"
   end
 end

@@ -126,12 +126,32 @@ function maj(em: Emitter): void {
  * Generate SHA-256 compression ops.
  * Assumes top of stack is [..., state(32 BE), block(64 BE)].
  * After: [..., newState(32 BE)]. Net depth: -1.
+ *
+ * `guardOperands` (F-114): abort unless the block is exactly 64 bytes and the
+ * state exactly 32 bytes. Without it a mis-sized operand (a 5-byte or short
+ * last word) is truncated / zero-extended by the 32-bit word arithmetic and
+ * yields the same digest as a different 64-byte block. sha256Finalize builds
+ * its blocks itself and checks its state once at entry, so its compressions
+ * run unguarded.
  */
-function generateCompressOps(): StackOp[] {
+function generateCompressOps(guardOperands: boolean): StackOp[] {
   const em = new Emitter(2); // pretend state+block are the only items
+
+  if (guardOperands) {
+    // [state, block] → abort unless len(block) == 64
+    em.oc('OP_SIZE'); em.depth++;
+    em.pushI(64n);
+    em.oc('OP_EQUALVERIFY'); em.depth -= 2;
+  }
 
   // Phase 1: Save init state to alt, unpack block into 16 LE words
   em.swap();
+  if (guardOperands) {
+    // [block, state] → abort unless len(state) == 32
+    em.oc('OP_SIZE'); em.depth++;
+    em.pushI(32n);
+    em.oc('OP_EQUALVERIFY'); em.depth -= 2;
+  }
   em.dup(); em.toAlt();
   em.toAlt();
   em.assert(1, 'compress: after state save');
@@ -201,8 +221,13 @@ function generateCompressOps(): StackOp[] {
 // Cache the ops since they're identical every time
 let _compressOpsCache: StackOp[] | null = null;
 function getCompressOps(): StackOp[] {
-  if (!_compressOpsCache) _compressOpsCache = generateCompressOps();
+  if (!_compressOpsCache) _compressOpsCache = generateCompressOps(false);
   return _compressOpsCache;
+}
+let _guardedCompressOpsCache: StackOp[] | null = null;
+function getGuardedCompressOps(): StackOp[] {
+  if (!_guardedCompressOpsCache) _guardedCompressOpsCache = generateCompressOps(true);
+  return _guardedCompressOpsCache;
 }
 
 // =========================================================================
@@ -213,9 +238,10 @@ function getCompressOps(): StackOp[] {
  * Emit SHA-256 compression in Bitcoin Script.
  * Stack on entry: [..., state(32 BE), block(64 BE)]
  * Stack on exit:  [..., newState(32 BE)]
+ * Aborts unless the state is 32 bytes and the block 64 bytes (F-114).
  */
 export function emitSha256Compress(emit: (op: StackOp) => void): void {
-  for (const op of getCompressOps()) emit(op);
+  for (const op of getGuardedCompressOps()) emit(op);
 }
 
 /**
@@ -244,6 +270,14 @@ export function emitSha256Finalize(emit: (op: StackOp) => void): void {
   em.binOp('OP_CAT');          // [bitLenBE(8)]
   em.toAlt();                   // save bitLenBE to alt
   em.assert(2, 'finalize: after bitLen conversion');
+
+  // F-114: abort unless len(state) == 32 (remaining is variable-length; a
+  // remaining past 119 bytes already aborts on the negative OP_NUM2BIN below).
+  em.swap();                    // [remaining, state]
+  em.oc('OP_SIZE'); em.depth++;
+  em.pushI(32n);
+  em.oc('OP_EQUALVERIFY'); em.depth -= 2;
+  em.swap();                    // [state, remaining]
 
   // ---- Step 2: Pad remaining ----
   // [state, remaining]
