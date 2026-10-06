@@ -31,6 +31,8 @@ module Runar
                     else
                       'https://testnet.ordinals.gorillapool.io/api'
                     end
+        # Inscription content is served from the host root (/content/{outpoint}).
+        @content_base_url = @base_url.delete_suffix('/api')
       end
 
       # -------------------------------------------------------------------
@@ -46,13 +48,8 @@ module Runar
       # @param txid [String] transaction id (64 hex chars)
       # @return [TransactionData]
       def get_transaction(txid)
-        raw = api_get_raw("/tx/#{txid}/raw")
-        body_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw)).reverse.unpack1('H*')
-        unless body_txid == txid.downcase
-          raise "GorillaPool getTransaction: txid mismatch: response body hashes to #{body_txid}, requested #{txid}"
-        end
-
-        self.class.decode_raw_tx(body_txid, raw)
+        raw = fetch_verified_raw(txid, 'getTransaction')
+        self.class.decode_raw_tx(txid.downcase, raw)
       end
 
       # Broadcast a raw transaction hex to the network.
@@ -66,7 +63,8 @@ module Runar
 
         request = Net::HTTP::Post.new(uri)
         request['Content-Type'] = 'application/json'
-        request.body = JSON.generate(rawTx: raw_tx)
+        # N-025: the documented Broadcast body is {"rawtx": string} (lowercase).
+        request.body = JSON.generate(rawtx: raw_tx)
 
         response = http.request(request)
         unless response.is_a?(Net::HTTPSuccess)
@@ -77,64 +75,49 @@ module Runar
         result.is_a?(String) ? result : (result['txid'] || '')
       end
 
-      # Return all UTXOs for a given address.
+      # N-025: GET /txos/address/{address}/unspent (Txo[]). The listing carries
+      # no locking script, so each entry's tx is fetched via /tx/{txid}/raw
+      # (hash-verified); the output must exist, its value must equal the
+      # listing's, and its script is returned. Any non-2xx (404 included)
+      # raises. The listing is not filtered: 1-sat ordinal outputs are
+      # returned too.
       #
       # @param address [String] BSV address
       # @return [Array<Utxo>]
       def get_utxos(address)
-        entries = api_get("/address/#{address}/utxos")
-        return [] unless entries.is_a?(Array)
-
-        utxos = entries.map do |e|
-          Utxo.new(
-            txid: e['txid'],
-            output_index: e['vout'],
-            satoshis: e['satoshis'],
-            script: e['script'] || ''
-          )
-        end
-        # DoS-bound: reject pathological scripts at the provider boundary.
-        utxos.each do |u|
-          next if u.script.nil? || u.script.empty?
+        entries = api_get("/txos/address/#{address}/unspent", 'getUtxos')
+        txs = {}
+        entries.map do |e|
+          txid = e['txid']
+          vout = e['vout']
+          tx = (txs[txid] ||= self.class.decode_raw_tx(txid.downcase, fetch_verified_raw(txid, 'getUtxos')))
+          out = vout.is_a?(Integer) && vout >= 0 ? tx.outputs[vout] : nil
+          if out.nil?
+            raise "GorillaPool getUtxos: no output #{vout} in tx #{txid} (#{tx.outputs.length} outputs)"
+          end
+          unless out.satoshis == e['satoshis']
+            raise "GorillaPool getUtxos: value mismatch for #{txid}_#{vout}: " \
+                  "listing says #{e['satoshis']}, tx says #{out.satoshis}"
+          end
+          raise "GorillaPool getUtxos: empty locking script for #{txid}_#{vout}" if out.script.empty?
 
           SDK.assert_script_hex_under_limit(
-            u.script, SDK::MAX_SCRIPT_BYTES,
+            out.script, SDK::MAX_SCRIPT_BYTES,
             "GorillaPoolProvider.get_utxos(#{address})"
           )
+          Utxo.new(txid: txid, output_index: vout, satoshis: out.satoshis, script: out.script)
         end
-        utxos
-      rescue RuntimeError => e
-        return [] if e.message.include?('404')
-
-        raise
       end
 
-      # Find a contract UTXO by its script hash.
+      # N-025: the GorillaPool API has no documented route that looks UTXOs up
+      # by script hash (the former /script/{hash}/utxos is a 404), so this
+      # refuses rather than reporting "no UTXO".
       #
       # @param script_hash [String] hex-encoded script hash
       # @return [Utxo, nil]
       def get_contract_utxo(script_hash)
-        entries = api_get("/script/#{script_hash}/utxos")
-        return nil unless entries.is_a?(Array) && !entries.empty?
-
-        first = entries[0]
-        utxo = Utxo.new(
-          txid: first['txid'],
-          output_index: first['vout'],
-          satoshis: first['satoshis'],
-          script: first['script'] || ''
-        )
-        if utxo.script && !utxo.script.empty?
-          SDK.assert_script_hex_under_limit(
-            utxo.script, SDK::MAX_SCRIPT_BYTES,
-            "GorillaPoolProvider.get_contract_utxo(#{script_hash})"
-          )
-        end
-        utxo
-      rescue RuntimeError => e
-        return nil if e.message.include?('404')
-
-        raise
+        raise "GorillaPool getContractUtxo(#{script_hash}): lookup by script hash " \
+              'is not supported by the GorillaPool API'
       end
 
       # Return the network this provider is connected to.
@@ -144,21 +127,12 @@ module Runar
         @network
       end
 
-      # Fetch the raw transaction hex by its txid.
+      # N-025: GET /tx/{txid}/raw (binary), hash-verified, returned as hex.
       #
       # @param txid [String]
       # @return [String] hex-encoded raw transaction
       def get_raw_transaction(txid)
-        uri = URI("#{@base_url}/tx/#{txid}/hex")
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = true
-
-        response = http.request(Net::HTTP::Get.new(uri))
-        unless response.is_a?(Net::HTTPSuccess)
-          raise "GorillaPool getRawTransaction failed (#{response.code}): #{response.body}"
-        end
-
-        response.body.strip
+        fetch_verified_raw(txid, 'getRawTransaction').unpack1('H*')
       end
 
       # Return the current fee rate in satoshis per kilobyte.
@@ -174,120 +148,138 @@ module Runar
       # Ordinal-specific methods
       # -------------------------------------------------------------------
 
-      # Get all inscriptions associated with an address.
+      # N-025: inscriptions currently held by an address -- the unspent Txos
+      # from GET /txos/address/{address}/unspent whose `origin` is set.
       #
       # @param address [String]
-      # @return [Array<Hash>] inscription info hashes
+      # @return [Array<Hash>] {txid, vout, origin, contentType, contentLength, height}
       def get_inscriptions_by_address(address)
-        entries = api_get("/inscriptions/address/#{address}")
-        return [] unless entries.is_a?(Array)
-
-        entries
-      rescue RuntimeError => e
-        return [] if e.message.include?('404')
-
-        raise
+        entries = api_get("/txos/address/#{address}/unspent", 'getInscriptionsByAddress')
+        entries.reject { |t| t['origin'].nil? }.map { |t| inscription_info(t) }
       end
 
-      # Get inscription details (including content) by inscription ID.
+      # N-025: GET /inscriptions/{outpoint} returns a Txo (not a content
+      # record). The content is GET /content/{outpoint} (host root), and its
+      # base64 sha256 must equal origin.data.insc.file.hash.
       #
       # @param inscription_id [String] format: "<txid>_<vout>"
-      # @return [Hash] inscription detail hash
+      # @return [Hash] inscription info plus 'data' (hex content)
       def get_inscription(inscription_id)
-        api_get("/inscriptions/#{inscription_id}")
+        t = api_get("/inscriptions/#{inscription_id}", 'getInscription')
+        if !t.is_a?(Hash) || t['origin'].nil?
+          raise "GorillaPool getInscription: #{inscription_id} is not an inscription (no origin)"
+        end
+
+        info = inscription_info(t)
+        content = http_get_bytes("#{@content_base_url}/content/#{inscription_id}", 'getInscription content')
+        want = t.dig('origin', 'data', 'insc', 'file', 'hash')
+        got = [Digest::SHA256.digest(content)].pack('m0')
+        if want.nil? || got != want
+          raise "GorillaPool getInscription: content hash mismatch for #{inscription_id}: " \
+                "sha256 #{got}, inscription says #{want || '(none)'}"
+        end
+        info.merge('data' => content.unpack1('H*'))
       end
 
-      # Get BSV-20 (v1, tick-based) token balance for an address.
+      # N-025: BSV-20 (v1, tick-based) confirmed balance, from
+      # GET /bsv20/{address}/balance. No entry for the tick means "0".
       #
       # @param address [String]
       # @param tick [String]
       # @return [String] balance
       def get_bsv20_balance(address, tick)
-        result = api_get("/bsv20/balance/#{address}/#{URI.encode_www_form_component(tick)}")
-        result.is_a?(String) ? result : (result['balance'] || '0').to_s
-      rescue RuntimeError => e
-        return '0' if e.message.include?('404')
-
-        raise
+        rows = api_get("/bsv20/#{address}/balance", 'getBSV20Balance')
+        row = rows.find { |r| r['tick'] == tick }
+        row ? row['all']['confirmed'].to_s : '0'
       end
 
-      # Get BSV-20 token UTXOs for an address and ticker.
+      # N-025: BSV-20 token UTXOs, from GET /bsv20/{address}/tick/{tick}.
       #
       # @param address [String]
       # @param tick [String]
       # @return [Array<Utxo>]
       def get_bsv20_utxos(address, tick)
-        entries = api_get("/bsv20/utxos/#{address}/#{URI.encode_www_form_component(tick)}")
-        return [] unless entries.is_a?(Array)
-
-        entries.map do |e|
-          Utxo.new(
-            txid: e['txid'],
-            output_index: e['vout'],
-            satoshis: e['satoshis'],
-            script: e['script'] || ''
-          )
-        end
-      rescue RuntimeError => e
-        return [] if e.message.include?('404')
-
-        raise
+        rows = api_get("/bsv20/#{address}/tick/#{URI.encode_www_form_component(tick)}", 'getBSV20Utxos')
+        rows.map { |r| bsv20_utxo(r, 'getBSV20Utxos') }
       end
 
-      # Get BSV-21 (v2, ID-based) token balance for an address.
+      # N-025: BSV-21 (v2, ID-based) confirmed balance, from
+      # GET /bsv20/{address}/balance. No entry for the id means "0".
       #
       # @param address [String]
       # @param id [String] token ID (format: "<txid>_<vout>")
       # @return [String] balance
       def get_bsv21_balance(address, id)
-        result = api_get("/bsv20/balance/#{address}/#{URI.encode_www_form_component(id)}")
-        result.is_a?(String) ? result : (result['balance'] || '0').to_s
-      rescue RuntimeError => e
-        return '0' if e.message.include?('404')
-
-        raise
+        rows = api_get("/bsv20/#{address}/balance", 'getBSV21Balance')
+        row = rows.find { |r| r['id'] == id }
+        row ? row['all']['confirmed'].to_s : '0'
       end
 
-      # Get BSV-21 token UTXOs for an address and token ID.
+      # N-025: BSV-21 token UTXOs, from GET /bsv20/{address}/id/{id}.
       #
       # @param address [String]
       # @param id [String] token ID (format: "<txid>_<vout>")
       # @return [Array<Utxo>]
       def get_bsv21_utxos(address, id)
-        entries = api_get("/bsv20/utxos/#{address}/#{URI.encode_www_form_component(id)}")
-        return [] unless entries.is_a?(Array)
-
-        entries.map do |e|
-          Utxo.new(
-            txid: e['txid'],
-            output_index: e['vout'],
-            satoshis: e['satoshis'],
-            script: e['script'] || ''
-          )
-        end
-      rescue RuntimeError => e
-        return [] if e.message.include?('404')
-
-        raise
+        rows = api_get("/bsv20/#{address}/id/#{URI.encode_www_form_component(id)}", 'getBSV21Utxos')
+        rows.map { |r| bsv20_utxo(r, 'getBSV21Utxos') }
       end
 
       private
 
-      # Perform an HTTP GET request and return the raw (binary) response body.
+      # GET {url}; any non-2xx (a 404 included) raises. Returns the body bytes.
       #
-      # @param path [String] API path (appended to base_url)
+      # @param url [String]
+      # @param method [String] name used in the error message
       # @return [String] response body bytes (ASCII-8BIT)
-      def api_get_raw(path)
-        uri = URI("#{@base_url}#{path}")
+      def http_get_bytes(url, method)
+        uri = URI(url)
         http = Net::HTTP.new(uri.host, uri.port)
         http.use_ssl = true
 
         response = http.request(Net::HTTP::Get.new(uri))
         unless response.is_a?(Net::HTTPSuccess)
-          raise "GorillaPool getTransaction failed (#{response.code}): #{response.body}"
+          raise "GorillaPool #{method} failed (#{response.code}): #{response.body}"
         end
 
         response.body.b
+      end
+
+      # Perform an HTTP GET request and return the raw (binary) response body.
+      #
+      # @param path [String] API path (appended to base_url)
+      # @param method [String] name used in the error message
+      # @return [String] response body bytes (ASCII-8BIT)
+      def api_get_raw(path, method = 'getTransaction')
+        http_get_bytes("#{@base_url}#{path}", method)
+      end
+
+      # GET /tx/{txid}/raw; the body must hash (sha256d, reversed) to txid.
+      def fetch_verified_raw(txid, method)
+        raw = api_get_raw("/tx/#{txid}/raw", method)
+        body_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw)).reverse.unpack1('H*')
+        unless body_txid == txid.downcase
+          raise "GorillaPool #{method}: txid mismatch: response body hashes to #{body_txid}, requested #{txid}"
+        end
+
+        raw
+      end
+
+      def inscription_info(t)
+        file = t.dig('origin', 'data', 'insc', 'file') || {}
+        {
+          'txid' => t['txid'], 'vout' => t['vout'], 'origin' => t['origin']['outpoint'],
+          'contentType' => file['type'] || '', 'contentLength' => file['size'] || 0,
+          'height' => t['height'] || 0
+        }
+      end
+
+      def bsv20_utxo(r, method)
+        script = r['script'].is_a?(String) ? r['script'].unpack1('m').unpack1('H*') : ''
+        raise "GorillaPool #{method}: no locking script for #{r['txid']}_#{r['vout']}" if script.empty?
+
+        SDK.assert_script_hex_under_limit(script, SDK::MAX_SCRIPT_BYTES, "GorillaPoolProvider.#{method}")
+        Utxo.new(txid: r['txid'], output_index: r['vout'], satoshis: r['satoshis'], script: script)
       end
 
       # Decode a serialized transaction into TransactionData, keeping the input
@@ -336,21 +328,14 @@ module Runar
                             locktime: locktime, raw: raw.unpack1('H*'))
       end
 
-      # Perform an HTTP GET request against the GorillaPool API and parse the JSON response.
+      # Perform an HTTP GET request against the GorillaPool API and parse the
+      # JSON response. Any non-2xx (a 404 included) raises.
       #
       # @param path [String] API path (appended to base_url)
+      # @param method [String] name used in the error message
       # @return [Object] parsed JSON response
-      def api_get(path)
-        uri = URI("#{@base_url}#{path}")
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = true
-
-        response = http.request(Net::HTTP::Get.new(uri))
-        unless response.is_a?(Net::HTTPSuccess)
-          raise "GorillaPool request failed (#{response.code}): #{response.body}"
-        end
-
-        JSON.parse(response.body)
+      def api_get(path, method = 'request')
+        JSON.parse(http_get_bytes("#{@base_url}#{path}", method).force_encoding('UTF-8'))
       end
     end
   end

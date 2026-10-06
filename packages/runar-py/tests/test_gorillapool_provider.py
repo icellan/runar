@@ -11,7 +11,8 @@ closes that gap by:
 
   1. Pinning the exact URL (path + base) for each endpoint, including the
      ordinal-specific BSV-20 / BSV-21 routes.
-  2. Asserting the broadcast endpoint sends a JSON ``{"rawTx": ...}`` body.
+  2. Asserting the broadcast endpoint sends a JSON ``{"rawtx": ...}`` body
+     (N-025: the documented key is lowercase ``rawtx``).
   3. Asserting the ordinal-balance / utxo lookups handle URL-encoded ticks.
 """
 
@@ -142,8 +143,10 @@ class TestGetTransaction:
 # ---------------------------------------------------------------------------
 
 class TestBroadcast:
+    # N-025: the documented Broadcast body is {"rawtx": string} (lowercase);
+    # these tests previously pinned the undocumented ``rawTx`` key.
     def test_posts_json_body_with_rawtx_key(self):
-        """GorillaPool's broadcast body uses ``rawTx`` (not ``txhex`` like WoC)."""
+        """GorillaPool's broadcast body uses ``rawtx`` (not ``txhex`` like WoC)."""
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_response(json.dumps("aa" * 32).encode())
@@ -152,7 +155,7 @@ class TestBroadcast:
         assert req.full_url == "https://ordinals.gorillapool.io/api/tx"
         assert req.get_method() == "POST"
         body_obj = json.loads(req.data.decode())
-        assert body_obj == {"rawTx": "01abcd"}
+        assert body_obj == {"rawtx": "01abcd"}
 
     def test_returns_string_txid_directly(self):
         provider = GorillaPoolProvider("mainnet")
@@ -179,73 +182,71 @@ class TestBroadcast:
             mock_urlopen.return_value = _make_response(json.dumps("aa" * 32).encode())
             provider.broadcast(tx_obj)
         body_obj = json.loads(mock_urlopen.call_args[0][0].data.decode())
-        assert body_obj == {"rawTx": "01dead"}
+        assert body_obj == {"rawtx": "01dead"}
 
 
 # ---------------------------------------------------------------------------
 # get_utxos / get_contract_utxo
 # ---------------------------------------------------------------------------
 
+# N-025: /address/{a}/utxos and /script/{h}/utxos do not exist (live 404), and
+# the provider mapped that 404 to [] / None. get_utxos now lists
+# /txos/address/{a}/unspent and takes each script + value from the verified raw
+# tx (/tx/{txid}/raw); a 404 raises. get_contract_utxo refuses (no documented
+# route by script hash). The full recorded replay is test_n025_gorillapool_endpoints.py.
+
 class TestGetUtxos:
-    def test_url_shape_uses_address_utxos_path(self):
+    def test_url_shape_uses_txos_unspent_path(self):
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_response(b"[]")
-            provider.get_utxos("1Addr")
+            assert provider.get_utxos("1Addr") == []
         req = mock_urlopen.call_args[0][0]
-        assert req.full_url == "https://ordinals.gorillapool.io/api/address/1Addr/utxos"
+        assert req.full_url == "https://ordinals.gorillapool.io/api/txos/address/1Addr/unspent"
 
-    def test_parses_utxo_list(self):
-        provider = GorillaPoolProvider("mainnet")
-        body = json.dumps([
-            {"txid": "aa" * 32, "vout": 0, "satoshis": 100, "script": "76a9"},
-            {"txid": "bb" * 32, "vout": 1, "satoshis": 200, "script": "ac"},
+    def test_parses_utxo_list_from_verified_raw_tx(self):
+        v = _VECTORS["vectors"][0]
+        exp_out = v["expected"]["outputs"][0]
+        listing = json.dumps([
+            {"txid": v["txid"], "vout": 0, "satoshis": exp_out["satoshis"]},
         ]).encode()
+        provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
+            mock_urlopen.side_effect = [
+                _make_response(listing),
+                _make_response(bytes.fromhex(v["responseHex"])),
+            ]
             utxos = provider.get_utxos("1Addr")
-        assert len(utxos) == 2
-        assert utxos[0].satoshis == 100
-        assert utxos[0].script == "76a9"
-        assert utxos[1].output_index == 1
+        urls = [c[0][0].full_url for c in mock_urlopen.call_args_list]
+        assert urls == [
+            "https://ordinals.gorillapool.io/api/txos/address/1Addr/unspent",
+            f"https://ordinals.gorillapool.io/api/tx/{v['txid']}/raw",
+        ]
+        assert len(utxos) == 1
+        assert utxos[0].txid == v["txid"]
+        assert utxos[0].output_index == 0
+        assert utxos[0].satoshis == exp_out["satoshis"]
+        assert len(utxos[0].script) == 2 * exp_out["scriptLen"]
+        assert _sha256_hex_of_hex(utxos[0].script) == exp_out["scriptSha256"]
 
-    def test_returns_empty_list_on_404(self):
-        """404 means no UTXOs -- the provider must convert it to []."""
+    def test_raises_on_404(self):
+        """N-025: a 404 is an error, never "no UTXOs" (was: returned [])."""
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = _make_404()
-            utxos = provider.get_utxos("1Addr")
-        assert utxos == []
+            with pytest.raises(RuntimeError, match="404"):
+                provider.get_utxos("1Addr")
 
 
 class TestGetContractUtxo:
-    def test_url_shape_uses_script_utxos(self):
+    # N-025: replaces test_url_shape_uses_script_utxos / test_returns_first_utxo
+    # / test_returns_none_on_404, which pinned a route the API does not serve.
+    def test_refuses_without_a_request(self):
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(b"[]")
-            provider.get_contract_utxo("00112233")
-        req = mock_urlopen.call_args[0][0]
-        assert req.full_url == (
-            "https://ordinals.gorillapool.io/api/script/00112233/utxos"
-        )
-
-    def test_returns_first_utxo(self):
-        provider = GorillaPoolProvider("mainnet")
-        body = json.dumps([
-            {"txid": "11" * 32, "vout": 5, "satoshis": 999, "script": "ac"},
-        ]).encode()
-        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            utxo = provider.get_contract_utxo("scripthash")
-        assert utxo is not None
-        assert utxo.output_index == 5
-        assert utxo.satoshis == 999
-
-    def test_returns_none_on_404(self):
-        provider = GorillaPoolProvider("mainnet")
-        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = _make_404()
-            assert provider.get_contract_utxo("scripthash") is None
+            with pytest.raises(RuntimeError, match="not supported"):
+                provider.get_contract_utxo("00112233")
+        assert mock_urlopen.call_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +254,25 @@ class TestGetContractUtxo:
 # ---------------------------------------------------------------------------
 
 class TestGetRawTransaction:
-    def test_url_shape_uses_tx_hex(self):
+    # N-025: /tx/{txid}/hex does not exist; the documented route is
+    # /tx/{txid}/raw (binary), hash-verified and returned as hex.
+    def test_url_shape_uses_tx_raw(self):
+        v = _VECTORS["vectors"][0]
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(b"01abcd\n")
-            raw = provider.get_raw_transaction("aa" * 32)
+            mock_urlopen.return_value = _make_response(bytes.fromhex(v["responseHex"]))
+            raw = provider.get_raw_transaction(v["txid"])
         req = mock_urlopen.call_args[0][0]
-        assert req.full_url == f"https://ordinals.gorillapool.io/api/tx/{'aa' * 32}/hex"
-        assert raw == "01abcd"  # whitespace stripped
+        assert req.full_url == f"https://ordinals.gorillapool.io/api/tx/{v['txid']}/raw"
+        assert raw == v["responseHex"]
+
+    def test_rejects_body_for_another_txid(self):
+        v = _VECTORS["vectors"][0]
+        provider = GorillaPoolProvider("mainnet")
+        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_response(bytes.fromhex(v["responseHex"]))
+            with pytest.raises(RuntimeError, match="txid mismatch"):
+                provider.get_raw_transaction("00" * 32)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +280,9 @@ class TestGetRawTransaction:
 # ---------------------------------------------------------------------------
 
 class TestInscriptions:
+    # N-025: /inscriptions/address/{a} does not exist; inscriptions held by an
+    # address are the unspent Txos with an origin. /inscriptions/{outpoint}
+    # returns a Txo; content comes from /content/{outpoint}.
     def test_get_inscriptions_by_address_url_shape(self):
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
@@ -275,94 +290,100 @@ class TestInscriptions:
             inscriptions = provider.get_inscriptions_by_address("1Addr")
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == (
-            "https://ordinals.gorillapool.io/api/inscriptions/address/1Addr"
+            "https://ordinals.gorillapool.io/api/txos/address/1Addr/unspent"
         )
         assert inscriptions == []
 
-    def test_get_inscriptions_by_address_returns_empty_on_404(self):
+    def test_get_inscriptions_by_address_raises_on_404(self):
         provider = GorillaPoolProvider("mainnet")
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = _make_404()
-            assert provider.get_inscriptions_by_address("1Addr") == []
+            with pytest.raises(RuntimeError, match="404"):
+                provider.get_inscriptions_by_address("1Addr")
 
     def test_get_inscription_url_shape(self):
         provider = GorillaPoolProvider("mainnet")
-        body = json.dumps({"txid": "aa" * 32, "vout": 0}).encode()
+        body = json.dumps({"txid": "aa" * 32, "vout": 0, "origin": None}).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_response(body)
-            data = provider.get_inscription("aa" * 32 + "_0")
+            with pytest.raises(RuntimeError, match="not an inscription"):
+                provider.get_inscription("aa" * 32 + "_0")
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == (
             f"https://ordinals.gorillapool.io/api/inscriptions/{'aa' * 32}_0"
         )
-        assert data["txid"] == "aa" * 32
 
 
 class TestBsv20:
-    def test_get_bsv20_balance_url_shape_url_encodes_tick(self):
-        """Tick names with special characters (e.g. '#' or spaces) must be
-        URL-encoded so the API receives the literal value.
-        """
-        provider = GorillaPoolProvider("mainnet")
-        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(json.dumps("100").encode())
-            bal = provider.get_bsv20_balance("1Addr", "TICK#1")
-        req = mock_urlopen.call_args[0][0]
-        # '#' must be URL-encoded to %23.
-        assert req.full_url == (
-            "https://ordinals.gorillapool.io/api/bsv20/balance/1Addr/TICK%231"
-        )
-        assert bal == "100"
-
-    def test_get_bsv20_balance_zero_on_404(self):
-        provider = GorillaPoolProvider("mainnet")
-        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = _make_404()
-            assert provider.get_bsv20_balance("1Addr", "PEPE") == "0"
-
-    def test_get_bsv20_utxos_url_shape(self):
+    # N-025: /bsv20/balance/{a}/{x} and /bsv20/utxos/{a}/{x} do not exist. The
+    # documented routes are /bsv20/{a}/balance (TokenBalanceResponse[]) and
+    # /bsv20/{a}/tick/{tick} (BSV20Txo[], base64 script).
+    def test_get_bsv20_balance_url_shape_and_tick_match(self):
         provider = GorillaPoolProvider("mainnet")
         body = json.dumps([
-            {"txid": "aa" * 32, "vout": 0, "satoshis": 1, "script": "76"},
+            {"all": {"confirmed": "100", "pending": "0"}, "listed": {"confirmed": "0", "pending": "0"}, "tick": "TICK#1"},
         ]).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_response(body)
-            utxos = provider.get_bsv20_utxos("1Addr", "PEPE")
+            bal = provider.get_bsv20_balance("1Addr", "TICK#1")
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "https://ordinals.gorillapool.io/api/bsv20/1Addr/balance"
+        assert bal == "100"
+
+    def test_get_bsv20_balance_raises_on_404(self):
+        provider = GorillaPoolProvider("mainnet")
+        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = _make_404()
+            with pytest.raises(RuntimeError, match="404"):
+                provider.get_bsv20_balance("1Addr", "PEPE")
+
+    def test_get_bsv20_utxos_url_shape_url_encodes_tick(self):
+        """Tick names with special characters (e.g. '#') must be URL-encoded."""
+        provider = GorillaPoolProvider("mainnet")
+        body = json.dumps([
+            {"txid": "aa" * 32, "vout": 0, "satoshis": 1, "script": "dqw="},
+        ]).encode()
+        with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_response(body)
+            utxos = provider.get_bsv20_utxos("1Addr", "TICK#1")
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == (
-            "https://ordinals.gorillapool.io/api/bsv20/utxos/1Addr/PEPE"
+            "https://ordinals.gorillapool.io/api/bsv20/1Addr/tick/TICK%231"
         )
         assert len(utxos) == 1
         assert utxos[0].satoshis == 1
+        assert utxos[0].script == "76ac"
 
 
 class TestBsv21:
     def test_get_bsv21_balance_url_shape(self):
-        """BSV-21 reuses the bsv20 endpoint with a token_id (txid_vout)."""
+        """N-025: BSV-21 balance is the /bsv20/{a}/balance entry with this id."""
         provider = GorillaPoolProvider("mainnet")
+        body = json.dumps([
+            {"all": {"confirmed": "999", "pending": "0"}, "listed": {"confirmed": "0", "pending": "0"}, "id": "aa" * 32 + "_0"},
+        ]).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(json.dumps({"balance": "999"}).encode())
+            mock_urlopen.return_value = _make_response(body)
             bal = provider.get_bsv21_balance("1Addr", "aa" * 32 + "_0")
         req = mock_urlopen.call_args[0][0]
-        # '_' is not encoded (it's a valid URL char).
-        assert req.full_url == (
-            f"https://ordinals.gorillapool.io/api/bsv20/balance/1Addr/{'aa' * 32}_0"
-        )
+        assert req.full_url == "https://ordinals.gorillapool.io/api/bsv20/1Addr/balance"
         assert bal == "999"
 
     def test_get_bsv21_utxos_url_shape(self):
         provider = GorillaPoolProvider("mainnet")
         body = json.dumps([
-            {"txid": "bb" * 32, "vout": 1, "satoshis": 1, "script": "ac"},
+            {"txid": "bb" * 32, "vout": 1, "satoshis": 1, "script": "rA=="},
         ]).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_response(body)
             utxos = provider.get_bsv21_utxos("1Addr", "bb" * 32 + "_1")
         req = mock_urlopen.call_args[0][0]
+        # '_' is not encoded (it's a valid URL char).
         assert req.full_url == (
-            f"https://ordinals.gorillapool.io/api/bsv20/utxos/1Addr/{'bb' * 32}_1"
+            f"https://ordinals.gorillapool.io/api/bsv20/1Addr/id/{'bb' * 32}_1"
         )
         assert len(utxos) == 1
+        assert utxos[0].script == "ac"
 
 
 # ---------------------------------------------------------------------------

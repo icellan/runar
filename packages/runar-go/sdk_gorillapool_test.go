@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
@@ -207,29 +208,45 @@ func TestGorillaPoolProvider_GetTransaction_HTTPError(t *testing.T) {
 // GetUtxos
 // ---------------------------------------------------------------------------
 
+// gpTestTx builds a 2-output transaction and returns it with its raw bytes and
+// txid, so a handler can serve a /tx/{txid}/raw body that hash-verifies.
+func gpTestTx(t *testing.T, sats0, sats1 uint64) (*transaction.Transaction, []byte, string) {
+	t.Helper()
+	tx := transaction.NewTransaction()
+	for _, sats := range []uint64{sats0, sats1} {
+		s, err := hex.DecodeString("76a914000000000000000000000000000000000000000088ac")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ls := script.Script(s)
+		tx.AddOutput(&transaction.TransactionOutput{Satoshis: sats, LockingScript: &ls})
+	}
+	return tx, tx.Bytes(), tx.TxID().String()
+}
+
+// N-025: this test used to pin GET /address/{a}/utxos (a route the live API
+// 404s) and a `script` field it never returns. It now pins the documented
+// /txos/address/{a}/unspent listing plus the hash-verified raw tx, from which
+// each UTXO's script and value are taken.
 func TestGorillaPoolProvider_GetUtxos(t *testing.T) {
 	address := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	_, raw, txid := gpTestTx(t, 1000000, 5000000)
 
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
-		expectedPath := "/address/" + address + "/utxos"
-		if r.URL.Path != expectedPath {
+		switch r.URL.Path {
+		case "/txos/address/" + address + "/unspent":
+			entries := []map[string]interface{}{
+				{"txid": txid, "vout": 0, "satoshis": 1000000},
+				{"txid": txid, "vout": 1, "satoshis": 5000000},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(entries)
+		case "/tx/" + txid + "/raw":
+			w.Write(raw)
+		default:
 			t.Errorf("unexpected path: %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
 		}
-		entries := []map[string]interface{}{
-			{
-				"txid":     strings.Repeat("aa", 32),
-				"vout":     0,
-				"satoshis": 1000000,
-				"script":   "76a914000000000000000000000000000000000000000088ac",
-			},
-			{
-				"txid":     strings.Repeat("bb", 32),
-				"vout":     1,
-				"satoshis": 5000000,
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
 	})
 	defer server.Close()
 
@@ -240,17 +257,18 @@ func TestGorillaPoolProvider_GetUtxos(t *testing.T) {
 	if len(utxos) != 2 {
 		t.Fatalf("expected 2 UTXOs, got %d", len(utxos))
 	}
-	if utxos[0].Txid != strings.Repeat("aa", 32) || utxos[0].Satoshis != 1000000 || utxos[0].OutputIndex != 0 {
+	if utxos[0].Txid != txid || utxos[0].Satoshis != 1000000 || utxos[0].OutputIndex != 0 {
 		t.Errorf("unexpected utxo[0]: %+v", utxos[0])
 	}
 	if utxos[0].Script != "76a914000000000000000000000000000000000000000088ac" {
-		t.Errorf("expected script preserved, got %q", utxos[0].Script)
+		t.Errorf("expected script from the raw tx, got %q", utxos[0].Script)
 	}
-	if utxos[1].Txid != strings.Repeat("bb", 32) || utxos[1].Satoshis != 5000000 || utxos[1].OutputIndex != 1 {
+	if utxos[1].Txid != txid || utxos[1].Satoshis != 5000000 || utxos[1].OutputIndex != 1 {
 		t.Errorf("unexpected utxo[1]: %+v", utxos[1])
 	}
 }
 
+// N-025: a 404 used to be mapped to an empty UTXO list; it now raises.
 func TestGorillaPoolProvider_GetUtxos_NotFound(t *testing.T) {
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -258,11 +276,11 @@ func TestGorillaPoolProvider_GetUtxos_NotFound(t *testing.T) {
 	defer server.Close()
 
 	utxos, err := provider.GetUtxos("nobody")
-	if err != nil {
-		t.Fatalf("expected nil error on 404, got %v", err)
+	if err == nil {
+		t.Fatalf("expected an error on 404, got utxos %+v", utxos)
 	}
-	if len(utxos) != 0 {
-		t.Fatalf("expected empty utxos on 404, got %+v", utxos)
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected 404 in error, got: %v", err)
 	}
 }
 
@@ -270,39 +288,30 @@ func TestGorillaPoolProvider_GetUtxos_NotFound(t *testing.T) {
 // GetContractUtxo
 // ---------------------------------------------------------------------------
 
+// N-025: GetContractUtxo used to read GET /script/{hash}/utxos, which the live
+// API does not serve. No documented route looks UTXOs up by script hash, so it
+// now refuses without making a request (both former tests pin that).
 func TestGorillaPoolProvider_GetContractUtxo_Found(t *testing.T) {
 	scriptHash := strings.Repeat("cd", 32)
-
+	requests := 0
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
-		expectedPath := "/script/" + scriptHash + "/utxos"
-		if r.URL.Path != expectedPath {
-			t.Errorf("unexpected path: %q", r.URL.Path)
-		}
-		entries := []map[string]interface{}{
-			{
-				"txid":     strings.Repeat("ee", 32),
-				"vout":     3,
-				"satoshis": 42000,
-				"script":   "abcd",
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
+		requests++
+		w.WriteHeader(http.StatusOK)
 	})
 	defer server.Close()
 
 	utxo, err := provider.GetContractUtxo(scriptHash)
-	if err != nil {
-		t.Fatalf("GetContractUtxo failed: %v", err)
+	if err == nil {
+		t.Fatalf("expected an error, got utxo %+v", utxo)
 	}
-	if utxo == nil {
-		t.Fatal("expected utxo, got nil")
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("expected a not-supported error, got: %v", err)
 	}
-	if utxo.Txid != strings.Repeat("ee", 32) || utxo.Satoshis != 42000 || utxo.OutputIndex != 3 {
-		t.Errorf("unexpected utxo: %+v", utxo)
+	if utxo != nil {
+		t.Fatalf("expected nil utxo, got %+v", utxo)
 	}
-	if utxo.Script != "abcd" {
-		t.Errorf("expected script preserved, got %q", utxo.Script)
+	if requests != 0 {
+		t.Fatalf("expected no HTTP request, got %d", requests)
 	}
 }
 
@@ -313,11 +322,11 @@ func TestGorillaPoolProvider_GetContractUtxo_NotFound(t *testing.T) {
 	defer server.Close()
 
 	utxo, err := provider.GetContractUtxo("nope")
-	if err != nil {
-		t.Fatalf("expected nil error on 404, got %v", err)
+	if err == nil {
+		t.Fatalf("expected an error, got utxo %+v", utxo)
 	}
 	if utxo != nil {
-		t.Fatalf("expected nil utxo on 404, got %+v", utxo)
+		t.Fatalf("expected nil utxo, got %+v", utxo)
 	}
 }
 
@@ -325,6 +334,8 @@ func TestGorillaPoolProvider_GetContractUtxo_NotFound(t *testing.T) {
 // Broadcast
 // ---------------------------------------------------------------------------
 
+// N-025: the documented Broadcast body is {"rawtx": string}; this used to pin
+// the undocumented "rawTx" spelling.
 func TestGorillaPoolProvider_Broadcast(t *testing.T) {
 	expectedTxid := strings.Repeat("ff", 32)
 	var gotPayload string
@@ -353,8 +364,12 @@ func TestGorillaPoolProvider_Broadcast(t *testing.T) {
 	if gotPath != "/tx" {
 		t.Errorf("expected path /tx, got %s", gotPath)
 	}
-	if !strings.Contains(gotPayload, `"rawTx"`) {
-		t.Errorf("expected rawTx field in payload, got %s", gotPayload)
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(gotPayload), &payload); err != nil {
+		t.Fatalf("payload is not JSON: %s", gotPayload)
+	}
+	if payload["rawtx"] != tx.Hex() || len(payload) != 1 {
+		t.Errorf("expected {\"rawtx\": %q}, got %s", tx.Hex(), gotPayload)
 	}
 }
 
@@ -379,16 +394,19 @@ func TestGorillaPoolProvider_Broadcast_HTTPError(t *testing.T) {
 // GetRawTransaction
 // ---------------------------------------------------------------------------
 
+// N-025: this used to pin GET /tx/{txid}/hex, which the live API 404s. It now
+// pins the documented binary /tx/{txid}/raw route, hex-encoded and
+// hash-verified against the requested txid.
 func TestGorillaPoolProvider_GetRawTransaction(t *testing.T) {
-	txid := strings.Repeat("ef", 32)
-	expectedHex := "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100000000000000000000000000"
+	_, raw, txid := gpTestTx(t, 1, 2)
+	expectedHex := hex.EncodeToString(raw)
 
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
-		expectedPath := "/tx/" + txid + "/hex"
+		expectedPath := "/tx/" + txid + "/raw"
 		if r.URL.Path != expectedPath {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		io.WriteString(w, expectedHex)
+		w.Write(raw)
 	})
 	defer server.Close()
 
@@ -405,23 +423,33 @@ func TestGorillaPoolProvider_GetRawTransaction(t *testing.T) {
 // Ordinal-specific methods
 // ---------------------------------------------------------------------------
 
+// N-025: this used to pin GET /inscriptions/address/{a} (a 404 on the live
+// API) returning flat InscriptionInfo rows. It now pins the documented
+// /txos/address/{a}/unspent Txo listing, keeping only Txos with an origin.
 func TestGorillaPoolProvider_GetInscriptionsByAddress(t *testing.T) {
 	address := "1Ord1nal"
 
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
-		expectedPath := "/inscriptions/address/" + address
+		expectedPath := "/txos/address/" + address + "/unspent"
 		if r.URL.Path != expectedPath {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
 		entries := []map[string]interface{}{
 			{
-				"txid":          strings.Repeat("aa", 32),
-				"vout":          0,
-				"origin":        "abcd_0",
-				"contentType":   "text/plain",
-				"contentLength": 11,
-				"height":        700000,
+				"txid":     strings.Repeat("aa", 32),
+				"vout":     0,
+				"satoshis": 1,
+				"height":   700000,
+				"origin": map[string]interface{}{
+					"outpoint": "abcd_0",
+					"data": map[string]interface{}{
+						"insc": map[string]interface{}{
+							"file": map[string]interface{}{"hash": "x", "size": 11, "type": "text/plain"},
+						},
+					},
+				},
 			},
+			{"txid": strings.Repeat("bb", 32), "vout": 1, "satoshis": 1000, "origin": nil},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(entries)
@@ -435,18 +463,23 @@ func TestGorillaPoolProvider_GetInscriptionsByAddress(t *testing.T) {
 	if len(insc) != 1 {
 		t.Fatalf("expected 1 inscription, got %d", len(insc))
 	}
-	if insc[0].ContentType != "text/plain" || insc[0].Origin != "abcd_0" {
+	if insc[0].ContentType != "text/plain" || insc[0].Origin != "abcd_0" ||
+		insc[0].ContentLength != 11 || insc[0].Height != 700000 {
 		t.Errorf("unexpected inscription: %+v", insc[0])
 	}
 }
 
+// N-025: this used to pin GET /bsv20/balance/{a}/{tick} returning a bare
+// string. It now pins the documented /bsv20/{a}/balance TokenBalanceResponse[]
+// listing, from which the matching tick's all.confirmed is returned.
 func TestGorillaPoolProvider_GetBSV20Balance(t *testing.T) {
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
-		expectedPath := "/bsv20/balance/1Addr/PEPE"
+		expectedPath := "/bsv20/1Addr/balance"
 		if r.URL.Path != expectedPath {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		io.WriteString(w, `"12345"`)
+		io.WriteString(w, `[{"all":{"confirmed":"12345","pending":"7"},"listed":{"confirmed":"0","pending":"0"},"tick":"PEPE","dec":0},`+
+			`{"all":{"confirmed":"99","pending":"0"},"listed":{"confirmed":"0","pending":"0"},"tick":"OTHER","dec":0}]`)
 	})
 	defer server.Close()
 
@@ -459,6 +492,7 @@ func TestGorillaPoolProvider_GetBSV20Balance(t *testing.T) {
 	}
 }
 
+// N-025: a 404 used to be mapped to balance "0"; it now raises.
 func TestGorillaPoolProvider_GetBSV20Balance_NotFound(t *testing.T) {
 	provider, server := newTestGorillaPoolProvider(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -466,10 +500,10 @@ func TestGorillaPoolProvider_GetBSV20Balance_NotFound(t *testing.T) {
 	defer server.Close()
 
 	bal, err := provider.GetBSV20Balance("1Addr", "PEPE")
-	if err != nil {
-		t.Fatalf("expected nil error on 404, got %v", err)
+	if err == nil {
+		t.Fatalf("expected an error on 404, got balance %q", bal)
 	}
-	if bal != "0" {
-		t.Errorf("expected balance 0 on 404, got %q", bal)
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected 404 in error, got: %v", err)
 	}
 }

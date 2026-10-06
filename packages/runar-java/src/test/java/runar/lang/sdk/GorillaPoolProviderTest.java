@@ -59,33 +59,50 @@ class GorillaPoolProviderTest {
     }
 
     // ------------------------------------------------------------------
-    // listUtxos hits /address/{addr}/utxos and parses txid/vout/satoshis/script
+    // listUtxos hits /txos/address/{addr}/unspent (N-025)
+    //
+    // N-025: replaces listUtxosParsesGorillaPoolPayload / listUtxosReturnsEmptyOn404,
+    // which pinned the undocumented /address/{addr}/utxos route (a 404 on the live
+    // API) and mapped its 404 to an empty list. The listing has no script, so the
+    // script and value now come from the hash-verified raw tx.
     // ------------------------------------------------------------------
 
     @Test
-    void listUtxosParsesGorillaPoolPayload() {
+    @SuppressWarnings("unchecked")
+    void listUtxosTakesScriptAndValueFromVerifiedRawTx() throws Exception {
+        Map<String, Object> v = ((List<Map<String, Object>>) loadGorillaPoolVectors().get("vectors")).get(0);
+        String txid = (String) v.get("txid");
+        Map<String, Object> out0 = ((List<Map<String, Object>>)
+            ((Map<String, Object>) v.get("expected")).get("outputs")).get(0);
+        long sats = Json.asLong(out0.get("satoshis"));
         FakeTransport t = new FakeTransport().queue(200,
-            "[{\"txid\":\"" + "aa".repeat(32) + "\",\"vout\":0,\"satoshis\":12345,\"script\":\"76a914aa\"},"
-                + "{\"txid\":\"" + "bb".repeat(32) + "\",\"vout\":3,\"satoshis\":1}]");
-        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
+            "[{\"txid\":\"" + txid + "\",\"vout\":0,\"satoshis\":" + sats + "}]");
+        FakeRawFetcher f = new FakeRawFetcher(rawUrl(txid), ScriptUtils.hexToBytes((String) v.get("responseHex")));
+        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t, f);
 
         List<UTXO> got = p.listUtxos("1ADDR");
-        assertEquals(2, got.size());
-        assertEquals("aa".repeat(32), got.get(0).txid());
+        assertEquals(1, got.size());
+        assertEquals(txid, got.get(0).txid());
         assertEquals(0, got.get(0).outputIndex());
-        assertEquals(12345L, got.get(0).satoshis());
-        assertEquals("76a914aa", got.get(0).scriptHex());
-        assertEquals("", got.get(1).scriptHex(), "missing script defaults to empty");
-
-        assertEquals("https://ordinals.gorillapool.io/api/address/1ADDR/utxos",
-            t.calls.get(0).url());
+        assertEquals(sats, got.get(0).satoshis());
+        assertEquals(out0.get("scriptSha256"), sha256Hex(got.get(0).scriptHex()));
+        assertEquals("https://ordinals.gorillapool.io/api/txos/address/1ADDR/unspent", t.calls.get(0).url());
+        assertEquals(rawUrl(txid), f.urls.get(0));
     }
 
     @Test
-    void listUtxosReturnsEmptyOn404() {
-        FakeTransport t = new FakeTransport().queue(404, "");
+    void listUtxosReturnsEmptyForEmptyListing() {
+        FakeTransport t = new FakeTransport().queue(200, "[]");
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
         assertTrue(p.listUtxos("addr").isEmpty());
+    }
+
+    @Test
+    void listUtxosThrowsOn404() {
+        FakeTransport t = new FakeTransport().queue(404, "{\"message\":\"Not Found\"}");
+        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
+        ProviderException pe = assertThrows(ProviderException.class, () -> p.listUtxos("addr"));
+        assertEquals(404, pe.statusCode());
     }
 
     @Test
@@ -98,7 +115,8 @@ class GorillaPoolProviderTest {
     }
 
     // ------------------------------------------------------------------
-    // broadcastRaw POSTs {"rawTx":"..."} and tolerates several response shapes
+    // broadcastRaw POSTs {"rawtx":"..."} (N-025: the documented key) and
+    // tolerates several response shapes
     // ------------------------------------------------------------------
 
     @Test
@@ -114,7 +132,9 @@ class GorillaPoolProviderTest {
         assertEquals("https://ordinals.gorillapool.io/api/tx", c.url());
         assertEquals("application/json", c.headers().get("Content-Type"));
         Map<String, Object> body = Json.asObject(Json.parse(c.body()));
-        assertEquals("deadbeef", body.get("rawTx"));
+        // N-025: the documented Broadcast body is {"rawtx": string}; "rawTx" is not accepted.
+        assertEquals("deadbeef", body.get("rawtx"));
+        assertFalse(body.containsKey("rawTx"));
     }
 
     @Test
@@ -236,50 +256,67 @@ class GorillaPoolProviderTest {
     }
 
     @Test
-    void getUtxoReturnsNullOn404() {
+    void getUtxoThrowsOn404() {
         // F-027: the 404 now comes from the binary /tx/{txid}/raw fetch.
+        // N-025: a 404 on this documented route throws; it is no longer null.
         FakeRawFetcher f = new FakeRawFetcher("nothing-matches", new byte[0]);
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", new FakeTransport(), f);
-        assertNull(p.getUtxo("ab".repeat(32), 0));
+        ProviderException pe = assertThrows(ProviderException.class, () -> p.getUtxo("ab".repeat(32), 0));
+        assertEquals(404, pe.statusCode());
     }
 
     // ------------------------------------------------------------------
     // getRawTransaction
     // ------------------------------------------------------------------
 
+    // N-025: replaces getRawTransactionTrimsBody, which pinned the undocumented
+    // /tx/{txid}/hex route (a 404 on the live API).
     @Test
-    void getRawTransactionTrimsBody() {
-        FakeTransport t = new FakeTransport().queue(200, " deadbeef \n");
-        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
-        assertEquals("deadbeef", p.getRawTransaction("ab".repeat(32)));
-        assertEquals("https://ordinals.gorillapool.io/api/tx/" + "ab".repeat(32) + "/hex",
-            t.calls.get(0).url());
+    @SuppressWarnings("unchecked")
+    void getRawTransactionReturnsVerifiedRawRouteAsHex() throws Exception {
+        Map<String, Object> v = ((List<Map<String, Object>>) loadGorillaPoolVectors().get("vectors")).get(0);
+        String txid = (String) v.get("txid");
+        FakeRawFetcher f = new FakeRawFetcher(rawUrl(txid), ScriptUtils.hexToBytes((String) v.get("responseHex")));
+        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", new FakeTransport(), f);
+        assertEquals(v.get("responseHex"), p.getRawTransaction(txid));
+        assertEquals(rawUrl(txid), f.urls.get(0));
+        assertThrows(ProviderException.class, () -> p.getRawTransaction("ab".repeat(32)));
     }
 
     // ------------------------------------------------------------------
     // Token helpers
     // ------------------------------------------------------------------
 
+    // N-025: the balance/utxo tests below replace ones that pinned the
+    // undocumented /bsv20/balance/{a}/{x} and /bsv20/utxos/{a}/{x} routes (404s
+    // on the live API) and mapped their 404 to "0" / an empty list.
+    private static final String BALANCES =
+        "[{\"all\":{\"confirmed\":\"123456\",\"pending\":\"5\"},\"listed\":{\"confirmed\":\"0\",\"pending\":\"0\"},\"tick\":\"DOGE\",\"dec\":0},"
+            + "{\"all\":{\"confirmed\":\"7\",\"pending\":\"0\"},\"listed\":{\"confirmed\":\"0\",\"pending\":\"0\"},\"id\":\"abcd_0\",\"sym\":\"X\",\"dec\":0}]";
+
     @Test
-    void getBSV20BalanceParsesStringResponse() {
-        FakeTransport t = new FakeTransport().queue(200, "\"123456\"");
+    void getBSV20BalanceReadsConfirmedFromDocumentedListing() {
+        FakeTransport t = new FakeTransport().queue(200, BALANCES);
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
         assertEquals("123456", p.getBSV20Balance("1ADDR", "DOGE"));
-        assertTrue(t.calls.get(0).url().endsWith("/bsv20/balance/1ADDR/DOGE"));
+        assertEquals("https://ordinals.gorillapool.io/api/bsv20/1ADDR/balance", t.calls.get(0).url());
     }
 
     @Test
-    void getBSV20BalanceParsesObjectResponse() {
-        FakeTransport t = new FakeTransport().queue(200, "{\"balance\":\"7\"}");
+    void getBSV21BalanceMatchesOnId() {
+        FakeTransport t = new FakeTransport().queue(200, BALANCES).queue(200, BALANCES);
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
-        assertEquals("7", p.getBSV20Balance("a", "TICK"));
+        assertEquals("7", p.getBSV21Balance("a", "abcd_0"));
+        assertEquals("0", p.getBSV20Balance("a", "abcd_0"), "an id is not a tick");
     }
 
     @Test
-    void getBSV20BalanceReturnsZeroOn404() {
-        FakeTransport t = new FakeTransport().queue(404, "");
+    void getBSV20BalanceIsZeroWhenTokenNotHeldButThrowsOn404() {
+        FakeTransport t = new FakeTransport().queue(200, BALANCES).queue(404, "{\"message\":\"Not Found\"}");
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
-        assertEquals("0", p.getBSV20Balance("a", "TICK"));
+        assertEquals("0", p.getBSV20Balance("a", "NOPE"));
+        ProviderException pe = assertThrows(ProviderException.class, () -> p.getBSV20Balance("a", "DOGE"));
+        assertEquals(404, pe.statusCode());
     }
 
     @Test
@@ -287,29 +324,35 @@ class GorillaPoolProviderTest {
         FakeTransport t = new FakeTransport().queue(200, "[]");
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
         p.getBSV21Utxos("1ADDR", "abcd_0");
-        assertTrue(t.calls.get(0).url().endsWith("/bsv20/utxos/1ADDR/abcd_0"),
+        assertTrue(t.calls.get(0).url().endsWith("/bsv20/1ADDR/id/abcd_0"),
             t.calls.get(0).url());
+    }
+
+    @Test
+    void getBSV20UtxosDecodesBase64ScriptAndRefusesMissingScript() {
+        FakeTransport t = new FakeTransport()
+            .queue(200, "[{\"txid\":\"" + "aa".repeat(32) + "\",\"vout\":2,\"satoshis\":1,\"script\":\"dqkU\"}]")
+            .queue(200, "[{\"txid\":\"" + "aa".repeat(32) + "\",\"vout\":2,\"satoshis\":1}]");
+        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
+        List<UTXO> got = p.getBSV20Utxos("1ADDR", "DOGE");
+        assertEquals("76a914", got.get(0).scriptHex());
+        assertTrue(t.calls.get(0).url().endsWith("/bsv20/1ADDR/tick/DOGE"), t.calls.get(0).url());
+        assertThrows(ProviderException.class, () -> p.getBSV20Utxos("1ADDR", "DOGE"));
     }
 
     // ------------------------------------------------------------------
     // Contract UTXO helper
     // ------------------------------------------------------------------
 
+    // N-025: replaces getContractUtxosHitsScriptEndpoint / getContractUtxosReturnsEmptyOn404.
+    // /script/{hash}/utxos is not a GorillaPool route (404 live), so the old
+    // method always reported "no UTXOs". It now refuses without a request.
     @Test
-    void getContractUtxosHitsScriptEndpoint() {
-        FakeTransport t = new FakeTransport().queue(200,
-            "[{\"txid\":\"" + "aa".repeat(32) + "\",\"vout\":0,\"satoshis\":1,\"script\":\"\"}]");
+    void getContractUtxosRefusesWithoutARequest() {
+        FakeTransport t = new FakeTransport();
         GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
-        List<UTXO> got = p.getContractUtxos("ff".repeat(32));
-        assertEquals(1, got.size());
-        assertEquals("https://ordinals.gorillapool.io/api/script/" + "ff".repeat(32) + "/utxos",
-            t.calls.get(0).url());
-    }
-
-    @Test
-    void getContractUtxosReturnsEmptyOn404() {
-        FakeTransport t = new FakeTransport().queue(404, "");
-        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
-        assertTrue(p.getContractUtxos("ff".repeat(32)).isEmpty());
+        ProviderException pe = assertThrows(ProviderException.class, () -> p.getContractUtxos("ff".repeat(32)));
+        assertTrue(pe.getMessage().contains("not supported"), pe.getMessage());
+        assertTrue(t.calls.isEmpty());
     }
 }

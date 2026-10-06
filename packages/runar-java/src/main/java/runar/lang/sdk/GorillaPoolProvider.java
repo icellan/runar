@@ -17,11 +17,13 @@ import java.util.Map;
  *     <li>Testnet: {@code https://testnet.ordinals.gorillapool.io/api}</li>
  * </ul>
  *
- * <p>UTXO endpoints return objects with {@code txid}, {@code vout},
- * {@code satoshis}, and (optional) {@code script} keys. The broadcast
- * endpoint accepts a {@code {"rawTx":"..."}} body and may return either a
- * JSON-encoded txid string or a {@code {"txid":"..."}} envelope; both
- * forms are tolerated.
+ * <p>N-025: every method uses a route documented in the server's OpenAPI
+ * document ({@code /txos/address/{a}/unspent}, {@code /tx/{txid}/raw},
+ * {@code /bsv20/{a}/balance}, {@code /bsv20/{a}/tick/{tick}},
+ * {@code /bsv20/{a}/id/{id}}, {@code POST /tx} with {@code {"rawtx":"..."}}),
+ * and every non-2xx response — a 404 included — throws. The broadcast
+ * response may be a JSON-encoded txid string or a {@code {"txid":"..."}}
+ * envelope; both forms are tolerated.
  */
 public final class GorillaPoolProvider implements Provider {
 
@@ -86,21 +88,54 @@ public final class GorillaPoolProvider implements Provider {
     // Provider
     // ------------------------------------------------------------------
 
+    /**
+     * N-025: {@code GET /txos/address/{address}/unspent} (Txo[]). The listing
+     * carries no locking script, so each entry's tx is fetched via the
+     * hash-verified {@code /tx/{txid}/raw}; the output must exist, its value
+     * must equal the listing's, and its non-empty script is returned. Any
+     * non-2xx (404 included) throws. Not filtered: 1-sat ordinal outputs are
+     * returned too.
+     */
     @Override
     public List<UTXO> listUtxos(String address) {
+        String op = "GorillaPool getUtxos";
         HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/address/" + address + "/utxos", null, null);
-        if (resp.statusCode() == 404) return List.of();
-        requireOk(resp, "GorillaPool getUtxos");
-
-        List<UTXO> utxos = parseUtxoList(resp.body(), "GorillaPool getUtxos");
-        // DoS-bound: reject pathological scripts at the provider boundary.
-        for (UTXO u : utxos) {
-            if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
+            "GET", baseUrl + "/txos/address/" + address + "/unspent", null, null);
+        requireOk(resp, op);
+        Object parsed = parseJson(resp.body(), op);
+        if (!(parsed instanceof List<?> entries)) {
+            throw new ProviderException(op + ": expected JSON array, got " + typeName(parsed));
+        }
+        Map<String, RawTx> txs = new java.util.HashMap<>();
+        List<UTXO> utxos = new ArrayList<>(entries.size());
+        for (Object e : entries) {
+            Map<String, Object> u = Json.asObject(e);
+            String txid = Json.asString(u.get("txid"));
+            int vout = Json.asInt(u.get("vout"));
+            long sats = Json.asLong(u.get("satoshis"));
+            RawTx tx = txs.get(txid);
+            if (tx == null) {
+                tx = parseRaw(fetchVerifiedRaw(txid, "getUtxos"), "getUtxos");
+                txs.put(txid, tx);
+            }
+            if (vout < 0 || vout >= tx.outputs.size()) {
+                throw new ProviderException(op + ": no output " + vout + " in tx " + txid
+                    + " (" + tx.outputs.size() + " outputs)");
+            }
+            RawTx.Output out = tx.outputs.get(vout);
+            if (out.satoshis != sats) {
+                throw new ProviderException(op + ": value mismatch for " + txid + "_" + vout
+                    + ": listing says " + sats + ", tx says " + out.satoshis);
+            }
+            String script = out.scriptPubKeyHex == null ? "" : out.scriptPubKeyHex;
+            if (script.isEmpty()) {
+                throw new ProviderException(op + ": empty locking script for " + txid + "_" + vout);
+            }
             ScriptSizeExceededError.assertScriptHexUnderLimit(
-                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                script, InputLimits.MAX_SCRIPT_BYTES,
                 "GorillaPoolProvider.listUtxos(" + address + ")"
             );
+            utxos.add(new UTXO(txid, vout, sats, script));
         }
         return utxos;
     }
@@ -111,7 +146,7 @@ public final class GorillaPoolProvider implements Provider {
             throw new IllegalArgumentException("GorillaPoolProvider.broadcastRaw: txHex is required");
         }
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("rawTx", txHex);
+        payload.put("rawtx", txHex); // N-025: the documented Broadcast body key
         Map<String, String> headers = Map.of("Content-Type", "application/json");
 
         HttpTransport.Response resp = transport.send(
@@ -139,29 +174,15 @@ public final class GorillaPoolProvider implements Provider {
      * the output's 8-byte little-endian field, so the value is exact (F-027:
      * the former JSON {@code vout[].value} decode with its {@code < 1000 → BTC}
      * guess targeted a field GorillaPool never returns). The body must hash to
-     * the requested txid. Returns {@code null} on 404 or an out-of-range vout.
+     * the requested txid. Returns {@code null} for an out-of-range vout (an
+     * outpoint the tx does not have). N-025: any non-2xx — a 404 on this
+     * documented route included — throws instead of returning {@code null}.
      */
     @Override
     public UTXO getUtxo(String txid, int vout) {
-        RawResponse resp = rawFetcher.get(baseUrl + "/tx/" + txid + "/raw");
-        if (resp.statusCode() == 404) return null;
-        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-            String body = resp.body() == null ? "" : new String(resp.body(), StandardCharsets.UTF_8);
-            throw new ProviderException("GorillaPool getTransaction failed (" + resp.statusCode() + "): "
-                + RPCProvider.truncate(body, 256), resp.statusCode());
-        }
-        byte[] raw = resp.body() == null ? new byte[0] : resp.body();
-        String bodyTxid = ScriptUtils.reverseHex(ScriptUtils.bytesToHex(Hash160.doubleSha256(raw)));
-        if (!bodyTxid.equals(txid.toLowerCase(java.util.Locale.ROOT))) {
-            throw new ProviderException("GorillaPool getTransaction: txid mismatch: response body hashes to "
-                + bodyTxid + ", requested " + txid);
-        }
-        RawTx tx;
-        try {
-            tx = RawTxParser.parse(ScriptUtils.bytesToHex(raw));
-        } catch (RuntimeException re) {
-            throw new ProviderException("GorillaPool getTransaction: parsing tx: " + re.getMessage(), re);
-        }
+        byte[] raw = fetchVerifiedRaw(txid, "getTransaction");
+        String bodyTxid = txid.toLowerCase(java.util.Locale.ROOT);
+        RawTx tx = parseRaw(raw, "getTransaction");
         if (vout < 0 || vout >= tx.outputs.size()) return null;
         RawTx.Output out = tx.outputs.get(vout);
         String script = out.scriptPubKeyHex == null ? "" : out.scriptPubKeyHex;
@@ -198,89 +219,81 @@ public final class GorillaPoolProvider implements Provider {
         .build();
 
     /**
-     * Fetches the raw transaction hex by txid via {@code /tx/{txid}/hex}.
-     * Mirrors {@code GorillaPoolProvider.GetRawTransaction} in the Go SDK.
+     * N-025: fetches {@code /tx/{txid}/raw} (binary), refuses a body that does
+     * not hash to {@code txid}, and returns it as lowercase hex. The former
+     * {@code /tx/{txid}/hex} route does not exist.
      */
     public String getRawTransaction(String txid) {
-        HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/tx/" + txid + "/hex", null, null);
-        requireOk(resp, "GorillaPool getRawTransaction");
-        return resp.body() == null ? "" : resp.body().trim();
+        return ScriptUtils.bytesToHex(fetchVerifiedRaw(txid, "getRawTransaction"));
     }
 
     /**
-     * Looks up unspent outputs for a script hash via
-     * {@code /script/{scriptHash}/utxos}. Returns an empty list when the
-     * upstream returns 404. Useful for stateful contract continuations.
+     * N-025: the GorillaPool API has no documented route that looks UTXOs up
+     * by script hash (the former {@code /script/{hash}/utxos} is a 404), so
+     * this refuses without a request rather than reporting "no UTXOs".
      */
     public List<UTXO> getContractUtxos(String scriptHash) {
-        HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/script/" + scriptHash + "/utxos", null, null);
-        if (resp.statusCode() == 404) return List.of();
-        requireOk(resp, "GorillaPool getContractUtxos");
-        return parseUtxoList(resp.body(), "GorillaPool getContractUtxos");
+        throw new ProviderException("GorillaPool getContractUtxos(" + scriptHash
+            + "): lookup by script hash is not supported by the GorillaPool API");
     }
 
     // ------------------------------------------------------------------
     // Ordinal / token helpers (parity with Go SDK)
     // ------------------------------------------------------------------
 
-    /** {@code /bsv20/balance/{address}/{tick}} — returns the balance string, or "0". */
+    /**
+     * N-025: confirmed BSV-20 (v1) balance from {@code /bsv20/{address}/balance}:
+     * the entry whose {@code tick} equals {@code tick} exactly, {@code all.confirmed};
+     * "0" when the address holds no such token.
+     */
     public String getBSV20Balance(String address, String tick) {
-        return getTokenBalance(address, tick, "getBSV20Balance");
+        return getTokenBalance(address, "tick", tick, "getBSV20Balance");
     }
 
-    /** {@code /bsv20/utxos/{address}/{tick}}. */
+    /** N-025: {@code /bsv20/{address}/tick/{tick}} (BSV20Txo[]). */
     public List<UTXO> getBSV20Utxos(String address, String tick) {
-        return getTokenUtxos(address, tick, "getBSV20Utxos");
+        return getTokenUtxos(baseUrl + "/bsv20/" + address + "/tick/" + urlEncode(tick), "getBSV20Utxos");
     }
 
-    /** {@code /bsv20/balance/{address}/{id}} — id is {@code <txid>_<vout>}. */
+    /** N-025: as {@link #getBSV20Balance} but matched on {@code id} ({@code <txid>_<vout>}). */
     public String getBSV21Balance(String address, String id) {
-        return getTokenBalance(address, id, "getBSV21Balance");
+        return getTokenBalance(address, "id", id, "getBSV21Balance");
     }
 
-    /** {@code /bsv20/utxos/{address}/{id}} — id is {@code <txid>_<vout>}. */
+    /** N-025: {@code /bsv20/{address}/id/{id}} (BSV20Txo[]); id is {@code <txid>_<vout>}. */
     public List<UTXO> getBSV21Utxos(String address, String id) {
-        return getTokenUtxos(address, id, "getBSV21Utxos");
+        return getTokenUtxos(baseUrl + "/bsv20/" + address + "/id/" + urlEncode(id), "getBSV21Utxos");
     }
 
-    private String getTokenBalance(String address, String key, String op) {
+    private String getTokenBalance(String address, String field, String key, String op) {
+        String what = "GorillaPool " + op;
         HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/bsv20/balance/" + address + "/" + urlEncode(key), null, null);
-        if (resp.statusCode() == 404) return "0";
-        requireOk(resp, "GorillaPool " + op);
-
-        String body = resp.body() == null ? "" : resp.body().trim();
-        try {
-            Object parsed = Json.parse(body);
-            if (parsed instanceof String s) return s;
-            if (parsed instanceof Map<?, ?> m) {
-                Object bal = ((Map<?, ?>) m).get("balance");
-                if (bal instanceof String s && !s.isEmpty()) return s;
+            "GET", baseUrl + "/bsv20/" + address + "/balance", null, null);
+        requireOk(resp, what);
+        Object parsed = parseJson(resp.body(), what);
+        if (!(parsed instanceof List<?> rows)) {
+            throw new ProviderException(what + ": expected JSON array, got " + typeName(parsed));
+        }
+        for (Object r : rows) {
+            Map<String, Object> row = Json.asObject(r);
+            if (key.equals(row.get(field))) {
+                Object confirmed = Json.asObject(row.get("all")).get("confirmed");
+                if (!(confirmed instanceof String s)) {
+                    throw new ProviderException(what + ": all.confirmed is not a string for " + key);
+                }
+                return s;
             }
-        } catch (RuntimeException ignored) {
-            // Fall through.
         }
         return "0";
     }
 
-    private List<UTXO> getTokenUtxos(String address, String key, String op) {
-        HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/bsv20/utxos/" + address + "/" + urlEncode(key), null, null);
-        if (resp.statusCode() == 404) return List.of();
-        requireOk(resp, "GorillaPool " + op);
-        return parseUtxoList(resp.body(), "GorillaPool " + op);
-    }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    private static List<UTXO> parseUtxoList(String body, String op) {
-        Object parsed = parseJson(body, op);
+    private List<UTXO> getTokenUtxos(String url, String op) {
+        String what = "GorillaPool " + op;
+        HttpTransport.Response resp = transport.send("GET", url, null, null);
+        requireOk(resp, what);
+        Object parsed = parseJson(resp.body(), what);
         if (!(parsed instanceof List<?> entries)) {
-            throw new ProviderException(op + ": expected JSON array, got " + typeName(parsed));
+            throw new ProviderException(what + ": expected JSON array, got " + typeName(parsed));
         }
         List<UTXO> utxos = new ArrayList<>(entries.size());
         for (Object e : entries) {
@@ -289,10 +302,50 @@ public final class GorillaPoolProvider implements Provider {
             int vout = Json.asInt(u.get("vout"));
             long sats = Json.asLong(u.get("satoshis"));
             String script = "";
-            if (u.get("script") instanceof String s) script = s;
+            if (u.get("script") instanceof String b64 && !b64.isEmpty()) {
+                try {
+                    script = ScriptUtils.bytesToHex(java.util.Base64.getDecoder().decode(b64));
+                } catch (IllegalArgumentException iae) {
+                    throw new ProviderException(what + ": script is not base64 for " + txid + "_" + vout, iae);
+                }
+            }
+            if (script.isEmpty()) {
+                throw new ProviderException(what + ": no locking script for " + txid + "_" + vout);
+            }
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                script, InputLimits.MAX_SCRIPT_BYTES, "GorillaPoolProvider." + op);
             utxos.add(new UTXO(txid, vout, sats, script));
         }
         return utxos;
+    }
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    /** GET {@code /tx/{txid}/raw}; any non-2xx throws; the body must hash (sha256d, reversed) to txid. */
+    private byte[] fetchVerifiedRaw(String txid, String op) {
+        RawResponse resp = rawFetcher.get(baseUrl + "/tx/" + txid + "/raw");
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            String body = resp.body() == null ? "" : new String(resp.body(), StandardCharsets.UTF_8);
+            throw new ProviderException("GorillaPool " + op + " failed (" + resp.statusCode() + "): "
+                + RPCProvider.truncate(body, 256), resp.statusCode());
+        }
+        byte[] raw = resp.body() == null ? new byte[0] : resp.body();
+        String bodyTxid = ScriptUtils.reverseHex(ScriptUtils.bytesToHex(Hash160.doubleSha256(raw)));
+        if (!bodyTxid.equals(txid.toLowerCase(java.util.Locale.ROOT))) {
+            throw new ProviderException("GorillaPool " + op + ": txid mismatch: response body hashes to "
+                + bodyTxid + ", requested " + txid);
+        }
+        return raw;
+    }
+
+    private static RawTx parseRaw(byte[] raw, String op) {
+        try {
+            return RawTxParser.parse(ScriptUtils.bytesToHex(raw));
+        } catch (RuntimeException re) {
+            throw new ProviderException("GorillaPool " + op + ": parsing tx: " + re.getMessage(), re);
+        }
     }
 
     private static void requireOk(HttpTransport.Response resp, String op) {
