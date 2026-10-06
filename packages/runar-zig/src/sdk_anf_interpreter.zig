@@ -1627,7 +1627,9 @@ fn evalCall(
         const v = toInt(getArg(arg_names, 0, env));
         const lo = toInt(getArg(arg_names, 1, env));
         const hi = toInt(getArg(arg_names, 2, env));
-        return .{ .int = if (v < lo) lo else if (v > hi) hi else v };
+        // The script is `OP_MAX` then `OP_MIN`: min(max(v, lo), hi), so with
+        // lo > hi, hi wins (N-030).
+        return .{ .int = @min(@max(v, lo), hi) };
     }
     if (std.mem.eql(u8, func, "sign")) {
         const v = toInt(getArg(arg_names, 0, env));
@@ -1647,13 +1649,16 @@ fn evalCall(
     if (std.mem.eql(u8, func, "sqrt")) {
         const v = toInt(getArg(arg_names, 0, env));
         if (v <= 0) return .{ .int = 0 };
-        var x = v;
-        var y = @divTrunc(x + 1, 2);
+        // Newton in i128, so `x + 1` cannot overflow at v = maxInt(i64)
+        // (sqrt(2^63 - 1) is 3037000499 on-chain; N-030).
+        const w: i128 = v;
+        var x: i128 = w;
+        var y: i128 = @divTrunc(x + 1, 2);
         while (y < x) {
             x = y;
-            y = @divTrunc(x + @divTrunc(v, x), 2);
+            y = @divTrunc(x + @divTrunc(w, x), 2);
         }
-        return .{ .int = x };
+        return .{ .int = @intCast(x) };
     }
     if (std.mem.eql(u8, func, "gcd")) {
         var a = toInt(getArg(arg_names, 0, env));

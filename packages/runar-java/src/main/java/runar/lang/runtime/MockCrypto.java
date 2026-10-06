@@ -552,9 +552,9 @@ public final class MockCrypto {
     }
 
     public static BigInteger clamp(BigInteger value, BigInteger lo, BigInteger hi) {
-        if (value.compareTo(lo) < 0) return lo;
-        if (value.compareTo(hi) > 0) return hi;
-        return value;
+        // The compiled script is `<value> <lo> OP_MAX <hi> OP_MIN`, i.e.
+        // min(max(value, lo), hi): with lo > hi, hi wins (N-030).
+        return min(max(value, lo), hi);
     }
 
     public static BigInteger sign(BigInteger x) {
@@ -597,7 +597,16 @@ public final class MockCrypto {
     }
 
     public static BigInteger gcd(BigInteger a, BigInteger b) {
-        return a.abs().gcd(b.abs());
+        // The compiled script unrolls exactly 256 Euclid steps and returns the
+        // partial remainder when they are not enough (N-030).
+        BigInteger x = a.abs();
+        BigInteger y = b.abs();
+        for (int i = 0; i < 256 && y.signum() != 0; i++) {
+            BigInteger t = y;
+            y = x.mod(y);
+            x = t;
+        }
+        return x;
     }
 
     public static BigInteger divmod(BigInteger a, BigInteger b) {
@@ -605,8 +614,10 @@ public final class MockCrypto {
     }
 
     public static BigInteger log2(BigInteger n) {
-        if (n.signum() <= 0) throw new ArithmeticException("log2: non-positive input");
-        return BigInteger.valueOf(n.bitLength() - 1);
+        // The compiled script returns 0 for n <= 0 and unrolls exactly 64
+        // halvings, so it saturates at 64 (N-030).
+        if (n.signum() <= 0) return BigInteger.ZERO;
+        return BigInteger.valueOf(Math.min(n.bitLength() - 1, 64));
     }
 
     public static boolean bool(BigInteger x) {

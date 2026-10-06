@@ -696,11 +696,9 @@ def safemod(a: int, b: int) -> int:
     return _script_mod(a, b, 'safemod')
 
 def clamp(value: int, lo: int, hi: int) -> int:
-    if value < lo:
-        return lo
-    if value > hi:
-        return hi
-    return value
+    # Script: <value> <lo> OP_MAX <hi> OP_MIN, i.e. min(max(value, lo), hi);
+    # with lo > hi, hi wins (N-030).
+    return min(max(value, lo), hi)
 
 def sign(n: int) -> int:
     if n > 0:
@@ -743,8 +741,12 @@ def sqrt(n: int) -> int:
     return x
 
 def gcd(a: int, b: int) -> int:
+    # The script unrolls exactly 256 Euclid steps and returns the partial
+    # remainder when they are not enough (N-030).
     a, b = abs(a), abs(b)
-    while b:
+    for _ in range(256):
+        if not b:
+            break
         a, b = b, a % b
     return a
 
@@ -756,7 +758,8 @@ def divmod_(a: int, b: int) -> int:
 def log2(n: int) -> int:
     if n <= 0:
         return 0
-    return n.bit_length() - 1
+    # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
+    return min(n.bit_length() - 1, 64)
 
 def bool_cast(n: int) -> bool:
     return n != 0

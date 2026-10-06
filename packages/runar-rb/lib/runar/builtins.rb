@@ -559,11 +559,24 @@ module Runar
       _script_mod(a, b, 'safemod')
     end
 
+    # Script: <value> <lo> OP_MAX <hi> OP_MIN, i.e. min(max(value, lo), hi);
+    # with lo > hi, hi wins (N-030).
     def clamp(value, lo, hi)
-      return lo if value < lo
-      return hi if value > hi
+      [[value, lo].max, hi].min
+    end
 
-      value
+    # abs/min/max are Runar builtins a .runar.rb contract calls bare
+    # (`abs(@value)`); they compile to OP_ABS / OP_MIN / OP_MAX (N-030).
+    def abs(n)
+      n.abs
+    end
+
+    def min(a, b)
+      a < b ? a : b
+    end
+
+    def max(a, b)
+      a > b ? a : b
     end
 
     def sign(n)
@@ -608,10 +621,16 @@ module Runar
       x
     end
 
+    # The script unrolls exactly 256 Euclid steps and returns the partial
+    # remainder when they are not enough (N-030).
     def gcd(a, b)
       a = a.abs
       b = b.abs
-      a, b = b, a % b while b != 0
+      256.times do
+        break if b.zero?
+
+        a, b = b, a % b
+      end
       a
     end
 
@@ -624,7 +643,8 @@ module Runar
     def log2(n)
       return 0 if n <= 0
 
-      n.bit_length - 1
+      # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
+      [n.bit_length - 1, 64].min
     end
 
     def bool(n)

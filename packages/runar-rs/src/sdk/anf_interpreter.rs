@@ -1848,14 +1848,16 @@ fn eval_call(
             if v <= 0 {
                 Val::Int(0)
             } else {
-                // Integer square root via Newton's method
+                // Integer square root via Newton's method, in i128 so that
+                // v = i64::MAX does not overflow `x + 1` (N-030).
+                let v = v as i128;
                 let mut x = v;
                 let mut y = (x + 1) / 2;
                 while y < x {
                     x = y;
                     y = (x + v / x) / 2;
                 }
-                Val::Int(x)
+                Val::Int(x as i64)
             }
         }
         "gcd" => {

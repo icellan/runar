@@ -994,9 +994,10 @@ pub fn safemod(a: Int, b: Int) -> Int {
     a % b
 }
 
-/// Clamp value to [lo, hi].
+/// Clamp value to [lo, hi]. The compiled script is `<value> <lo> OP_MAX <hi>
+/// OP_MIN`, i.e. min(max(value, lo), hi), so with lo > hi, hi wins (N-030).
 pub fn clamp(value: Int, lo: Int, hi: Int) -> Int {
-    if value < lo { lo } else if value > hi { hi } else { value }
+    value.max(lo).min(hi)
 }
 
 /// Sign of a number: -1, 0, or 1.
@@ -1036,16 +1037,15 @@ pub fn percent_of(amount: Int, bps: Int) -> Int {
     product / 10000
 }
 
-/// Integer square root via Newton's method. Panics on i64 overflow.
+/// Integer square root via Newton's method. The Newton sum is taken in i128,
+/// so every i64 input has its exact floor root (sqrt(i64::MAX) is 3037000499
+/// on-chain; the i64 sum overflowed there, N-030).
 pub fn sqrt(n: Int) -> Int {
     assert!(n >= 0, "sqrt: negative input");
     if n == 0 { return 0; }
     let mut guess = n;
     for _ in 0..256 {
-        let sum = guess.checked_add(n / guess).unwrap_or_else(|| {
-            panic!("runar: i64 overflow in sqrt — Bitcoin Script supports arbitrary precision but Rust tests use i64")
-        });
-        let next = sum / 2;
+        let next = ((guess as i128 + (n / guess) as i128) / 2) as Int;
         if next >= guess { break; }
         guess = next;
     }

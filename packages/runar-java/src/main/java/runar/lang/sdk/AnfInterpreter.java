@@ -1512,8 +1512,8 @@ public final class AnfInterpreter {
             }
             case "log2": {
                 BigInteger v = toBigInt(args.get(0));
-                if (v.signum() <= 0) return BigInteger.ZERO;
-                return BigInteger.valueOf(v.bitLength() - 1);
+                // Same as MockCrypto.log2: 0 for n <= 0, saturates at 64 (N-030).
+                return MockCrypto.log2(v);
             }
             case "bool":       return isTruthy(args.get(0)) ? BigInteger.ONE : BigInteger.ZERO;
             case "mulDiv": {

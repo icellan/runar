@@ -1026,7 +1026,8 @@ module Runar
           v  = to_int(args[0])
           lo = to_int(args[1])
           hi = to_int(args[2])
-          v < lo ? lo : v > hi ? hi : v
+          # The script is OP_MAX then OP_MIN: min(max(v, lo), hi) (N-030).
+          [[v, lo].max, hi].min
 
         when 'sign'
           v = to_int(args[0])
@@ -1050,7 +1051,12 @@ module Runar
         when 'gcd'
           a = to_int(args[0]).abs
           b = to_int(args[1]).abs
-          a, b = b, a % b while b != 0
+          # The script unrolls exactly 256 Euclid steps (N-030).
+          256.times do
+            break if b.zero?
+
+            a, b = b, a % b
+          end
           a
 
         when 'divmod'
@@ -1745,7 +1751,8 @@ module Runar
 
         bits = 0
         x    = v
-        while x > 1
+        # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
+        while x > 1 && bits < 64
           x >>= 1
           bits += 1
         end

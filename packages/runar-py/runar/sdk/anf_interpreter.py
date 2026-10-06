@@ -1362,7 +1362,8 @@ def _eval_call(
         return _truncate_mod(_to_int(args[0]), d)
     if func == 'clamp':
         v, lo, hi = _to_int(args[0]), _to_int(args[1]), _to_int(args[2])
-        return lo if v < lo else hi if v > hi else v
+        # The script is OP_MAX then OP_MIN: min(max(v, lo), hi) (N-030).
+        return min(max(v, lo), hi)
     if func == 'sign':
         v = _to_int(args[0])
         return 1 if v > 0 else -1 if v < 0 else 0
@@ -1390,7 +1391,10 @@ def _eval_call(
         return x
     if func == 'gcd':
         a, b = abs(_to_int(args[0])), abs(_to_int(args[1]))
-        while b:
+        # The script unrolls exactly 256 Euclid steps (N-030).
+        for _ in range(256):
+            if not b:
+                break
             a, b = b, a % b
         return a
     if func == 'divmod':
@@ -1401,7 +1405,8 @@ def _eval_call(
             return 0
         bits = 0
         x = v
-        while x > 1:
+        # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
+        while x > 1 and bits < 64:
             x >>= 1
             bits += 1
         return bits

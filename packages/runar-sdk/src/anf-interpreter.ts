@@ -1122,7 +1122,9 @@ function evalCall(
       const v = toBigInt(args[0]);
       const lo = toBigInt(args[1]);
       const hi = toBigInt(args[2]);
-      return v < lo ? lo : v > hi ? hi : v;
+      // The script is `OP_MAX` then `OP_MIN`: min(max(v, lo), hi) (N-030).
+      const m = v > lo ? v : lo;
+      return m < hi ? m : hi;
     }
     case 'sign': {
       const v = toBigInt(args[0]);
@@ -1152,7 +1154,8 @@ function evalCall(
       let b = toBigInt(args[1]);
       if (a < 0n) a = -a;
       if (b < 0n) b = -b;
-      while (b !== 0n) { const t = b; b = a % b; a = t; }
+      // The script unrolls exactly 256 Euclid steps (N-030).
+      for (let i = 0; i < 256 && b !== 0n; i++) { const t = b; b = a % b; a = t; }
       return a;
     }
     case 'divmod': {
@@ -1167,7 +1170,8 @@ function evalCall(
       if (v <= 0n) return 0n;
       let bits = 0n;
       let x = v;
-      while (x > 1n) { x >>= 1n; bits++; }
+      // The script unrolls exactly 64 halvings: saturates at 64 (N-030).
+      while (x > 1n && bits < 64n) { x >>= 1n; bits++; }
       return bits;
     }
     case 'bool': return isTruthy(args[0]) ? 1n : 0n;

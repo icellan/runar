@@ -1256,15 +1256,11 @@ func Safemod(a, b int64) int64 {
 	return a % b
 }
 
-// Clamp constrains value to the range [lo, hi].
+// Clamp constrains value to the range [lo, hi]. The compiled script is
+// `<value> <lo> OP_MAX <hi> OP_MIN`, i.e. min(max(value, lo), hi), so with
+// lo > hi, hi wins (N-030).
 func Clamp(value, lo, hi int64) int64 {
-	if value < lo {
-		return lo
-	}
-	if value > hi {
-		return hi
-	}
-	return value
+	return Min(Max(value, lo), hi)
 }
 
 // Sign returns -1, 0, or 1 depending on the sign of n.
@@ -1382,15 +1378,23 @@ func Gcd(a, b int64) int64 {
 	return r.Int64()
 }
 
-// GcdBig computes the greatest common divisor in arbitrary precision.
+// GcdBig computes the greatest common divisor in arbitrary precision, as the
+// compiled script does: exactly 256 unrolled Euclid steps on |a|, |b|. When
+// those are not enough (operands beyond ~2^177) the script returns the partial
+// remainder, not the gcd, and so does this (N-030). Any int64 pair needs far
+// fewer steps, so Gcd is the true gcd.
 func GcdBig(a, b *big.Int) *big.Int {
-	if a == nil {
-		a = new(big.Int)
+	x, y := new(big.Int), new(big.Int)
+	if a != nil {
+		x.Abs(a)
 	}
-	if b == nil {
-		b = new(big.Int)
+	if b != nil {
+		y.Abs(b)
 	}
-	return new(big.Int).GCD(nil, nil, new(big.Int).Abs(a), new(big.Int).Abs(b))
+	for i := 0; i < 256 && y.Sign() != 0; i++ {
+		x, y = y, new(big.Int).Rem(x, y)
+	}
+	return x
 }
 
 // Divmod returns the quotient of a / b.

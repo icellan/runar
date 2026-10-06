@@ -26,10 +26,15 @@
  * call, validated by `Spend.validate` against the real BIP-143 preimage) and
  * read the new `value` / `balance` from the accepted continuation output.
  *
- * What this does NOT prove: anything about the native Zig runtime by itself —
- * that is the Zig half. Values are limited to i64 because the Zig native
- * Bigint is i64; the script's arbitrary-precision range beyond that is not
- * exercised here.
+ * N-030 widened the file to the shared oracle for EVERY tier's native runtime
+ * and SDK ANF interpreter, and added `wideCases` (operands/results beyond i64:
+ * log2 saturating at 64, gcd stopping after 256 Euclid steps, sqrt's 2^495
+ * guard, ...), executed here exactly like `cases`.
+ *
+ * What this does NOT prove: anything about a native runtime or interpreter by
+ * itself — each tier's n030 vector test replays this file against its own
+ * code. Values in `cases` are limited to i64 because the Zig/Rust/Go native
+ * Bigint is i64.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -92,17 +97,49 @@ function probeSource(): string {
   ].join('\n');
 }
 
+/**
+ * N-030: `wideCases` carry integers beyond i64 as DECIMAL STRINGS (so no tier's
+ * JSON reader rounds them); `"abort"` stays the abort marker. Normalise them to
+ * the same shape as `cases` so both run through the one Spend probe below.
+ */
+function normaliseWide(c: { fn: string; args: string[]; expect: string | boolean }): BuiltinCase {
+  const big = (v: string): bigint => {
+    if (!/^-?[0-9]+$/.test(v)) throw new Error(`wideCases: not a decimal integer: ${v}`);
+    return BigInt(v);
+  };
+  const e = c.expect;
+  return {
+    fn: c.fn,
+    args: c.args.map(big),
+    expect: typeof e === 'boolean' ? e : e === 'abort' ? 'abort' : big(e),
+  };
+}
+
 describe('F-033: math builtins — compiled script verdict on Spend.validate', () => {
-  const { cases } = readVectors<{ cases: BuiltinCase[] }>(
-    'packages/runar-zig/src/fixtures/f033-math-builtins-onchain.json',
-  );
+  const vectors = readVectors<{
+    cases: BuiltinCase[];
+    wideCases: Array<{ fn: string; args: string[]; expect: string | boolean }>;
+  }>('packages/runar-zig/src/fixtures/f033-math-builtins-onchain.json');
+  const { cases } = vectors;
+  const wide = vectors.wideCases.map(normaliseWide);
   const probe = ScriptExecutionContract.fromSource(probeSource(), {}, 'F033MathProbe.runar.ts');
 
   it('covers every builtin the Zig runtime exports', () => {
     expect(new Set(cases.map((c) => c.fn))).toEqual(new Set(Object.keys(ARITY)));
   });
 
-  for (const c of cases) {
+  it('N-030: wideCases really are beyond i64 (else they belong in `cases`)', () => {
+    const I64_MAX = (1n << 63n) - 1n;
+    const I64_MIN = -(1n << 63n);
+    const fits = (v: bigint) => v >= I64_MIN && v <= I64_MAX;
+    expect(wide.length).toBeGreaterThan(0);
+    for (const c of wide) {
+      const ints = [...c.args, ...(typeof c.expect === 'bigint' ? [c.expect] : [])];
+      expect(ints.every(fits), `${c.fn}(${c.args.join(', ')})`).toBe(false);
+    }
+  });
+
+  for (const c of [...cases, ...wide]) {
     const label = `${c.fn}(${c.args.join(', ')}) -> ${String(c.expect)}`;
     it(label, () => {
       const isBool = BOOL_FNS.has(c.fn);

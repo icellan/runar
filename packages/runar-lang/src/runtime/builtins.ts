@@ -269,9 +269,10 @@ export function safemod(a: bigint, b: bigint): bigint {
 }
 
 export function clamp(value: bigint, lo: bigint, hi: bigint): bigint {
-  if (value < lo) return lo;
-  if (value > hi) return hi;
-  return value;
+  // The compiled script is `<value> <lo> OP_MAX <hi> OP_MIN`, i.e.
+  // min(max(value, lo), hi): with lo > hi, hi wins (N-030).
+  const m = value > lo ? value : lo;
+  return m < hi ? m : hi;
 }
 
 export function sign(value: bigint): bigint {
@@ -320,7 +321,9 @@ export function sqrt(n: bigint): bigint {
 export function gcd(a: bigint, b: bigint): bigint {
   let x = a < 0n ? -a : a;
   let y = b < 0n ? -b : b;
-  while (y !== 0n) {
+  // The compiled script unrolls exactly 256 Euclid steps and returns the
+  // partial remainder when they are not enough (N-030).
+  for (let i = 0; i < 256 && y !== 0n; i++) {
     const t = y;
     y = x % y;
     x = t;
@@ -333,10 +336,12 @@ export function divmod(a: bigint, b: bigint): bigint {
 }
 
 export function log2(n: bigint): bigint {
-  if (n <= 0n) throw new Error('log2: non-positive input');
+  // The compiled script returns 0 for n <= 0 and unrolls exactly 64
+  // halvings, so it saturates at 64 (N-030).
+  if (n <= 0n) return 0n;
   let result = 0n;
   let v = n;
-  while (v > 1n) {
+  while (v > 1n && result < 64n) {
     v >>= 1n;
     result++;
   }

@@ -1368,13 +1368,15 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		v := anfToBigInt(args[0])
 		lo := anfToBigInt(args[1])
 		hi := anfToBigInt(args[2])
-		if v.Cmp(lo) < 0 {
-			return new(big.Int).Set(lo)
+		// The script is OP_MAX then OP_MIN: min(max(v, lo), hi) (N-030).
+		m := v
+		if lo.Cmp(m) > 0 {
+			m = lo
 		}
-		if v.Cmp(hi) > 0 {
-			return new(big.Int).Set(hi)
+		if hi.Cmp(m) < 0 {
+			m = hi
 		}
-		return new(big.Int).Set(v)
+		return new(big.Int).Set(m)
 
 	case "sign":
 		v := anfToBigInt(args[0])
@@ -1406,9 +1408,13 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return new(big.Int).Sqrt(v)
 
 	case "gcd":
+		// The script unrolls exactly 256 Euclid steps (N-030).
 		a := new(big.Int).Abs(anfToBigInt(args[0]))
 		b := new(big.Int).Abs(anfToBigInt(args[1]))
-		return new(big.Int).GCD(nil, nil, a, b)
+		for i := 0; i < 256 && b.Sign() != 0; i++ {
+			a, b = b, new(big.Int).Rem(a, b)
+		}
+		return a
 
 	case "divmod":
 		a := anfToBigInt(args[0])
@@ -1423,7 +1429,12 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		if v.Sign() <= 0 {
 			return big.NewInt(0)
 		}
-		return big.NewInt(int64(v.BitLen() - 1))
+		// The script unrolls exactly 64 halvings: saturates at 64 (N-030).
+		bits := int64(v.BitLen() - 1)
+		if bits > 64 {
+			bits = 64
+		}
+		return big.NewInt(bits)
 
 	case "bool":
 		if anfIsTruthy(args[0]) {
