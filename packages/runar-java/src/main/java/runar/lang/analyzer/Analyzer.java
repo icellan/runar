@@ -3,7 +3,9 @@ package runar.lang.analyzer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Top-level entry point for the Bitcoin Script static analyzer (spec §11).
@@ -63,7 +65,25 @@ public final class Analyzer {
         // orchestration, opcode-concern findings are appended last. Place
         // the parser-emitted push findings inside that bucket so they sort
         // alongside the other opcode concerns.
-        all.addAll(parserFindings);
+        //
+        // The parser runs BEFORE raw_script spans are collapsed (:38-44), so
+        // a push finding's offset may point at a byte range that a span later
+        // swallows into a single synthetic RAW_SPAN step. TS/Python only run
+        // their push-encoding check AFTER collapsing, so a push entirely
+        // inside a span never gets a finding there; keep parity by dropping
+        // any parser finding whose offset no longer corresponds to a real
+        // (non-raw-span) push op in the collapsed `ops` list.
+        Set<Integer> survivingPushOffsets = new HashSet<>();
+        for (OpStep op : ops) {
+            if (op.pushEncoding != null) {
+                survivingPushOffsets.add(op.offset);
+            }
+        }
+        for (Finding f : parserFindings) {
+            if (f.offset != null && survivingPushOffsets.contains(f.offset)) {
+                all.add(f);
+            }
+        }
 
         // Sort (stable) by (severityRank, offsetRank). Optional-offset findings
         // sort to the end within their severity bucket. Ties are broken by
