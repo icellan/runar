@@ -29,23 +29,30 @@
 
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Every Gradle project in the repo, as build-file paths relative to ROOT. */
+/**
+ * Every Gradle project in the repo, as build-file paths relative to ROOT.
+ *
+ * R-210-FU: this used to enumerate with `find`, which has no concept of
+ * "tracked" — run from a checkout that hosts nested .worktrees/ copies (each
+ * a full repo clone, gitignored but not excluded by `find`), it returns
+ * every other worktree's build.gradle.kts too, which then fails "each one
+ * enables dependencyLocking" / "each lockfile is named" for paths this repo
+ * does not actually contain. `git ls-files` only ever returns files this
+ * repo tracks, so nested worktrees and any other scratch build.gradle.kts
+ * (e.g. one a test writes under conformance/.tmp) are both invisible to it.
+ */
 function gradleProjects(): string[] {
-  const out = execSync(
-    "find . -name 'build.gradle.kts' -not -path '*/node_modules/*' -not -path '*/build/*'",
-    { cwd: ROOT, encoding: 'utf-8' },
-  );
+  const out = execSync("git ls-files -- '*build.gradle.kts'", { cwd: ROOT, encoding: 'utf-8' });
   return out
     .trim()
     .split('\n')
     .filter(Boolean)
-    .map((p) => p.replace(/^\.\//, ''))
     .sort();
 }
 
@@ -53,6 +60,32 @@ const AUDIT = 'github/workflows/dependency-audit.yml';
 const auditYml = readFileSync(join(ROOT, '.github/workflows/dependency-audit.yml'), 'utf-8');
 
 describe('R-210: every Gradle project is locked and scanned', () => {
+  it('the enumeration excludes an untracked scratch build.gradle.kts', () => {
+    // A nested .worktrees/ checkout (gitignored, but still on disk) or a test
+    // scratch file under conformance/.tmp both produce an untracked
+    // build.gradle.kts somewhere under ROOT. If the enumeration used `find`,
+    // it would list that path too, and the later assertions would then fail
+    // for a project this repo does not actually contain.
+    const tmpDir = join(ROOT, 'conformance', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const scratchDir = join(tmpDir, 'r210fu-scratch-project');
+    if (!existsSync(scratchDir)) mkdirSync(scratchDir, { recursive: true });
+    const scratchFile = join(scratchDir, 'build.gradle.kts');
+    writeFileSync(scratchFile, '// untracked scratch gradle project', 'utf-8');
+    try {
+      expect(existsSync(scratchFile), 'setup: the scratch file was not actually written').toBe(
+        true,
+      );
+      const relative = 'conformance/.tmp/r210fu-scratch-project/build.gradle.kts';
+      expect(
+        gradleProjects(),
+        'the enumeration picked up an untracked scratch build.gradle.kts',
+      ).not.toContain(relative);
+    } finally {
+      unlinkSync(scratchFile);
+    }
+  });
+
   it('finds the Gradle projects at all', () => {
     // Guards against the find silently matching nothing and the whole file
     // passing vacuously.
