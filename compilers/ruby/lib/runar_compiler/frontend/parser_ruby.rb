@@ -1020,7 +1020,7 @@ module RunarCompiler
           elsif check_ident("default")
             advance # 'default'
             expect(TOK_COLON, ":")
-            initializer = parse_primary
+            initializer = parse_unary
           end
         end
 

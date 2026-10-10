@@ -308,6 +308,7 @@ _TYPE_MAP: dict[str, str] = {
     "Integer": "bigint",
     "Int": "bigint",
     "Boolean": "boolean",
+    "Bool": "boolean",
     "ByteString": "ByteString",
     "PubKey": "PubKey",
     "Sig": "Sig",
@@ -1007,7 +1008,7 @@ class _RbParser:
             elif self._check_ident("default"):
                 self._advance()  # 'default'
                 self._expect(TOK_COLON, ":")
-                initializer = self._parse_primary()
+                initializer = self._parse_unary()
 
         # In stateless contracts (SmartContract and UnsafeSmartContract),
         # all properties are always readonly.
@@ -1037,7 +1038,14 @@ class _RbParser:
             elem_type = self._parse_type()
             self._expect(TOK_COMMA, ",")
             size_tok = self._expect(TOK_NUMBER, "number")
-            size = int(size_tok.value)
+            try:
+                size = int(size_tok.value)
+            except ValueError:
+                # _expect already logged the token-mismatch diagnostic above;
+                # fall back to 0 instead of raising so a non-numeric length
+                # (e.g. an unresolved constant) is a clean diagnostic, not an
+                # uncaught exception out of the parser.
+                size = 0
             self._expect(TOK_RBRACKET, "]")
             return FixedArrayType(element=elem_type, length=size)
 

@@ -178,6 +178,33 @@ class TestParserRubyEdges < Minitest::Test
     assert_equal 42, prop.initializer.value
   end
 
+  # F-206: 'default: -5' must parse as a single negative literal, matching
+  # the TS reference. This tier called parse_primary directly for the
+  # default-value expression, which has no unary-minus handling, and
+  # rejected '-' as unexpected.
+  def test_property_default_initializer_accepts_unary_minus
+    source = <<~RB
+      require 'runar'
+
+      class DefaultNeg < Runar::SmartContract
+        prop :count, Bigint, default: -5
+
+        runar_public x: Bigint
+        def check(x)
+          assert x + @count == x - 5
+        end
+      end
+    RB
+
+    result = parse(source)
+    assert_empty result.errors.map(&:format_message), result.error_strings.join('; ')
+    prop = result.contract.properties.first
+    assert_instance_of UnaryExpr, prop.initializer
+    assert_equal '-', prop.initializer.op
+    assert_instance_of BigIntLiteral, prop.initializer.operand
+    assert_equal 5, prop.initializer.operand.value
+  end
+
   def test_property_no_initializer
     source = <<~RB
       require 'runar'

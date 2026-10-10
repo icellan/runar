@@ -536,4 +536,63 @@ class RbParserTest {
         ContractNode c = parse(src, "Bare.runar.rb");
         assertEquals(ParentClass.SMART_CONTRACT, c.parentClass());
     }
+
+    // ---------------------------------------------------------------
+    // F-206: property-declaration edge cases probed against the TS
+    // reference (01-parse-ruby.ts) across all seven .runar.rb frontends.
+    // ---------------------------------------------------------------
+
+    @Test
+    void boolTypeAliasesToBoolean() throws Exception {
+        // 'Bool' must alias to boolean exactly like 'Boolean' does. The TS
+        // reference (and the native Ruby tier's own reference parser) already
+        // map both spellings; this tier's mapRbType only had 'Boolean'.
+        String src = """
+            require 'runar'
+            class Flag < Runar::SmartContract
+              prop :flag, Bool
+            end
+            """;
+        ContractNode c = parse(src, "Flag.runar.rb");
+        PropertyNode p = c.properties().get(0);
+        assertInstanceOf(PrimitiveType.class, p.type());
+        assertEquals(PrimitiveTypeName.BOOLEAN, ((PrimitiveType) p.type()).name());
+    }
+
+    @Test
+    void defaultValueAcceptsUnaryMinusLiteral() throws Exception {
+        // 'default: -5' must parse as a single negative literal. This tier
+        // called parsePrimary() directly for the default-value expression,
+        // which has no unary-minus handling, and rejected '-' as unexpected.
+        String src = """
+            require 'runar'
+            class DefaultNeg < Runar::SmartContract
+              prop :count, Bigint, default: -5
+            end
+            """;
+        ContractNode c = parse(src, "DefaultNeg.runar.rb");
+        PropertyNode p = c.properties().get(0);
+        assertInstanceOf(UnaryExpr.class, p.initializer());
+        UnaryExpr u = (UnaryExpr) p.initializer();
+        assertEquals(Expression.UnaryOp.NEG, u.op());
+        assertInstanceOf(BigIntLiteral.class, u.operand());
+        assertEquals(java.math.BigInteger.valueOf(5), ((BigIntLiteral) u.operand()).value());
+    }
+
+    @Test
+    void fixedArrayNonNumericLengthIsACleanParseException() {
+        // FixedArray[Int, N] with a non-numeric length must become a
+        // ParseException, not an uncaught NumberFormatException. parseType()
+        // called Integer.parseInt(sizeTok.value, 10) unconditionally after
+        // expect(TK.NUMBER, ...) logged (but did not refuse) the mismatch.
+        String src = """
+            require 'runar'
+            class FixedArrayBad < Runar::SmartContract
+              prop :arr, FixedArray[Int, N]
+            end
+            """;
+        Exception e = assertThrows(RbParser.ParseException.class, () -> parse(src, "FixedArrayBad.runar.rb"));
+        assertTrue(e.getMessage().contains("number") || e.getMessage().contains("FixedArray"),
+            "expected a FixedArray/number diagnostic, got: " + e.getMessage());
+    }
 }

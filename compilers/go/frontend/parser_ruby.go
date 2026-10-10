@@ -662,7 +662,7 @@ func rbMapType(name string) string {
 	switch name {
 	case "Bigint", "Integer", "Int":
 		return "bigint"
-	case "Boolean":
+	case "Boolean", "Bool":
 		return "boolean"
 	case "ByteString":
 		return "ByteString"

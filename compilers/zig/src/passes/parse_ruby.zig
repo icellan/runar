@@ -708,6 +708,7 @@ fn rbMapType(name: []const u8) RunarType {
         .{ "Integer", .bigint },
         .{ "Int", .bigint },
         .{ "Boolean", .boolean },
+        .{ "Bool", .boolean },
         .{ "ByteString", .byte_string },
         .{ "PubKey", .pub_key },
         .{ "Sig", .sig },
@@ -732,6 +733,7 @@ fn rbMapTypeName(name: []const u8) []const u8 {
         .{ "Integer", "bigint" },
         .{ "Int", "bigint" },
         .{ "Boolean", "boolean" },
+        .{ "Bool", "boolean" },
         .{ "ByteString", "ByteString" },
         .{ "PubKey", "PubKey" },
         .{ "Sig", "Sig" },
@@ -2543,12 +2545,23 @@ test "rb type mapping" {
     try std.testing.expectEqual(RunarType.bigint, rbMapType("Integer"));
     try std.testing.expectEqual(RunarType.bigint, rbMapType("Int"));
     try std.testing.expectEqual(RunarType.boolean, rbMapType("Boolean"));
+    // F-206: 'Bool' must alias to boolean exactly like 'Boolean' does. The
+    // native Ruby tier's own reference parser (parser_ruby.rb) already maps
+    // both spellings; this tier's rbMapType only had 'Boolean'.
+    try std.testing.expectEqual(RunarType.boolean, rbMapType("Bool"));
     try std.testing.expectEqual(RunarType.byte_string, rbMapType("ByteString"));
     try std.testing.expectEqual(RunarType.pub_key, rbMapType("PubKey"));
     try std.testing.expectEqual(RunarType.sig, rbMapType("Sig"));
     try std.testing.expectEqual(RunarType.addr, rbMapType("Addr"));
     try std.testing.expectEqual(RunarType.point, rbMapType("Point"));
     try std.testing.expectEqual(RunarType.unknown, rbMapType("UnknownType"));
+}
+
+// F-206: rbMapTypeName (used for ParamNode.type_name, a separate map from
+// rbMapType) must also accept 'Bool'.
+test "rb type name mapping accepts Bool alias" {
+    try std.testing.expectEqualStrings("boolean", rbMapTypeName("Bool"));
+    try std.testing.expectEqualStrings("boolean", rbMapTypeName("Boolean"));
 }
 
 test "rb parse basic P2PKH" {

@@ -231,7 +231,7 @@ fn map_builtin_name(name: &str) -> String {
 fn map_rb_type(name: &str) -> &str {
     match name {
         "Bigint" | "Integer" | "Int" => "bigint",
-        "Boolean" => "boolean",
+        "Boolean" | "Bool" => "boolean",
         "ByteString" => "ByteString",
         "PubKey" => "PubKey",
         "Sig" => "Sig",
@@ -2649,6 +2649,34 @@ end
         assert_eq!(contract.methods.len(), 1);
         assert_eq!(contract.methods[0].name, "transfer");
         assert_eq!(contract.methods[0].params.len(), 4);
+    }
+
+    // F-206: 'Bool' must alias to boolean exactly like 'Boolean' does. The
+    // native Ruby tier's own reference parser (parser_ruby.rb) already maps
+    // both spellings; this tier's map_rb_type only had 'Boolean'.
+    #[test]
+    fn test_parse_bool_type_alias() {
+        let source = r#"
+require 'runar'
+
+class Flag < Runar::SmartContract
+  prop :flag, Bool
+
+  runar_public
+  def check
+    assert @flag
+  end
+end
+"#;
+
+        let result = parse_ruby(source, Some("Flag.runar.rb"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.properties.len(), 1);
+        match &contract.properties[0].prop_type {
+            TypeNode::Primitive(PrimitiveTypeName::Boolean) => {}
+            other => panic!("expected 'Bool' to map to Primitive(Boolean), got {:?}", other),
+        }
     }
 
     #[test]

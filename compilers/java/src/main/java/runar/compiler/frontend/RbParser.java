@@ -318,6 +318,7 @@ public final class RbParser {
         m.put("Integer", "bigint");
         m.put("Int", "bigint");
         m.put("Boolean", "boolean");
+        m.put("Bool", "boolean");
         m.put("ByteString", "ByteString");
         m.put("PubKey", "PubKey");
         m.put("Sig", "Sig");
@@ -928,7 +929,7 @@ public final class RbParser {
                 } else if (checkIdent("default")) {
                     advance();
                     expect(TK.COLON, ":");
-                    initializer = parsePrimary();
+                    initializer = parseUnary();
                 }
             }
 
@@ -960,7 +961,15 @@ public final class RbParser {
                 TypeNode elem = parseType();
                 expect(TK.COMMA, ",");
                 Token sizeTok = expect(TK.NUMBER, "number");
-                int size = parseIntLiteral(sizeTok.value);
+                int size;
+                try {
+                    size = parseIntLiteral(sizeTok.value);
+                } catch (NumberFormatException ex) {
+                    // expect() already logged the token-mismatch diagnostic
+                    // above; fall back to 0 instead of letting the raw
+                    // exception escape the parser.
+                    size = 0;
+                }
                 expect(TK.RBRACKET, "]");
                 return new FixedArrayType(elem, size);
             }
