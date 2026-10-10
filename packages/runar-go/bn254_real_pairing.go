@@ -2,13 +2,14 @@ package runar
 
 // Real BN254 pairing implementations for Go-mock tests.
 //
-// The int64-typed Bn254MultiPairing3/Bn254MultiPairing4 in bn254.go are
-// deliberate mocks that return true — BN254 field elements are 254 bits
-// and cannot fit in int64, so any "real" pairing that accepts Bigint
-// (int64) coords would truncate every real-world coordinate and always
-// fail. The Big variants below accept *big.Int coords directly and run a
-// real gnark-crypto pairing check, matching the compiled Bitcoin Script
-// semantics.
+// The int64-typed Bn254MultiPairing3/Bn254MultiPairing4 in bn254.go delegate
+// to the Big variants below (F-358) — BN254 G2 field elements are 254 bits
+// and cannot fit in int64, so no valid, non-identity G2 point can be
+// expressed through the int64 entry points: every call into them decodes to
+// the point at infinity or an off-curve/off-subgroup point, and is rejected
+// before the Miller loop ever runs. The Big variants accept *big.Int coords
+// directly and run a real gnark-crypto pairing check, matching the compiled
+// Bitcoin Script semantics.
 //
 // Use the Big variants in Go-level unit tests that consume gnark-generated
 // proofs and VKs. The compiled Script is unaffected by this file — it is

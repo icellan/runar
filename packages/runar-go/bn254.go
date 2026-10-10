@@ -274,19 +274,28 @@ func Bn254FieldNegP(a Bigint) Bigint {
 // Each G2 point is represented by 4 bigint coordinates (x0, x1, y0, y1)
 // from the Fp2 decomposition: x = x0 + x1*u, y = y0 + y1*u.
 //
-// Mock: always returns true. BN254 Fp elements are 254 bits and cannot fit
-// in int64, so any "real" implementation accepting Bigint coords would
-// unconditionally fail on real-world fixtures. Use Bn254MultiPairing4Big
-// (*big.Int coords) for tests that consume gnark-generated proofs.
-// The compiled Bitcoin Script performs the real pairing check via the
-// codegen in bn254_pairing.go and bn254_groth16.go regardless.
+// Delegates to Bn254MultiPairing4Big, which runs the real gnark-crypto
+// pairing. BN254 Fp elements are 254 bits and cannot fit in int64, so this
+// int64-typed entry point can never express a genuine, non-degenerate
+// Groth16 fixture — real-world proofs must go through Bn254MultiPairing4Big
+// (*big.Int coords) instead. But delegating still makes this entry point
+// exact rather than a hardcoded true: a forged or degenerate proof passed
+// through it (e.g. the G2 point-at-infinity encoding, which fits int64)
+// is correctly rejected instead of always verifying (F-358). The compiled
+// Bitcoin Script performs the real pairing check via the codegen in
+// bn254_pairing.go and bn254_groth16.go regardless of this Go-mock's result.
 func Bn254MultiPairing4(
 	p1 Point, q1x0, q1x1, q1y0, q1y1 Bigint,
 	p2 Point, q2x0, q2x1, q2y0, q2y1 Bigint,
 	p3 Point, q3x0, q3x1, q3y0, q3y1 Bigint,
 	p4 Point, q4x0, q4x1, q4y0, q4y1 Bigint,
 ) bool {
-	return true
+	return Bn254MultiPairing4Big(
+		p1, big.NewInt(q1x0), big.NewInt(q1x1), big.NewInt(q1y0), big.NewInt(q1y1),
+		p2, big.NewInt(q2x0), big.NewInt(q2x1), big.NewInt(q2y0), big.NewInt(q2y1),
+		p3, big.NewInt(q3x0), big.NewInt(q3x1), big.NewInt(q3y0), big.NewInt(q3y1),
+		p4, big.NewInt(q4x0), big.NewInt(q4x1), big.NewInt(q4y0), big.NewInt(q4y1),
+	)
 }
 
 // AssertGroth16WitnessAssisted is a DSL marker that requests the
@@ -350,8 +359,10 @@ func Groth16PublicInput(i int64) Bigint {
 // pre-computed e(alpha, beta) as Fp12 element) equals the identity.
 // The last 12 bigint args are the pre-computed Fp12 value.
 //
-// Mock: always returns true. Use Bn254MultiPairing3Big with BigintBig
-// coords for a real pairing check.
+// Delegates to Bn254MultiPairing3Big, which runs the real gnark-crypto
+// pairing — see the Bn254MultiPairing4 comment above for why this int64
+// entry point can't carry a genuine fixture but still benefits from being
+// exact rather than a hardcoded true (F-358).
 func Bn254MultiPairing3(
 	p1 Point, q1x0, q1x1, q1y0, q1y1 Bigint,
 	p2 Point, q2x0, q2x1, q2y0, q2y1 Bigint,
@@ -359,7 +370,15 @@ func Bn254MultiPairing3(
 	alphaBeta0, alphaBeta1, alphaBeta2, alphaBeta3, alphaBeta4, alphaBeta5 Bigint,
 	alphaBeta6, alphaBeta7, alphaBeta8, alphaBeta9, alphaBeta10, alphaBeta11 Bigint,
 ) bool {
-	return true
+	return Bn254MultiPairing3Big(
+		p1, big.NewInt(q1x0), big.NewInt(q1x1), big.NewInt(q1y0), big.NewInt(q1y1),
+		p2, big.NewInt(q2x0), big.NewInt(q2x1), big.NewInt(q2y0), big.NewInt(q2y1),
+		p3, big.NewInt(q3x0), big.NewInt(q3x1), big.NewInt(q3y0), big.NewInt(q3y1),
+		big.NewInt(alphaBeta0), big.NewInt(alphaBeta1), big.NewInt(alphaBeta2),
+		big.NewInt(alphaBeta3), big.NewInt(alphaBeta4), big.NewInt(alphaBeta5),
+		big.NewInt(alphaBeta6), big.NewInt(alphaBeta7), big.NewInt(alphaBeta8),
+		big.NewInt(alphaBeta9), big.NewInt(alphaBeta10), big.NewInt(alphaBeta11),
+	)
 }
 
 // ---------------------------------------------------------------------------

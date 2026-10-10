@@ -8,8 +8,10 @@ package compiler
 // These tests COMPILE THAT EXACT CONTRACT FILE with a baked verification key
 // and EXECUTE the resulting locking script under the go-sdk interpreter (the
 // same engine codegen.BuildAndExecuteOps uses). No TestContract, no ANF
-// interpreter, no runar-go mock: the Go runtime mock of Bn254MultiPairing4
-// returns true unconditionally and would prove nothing.
+// interpreter, no runar-go mock: Bn254MultiPairing4's int64 entry point
+// (F-358) now delegates to a real pairing, but it still cannot carry a
+// genuine, non-degenerate Groth16 proof — BN254 G2 coordinates are 254 bits
+// and cannot fit in its int64 parameters — so it would prove nothing here.
 //
 // The Groth16 instance is simulator-built: random VK scalars and a random B
 // scalar s, with A chosen so that
