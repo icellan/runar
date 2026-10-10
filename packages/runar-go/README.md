@@ -1157,7 +1157,7 @@ func (g *Groth16WAContract) CurrentUTXO() *UTXO
 func (g *Groth16WAContract) SetCurrentUTXO(u *UTXO)
 func (g *Groth16WAContract) LockingScript() string
 func (g *Groth16WAContract) Connect(provider Provider, signer Signer)
-func (g *Groth16WAContract) Deploy(provider Provider, signer Signer, opts DeployOptions) (string, *TransactionData, error)
+func (g *Groth16WAContract) Deploy(provider Provider, signer Signer, ownerPubKeyHex string, opts DeployOptions) (string, *TransactionData, error)
 func (g *Groth16WAContract) CallWithWitness(
 	provider Provider, signer Signer,
 	w *bn254witness.Witness,
@@ -1165,7 +1165,7 @@ func (g *Groth16WAContract) CallWithWitness(
 ) (string, *TransactionData, error)
 ```
 
-Wrapper for artifacts produced by the `runarc groth16-wa` compiler backend. The verifying key is baked into the locking script at compile time, so deploy is just "send funds to this script", and spend takes a raw witness bundle (`*bn254witness.Witness`) instead of an ABI-encoded arg list. **Panics** if constructed with a nil artifact or one that lacks `Groth16WA` metadata. [sdk_groth16.go](sdk_groth16.go).
+Wrapper for artifacts produced by the `runarc groth16-wa` compiler backend. The verifying key is baked into the locking script at compile time; the owner public key is spliced in at `Deploy` (required — an empty or invalid key, or an artifact compiled without the owner slot, is an error). Spend takes a raw witness bundle (`*bn254witness.Witness`) instead of an ABI-encoded arg list, and `CallWithWitness` appends the signer's signature over the spend: the script opens with `<ownerPubKey> OP_CHECKSIGVERIFY`, so the signer must hold the owner key, and an observed witness cannot be replayed into another transaction. **Panics** if constructed with a nil artifact or one that lacks `Groth16WA` metadata. [sdk_groth16.go](sdk_groth16.go).
 
 #### `Groth16WAMeta`
 

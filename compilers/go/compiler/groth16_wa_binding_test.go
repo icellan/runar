@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bsv-blockchain/go-sdk/script"
-	"github.com/bsv-blockchain/go-sdk/script/interpreter"
 	bn254 "github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 
@@ -237,29 +235,21 @@ func writeSP1VKJSON(t *testing.T, vk bn254witness.VerifyingKey, path string) {
 	}
 }
 
-// executeArtifactWithWitness runs [witness pushes ‖ artifact locking script]
-// through the go-sdk Bitcoin Script interpreter — the same engine
-// codegen.BuildAndExecuteOps uses. Returns nil when the script succeeds.
+// executeArtifactWithWitness deploys the artifact to a fixed owner key and
+// spends it with [witness pushes ‖ owner signature] through the go-sdk
+// Bitcoin Script interpreter with full transaction context (F-233: the
+// standalone verifier opens with `<ownerPubKey> OP_CHECKSIGVERIFY`). The
+// signature is always the owner's own, valid one, so a rejection here comes
+// from the proof-verification half of the script. Returns nil when the
+// script succeeds.
 func executeArtifactWithWitness(t *testing.T, art *Artifact, w *bn254witness.Witness) error {
 	t.Helper()
 
-	witnessRes, err := codegen.Emit([]codegen.StackMethod{{Name: "witness", Ops: w.ToStackOps()}})
-	if err != nil {
-		t.Fatalf("emit witness pushes: %v", err)
-	}
-
-	lock, err := script.NewFromHex(witnessRes.ScriptHex + art.Script)
-	if err != nil {
-		t.Fatalf("assemble script: %v", err)
-	}
-
-	eng := interpreter.NewEngine()
-	return eng.Execute(
-		interpreter.WithScripts(lock, &script.Script{}),
-		interpreter.WithAfterGenesis(),
-		interpreter.WithAfterChronicle(),
-		interpreter.WithForkID(),
-	)
+	owner := groth16TestKey(0x11)
+	lockHex := groth16DeployedLockHex(t, art, owner.PubKey().Compressed())
+	tx, prevOut := groth16SpendTx(t, lockHex, groth16PayTo(0x11))
+	groth16SetUnlock(t, tx, groth16HonestUnlockHex(t, art, tx, groth16WitnessHex(t, w), owner))
+	return groth16ExecuteSpend(tx, prevOut)
 }
 
 // witnessLayout is the shape of the unlocking-script stack a compiled

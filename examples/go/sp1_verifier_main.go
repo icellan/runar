@@ -95,7 +95,10 @@ func run() error {
 	fmt.Printf("    vkDigest: %s\n", compArtifact.Groth16WA.VKDigest)
 	fmt.Printf("    compile time: %s\n", compileDur)
 
-	artifact := compilerArtifactToRunar(compArtifact)
+	artifact, err := compilerArtifactToRunar(compArtifact)
+	if err != nil {
+		return fmt.Errorf("convert artifact: %w", err)
+	}
 
 	// ---------------------------------------------------------------
 	// 3. Wrap it in the SDK helper.
@@ -195,7 +198,9 @@ func run() error {
 	// ---------------------------------------------------------------
 	fmt.Println("==> Deploying verifier UTXO")
 	t2 := time.Now()
-	deployTxid, deployData, err := g.Deploy(provider, signer, runar.DeployOptions{
+	// The verifier is bound to an owner key at deploy (F-233): only this
+	// key's signature can spend it, so an observed witness is not replayable.
+	deployTxid, deployData, err := g.Deploy(provider, signer, pubHex, runar.DeployOptions{
 		Satoshis:      50_000,
 		ChangeAddress: addr,
 	})
@@ -257,30 +262,19 @@ func sp1FixtureDir() (string, error) {
 
 // compilerArtifactToRunar copies the relevant fields from a
 // compiler.Artifact into a runar.RunarArtifact. The two types have the
-// same JSON shape; only the fields the SDK actually reads for a
-// Groth16 WA contract are copied here.
-func compilerArtifactToRunar(a *compiler.Artifact) *runar.RunarArtifact {
-	out := &runar.RunarArtifact{
-		Version:         a.Version,
-		CompilerVersion: a.CompilerVersion,
-		ContractName:    a.ContractName,
-		Script:          a.Script,
-		ASM:             a.ASM,
-		BuildTimestamp:  a.BuildTimestamp,
-		ABI: runar.ABI{
-			Constructor: runar.ABIConstructor{Params: []runar.ABIParam{}},
-			Methods: []runar.ABIMethod{
-				{Name: "verify", Params: []runar.ABIParam{}, IsPublic: true},
-			},
-		},
+// same JSON shape, so the conversion goes through the artifact JSON.
+func compilerArtifactToRunar(a *compiler.Artifact) (*runar.RunarArtifact, error) {
+	// Round-trip through the artifact JSON so every field crosses,
+	// including the owner-pubkey constructor slot (F-233).
+	jsonBytes, err := compiler.ArtifactToJSON(a)
+	if err != nil {
+		return nil, err
 	}
-	if a.Groth16WA != nil {
-		out.Groth16WA = &runar.Groth16WAMeta{
-			NumPubInputs: a.Groth16WA.NumPubInputs,
-			VKDigest:     a.Groth16WA.VKDigest,
-		}
+	var out runar.RunarArtifact
+	if err := json.Unmarshal(jsonBytes, &out); err != nil {
+		return nil, err
 	}
-	return out
+	return &out, nil
 }
 
 func envOr(key, def string) string {

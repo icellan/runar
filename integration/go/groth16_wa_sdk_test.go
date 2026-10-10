@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"math/big"
 	"testing"
 	"time"
@@ -43,27 +44,20 @@ func buildGroth16WAArtifactFromCompiler(t *testing.T, vkPath string, publicInput
 		t.Fatalf("compiled artifact has nil Groth16WA metadata")
 	}
 	// The compiler package and the SDK package each define their own
-	// Artifact type with identical JSON shape. Translate by field copy
-	// — this is the same thing downstream consumers will do when
-	// loading an artifact JSON file produced by `runarc groth16-wa`.
-	return &runar.RunarArtifact{
-		Version:         compArt.Version,
-		CompilerVersion: compArt.CompilerVersion,
-		ContractName:    compArt.ContractName,
-		Script:          compArt.Script,
-		ASM:             compArt.ASM,
-		BuildTimestamp:  compArt.BuildTimestamp,
-		ABI: runar.ABI{
-			Constructor: runar.ABIConstructor{Params: []runar.ABIParam{}},
-			Methods: []runar.ABIMethod{
-				{Name: "verify", Params: []runar.ABIParam{}, IsPublic: true},
-			},
-		},
-		Groth16WA: &runar.Groth16WAMeta{
-			NumPubInputs: compArt.Groth16WA.NumPubInputs,
-			VKDigest:     compArt.Groth16WA.VKDigest,
-		},
+	// Artifact type with identical JSON shape. Translate through the
+	// artifact JSON — exactly what downstream consumers do when loading a
+	// file produced by `runarc groth16-wa` — so every field crosses,
+	// including the owner-pubkey constructor slot (F-233). A hand-written
+	// field copy silently dropped ConstructorSlots and the ABI param.
+	jsonBytes, err := compiler.ArtifactToJSON(compArt)
+	if err != nil {
+		t.Fatalf("compiler.ArtifactToJSON: %v", err)
 	}
+	var art runar.RunarArtifact
+	if err := json.Unmarshal(jsonBytes, &art); err != nil {
+		t.Fatalf("unmarshal groth16-wa artifact: %v", err)
+	}
+	return &art
 }
 
 // deployGroth16WASDK funds a fresh wallet, wraps the SP1 artifact in a
@@ -87,7 +81,13 @@ func deployGroth16WASDK(t *testing.T, artifact *runar.RunarArtifact, provider ru
 	g := runar.NewGroth16WAContract(artifact)
 	g.Connect(provider, signer)
 
-	txid, txData, err := g.Deploy(provider, signer, runar.DeployOptions{Satoshis: contractSats})
+	// F-233: the verifier is bound to an owner key at deploy; the funder is
+	// the owner here, and the Connect()-stored signer signs every spend.
+	ownerPub, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey: %v", err)
+	}
+	txid, txData, err := g.Deploy(provider, signer, ownerPub, runar.DeployOptions{Satoshis: contractSats})
 	if err != nil {
 		t.Fatalf("Groth16WAContract.Deploy: %v", err)
 	}

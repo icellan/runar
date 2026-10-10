@@ -31,6 +31,11 @@ const (
 	// defaultGroth16WAContractName is the contract name used when
 	// Groth16WAOpts.ContractName is empty.
 	defaultGroth16WAContractName = "Groth16Verifier"
+
+	// groth16WAOwnerParam names the single constructor parameter of a
+	// standalone groth16-wa artifact: the compressed secp256k1 public key
+	// whose signature every spend must carry (F-233).
+	groth16WAOwnerParam = "ownerPubKey"
 )
 
 // Groth16WAOpts configures a `runarc groth16-wa` compile run.
@@ -240,6 +245,13 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 // build it with `bn254witness.BuildFromProofWithInputs`, which emits the
 // MSM layout. It does not fit the standard Rúnar ABI-param model, which is
 // why Params is empty.
+//
+// The SPENDER is fixed at deploy time (F-233). The artifact has one
+// constructor parameter, `ownerPubKey` (PubKey), and the locking script opens
+// with `<ownerPubKey> OP_CHECKSIGVERIFY`, so the unlock is the witness bundle
+// followed by the owner's signature over the spending transaction. Without it
+// a valid spend's witness, once public, could be replayed by anyone into a
+// transaction paying themselves.
 func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 	// 1. Load the raw VK JSON bytes — we need them for the digest AND
 	//    for the typed parse. Reading twice would risk a TOCTOU mismatch.
@@ -296,6 +308,26 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 	ops = codegen.OptimizeStackOps(ops)
 	ops = codegen.OptimizeBN254Ops(ops)
 
+	// 6a. F-233: bind the spend to an owner key chosen at deploy time.
+	//     A Groth16 witness proves a statement, not who may spend: without
+	//     this, the honest spend's unlocking script is public once it hits
+	//     the mempool and any observer can replay it into a transaction
+	//     paying themselves. The script therefore OPENS with
+	//
+	//         <ownerPubKey> OP_CHECKSIGVERIFY
+	//
+	//     where <ownerPubKey> is constructor slot 0 (an OP_0 placeholder the
+	//     SDK splices at deploy). The unlock is `witness ‖ <ownerSig>`: the
+	//     signature sits on top of the stack, is consumed here, and leaves
+	//     the witness layout the verifier expects untouched. It is prepended
+	//     AFTER the optimizers so the verifier body is byte-identical to the
+	//     unbound one, and it runs first so an unsigned spend is refused
+	//     before the ~700 KB verifier executes.
+	ops = append([]codegen.StackOp{
+		{Op: "placeholder", ParamIndex: 0, ParamName: groth16WAOwnerParam},
+		{Op: "opcode", Code: "OP_CHECKSIGVERIFY"},
+	}, ops...)
+
 	// 7. Emit to hex. We pass a single StackMethod named "verify" — it
 	//    corresponds to the single public entry point on the ABI.
 	method := codegen.StackMethod{Name: "verify", Ops: ops}
@@ -306,9 +338,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 
 	// 8. Assemble the artifact. This path is independent from
 	//    assembleArtifact() above because we don't have an ANF program
-	//    (no Rúnar source was compiled). All the derived metadata —
-	//    ConstructorSlots, StateFields, ANF, IR, SourceMap — is
-	//    deliberately absent.
+	//    (no Rúnar source was compiled). The derived metadata — StateFields,
+	//    ANF, IR, SourceMap — is deliberately absent. ConstructorSlots
+	//    carries the single owner-pubkey slot (F-233).
 	contractName := opts.ContractName
 	if contractName == "" {
 		contractName = defaultGroth16WAContractName
@@ -327,7 +359,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 		CompilerVersion: compilerVersion,
 		ContractName:    contractName,
 		ABI: ABI{
-			Constructor: ABIConstructor{Params: []ABIParam{}},
+			Constructor: ABIConstructor{Params: []ABIParam{
+				{Name: groth16WAOwnerParam, Type: "PubKey"},
+			}},
 			Methods: []ABIMethod{
 				{
 					Name:     "verify",
@@ -336,8 +370,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 				},
 			},
 		},
-		Script: emitResult.ScriptHex,
-		ASM:    emitResult.ScriptAsm,
+		Script:           emitResult.ScriptHex,
+		ASM:              emitResult.ScriptAsm,
+		ConstructorSlots: emitResult.ConstructorSlots,
 		// buildTimestamp(), not time.Now(): this path used to stamp the clock
 		// directly, so SOURCE_DATE_EPOCH was honoured by every artifact except
 		// the one whose entire purpose is to be reproduced from the same

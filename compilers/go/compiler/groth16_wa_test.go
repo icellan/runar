@@ -101,9 +101,22 @@ func TestCompileGroth16WA_SP1VK_ProducesArtifact(t *testing.T) {
 		t.Errorf("ContractName = %q, want %q", art.ContractName, "Groth16Verifier")
 	}
 
-	// Constructor slots must be empty (VK is baked in, not patched).
-	if len(art.ConstructorSlots) != 0 {
-		t.Errorf("ConstructorSlots len = %d, want 0", len(art.ConstructorSlots))
+	// The VK is baked in, not patched. The ONLY constructor slot is the
+	// owner pubkey (F-233): an OP_0 placeholder at byte 0, immediately
+	// followed by OP_CHECKSIGVERIFY, so no spend reaches the verifier
+	// without the deploy-time owner's signature.
+	if len(art.ConstructorSlots) != 1 {
+		t.Fatalf("ConstructorSlots len = %d, want 1 (ownerPubKey)", len(art.ConstructorSlots))
+	}
+	if slot := art.ConstructorSlots[0]; slot.ParamIndex != 0 || slot.ByteOffset != 0 {
+		t.Errorf("owner slot = %+v, want {ParamIndex:0 ByteOffset:0}", slot)
+	}
+	if !strings.HasPrefix(art.Script, "00ad") {
+		t.Errorf("script must open with <ownerPubKey placeholder> OP_CHECKSIGVERIFY (00ad), got %q", art.Script[:8])
+	}
+	ctorParams := art.ABI.Constructor.Params
+	if len(ctorParams) != 1 || ctorParams[0].Name != "ownerPubKey" || ctorParams[0].Type != "PubKey" {
+		t.Errorf("constructor params = %+v, want exactly [{ownerPubKey PubKey}]", ctorParams)
 	}
 
 	// ABI must expose exactly one public method `verify` with no params.

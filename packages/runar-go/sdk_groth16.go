@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	sdkscript "github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 
@@ -20,8 +21,12 @@ import (
 // The Rúnar artifact emitted by Groth16 WA compilation is shaped differently
 // from a normal Rúnar contract:
 //
-//   - No constructor args — the verifying key is baked into the script at
-//     compile time, so deploying is just "send funds to this locking script".
+//   - One constructor arg, the owner public key (F-233). The verifying key
+//     and public inputs are baked into the script at compile time; the owner
+//     is spliced in at deploy, and every spend must carry the owner's
+//     signature over the spending transaction (`<ownerPubKey>
+//     OP_CHECKSIGVERIFY` opens the script). Without it a valid spend's
+//     witness, once public, could be replayed into a tx paying anyone.
 //   - No standard ABI-encoded method args — the "verify" method's unlock is
 //     a RAW witness bundle: gradients, final-exp witnesses, proof points,
 //     prepared inputs, all pushed in the order EmitGroth16VerifierWitnessAssisted
@@ -56,10 +61,10 @@ func NewGroth16WAContract(artifact *RunarArtifact) *Groth16WAContract {
 	if artifact.Groth16WA == nil {
 		panic("NewGroth16WAContract: artifact has no Groth16WA metadata; was it produced by `runarc groth16-wa`?")
 	}
-	// Groth16 WA artifacts have no constructor args (the VK is baked into
-	// the locking script at compile time). Pass an empty slice, not nil,
-	// so NewRunarContract's argv-length check passes.
-	inner := NewRunarContract(artifact, []interface{}{})
+	// The owner public key is not known until Deploy (F-233). Until then
+	// every constructor slot holds an empty push, i.e. the template's own
+	// OP_0 placeholder, so LockingScript() before Deploy is the template.
+	inner := NewRunarContract(artifact, groth16WAPlaceholderArgs(artifact))
 	return &Groth16WAContract{
 		artifact: artifact,
 		contract: inner,
@@ -109,20 +114,41 @@ func (g *Groth16WAContract) LockingScript() string {
 	return g.contract.GetLockingScript()
 }
 
-// Deploy deploys the Groth16 verifier locking script and returns the
-// deploy txid and TransactionData. Semantically equivalent to
-// RunarContract.Deploy — the Groth16 artifact has no constructor slots,
-// so the deploy path is just a standard P2PKH-funded TX with the
-// verifier locking script as output 0.
+// Deploy deploys the Groth16 verifier locking script bound to
+// ownerPubKeyHex and returns the deploy txid and TransactionData.
 //
-// This is a thin pass-through provided so callers can drive the entire
-// contract lifecycle through the Groth16WAContract API without having
-// to reach into the underlying RunarContract.
+// ownerPubKeyHex (a compressed secp256k1 public key, 66 hex chars) is
+// spliced into the artifact's ownerPubKey constructor slot; every later
+// spend must be signed by its private key (F-233). It is REQUIRED: an empty
+// or malformed key is an error, as is an artifact with no owner slot (one
+// compiled before F-233), because such an output is spendable by anyone who
+// observes a valid witness. Recompile it with the current `runarc
+// groth16-wa`.
+//
+// The deploy itself is a standard P2PKH-funded TX with the verifier locking
+// script as output 0, delegated to RunarContract.Deploy.
 func (g *Groth16WAContract) Deploy(
 	provider Provider,
 	signer Signer,
+	ownerPubKeyHex string,
 	opts DeployOptions,
 ) (string, *TransactionData, error) {
+	params := g.artifact.ABI.Constructor.Params
+	slots := g.artifact.ConstructorSlots
+	if len(params) != 1 || params[0].Type != "PubKey" || len(slots) != 1 || slots[0].ParamIndex != 0 {
+		return "", nil, fmt.Errorf("Groth16WAContract.Deploy: artifact %q has no owner-pubkey constructor slot, so its output would be spendable by anyone who sees a valid witness; recompile it with the current `runarc groth16-wa`", g.artifact.ContractName)
+	}
+	if ownerPubKeyHex == "" {
+		return "", nil, fmt.Errorf("Groth16WAContract.Deploy: owner public key is required: the standalone Groth16 verifier binds every spend to this key's signature")
+	}
+	if err := validateGroth16WAOwnerPubKey(ownerPubKeyHex); err != nil {
+		return "", nil, fmt.Errorf("Groth16WAContract.Deploy: %w", err)
+	}
+
+	inner := NewRunarContract(g.artifact, []interface{}{strings.ToLower(ownerPubKeyHex)})
+	inner.provider = g.contract.provider
+	inner.signer = g.contract.signer
+	g.contract = inner
 	return g.contract.Deploy(provider, signer, opts)
 }
 
@@ -146,11 +172,11 @@ func (g *Groth16WAContract) Connect(provider Provider, signer Signer) {
 //   - Exactly one of changeAddress / outputScriptHex must be provided.
 //
 // Provider / signer semantics: if either argument is nil, the value
-// stored via Connect() is used. The provider is required (we need to
-// broadcast and read the fee rate). The signer is NOT required — the
-// Groth16 WA spend script has no signature check in the contract
-// input, so we never call signer.Sign() — but Connect() takes both
-// together, so we accept it here for API symmetry.
+// stored via Connect() is used. Both are required. The signer must hold
+// the owner key the output was deployed to (F-233): the unlock is the
+// witness followed by the signer's SIGHASH_ALL|FORKID signature over the
+// spend, which is what stops an observer replaying the witness into a
+// transaction of their own.
 //
 // If the witness is valid for the baked-in VK the node accepts the
 // spend. Any tampering — flipping a proof byte, corrupting a gradient,
@@ -169,16 +195,18 @@ func (g *Groth16WAContract) CallWithWitness(
 	changeAddress string,
 	outputScriptHex string,
 ) (string, *TransactionData, error) {
-	// Fall back to Connect()-stored defaults. We access the inner
-	// contract's fields through the RunarContract methods we already
-	// have — provider is load-bearing (we need to Broadcast), signer
-	// is unused but we accept it for API symmetry.
+	// Fall back to Connect()-stored defaults.
 	if provider == nil {
 		provider = g.contract.provider
 	}
-	_ = signer // intentionally unused: Groth16 WA spends do not sign
+	if signer == nil {
+		signer = g.contract.signer
+	}
 	if provider == nil {
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: no provider available; pass one explicitly or call Connect() first")
+	}
+	if signer == nil {
+		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: no signer available; the spend must be signed by the owner key the verifier was deployed to — pass one explicitly or call Connect() first")
 	}
 	if w == nil {
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: nil witness")
@@ -194,8 +222,10 @@ func (g *Groth16WAContract) CallWithWitness(
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: only one of changeAddress or outputScriptHex may be provided")
 	}
 
-	// 1. Serialize the witness as a raw push-only unlocking script.
-	unlockingHex, err := serializeWitnessToUnlock(w)
+	// 1. Serialize the witness as a raw push-only unlocking script. The
+	//    owner signature is pushed after it (on top of the stack, consumed
+	//    first by the script's leading OP_CHECKSIGVERIFY).
+	witnessHex, err := serializeWitnessToUnlock(w)
 	if err != nil {
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: serialize witness: %w", err)
 	}
@@ -216,9 +246,12 @@ func (g *Groth16WAContract) CallWithWitness(
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: get fee rate: %w", err)
 	}
 
-	// Build the spend TX with a placeholder output value (contract value
-	// minus a generous fee headroom). We'll refine after a dry-run build.
-	spendTx, err := buildGroth16WASpendTx(utxo, unlockingHex, destScriptHex, utxo.Satoshis)
+	// Build the spend TX with a placeholder output value and a 72-byte
+	// placeholder signature (the DER maximum plus the sighash byte) so the
+	// size estimate covers the real signature. We'll refine after this
+	// dry-run build.
+	dummySigHex := strings.Repeat("00", 72)
+	spendTx, err := buildGroth16WASpendTx(utxo, witnessHex+EncodePushData(dummySigHex), destScriptHex, utxo.Satoshis)
 	if err != nil {
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: build spend tx: %w", err)
 	}
@@ -239,11 +272,24 @@ func (g *Groth16WAContract) CallWithWitness(
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: contract UTXO (%d sats) too small to cover fee (%d sats) and dust minimum", utxo.Satoshis, fee)
 	}
 
-	// 4. Rebuild with the real output value.
-	spendTx, err = buildGroth16WASpendTx(utxo, unlockingHex, destScriptHex, outputSats)
+	// 4. Rebuild with the real output value, then sign. The signature
+	//    commits to the final outputs, so it must come after the rebuild;
+	//    the unlocking script is not part of the BIP-143 preimage, so the
+	//    placeholder signature present while signing does not matter.
+	spendTx, err = buildGroth16WASpendTx(utxo, witnessHex+EncodePushData(dummySigHex), destScriptHex, outputSats)
 	if err != nil {
 		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: rebuild spend tx: %w", err)
 	}
+	sigHex, err := signer.Sign(spendTx.Hex(), 0, utxo.Script, utxo.Satoshis, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: sign spend: %w", err)
+	}
+	unlockingHex := witnessHex + EncodePushData(sigHex)
+	unlockScript, err := sdkscript.NewFromHex(unlockingHex)
+	if err != nil {
+		return "", nil, fmt.Errorf("Groth16WAContract.CallWithWitness: parse signed unlocking script: %w", err)
+	}
+	spendTx.Inputs[0].UnlockingScript = unlockScript
 
 	// 5. Broadcast.
 	txid, err := provider.Broadcast(spendTx)
@@ -285,6 +331,38 @@ func (g *Groth16WAContract) CallWithWitness(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// groth16WAPlaceholderArgs returns one empty push per constructor param, so
+// the code script built before Deploy is the artifact template itself.
+func groth16WAPlaceholderArgs(artifact *RunarArtifact) []interface{} {
+	args := make([]interface{}, len(artifact.ABI.Constructor.Params))
+	for i := range args {
+		args[i] = []byte{}
+	}
+	return args
+}
+
+// validateGroth16WAOwnerPubKey requires a compressed secp256k1 public key
+// that is a real curve point. A key that is not one makes the output
+// unspendable, which is a silent fund lock rather than a safe default.
+func validateGroth16WAOwnerPubKey(pubKeyHex string) error {
+	raw, err := hex.DecodeString(pubKeyHex)
+	if err != nil {
+		return fmt.Errorf("owner public key is not hex: %w", err)
+	}
+	if len(raw) != 33 || (raw[0] != 0x02 && raw[0] != 0x03) {
+		return fmt.Errorf("owner public key must be a 33-byte compressed secp256k1 key (66 hex chars, 02/03 prefix), got %d bytes", len(raw))
+	}
+	// ParsePubKey does not range-check a compressed key's x; x >= p is a
+	// non-canonical encoding, not the key the owner signs with.
+	if new(big.Int).SetBytes(raw[1:]).Cmp(ec.S256().Params().P) >= 0 {
+		return fmt.Errorf("owner public key is not a canonical compressed encoding (x >= p)")
+	}
+	if _, err := ec.ParsePubKey(raw); err != nil {
+		return fmt.Errorf("owner public key is not a valid secp256k1 point: %w", err)
+	}
+	return nil
+}
 
 // serializeWitnessToUnlock converts a witness bundle to the raw unlocking
 // script hex expected by the on-chain verifier. Every op emitted by
@@ -340,14 +418,13 @@ func SerializeGroth16WAWitnessForTests(w *bn254witness.Witness) string {
 
 var _ = hex.EncodeToString // keep import for legacy callers
 
-// buildGroth16WASpendTx builds an unsigned Bitcoin transaction spending
-// the contract UTXO with the given unlocking script and creating a
-// single output with the given destination script + satoshis.
+// buildGroth16WASpendTx builds a Bitcoin transaction spending the
+// contract UTXO with the given unlocking script and creating a single
+// output with the given destination script + satoshis.
 //
-// The Groth16 WA verifier has no signature check in its locking script —
-// the unlock is pure witness data — so the returned transaction is
-// already fully formed and ready to broadcast. No P2PKH signing pass is
-// needed.
+// It does not sign: the verifier opens with `<ownerPubKey>
+// OP_CHECKSIGVERIFY` (F-233), so CallWithWitness signs the returned
+// transaction and replaces the unlocking script's trailing signature push.
 func buildGroth16WASpendTx(utxo *UTXO, unlockingScriptHex string, destScriptHex string, outputSats int64) (*transaction.Transaction, error) {
 	lockScript, err := sdkscript.NewFromHex(utxo.Script)
 	if err != nil {

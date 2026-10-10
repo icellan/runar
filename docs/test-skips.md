@@ -132,7 +132,7 @@ pair with its own row.
 | `TestWOTS_ValidSpend` / `TestWOTS_TamperedSig_Rejected` / `TestWOTS_WrongECDSASig_Rejected` | `integration/go/wots_test.go:168,219,268` | Environmental | Same WOTS+ slowness; integration suite already requires `-tags=integration` + regtest, dropping `-short` enables. |
 | `TestSLHDSA_*` regtest tests | `integration/go/slhdsa_test.go:173,219,263` | Environmental | Same SLH-DSA cost note as conformance row. |
 | `TestGroth16WA_Regtest_Deploy_SP1` / `TestGroth16WA_Regtest_ValidSpend_SP1` / `TestGroth16WA_Regtest_TamperedProofA_Rejected` / `TestGroth16WA_Regtest_TamperedGradient_Rejected` | `integration/go/groth16_wa_test.go:418,437,459,506` | Environmental | Witness-assisted Groth16 verifier produces a ~470 KB locking script; full deploy + spend round-trip is multi-second. |
-| `TestGroth16WASDK_*` | `integration/go/groth16_wa_sdk_test.go:113,178` | Environmental | Same Groth16 WA cost. |
+| `TestGroth16WASDK_*` | `integration/go/groth16_wa_sdk_test.go:113,187` | Environmental | Same Groth16 WA cost. |
 | `TestSchnorr_ValidProof` / `TestSchnorr_InvalidS_Rejected` | `integration/go/schnorr_zkp_test.go:289,343` | Environmental | Schnorr verifier exercises full secp256k1 EC scalar-mul on the interpreter; multi-second. |
 | `TestCLI_Groth16WA_SP1` | `compilers/go/groth16_wa_cli_test.go:22` | Environmental | Builds the compiler binary and runs an end-to-end CLI invocation against the SP1 v6.0.0 fixture (~10 s). |
 | `TestGroth16WA_EndToEnd_SP1Proof_Script` | `packages/runar-go/bn254witness/sp1_script_test.go:207` | Environmental | Script execution of the Groth16-WA verifier against the SP1 fixture is minutes-long on the go-sdk interpreter. |
