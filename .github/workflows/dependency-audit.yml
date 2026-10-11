@@ -221,6 +221,8 @@ jobs:
         run: gem install bundler-audit
       - name: Audit packages/runar-rb
         run: cd packages/runar-rb && bundle-audit check --update
+      - name: Audit compilers/ruby
+        run: cd compilers/ruby && bundle-audit check
       - name: Audit examples/ruby
         run: cd examples/ruby && bundle-audit check
       - name: Audit integration/ruby

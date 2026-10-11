@@ -713,6 +713,8 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: compilers/ruby
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -728,7 +730,7 @@ jobs:
       - name: Build the Go peer compiler
         run: cd compilers/go && go build -o runar-go .
       - name: Ruby compiler unit tests
-        run: cd compilers/ruby && rake test
+        run: cd compilers/ruby && bundle exec rake test
       - name: Ruby compiler conformance (IR -> hex)
         run: |
           fail=0

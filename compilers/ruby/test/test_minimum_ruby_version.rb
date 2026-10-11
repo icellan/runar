@@ -5,8 +5,9 @@ require "runar_compiler"
 
 # The Ruby compiler tier must declare the Ruby version it actually needs.
 #
-# `compilers/ruby` ships no gemspec and no Gemfile — it is driven by its
-# Rakefile — so nothing anywhere stated a minimum. It uses `filter_map`
+# `compilers/ruby` ships no gemspec — it is driven by its Rakefile, and its
+# Gemfile (see F-334) pins the dev/test toolchain, not a Ruby floor — so
+# nothing anywhere stated a minimum. It uses `filter_map`
 # (Ruby 2.7+) in `frontend/embed_always_dce.rb`, so on Ruby 2.6 the suite dies
 # during loading with `undefined method 'filter_map' for Array`. An external
 # reviewer hit exactly that and could not run this tier at all; the error names
