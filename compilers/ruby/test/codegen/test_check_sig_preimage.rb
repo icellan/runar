@@ -49,34 +49,75 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
            "expected OP_CHECKSIG or OP_CHECKSIGVERIFY in ASM, got: #{asm[0, 200]}"
   end
 
-  def test_checksig_terminal_assert_folds_to_verify
-    # When checkSig is the sole assertion in a stateless contract, the
-    # peephole optimizer should fold the trailing OP_VERIFY into the opcode
-    # itself, producing OP_CHECKSIGVERIFY (0xac → 0xad).
+  def test_checksig_nonterminal_assert_folds_to_verify
+    # F-378: renamed from `test_checksig_terminal_assert_folds_to_verify`.
+    # The old name and comment claimed that a checkSig assert, when it is
+    # the SOLE/terminal statement in the method, gets its trailing
+    # OP_VERIFY folded by the peephole optimizer into OP_CHECKSIGVERIFY.
+    # That premise is wrong: a terminal assert's OP_VERIFY is elided
+    # entirely by `_lower_assert` in compilers/ruby/lib/runar_compiler/
+    # codegen/stack.rb:3156-3167 (TS reference: 05-stack-lower.ts's
+    # `terminalAssert` path) BEFORE the peephole optimizer ever runs,
+    # because Bitcoin Script's own success rule (truthy top-of-stack at
+    # script end) already enforces it. Compiling the OLD single-statement
+    # contract produces only `OP_0 OP_CHECKSIG` -- verified byte-identical
+    # against the TS reference compiler -- with no OP_VERIFY ever emitted
+    # to fold, so the old assertion could never have observed a fold for
+    # that contract shape, on top of being vacuous in its own right:
+    # `asm.include?('OP_CHECKSIG') || asm.include?('OP_CHECKSIGVERIFY')` is
+    # always true regardless of fold state, because
+    # 'OP_CHECKSIGVERIFY'.include?('OP_CHECKSIG') is itself true (substring
+    # match) -- so the first disjunct alone is satisfied by the folded form.
+    #
+    # To actually exercise the fold, checkSig's assert must NOT be the
+    # method's terminal statement (a second assert follows it), which forces
+    # stack-lowering to emit a real, foldable OP_CHECKSIG + OP_VERIFY pair --
+    # verified byte-identical to the TS reference compiler
+    # (`OP_SWAP OP_0 OP_CHECKSIGVERIFY OP_0 OP_NUMEQUAL`).
+    #
+    # Proves: for this non-terminal-assert shape, the Ruby peephole
+    # optimizer (compilers/ruby/lib/runar_compiler/codegen/optimizer.rb:
+    # 128-130) actually folds an adjacent OP_CHECKSIG + OP_VERIFY pair into
+    # OP_CHECKSIGVERIFY, and that no bare OP_CHECKSIG token survives the
+    # fold -- disabling the fold rule makes this exact test fail (verified
+    # during remediation).
+    # Does NOT prove: that the fold (or the terminal-assert elision it is
+    # distinguished from) is correct on-chain -- Ruby ships no ScriptVM, so
+    # on-chain semantic equivalence of OP_CHECKSIG+OP_VERIFY vs.
+    # OP_CHECKSIGVERIFY is established once, in TS, not here. Nor does it
+    # prove cross-tier byte parity for this shape generically -- that is
+    # the conformance suite's job, not this unit test.
     source = <<~TS
       import { SmartContract, assert, checkSig } from 'runar-lang';
       import type { PubKey, Sig } from 'runar-lang';
 
-      class TerminalSig extends SmartContract {
+      class NonTerminalSig extends SmartContract {
         readonly pk: PubKey;
+        readonly x: bigint;
 
-        constructor(pk: PubKey) {
-          super(pk);
+        constructor(pk: PubKey, x: bigint) {
+          super(pk, x);
           this.pk = pk;
+          this.x = x;
         }
 
-        public unlock(sig: Sig): void {
+        public unlock(sig: Sig, y: bigint): void {
           assert(checkSig(sig, this.pk));
+          assert(y == this.x);
         }
       }
     TS
 
-    artifact = compile_ts_source(source, 'TerminalSig.runar.ts')
+    artifact = compile_ts_source(source, 'NonTerminalSig.runar.ts')
     asm = artifact.asm
-    # Either the folded VERIFY form (preferred) or the unfolded sequence is
-    # acceptable. We just require that the opcode appears somewhere.
-    assert(asm.include?('OP_CHECKSIG') || asm.include?('OP_CHECKSIGVERIFY'),
-           "expected a CHECKSIG[VERIFY] opcode, got: #{asm[0, 200]}")
+    # Tokenize the space-joined ASM and check the exact mnemonic (not a
+    # substring) so the test fails if the fold regresses.
+    tokens = asm.split(/\s+/)
+    assert_includes tokens, 'OP_CHECKSIGVERIFY',
+                    "expected the peephole optimizer to fold the non-terminal checkSig's " \
+                    "OP_CHECKSIG + OP_VERIFY into OP_CHECKSIGVERIFY, got: #{asm[0, 200]}"
+    refute_includes tokens, 'OP_CHECKSIG',
+                    "expected no standalone OP_CHECKSIG left after the fold, got: #{asm[0, 200]}"
   end
 
   # ---------------------------------------------------------------------------
