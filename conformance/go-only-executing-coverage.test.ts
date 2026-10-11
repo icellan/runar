@@ -87,6 +87,28 @@ const EXECUTING: Record<string, Coverage> = {
     file: 'compilers/go/codegen/r119_field_canonicity_test.go',
     marker: 'func TestR119_Ext4OperandsGated(t *testing.T)',
   },
+  // N-156: F-196 drives all five scalar-field entry points' operand
+  // canonicity through @bsv/sdk's Spend in every tier.
+  bn254FieldAdd: {
+    file: 'conformance/go-only-parity/go-only-parity.test.ts',
+    marker: 'F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend',
+  },
+  bn254FieldSub: {
+    file: 'conformance/go-only-parity/go-only-parity.test.ts',
+    marker: 'F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend',
+  },
+  bn254FieldMul: {
+    file: 'conformance/go-only-parity/go-only-parity.test.ts',
+    marker: 'F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend',
+  },
+  bn254FieldInv: {
+    file: 'conformance/go-only-parity/go-only-parity.test.ts',
+    marker: 'F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend',
+  },
+  bn254FieldNeg: {
+    file: 'conformance/go-only-parity/go-only-parity.test.ts',
+    marker: 'F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend',
+  },
 };
 
 const REMAINING_REASON =
@@ -133,6 +155,16 @@ describe('Go-only builtin executing-coverage ratchet', () => {
     expect('bn254G1Add' in EXECUTING, 'bn254G1Add should be EXECUTING — see F-091').toBe(true);
     for (const name of ['kbFieldAdd', 'kbFieldSub', 'kbFieldMul', 'kbFieldInv', 'kbExt4Mul0', 'kbExt4Inv0']) {
       expect(name in EXECUTING, `${name} should be EXECUTING — see r119_field_canonicity_test.go`).toBe(true);
+    }
+  });
+
+  // N-156: F-196 (conformance/go-only-parity/go-only-parity.test.ts) executes
+  // all five bn254Field* scalar-field builtins on @bsv/sdk's Spend in every
+  // tier. Same root cause as N-083: the file matches neither
+  // *execution_test.go nor r141_*.go, so the detector above never saw it.
+  it('N-156: all five bn254Field* builtins are executed today', () => {
+    for (const name of ['bn254FieldAdd', 'bn254FieldSub', 'bn254FieldMul', 'bn254FieldInv', 'bn254FieldNeg']) {
+      expect(name in EXECUTING, `${name} should be EXECUTING — see F-196`).toBe(true);
     }
   });
 });
