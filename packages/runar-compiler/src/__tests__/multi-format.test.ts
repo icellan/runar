@@ -290,13 +290,11 @@ describe('Multi-format: universal parser coverage (every fixture × every declar
   });
 
   for (const fixture of fixtures) {
-    const config = (() => {
-      try {
-        return loadSourceConfig(fixture);
-      } catch {
-        return { sources: undefined } as SourceConfig;
-      }
-    })();
+    // F-225: a malformed or missing source.json must fail collection loudly
+    // (the same way findZigConformanceCases's unguarded call already does),
+    // not be swallowed into an empty config that silently drops every test
+    // for this fixture.
+    const config = loadSourceConfig(fixture);
     const declaredExts = Object.keys(config.sources ?? {});
     if (declaredExts.length === 0) continue;
 
