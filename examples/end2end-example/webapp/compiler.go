@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -78,7 +79,10 @@ func normalizeLang(lang string) string {
 	}
 }
 
-func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, threshold int) (scriptHex string, scriptAsm string, err error) {
+// alicePubKeyHex and bobPubKeyHex fill the contract's slots of those names:
+// settle pays alicePubKey when price > strikePrice and bobPubKey otherwise.
+// oracleN is the Rabin modulus whose signature settle accepts.
+func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, oracleN *big.Int, threshold int) (scriptHex string, scriptAsm string, err error) {
 	key := normalizeLang(lang)
 	spec, ok := sourceLangs[key]
 	if !ok {
@@ -124,7 +128,9 @@ func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, threshold int) (
 		case "bobPubKey":
 			program.Properties[i].InitialValue = bobPubKeyHex
 		case "oraclePubKey":
-			program.Properties[i].InitialValue = float64(12345)
+			// F-162: the game's real oracle modulus. It used to be 12345, under
+			// which settle accepts sig = 0, padding = SHA256(msg) mod 12345.
+			program.Properties[i].InitialValue = new(big.Int).Set(oracleN)
 		case "strikePrice":
 			program.Properties[i].InitialValue = float64(threshold)
 		}
