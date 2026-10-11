@@ -1499,7 +1499,7 @@ class _LoweringContext:
             self.bring_to_top(prop_name, False)
             self.sm.pop()
         elif prop is not None and prop.initial_value is not None:
-            self._push_property_value(prop.initial_value)
+            self._push_property_value(prop.initial_value, prop.name)
         else:
             # Property value will be provided at deployment time; emit placeholder
             # for its constructor slot.
@@ -1548,7 +1548,7 @@ class _LoweringContext:
             self.emit_op(StackOp(op="placeholder", param_index=param_index, param_name=prop_name))
         self.sm.push(binding_name)
 
-    def _push_property_value(self, val: object) -> None:
+    def _push_property_value(self, val: object, prop_name: str) -> None:
         if isinstance(val, bool):
             self.emit_op(StackOp(op="push", value=PushValue(kind="bool", bool_val=val)))
         elif isinstance(val, int):
@@ -1558,7 +1558,19 @@ class _LoweringContext:
         elif isinstance(val, str):
             self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=_hex_to_bytes(val))))
         else:
-            self.emit_op(StackOp(op="push", value=big_int_push(0)))
+            # F-258 / CL-BUG-151: a property initializer is supposed to be a
+            # literal (bool/int/float/str) -- the language only allows
+            # BigIntLiteral / BoolLiteral / ByteStringLiteral initializers.
+            # `--ir` skips the frontend that enforces that, so a hand-written
+            # IR file can hand this an array or object. Silently pushing 0
+            # compiled a working-looking script whose property reads whatever
+            # the caller named `secret`, `threshold`, etc. always as 0 --
+            # fail loudly instead.
+            raise RuntimeError(
+                f"Stack lowering: property '{prop_name}' has a non-literal "
+                f"initializer of type {type(val).__name__!r} ({val!r}). "
+                f"Refusing to emit a silent OP_0 placeholder."
+            )
 
     def _lower_load_const(self, binding_name: str, value: ANFValue,
                           binding_index: int, last_uses: dict[str, int]) -> None:
@@ -2883,7 +2895,7 @@ class _LoweringContext:
             if self.sm.has(prop.name):
                 self.bring_to_top(prop.name, True)  # consume
             elif prop.initial_value is not None:
-                self._push_property_value(prop.initial_value)
+                self._push_property_value(prop.initial_value, prop.name)
                 self.sm.push("")
             else:
                 self.emit_op(StackOp(op="push", value=big_int_push(0)))

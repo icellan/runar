@@ -1641,7 +1641,7 @@ func (ctx *loweringContext) lowerLoadProp(bindingName, propName string) {
 		ctx.bringToTop(propName, false)
 		ctx.sm.pop()
 	} else if prop != nil && prop.InitialValue != nil {
-		ctx.pushPropertyValue(prop.InitialValue)
+		ctx.pushPropertyValue(prop.InitialValue, prop.Name)
 	} else {
 		// Property value will be provided at deployment time; emit a placeholder.
 		// The emitter records byte offsets so the SDK can splice in real values.
@@ -1690,7 +1690,7 @@ func (ctx *loweringContext) lowerLoadProp(bindingName, propName string) {
 	ctx.sm.push(bindingName)
 }
 
-func (ctx *loweringContext) pushPropertyValue(val interface{}) {
+func (ctx *loweringContext) pushPropertyValue(val interface{}, propName string) {
 	switch v := val.(type) {
 	case bool:
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bool", Bool: v}})
@@ -1701,7 +1701,17 @@ func (ctx *loweringContext) pushPropertyValue(val interface{}) {
 	case string:
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: hexToBytes(v)}})
 	default:
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+		// F-258 / CL-BUG-151: a property initializer is supposed to be a
+		// literal (bool/float64/*big.Int/string) -- the language only allows
+		// BigIntLiteral / BoolLiteral / ByteStringLiteral initializers.
+		// `--ir` skips the frontend that enforces that, so a hand-written IR
+		// file can hand this an array or object. Silently pushing 0 compiled
+		// a working-looking script whose property reads whatever the caller
+		// named always as 0 -- fail loudly instead.
+		panic(fmt.Errorf(
+			"stack lowering: property '%s' has a non-literal initializer of "+
+				"type %T (%v). Refusing to emit a silent OP_0 placeholder.",
+			propName, val, val))
 	}
 }
 
@@ -3276,7 +3286,7 @@ func (ctx *loweringContext) lowerGetStateScript(bindingName string) {
 		if ctx.sm.has(prop.Name) {
 			ctx.bringToTop(prop.Name, true) // consume: raw value dead after serialization
 		} else if prop.InitialValue != nil {
-			ctx.pushPropertyValue(prop.InitialValue)
+			ctx.pushPropertyValue(prop.InitialValue, prop.Name)
 			ctx.sm.push("")
 		} else {
 			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})

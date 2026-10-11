@@ -1795,7 +1795,7 @@ module RunarCompiler::Codegen
         bring_to_top(prop_name, false)
         @sm.pop
       elsif prop && !prop.initial_value.nil?
-        _push_property_value(prop.initial_value)
+        _push_property_value(prop.initial_value, prop.name)
       else
         # Property value will be provided at deployment time; emit placeholder.
         # Initialized properties are excluded from the constructor, so the
@@ -1828,7 +1828,7 @@ module RunarCompiler::Codegen
       @sm.push(binding_name)
     end
 
-    def _push_property_value(val)
+    def _push_property_value(val, prop_name)
       case val
       when true, false
         emit_push_bool(val)
@@ -1839,7 +1839,16 @@ module RunarCompiler::Codegen
       when String
         emit_push_bytes(RunarCompiler::Codegen.hex_to_bytes(val))
       else
-        emit_push_int(0)
+        # F-258 / CL-BUG-151: a property initializer is supposed to be a
+        # literal (bool/int/float/str) -- the language only allows
+        # BigIntLiteral / BoolLiteral / ByteStringLiteral initializers.
+        # `--ir` skips the frontend that enforces that, so a hand-written
+        # IR file can hand this an array or object. Silently pushing 0
+        # compiled a working-looking script whose property always reads
+        # as 0 -- fail loudly instead.
+        raise "Stack lowering: property '#{prop_name}' has a non-literal initializer " \
+              "of type #{val.class} (#{val.inspect}). Refusing to emit a silent OP_0 " \
+              "placeholder."
       end
     end
 
@@ -4414,7 +4423,7 @@ module RunarCompiler::Codegen
         if @sm.has?(prop.name)
           bring_to_top(prop.name, true) # consume
         elsif !prop.initial_value.nil?
-          _push_property_value(prop.initial_value)
+          _push_property_value(prop.initial_value, prop.name)
           @sm.push("")
         else
           emit_push_int(0)

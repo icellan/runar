@@ -1720,7 +1720,7 @@ impl LoweringContext {
             self.sm.pop();
         } else if let Some(ref p) = prop {
             if let Some(ref val) = p.initial_value {
-                self.push_json_value(val);
+                self.push_json_value(val, prop_name);
             } else {
                 // Property value will be provided at deployment time; emit a placeholder.
                 // The emitter records byte offsets so the SDK can splice in real values.
@@ -1798,7 +1798,7 @@ impl LoweringContext {
     /// arbitrary-precision JSON number (what the Go tier writes) — never as
     /// hex. Only a plain string that is not a decimal-BigInt literal is hex
     /// `ByteString` bytes.
-    fn push_json_value(&mut self, val: &serde_json::Value) {
+    fn push_json_value(&mut self, val: &serde_json::Value, prop_name: &str) {
         match crate::ir::parse_const_value(val) {
             Some(ConstValue::Bool(b)) => {
                 self.emit_op(StackOp::Push(PushValue::Bool(b)));
@@ -1811,7 +1811,19 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
             None => {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+                // F-258 / CL-BUG-151: a property initializer is supposed to
+                // be a literal (bool/number/string) -- the language only
+                // allows BigIntLiteral / BoolLiteral / ByteStringLiteral
+                // initializers. `--ir` skips the frontend that enforces
+                // that, so a hand-written IR file can hand this an array or
+                // object. Silently pushing 0 compiled a working-looking
+                // script whose property always reads as 0 -- fail loudly
+                // instead.
+                panic!(
+                    "Stack lowering: property '{}' has a non-literal initializer \
+                     ({}). Refusing to emit a silent OP_0 placeholder.",
+                    prop_name, val
+                );
             }
         }
     }
@@ -1880,7 +1892,22 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
             None => {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+                // F-258 / CL-BUG-151: `load_const.value` must decode to a
+                // bool / number / string (see `parse_const_value`). Unlike
+                // Go/Python/Ruby, this tier's IR loader does not eagerly
+                // validate `load_const` values at load time, so a
+                // hand-written `--ir` file naming an array or object here
+                // reached this point and silently compiled to a bare OP_0 --
+                // fail loudly instead.
+                let raw = match value {
+                    ANFValue::LoadConst { value: raw } => raw.to_string(),
+                    _ => "<unknown>".to_string(),
+                };
+                panic!(
+                    "Stack lowering: binding '{}' has an undecodable load_const value \
+                     ({}). Refusing to emit a silent OP_0 placeholder.",
+                    binding_name, raw
+                );
             }
         }
         // Track constant values for compile-time extraction (e.g., Merkle depth)
@@ -3374,7 +3401,7 @@ impl LoweringContext {
             if self.sm.has(&prop.name) {
                 self.bring_to_top(&prop.name, true); // consume: raw value dead after serialization
             } else if let Some(ref val) = prop.initial_value {
-                self.push_json_value(val);
+                self.push_json_value(val, &prop.name);
                 self.sm.push("");
             } else {
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));

@@ -6,8 +6,11 @@ pass produces correct StackOp sequences for common ANF IR patterns.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from runar_compiler.compiler import compile_from_ir_bytes
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -748,6 +751,44 @@ class TestWithInitialValues:
         assert len(placeholders) == 0, (
             f"with initial values, there should be no Placeholder ops, found: {placeholders}"
         )
+
+    def test_non_literal_initial_value_is_loud_error_not_op0(self):
+        """F-258 / CL-BUG-151: a property's `initialValue` is supposed to be a
+        literal -- the language only allows BigIntLiteral / BoolLiteral /
+        ByteStringLiteral initializers (see CLAUDE.md "Property
+        initializers"). The frontend enforces that, but `--ir` bypasses the
+        frontend entirely, so a hand-written IR file can give a property an
+        array (or object) `initialValue`.
+
+        Before the fix, `_push_property_value`'s fallback silently pushed a
+        bare OP_0 for any non-bool/int/float/str value: this IR compiled
+        cleanly to a 1-byte script (`00`) that always reads `secret` as 0,
+        instead of being refused. This test proves ONLY that: it does not
+        prove anything about `load_const`'s own equivalent fallback (that one
+        is already unreachable -- every producer of a `load_const` binding,
+        including the `--ir` loader's `decode_constants`, sets one of
+        const_bool/const_int/const_string or raises first).
+        """
+        ir = json.dumps({
+            "contractName": "HostilePropInit",
+            "properties": [
+                {"name": "secret", "type": "bigint", "readonly": True, "initialValue": [1, 2, 3]},
+            ],
+            "methods": [
+                {
+                    "name": "reveal",
+                    "params": [],
+                    "body": [
+                        {"name": "t0", "value": {"kind": "load_prop", "name": "secret"}},
+                        {"name": "t1", "value": {"kind": "assert", "value": "t0"}},
+                    ],
+                    "isPublic": True,
+                }
+            ],
+        }).encode("utf-8")
+
+        with pytest.raises(RuntimeError, match="Refusing to emit a silent OP_0"):
+            compile_from_ir_bytes(ir)
 
 
 # ---------------------------------------------------------------------------
