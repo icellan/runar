@@ -156,7 +156,11 @@ def main() -> None:
             sys.exit(1)
         try:
             src = _read_file(args.source)
-            parse_result = _parse_source(src, args.source)
+            # F-213: parse + validate with the same recursion headroom as a
+            # full compile (see input_limits.COMPILE_RECURSION_LIMIT).
+            from runar_compiler.frontend.input_limits import recursion_headroom
+            with recursion_headroom():
+                parse_result = _parse_source(src, args.source)
             if parse_result.errors:
                 print(
                     "parse errors:\n  " + "\n  ".join(parse_result.error_strings()),
@@ -166,7 +170,8 @@ def main() -> None:
             if parse_result.contract is None:
                 print(f"parse error: no contract found in {args.source}", file=sys.stderr)
                 sys.exit(1)
-            valid = _validate(parse_result.contract)
+            with recursion_headroom():
+                valid = _validate(parse_result.contract)
             if valid.errors:
                 print(
                     "validation errors:\n  " + "\n  ".join(valid.error_strings()),

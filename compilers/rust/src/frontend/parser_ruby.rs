@@ -50,6 +50,7 @@ use super::diagnostic::{
     lex_error, static_method_message, unsupported_statement_message, UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 use std::collections::HashMap;
 
@@ -70,6 +71,15 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_ruby_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_ruby`], on the parse stack segment.
+fn parse_ruby_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
+    use super::diagnostic::Diagnostic;
     let file = file_name.unwrap_or("contract.runar.rb");
     let mut str_errors: Vec<String> = Vec::new();
 
@@ -78,6 +88,10 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = RbParser::new(tokens, file, &mut str_errors);
 
     let contract = parser.parse_contract();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
     let collision = parser.idents.collision_diagnostic();
 
     let mut errors: Vec<Diagnostic> = lex_errors;
@@ -86,7 +100,7 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
         errors.extend(collision);
     }
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +867,8 @@ struct RbParser<'a> {
     declared_locals: std::collections::HashSet<String>,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: super::identifier_collision::DeclaredIdents,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> RbParser<'a> {
@@ -864,7 +880,38 @@ impl<'a> RbParser<'a> {
             errors,
             declared_locals: std::collections::HashSet::new(),
             idents: Default::default(),
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn peek(&self) -> &Token {
@@ -1249,7 +1296,7 @@ impl<'a> RbParser<'a> {
         // Check for FixedArray[T, N]
         if raw_name == "FixedArray" && *self.peek() == Token::LBracket {
             self.advance(); // '['
-            let element = self.parse_type();
+            let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
             self.expect(&Token::Comma);
             let length = match self.advance() {
                 Token::NumberLit(n) => n.to_usize().unwrap_or(0),
@@ -1417,6 +1464,10 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         match self.peek().clone() {
             // assert statement: assert expr
             Token::Assert => Some(self.parse_assert_statement()),
@@ -1504,7 +1555,8 @@ impl<'a> RbParser<'a> {
 
         let else_branch = if *self.peek() == Token::Elsif {
             // elsif -> else { if ... }
-            let res = Some(vec![self.parse_elsif_statement()]);
+            // F-213: elsif is an `if` statement of the else branch (+1).
+            let res = self.nested(Some(Vec::new()), |p| Some(vec![p.parse_elsif_statement()]));
             self.declared_locals = locals_before_then.clone();
             res
         } else if *self.peek() == Token::Else {
@@ -1538,7 +1590,8 @@ impl<'a> RbParser<'a> {
         self.declared_locals = locals_before_then.clone();
 
         let else_branch = if *self.peek() == Token::Elsif {
-            let res = Some(vec![self.parse_elsif_statement()]);
+            // F-213: elsif is an `if` statement of the else branch (+1).
+            let res = self.nested(Some(Vec::new()), |p| Some(vec![p.parse_elsif_statement()]));
             self.declared_locals = locals_before_then.clone();
             res
         } else if *self.peek() == Token::Else {
@@ -1746,10 +1799,12 @@ impl<'a> RbParser<'a> {
 
         // Consume index-access postfixes on the LHS so `@var[i] = expr`
         // is recognised as an assignment statement.
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::LBracket {
             self.advance();
             let index = self.parse_expression();
             self.expect(&Token::RBracket);
+            if !self.grow(&mut dt, &target, &[&index]) { break; }
             target = Expression::IndexAccess {
                 object: Box::new(target),
                 index: Box::new(index),
@@ -1890,7 +1945,7 @@ impl<'a> RbParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Expression {
-        self.parse_ternary()
+        self.nested(zero(), |p| p.parse_ternary())
     }
 
     /// Ruby ternary: `condition ? consequent : alternate`
@@ -1914,9 +1969,11 @@ impl<'a> RbParser<'a> {
 
     fn parse_or(&mut self) -> Expression {
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or || *self.peek() == Token::OrOr {
             self.advance();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
@@ -1928,9 +1985,11 @@ impl<'a> RbParser<'a> {
 
     fn parse_and(&mut self) -> Expression {
         let mut left = self.parse_not();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::And || *self.peek() == Token::AndAnd {
             self.advance();
             let right = self.parse_not();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
@@ -1943,7 +2002,7 @@ impl<'a> RbParser<'a> {
     fn parse_not(&mut self) -> Expression {
         if *self.peek() == Token::Not || *self.peek() == Token::Bang {
             self.advance();
-            let operand = self.parse_not();
+            let operand = self.nested(zero(), |p| p.parse_not());
             Expression::UnaryExpr {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
@@ -1955,9 +2014,11 @@ impl<'a> RbParser<'a> {
 
     fn parse_bit_or(&mut self) -> Expression {
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
             self.advance();
             let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
@@ -1969,9 +2030,11 @@ impl<'a> RbParser<'a> {
 
     fn parse_bit_xor(&mut self) -> Expression {
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
             self.advance();
             let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
@@ -1983,9 +2046,11 @@ impl<'a> RbParser<'a> {
 
     fn parse_bit_and(&mut self) -> Expression {
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
             self.advance();
             let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
@@ -1997,11 +2062,13 @@ impl<'a> RbParser<'a> {
 
     fn parse_equality(&mut self) -> Expression {
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::EqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
@@ -2012,6 +2079,7 @@ impl<'a> RbParser<'a> {
                 Token::NotEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictNe,
@@ -2027,11 +2095,13 @@ impl<'a> RbParser<'a> {
 
     fn parse_comparison(&mut self) -> Expression {
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
@@ -2041,6 +2111,7 @@ impl<'a> RbParser<'a> {
                 Token::Le => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
@@ -2050,6 +2121,7 @@ impl<'a> RbParser<'a> {
                 Token::Gt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
@@ -2059,6 +2131,7 @@ impl<'a> RbParser<'a> {
                 Token::Ge => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
@@ -2073,11 +2146,13 @@ impl<'a> RbParser<'a> {
 
     fn parse_shift(&mut self) -> Expression {
         let mut left = self.parse_additive();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::LShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
@@ -2087,6 +2162,7 @@ impl<'a> RbParser<'a> {
                 Token::RShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
@@ -2101,11 +2177,13 @@ impl<'a> RbParser<'a> {
 
     fn parse_additive(&mut self) -> Expression {
         let mut left = self.parse_multiplicative();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Plus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Add,
                         left: Box::new(left),
@@ -2115,6 +2193,7 @@ impl<'a> RbParser<'a> {
                 Token::Minus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
@@ -2129,11 +2208,13 @@ impl<'a> RbParser<'a> {
 
     fn parse_multiplicative(&mut self) -> Expression {
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
@@ -2143,6 +2224,7 @@ impl<'a> RbParser<'a> {
                 Token::Slash => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
@@ -2152,6 +2234,7 @@ impl<'a> RbParser<'a> {
                 Token::Percent => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
@@ -2168,7 +2251,7 @@ impl<'a> RbParser<'a> {
         match self.peek() {
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
@@ -2176,7 +2259,7 @@ impl<'a> RbParser<'a> {
             }
             Token::Tilde => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
@@ -2184,7 +2267,7 @@ impl<'a> RbParser<'a> {
             }
             Token::Bang => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
@@ -2200,7 +2283,8 @@ impl<'a> RbParser<'a> {
 
         if *self.peek() == Token::DoubleStar {
             self.advance();
-            let exp = self.parse_power(); // right-recursive for right-associativity
+            // right-recursive for right-associativity; F-213: +1.
+            let exp = self.nested(zero(), |p| p.parse_power());
             Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "pow".to_string(),
@@ -2220,6 +2304,7 @@ impl<'a> RbParser<'a> {
 
     /// Parse postfix operations (method calls, property access, indexing) from a given expression.
     fn parse_postfix_from(&mut self, mut expr: Expression) -> Expression {
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek().clone() {
                 Token::Dot => {
@@ -2230,6 +2315,9 @@ impl<'a> RbParser<'a> {
                     // Check if it's a method call
                     if *self.peek() == Token::LParen {
                         let args = self.parse_call_args();
+                        // F-213: the member node, then the call around it.
+                        let arg_refs: Vec<&Expression> = args.iter().collect();
+                        if !self.grow(&mut dt, &expr, &[]) || !self.grow(&mut dt, &expr, &arg_refs) { break; }
                         // Handle property_access.method(...)
                         if matches!(&expr, Expression::Identifier { name } if name == "this") {
                             expr = Expression::CallExpr {
@@ -2256,7 +2344,9 @@ impl<'a> RbParser<'a> {
                         // Property access
                         if matches!(&expr, Expression::Identifier { name } if name == "this") {
                             expr = Expression::PropertyAccess { property: prop };
+                            dt = DepthTracker::new();
                         } else {
+                            if !self.grow(&mut dt, &expr, &[]) { break; }
                             expr = Expression::MemberExpr {
                                 object: Box::new(expr),
                                 property: prop,
@@ -2266,6 +2356,8 @@ impl<'a> RbParser<'a> {
                 }
                 Token::LParen => {
                     let args = self.parse_call_args();
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -2276,6 +2368,7 @@ impl<'a> RbParser<'a> {
                     self.advance();
                     let index = self.parse_expression();
                     self.expect(&Token::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -2427,6 +2520,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         },
         sighash_type: None,
     }
+}
+
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
 }
 
 // ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { identifierCollisionMessage } from './snake-to-camel.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -713,7 +713,7 @@ class GoParser extends ParserCore<GoToken> {
       this.advance();
       const length = parseInt(this.expect('number').value, 10);
       this.expect(']');
-      const element = this.parseGoType();
+      const element = this.nest.nested(this.loc(), () => this.parseGoType());
       return { kind: 'fixed_array_type', element, length };
     }
 
@@ -871,6 +871,10 @@ class GoParser extends ParserCore<GoToken> {
   // -----------------------------------------------------------------------
 
   private parseStatement(): Statement {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement {
     const location = this.loc();
 
     // N-153: a `{` cannot start a statement. Rúnar has no block statement,
@@ -1040,7 +1044,7 @@ class GoParser extends ParserCore<GoToken> {
       this.advance();
       if (this.current().type === 'if') {
         // else if — parse as nested if_statement in the else branch
-        elseBranch = [this.parseIfStatement()];
+        elseBranch = [this.nest.nested(this.loc(), () => this.parseIfStatement())];
       } else {
         this.expect('{');
         elseBranch = [];
@@ -1220,20 +1224,20 @@ class GoParser extends ParserCore<GoToken> {
   protected parseUnary(): Expression {
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (this.current().type === '^') {
       // Go uses ^ as bitwise NOT (complement) when used as unary prefix
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
 
     let expr = this.parsePrimary();
@@ -1420,7 +1424,7 @@ class GoParser extends ParserCore<GoToken> {
     const elements: Expression[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       if (this.current().type === '{') {
-        elements.push(this.parseGoBraceLiteral());
+        elements.push(this.nest.nested(this.loc(), () => this.parseGoBraceLiteral()));
       } else {
         elements.push(this.parseExpression());
       }
@@ -1505,5 +1509,5 @@ export function parseGoSource(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new GoParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

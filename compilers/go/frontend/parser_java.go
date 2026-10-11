@@ -39,6 +39,10 @@ func ParseJava(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseJavaSurface(source, fileName) })
+}
+
+func parseJavaSurface(source []byte, fileName string) *ParseResult {
 	tokens, lexErrors := javaTokenize(string(source), fileName)
 	p := &javaParser{
 		tokens:   tokens,
@@ -498,6 +502,9 @@ type javaParser struct {
 	pos      int
 	fileName string
 	errors   []Diagnostic
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *javaParser) current() javaToken {
@@ -1188,7 +1195,7 @@ func (p *javaParser) parseType() TypeNode {
 				generic = append(generic, CustomType{Name: "<int:" + numTok.value + ">"})
 				continue
 			}
-			generic = append(generic, p.parseType())
+			generic = append(generic, nested(&p.nest, p.loc(), p.parseType))
 		}
 		p.expect(javaTokGt)
 	}
@@ -1290,6 +1297,10 @@ func (p *javaParser) parseBlock() []Statement {
 }
 
 func (p *javaParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *javaParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// Bare { ... } — a nested block. We don't model nested blocks as a
@@ -1590,7 +1601,7 @@ func (p *javaParser) parseReturn(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *javaParser) parseExpression() Expression {
-	return p.parseTernary()
+	return nested(&p.nest, p.loc(), p.parseTernary)
 }
 
 func (p *javaParser) parseTernary() Expression {
@@ -1745,7 +1756,7 @@ func (p *javaParser) parseUnary() Expression {
 	switch p.current().kind {
 	case javaTokBang:
 		p.advance()
-		return UnaryExpr{Op: "!", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
 	case javaTokMinus:
 		p.advance()
 		// F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
@@ -1753,20 +1764,20 @@ func (p *javaParser) parseUnary() Expression {
 		if p.pos < len(p.tokens) && p.tokens[p.pos].kind == javaTokNumber {
 			p.tokens[p.pos].negOnly = false
 		}
-		return UnaryExpr{Op: "-", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
 	case javaTokPlus:
 		// +x == x
 		p.advance()
-		return p.parseUnary()
+		return nested(&p.nest, p.loc(), p.parseUnary)
 	case javaTokTilde:
 		p.advance()
-		return UnaryExpr{Op: "~", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
 	case javaTokPlusPlus:
 		p.advance()
-		return IncrementExpr{Operand: p.parseUnary(), Prefix: true}
+		return IncrementExpr{Operand: nested(&p.nest, p.loc(), p.parseUnary), Prefix: true}
 	case javaTokMinusMinus:
 		p.advance()
-		return DecrementExpr{Operand: p.parseUnary(), Prefix: true}
+		return DecrementExpr{Operand: nested(&p.nest, p.loc(), p.parseUnary), Prefix: true}
 	}
 	return p.parsePostfix()
 }

@@ -21,7 +21,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -231,6 +231,8 @@ class MoveParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
 
   /** F-017: (source spelling, Rúnar name) of every declared identifier. */
   private declared: Array<[string, string]> = [];
@@ -429,7 +431,7 @@ class MoveParser {
     // the token in place and falling through to the next `>` close.
     if (name === 'FixedArray' && this.current().type === '<') {
       this.advance();
-      const inner = this.parseMoveType();
+      const inner = this.nest.nested(this.loc(), () => this.parseMoveType());
       this.expect(',');
       const length = parseInt(this.expect('number').value, 10);
       this.consumeGenericClose();
@@ -439,7 +441,7 @@ class MoveParser {
     // vector<T> => FixedArray<T, N> (we treat it as ByteString for now)
     if (name === 'vector' && this.current().type === '<') {
       this.advance();
-      const innerType = this.parseMoveType();
+      const innerType = this.nest.nested(this.loc(), () => this.parseMoveType());
       this.consumeGenericClose();
       return innerType; // Simplify: vector<u8> -> ByteString
     }
@@ -595,6 +597,10 @@ class MoveParser {
   }
 
   private parseStatement(): Statement {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement {
     const location = this.loc();
 
     // assert!(expr, code) -> assert(expr)
@@ -830,7 +836,7 @@ class MoveParser {
   }
 
   // Expression parsing (same precedence climbing as Solidity parser)
-  private parseExpression(): Expression { return this.parseOr(); }
+  private parseExpression(): Expression { return this.nest.nested(this.loc(), () => this.parseOr()); }
 
   private parseOr(): Expression {
     let left = this.parseAnd();
@@ -899,9 +905,9 @@ class MoveParser {
   }
 
   private parseUnary(): Expression {
-    if (this.current().type === '!') { this.advance(); return { kind: 'unary_expr', op: '!', operand: this.parseUnary() }; }
-    if (this.current().type === '-') { this.advance(); return { kind: 'unary_expr', op: '-', operand: this.parseUnary() }; }
-    if (this.current().type === '~') { this.advance(); return { kind: 'unary_expr', op: '~', operand: this.parseUnary() }; }
+    if (this.current().type === '!') { this.advance(); return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()) }; }
+    if (this.current().type === '-') { this.advance(); return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()) }; }
+    if (this.current().type === '~') { this.advance(); return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()) }; }
     // Dereference & — skip
     if (this.current().type === '&') {
       this.advance();
@@ -1264,5 +1270,5 @@ export function parseMoveSource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new MoveParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

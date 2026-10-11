@@ -72,6 +72,11 @@ pub fn parseZig(allocator: Allocator, source: []const u8, file_name: []const u8)
     }
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
+    // F-213: an over-nested source is refused with the one shared diagnostic,
+    // before anything here or downstream recurses over the tree.
+    if (input_limits.nestingGuardErrors(allocator, parser.nest_error, r.contract, file_name)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     // F-011: tokenize the whole source once more so an unterminated literal
     // is reported even where the parser stopped before reaching it.
     var t = Tokenizer.init(source);
@@ -265,9 +270,8 @@ const Parser = struct {
     current: Token,
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
-    depth: u32,
-
-    const max_depth: u32 = 256;
+    nest: input_limits.NestingCounter = .{},
+    nest_error: ?[]const u8 = null,
 
     const ParsedFieldType = struct {
         type_node: TypeNode,
@@ -277,9 +281,48 @@ const Parser = struct {
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty };
         p.current = p.normalizeNumber(p.current);
         return p;
+    }
+
+    /// F-213 measure (A): enter one counted nesting level — a statement, a
+    /// full-expression parse, a prefix-unary operand, another self-recursion
+    /// or a nested type (see frontend/input_limits.zig). False once the source
+    /// is over-nested: the caller then returns without parsing, and must not
+    /// call `self.nest.exit()`.
+    fn enterNest(self: *Parser) bool {
+        if (self.nest.enter()) return true;
+        self.refuseNesting();
+        return false;
+    }
+
+    /// Record the shared F-213 diagnostic (once) and jump to end of input, so
+    /// every parse loop winds down; the parse entry then returns that
+    /// diagnostic alone. Called again on every later refused `enterNest`, so a
+    /// parse that rewinds the token stream after a refusal still ends.
+    fn refuseNesting(self: *Parser) void {
+        self.nest.exceeded = true;
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        self.tokenizer.pos = self.tokenizer.source.len;
+        self.current = self.fetch();
+    }
+
+    /// F-213 measure (A): run `f` one counted nesting level deeper — the
+    /// prefix-unary operand, ternary-arm, else-if and nested-type recursions.
+    fn nestedParse(self: *Parser, comptime T: type, comptime f: fn (*Parser) ?T) ?T {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return f(self);
+    }
+
+    /// F-213 measure (A) for the nested-type recursions, whose parse functions
+    /// return a value rather than an optional: `fallback` stands in for the
+    /// refused parse (the whole source is refused anyway).
+    fn nestedValue(self: *Parser, comptime T: type, fallback: T, comptime f: anytype, args: anytype) T {
+        if (!self.enterNest()) return fallback;
+        defer self.nest.exit();
+        return @call(.auto, f, .{self} ++ args);
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -486,6 +529,12 @@ const Parser = struct {
             }
         }
 
+        // F-213 measure (B), before the recursive pass below walks the bodies.
+        if (self.nest.exceeded or input_limits.membersTooDeep(properties.items, methods.items)) {
+            self.refuseNesting();
+            return null;
+        }
+
         // Rule 3: a field with no default that a method body ASSIGNS is state,
         // not a constructor constant. Without this the no-default shape was
         // inferred fully-readonly and the stateful continuation was dropped.
@@ -580,7 +629,7 @@ const Parser = struct {
                 if (self.expect(.lparen) == null) {
                     return .{ .type_node = .{ .custom_type = "unknown" }, .explicit_readonly = true };
                 }
-                const inner = self.parseFieldTypeNode();
+                const inner = self.nestedValue(ParsedFieldType, .{ .type_node = .{ .primitive_type = .void }, .explicit_readonly = false }, Parser.parseFieldTypeNode, .{});
                 _ = self.expect(.rparen);
                 return .{ .type_node = inner.type_node, .explicit_readonly = true };
             }
@@ -607,7 +656,7 @@ const Parser = struct {
             const size_tok = self.bump();
             const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
             _ = self.expect(.rbracket);
-            const inner = self.parseTypeNode();
+            const inner = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parseTypeNode, .{});
             const inner_ptr = self.allocator.create(TypeNode) catch return .{ .custom_type = "unknown" };
             inner_ptr.* = inner;
             return .{ .fixed_array_type = .{ .element = inner_ptr, .length = size } };
@@ -864,6 +913,12 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ?Statement {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return self.parseStatementInner();
+    }
+
+    fn parseStatementInner(self: *Parser) ?Statement {
         return switch (self.current.kind) {
             .kw_const => self.parseVarDeclStmt(false),
             .kw_var => self.parseVarDeclStmt(true),
@@ -904,7 +959,7 @@ const Parser = struct {
         if (self.current.kind == .kw_else) {
             _ = self.bump();
             if (self.current.kind == .kw_if) {
-                const nested = self.parseIfStmt() orelse return null;
+                const nested = self.nestedParse(Statement, Parser.parseIfStmt) orelse return null;
                 const a = self.allocator.alloc(Statement, 1) catch return null;
                 a[0] = nested;
                 else_body = a;
@@ -1208,12 +1263,8 @@ const Parser = struct {
     // ---- Expressions ----
 
     fn parseExpression(self: *Parser) ?Expression {
-        self.depth += 1;
-        defer self.depth -= 1;
-        if (self.depth > max_depth) {
-            self.addError("expression nesting depth exceeds maximum (256)");
-            return null;
-        }
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
         return self.parseLogicalOr();
     }
 
@@ -1309,9 +1360,9 @@ const Parser = struct {
     }
 
     fn parseUnary(self: *Parser) ?Expression {
-        if (self.current.kind == .minus) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.negate, o); }
-        if (self.current.kind == .bang) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.not, o); }
-        if (self.current.kind == .tilde) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.bitnot, o); }
+        if (self.current.kind == .minus) { _ = self.bump(); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.negate, o); }
+        if (self.current.kind == .bang) { _ = self.bump(); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.not, o); }
+        if (self.current.kind == .tilde) { _ = self.bump(); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.bitnot, o); }
         // Zig's `&` is the address-of operator used for slice coercion at
         // call sites like `&.{sig1, sig2}` (an anonymous-struct literal
         // coerced to a slice). Slices have no Rúnar IR analogue — the inner

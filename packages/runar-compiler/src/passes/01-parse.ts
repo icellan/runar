@@ -59,6 +59,7 @@ import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
 import { extractSighashDirective } from './sighash-directive.js';
 import { OPCODES } from './06-emit.js';
+import { SourceNestingError, withNestingLimit } from './source-limits.js';
 import {
   encodePushBigIntHex,
   encodePushBytesHex,
@@ -188,6 +189,11 @@ export function parse(source: string, fileName?: string): ParseResult {
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
+  return withNestingLimit(file, () => parseTsSurface(source, file, errors));
+}
+
+/** The `.runar.ts` surface: ts-morph parse, then conversion to the Rúnar AST. */
+function parseTsSurface(source: string, file: string, errors: CompilerDiagnostic[]): ParseResult {
 
   const project = new Project({
     useInMemoryFileSystem: true,
@@ -199,6 +205,15 @@ export function parse(source: string, fileName?: string): ParseResult {
   });
 
   const sourceFile = project.createSourceFile(file, source);
+
+  // F-213 measure (A), before anything walks the tree recursively. ts-morph
+  // has no hook inside its parser, so the counter the hand-written surfaces
+  // keep is recomputed here, iteratively, from the TypeScript AST.
+  const tooDeep = tsParseNestingViolation(sourceFile.compilerNode);
+  if (tooDeep) {
+    const lc = sourceFile.compilerNode.getLineAndCharacterOfPosition(tooDeep.getStart(sourceFile.compilerNode));
+    throw new SourceNestingError({ file, line: lc.line + 1, column: lc.character });
+  }
 
   // F-011: ts-morph ends an unterminated string literal at the line break and
   // records a syntax diagnostic that nothing here reads, so `"cafe;` used to
@@ -1974,4 +1989,83 @@ function locFromNode(node: Node, file: string): SourceLocation {
     line: start,
     column: lineAndCol.column - 1, // 0-based
   };
+}
+
+// ---------------------------------------------------------------------------
+// F-213 measure (A) for the .runar.ts surface
+// ---------------------------------------------------------------------------
+
+function isStatementKind(k: ts.SyntaxKind): boolean {
+  return k === ts.SyntaxKind.Block
+    || (k >= ts.SyntaxKind.FirstStatement && k <= ts.SyntaxKind.LastStatement);
+}
+
+/**
+ * The parse-nesting counter (measure A) of `child`, given its parent's.
+ * Mirrors what the hand-written surface parsers count: a statement inside a
+ * body (+1; a block is free unless it is itself a nested statement), each
+ * expression slot of a statement / declaration, a parenthesised group, a call
+ * or `new` argument, an element-access index, an array element, a ternary arm,
+ * a prefix-unary operand, a nested type argument. Binary operands, member
+ * objects and callees add nothing.
+ */
+function tsChildNesting(parent: ts.Node, child: ts.Node, level: number): number {
+  const pk = parent.kind;
+  if (isStatementKind(child.kind) && (pk === ts.SyntaxKind.Block || isStatementKind(pk))) {
+    if (child.kind === ts.SyntaxKind.Block && pk !== ts.SyntaxKind.Block) return level;
+    return level + 1;
+  }
+  switch (pk) {
+    case ts.SyntaxKind.ExpressionStatement:
+    case ts.SyntaxKind.IfStatement:
+    case ts.SyntaxKind.ReturnStatement:
+    case ts.SyntaxKind.ThrowStatement:
+    case ts.SyntaxKind.WhileStatement:
+    case ts.SyntaxKind.DoStatement:
+    case ts.SyntaxKind.SwitchStatement:
+      return child === (parent as ts.ExpressionStatement).expression ? level + 1 : level;
+    case ts.SyntaxKind.ForStatement: {
+      const f = parent as ts.ForStatement;
+      return child === f.condition || child === f.incrementor
+        || (child === f.initializer && child.kind !== ts.SyntaxKind.VariableDeclarationList)
+        ? level + 1 : level;
+    }
+    case ts.SyntaxKind.VariableDeclaration:
+    case ts.SyntaxKind.PropertyDeclaration:
+    case ts.SyntaxKind.Parameter:
+      return child === (parent as ts.VariableDeclaration).initializer ? level + 1 : level;
+    case ts.SyntaxKind.ParenthesizedExpression:
+    case ts.SyntaxKind.PrefixUnaryExpression:
+    case ts.SyntaxKind.ArrayLiteralExpression:
+      return level + 1;
+    case ts.SyntaxKind.CallExpression:
+    case ts.SyntaxKind.NewExpression: {
+      const args = (parent as ts.CallExpression).arguments;
+      return args !== undefined && args.includes(child as ts.Expression) ? level + 1 : level;
+    }
+    case ts.SyntaxKind.ElementAccessExpression:
+      return child === (parent as ts.ElementAccessExpression).argumentExpression ? level + 1 : level;
+    case ts.SyntaxKind.ConditionalExpression:
+      return child === (parent as ts.ConditionalExpression).condition ? level : level + 1;
+    case ts.SyntaxKind.TypeReference: {
+      const typeArgs = (parent as ts.TypeReferenceNode).typeArguments;
+      return typeArgs !== undefined && typeArgs.includes(child as ts.TypeNode) ? level + 1 : level;
+    }
+    default:
+      return level;
+  }
+}
+
+/** The first node whose parse nesting exceeds the limit, or null. Iterative. */
+function tsParseNestingViolation(sf: ts.SourceFile): ts.Node | null {
+  const limit = InputLimits.MAX_SOURCE_NESTING;
+  const work: Array<[ts.Node, number]> = [[sf, 0]];
+  while (work.length > 0) {
+    const [node, level] = work.pop()!;
+    if (level > limit) return node;
+    ts.forEachChild(node, (child) => {
+      work.push([child, tsChildNesting(node, child, level)]);
+    });
+  }
+  return null;
 }

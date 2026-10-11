@@ -586,6 +586,8 @@ module RunarCompiler
     end
 
     class GoParser
+      include InputLimits::NestingCounter
+
       include GoTokens
 
       def initialize(file_name)
@@ -907,7 +909,7 @@ module RunarCompiler
             0
           end
           expect(TOK_RBRACKET)
-          element = parse_go_type
+          element = nested { parse_go_type }
           return FixedArrayType.new(element: element, length: length)
         end
 
@@ -1034,6 +1036,10 @@ module RunarCompiler
       # -- Statement parsing -------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # N-153: a `{` cannot start a statement (no block statement, and not a
@@ -1163,7 +1169,7 @@ module RunarCompiler
           advance
           if check_ident("if")
             # else if -- parse as nested if_statement in the else branch
-            else_block = [parse_if_statement]
+            else_block = [nested { parse_if_statement }]
           else
             expect(TOK_LBRACE)
             while !check(TOK_RBRACE) && !check(TOK_EOF)
@@ -1257,6 +1263,10 @@ module RunarCompiler
       # -- Expression parsing (precedence climbing) -------------------------
 
       def parse_expression
+        nested { parse_expression_inner }
+      end
+
+      def parse_expression_inner
         expr = parse_or
         # N-056: refuse an unparenthesised operand edge that groups differently
         # under Go precedence; nested ( ... ) groups were checked by their own
@@ -1401,17 +1411,17 @@ module RunarCompiler
 
       def parse_unary
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary })
         end
         if match_tok(TOK_MINUS)
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary })
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
         end
         # Go uses ^ as bitwise NOT (complement) when used as unary prefix
         if match_tok(TOK_CARET)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
         end
 
         expr = parse_postfix_chain(parse_primary)
@@ -1458,7 +1468,7 @@ module RunarCompiler
         elements = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
           elements << if check(TOK_LBRACE)
-            parse_go_brace_literal
+            nested { parse_go_brace_literal }
           else
             parse_expression
           end
@@ -1636,7 +1646,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_go_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_go_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_go_tokens(source, file_name, lex)
@@ -1646,6 +1658,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

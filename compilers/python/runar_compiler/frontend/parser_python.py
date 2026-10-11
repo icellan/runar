@@ -17,6 +17,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -662,6 +663,8 @@ class _PyParser:
         # binding's name. Snapshot/restored around if-branches and loop bodies
         # exactly as the Ruby parser's ``declared_locals``.
         self.declared_locals: set[str] = set()
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def _bind_local(self, name: str, typ, init: Expression, loc: SourceLocation) -> Statement:
         """N-046: ``name = init`` is an assignment when the method already
@@ -747,14 +750,16 @@ class _PyParser:
 
         if name == "Readonly":
             if self.match(TOK_LBRACKET):
-                inner = self.parse_type_annotation()
+                with self._nest.nested(self.loc):
+                    inner = self.parse_type_annotation()
                 self.expect(TOK_RBRACKET)
                 return inner
             return CustomType(name=name)
 
         if name == "FixedArray":
             if self.match(TOK_LBRACKET):
-                elem_type = self.parse_type_annotation()
+                with self._nest.nested(self.loc):
+                    elem_type = self.parse_type_annotation()
                 self.expect(TOK_COMMA)
                 size_tok = self.expect(TOK_NUMBER)
                 try:
@@ -1081,6 +1086,10 @@ class _PyParser:
     # -- Statement parsing ---------------------------------------------------
 
     def parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         if self.check_ident("assert") or self.check_ident("assert_"):
@@ -1172,7 +1181,8 @@ class _PyParser:
         if self.check_ident("elif"):
             elif_loc = self.loc()
             self.advance()
-            elif_stmt = self._parse_if_body(elif_loc)
+            with self._nest.nested(self.loc):
+                elif_stmt = self._parse_if_body(elif_loc)
             else_block = [elif_stmt]
             self.declared_locals = set(locals_before)
         elif self.match_ident("else"):
@@ -1338,7 +1348,8 @@ class _PyParser:
     # -- Expression parsing --------------------------------------------------
 
     def parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
@@ -1346,7 +1357,8 @@ class _PyParser:
             self.advance()
             condition = self._parse_or()
             self.expect_ident("else")
-            alternate = self._parse_ternary()
+            with self._nest.nested(self.loc):
+                alternate = self._parse_ternary()
             return TernaryExpr(condition=condition, consequent=expr, alternate=alternate)
         return expr
 
@@ -1366,7 +1378,8 @@ class _PyParser:
 
     def _parse_not(self) -> Expression:
         if self.match(TOK_BANG):
-            operand = self._parse_not()
+            with self._nest.nested(self.loc):
+                operand = self._parse_not()
             return UnaryExpr(op="!", operand=operand)
         return self._parse_bitwise_or()
 
@@ -1470,20 +1483,24 @@ class _PyParser:
 
     def _parse_unary(self) -> Expression:
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="-", operand=operand)
         if self.match(TOK_TILDE):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="~", operand=operand)
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="!", operand=operand)
         return self._parse_power()
 
     def _parse_power(self) -> Expression:
         base = self._parse_postfix()
         if self.match(TOK_STARSTAR):
-            exp = self._parse_unary()
+            with self._nest.nested(self.loc):
+                exp = self._parse_unary()
             return CallExpr(callee=Identifier(name="pow"), args=[base, exp])
         return base
 
@@ -1663,7 +1680,9 @@ def parse_python(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_python_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_python_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_python_tokens(source: str, file_name: str, lex: list) -> ParseResult:

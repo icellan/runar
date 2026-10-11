@@ -17,6 +17,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -569,6 +570,8 @@ class _GoParser:
         # N-056: id() -> node of every expression operand (atoms); holding the
         # node keeps its id() from being reused.
         self._go_atoms: dict[int, Expression] = {}
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -652,17 +655,20 @@ class _GoParser:
                     size = 0
                     self.add_error(f"line {size_tok.line}: array size must be integer")
                 self.expect(TOK_RBRACKET)
-                elem_type = self.parse_type()
+                with self._nest.nested(self.loc):
+                    elem_type = self.parse_type()
                 return FixedArrayType(element=elem_type, length=size)
             else:
                 # []Type -- slice, treat as the element type
                 self.expect(TOK_RBRACKET)
-                return self.parse_type()
+                with self._nest.nested(self.loc):
+                    return self.parse_type()
 
         # Pointer type: *Type (skip the star)
         if self.check(TOK_STAR):
             self.advance()
-            return self.parse_type()
+            with self._nest.nested(self.loc):
+                return self.parse_type()
 
         tok = self.peek()
         if tok.kind != TOK_IDENT:
@@ -1241,6 +1247,10 @@ class _GoParser:
             self.advance()
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         # if statement
@@ -1276,7 +1286,8 @@ class _GoParser:
             if self.check_ident("if"):
                 # else if -> nested IfStmt in else
                 elif_loc = self.loc()
-                elif_stmt = self._parse_if(elif_loc)
+                with self._nest.nested(self.loc):
+                    elif_stmt = self._parse_if(elif_loc)
                 else_block = [elif_stmt]
             else:
                 else_block = self._parse_block()
@@ -1493,7 +1504,8 @@ class _GoParser:
     # -- Expression parsing --------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        expr = self._parse_or()
+        with self._nest.nested(self.loc):
+            expr = self._parse_or()
         # N-056: refuse an unparenthesised operand edge that groups differently
         # under Go precedence; nested ( ... ) groups were checked by their own
         # _parse_expression call and are atoms here.
@@ -1626,14 +1638,17 @@ class _GoParser:
 
     def _parse_unary(self) -> Expression:
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="-", operand=operand)
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="!", operand=operand)
         if self.match(TOK_CARET):
             # Go uses ^ as bitwise NOT (unary)
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="~", operand=operand)
         expr = self._parse_postfix()
         self._go_atoms[id(expr)] = expr  # N-056: an operand is an atom
@@ -1879,7 +1894,8 @@ class _GoParser:
         elements: list[Expression] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             if self.check(TOK_LBRACE):
-                elements.append(self._parse_go_brace_literal())
+                with self._nest.nested(self.loc):
+                    elements.append(self._parse_go_brace_literal())
             else:
                 elements.append(self._parse_expression())
             if not self.match(TOK_COMMA):
@@ -1988,7 +2004,9 @@ def parse_go(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_go_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_go_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_go_tokens(source: str, file_name: str, lex: list) -> ParseResult:

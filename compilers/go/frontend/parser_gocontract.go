@@ -37,10 +37,35 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 	if diags := checkGoNumericLiterals(source, fileName); len(diags) > 0 {
 		return &ParseResult{Errors: diags}
 	}
+	return withNestingLimit(func() *ParseResult { return parseGoContractSurface(source, fileName) })
+}
+
+// goParserDepthErrors are go/parser's own recursion bounds (max nesting depth
+// 100,000; max resolver scope depth 1,000). Both sit far past
+// MaxSourceNesting, so a source that trips one is over-nested by F-213's
+// measures too and gets the shared diagnostic, not go/parser's text.
+var goParserDepthErrors = []string{"exceeded max nesting depth", "exceeded max scope depth"}
+
+func parseGoContractSurface(source []byte, fileName string) *ParseResult {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, fileName, source, parser.ParseComments)
+	file, err := parser.ParseFile(fset, fileName, source, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
+		for _, depthErr := range goParserDepthErrors {
+			if strings.Contains(err.Error(), depthErr) {
+				return sourceNestingResult(&SourceLocation{File: fileName, Line: 1, Column: 0})
+			}
+		}
 		return &ParseResult{Errors: []Diagnostic{{Message: fmt.Sprintf("Go parse error: %v", err), Severity: SeverityError}}}
+	}
+
+	// F-213 measure (A), iteratively over go/ast, before the recursive
+	// converter walks the tree.
+	if bad := goParseNestingViolation(file); bad != nil {
+		loc := SourceLocation{File: fileName}
+		if pos := fset.Position(bad.Pos()); pos.IsValid() {
+			loc = SourceLocation{File: fileName, Line: pos.Line, Column: pos.Column - 1}
+		}
+		return sourceNestingResult(&loc)
 	}
 
 	p := &goContractParser{
@@ -1053,4 +1078,140 @@ func goFieldToCamel(name string) string {
 	// the Rúnar side of this mapping is a field name the author wrote.
 	r[0] = unicode.ToLower(r[0])
 	return string(r)
+}
+
+// ---------------------------------------------------------------------------
+// F-213 measure (A) for the .runar.go surface
+// ---------------------------------------------------------------------------
+
+// goNestItem is one go/ast node on the iterative walk's work list.
+type goNestItem struct {
+	node  ast.Node
+	level int
+	// chain counts the edges above node that each become one level of the
+	// Rúnar expression tree (see goParseNestingViolation).
+	chain int
+}
+
+// goNestChildren returns the children of it.node with their parse nesting,
+// mirroring the TS reference's hand-written .runar.go parser
+// (packages/runar-compiler/src/passes/01-parse-go.ts): +1 per statement in a
+// body (an `else if` is a statement of the else branch), +1 per expression
+// slot of a statement (a `for` init / post statement is not itself counted,
+// its expressions are), +1 per parenthesised group, prefix-unary operand,
+// call argument, index expression, composite-literal element and nested
+// array element type. Binary operands, selectors and callees add nothing.
+func goNestChildren(it goNestItem) []goNestItem {
+	lv := it.level
+	var out []goNestItem
+	addChain := func(n ast.Node, level, chain int) {
+		if n != nil {
+			out = append(out, goNestItem{node: n, level: level, chain: chain})
+		}
+	}
+	add := func(n ast.Node, level int) { addChain(n, level, it.chain) }
+	addExprs := func(es []ast.Expr, level int) {
+		for _, e := range es {
+			add(e, level)
+		}
+	}
+	switch n := it.node.(type) {
+	case *ast.BlockStmt:
+		for _, s := range n.List {
+			add(s, lv+1)
+		}
+	case *ast.IfStmt:
+		add(n.Init, lv+1)
+		add(n.Cond, lv+1)
+		if n.Body != nil {
+			add(n.Body, lv)
+		}
+		if elseIf, ok := n.Else.(*ast.IfStmt); ok {
+			add(elseIf, lv+1)
+		} else {
+			add(n.Else, lv)
+		}
+	case *ast.ForStmt:
+		add(n.Init, lv)
+		add(n.Cond, lv+1)
+		add(n.Post, lv)
+		if n.Body != nil {
+			add(n.Body, lv)
+		}
+	case *ast.RangeStmt:
+		add(n.Key, lv+1)
+		add(n.Value, lv+1)
+		add(n.X, lv+1)
+		if n.Body != nil {
+			add(n.Body, lv)
+		}
+	case *ast.ExprStmt:
+		add(n.X, lv+1)
+	case *ast.AssignStmt:
+		addExprs(n.Lhs, lv+1)
+		addExprs(n.Rhs, lv+1)
+	case *ast.IncDecStmt:
+		add(n.X, lv+1)
+	case *ast.ReturnStmt:
+		addExprs(n.Results, lv+1)
+	case *ast.ValueSpec:
+		add(n.Type, lv)
+		addExprs(n.Values, lv+1)
+	case *ast.ParenExpr:
+		add(n.X, lv+1)
+	case *ast.UnaryExpr:
+		add(n.X, lv+1)
+	case *ast.CallExpr:
+		addChain(n.Fun, lv, it.chain+1)
+		addExprs(n.Args, lv+1)
+	case *ast.IndexExpr:
+		addChain(n.X, lv, it.chain+1)
+		add(n.Index, lv+1)
+	case *ast.SelectorExpr:
+		addChain(n.X, lv, it.chain+1)
+	case *ast.CompositeLit:
+		add(n.Type, lv)
+		addExprs(n.Elts, lv+1)
+	case *ast.ArrayType:
+		add(n.Len, lv)
+		add(n.Elt, lv+1)
+	case *ast.BinaryExpr:
+		addChain(n.X, lv, it.chain+1)
+		addChain(n.Y, lv, it.chain+1)
+	default:
+		// Every other node: its direct children, at the same level.
+		// ast.Inspect is stopped one level down, so this never recurses.
+		ast.Inspect(it.node, func(c ast.Node) bool {
+			if c == it.node {
+				return true
+			}
+			add(c, lv)
+			return false
+		})
+	}
+	return out
+}
+
+// goParseNestingViolation returns the first node whose parse nesting
+// (measure A) exceeds MaxSourceNesting, or nil. Iterative, run before the
+// recursive converter. Like the .runar.ts walk it also refuses a node reached
+// through more than MaxSourceNesting+1 chain edges (binary operand, index /
+// selector object, callee): convertExpression turns each such parent into a
+// Rúnar node holding the converted child, except at the innermost two edges
+// of a `runar.Int(x)`-style conversion (callee, then selector on the bare
+// `runar` identifier), which build no node. A path of k chain edges is thus
+// a Rúnar expression at least k-1 deep, so measure (B) would refuse the tree
+// anyway; refusing here keeps the recursive converter off a left-deep chain
+// hundreds of thousands of levels deep.
+func goParseNestingViolation(file *ast.File) ast.Node {
+	work := []goNestItem{{node: file}}
+	for len(work) > 0 {
+		it := work[len(work)-1]
+		work = work[:len(work)-1]
+		if it.level > MaxSourceNesting || it.chain > MaxSourceNesting+1 {
+			return it.node
+		}
+		work = append(work, goNestChildren(it)...)
+	}
+	return nil
 }

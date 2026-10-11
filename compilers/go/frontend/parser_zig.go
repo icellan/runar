@@ -19,6 +19,10 @@ func ParseZig(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseZigSurface(source, fileName) })
+}
+
+func parseZigSurface(source []byte, fileName string) *ParseResult {
 	p := &zigParser{
 		fileName:             fileName,
 		selfNames:            make(map[string]bool),
@@ -128,6 +132,9 @@ type zigParser struct {
 	parentClass          string
 	selfNames            map[string]bool
 	statefulContextNames map[string]bool
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *zigParser) addError(msg string) {
@@ -536,7 +543,7 @@ func (p *zigParser) parseType() zigParsedType {
 			length = 0
 		}
 		p.expect(zigTokRBracket)
-		elem := p.parseType()
+		elem := nested(&p.nest, p.loc(), p.parseType)
 		return zigParsedType{
 			typeNode: FixedArrayType{Element: elem.typeNode, Length: length},
 			rawName:  elem.rawName,
@@ -550,7 +557,7 @@ func (p *zigParser) parseType() zigParsedType {
 		name := p.expect(zigTokIdent).value
 		if name == "Readonly" && p.check(zigTokLParen) {
 			p.expect(zigTokLParen)
-			inner := p.parseType()
+			inner := nested(&p.nest, p.loc(), p.parseType)
 			p.expect(zigTokRParen)
 			inner.readonly = true
 			return inner
@@ -1115,6 +1122,10 @@ func zigGetLoopUpdateTargetName(stmt ForStmt) string {
 }
 
 func (p *zigParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *zigParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// return statement
@@ -1226,7 +1237,8 @@ func (p *zigParser) parseIfStatement(loc SourceLocation) Statement {
 	var elseBranch []Statement
 	if p.match(zigTokElse) {
 		if p.check(zigTokIf) {
-			elseBranch = []Statement{p.parseIfStatement(p.loc())}
+			elseLoc := p.loc()
+			elseBranch = []Statement{nested(&p.nest, elseLoc, func() Statement { return p.parseIfStatement(elseLoc) })}
 		} else {
 			elseBranch = p.parseBlockStatements()
 		}
@@ -1342,7 +1354,7 @@ func (p *zigParser) skipUnsupportedBlock() {
 // ---------------------------------------------------------------------------
 
 func (p *zigParser) parseExpression() Expression {
-	return p.parseOr()
+	return nested(&p.nest, p.loc(), p.parseOr)
 }
 
 func (p *zigParser) parseOr() Expression {
@@ -1481,15 +1493,15 @@ func (p *zigParser) parseMultiplicative() Expression {
 
 func (p *zigParser) parseUnary() Expression {
 	if p.match(zigTokBang) {
-		operand := p.parseUnary()
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	if p.match(zigTokMinus) {
-		operand := p.parseUnary()
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "-", Operand: operand}
 	}
 	if p.match(zigTokTilde) {
-		operand := p.parseUnary()
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
 	expr := p.parsePrimary()

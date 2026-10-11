@@ -37,7 +37,7 @@ import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -639,13 +639,13 @@ class RustParser extends ParserCore<RustToken> {
     if (this.current().type === '&') {
       this.advance();
       if (this.current().type === 'mut') this.advance();
-      return this.parseRustType();
+      return this.nest.nested(this.loc(), () => this.parseRustType());
     }
 
     // Handle array types: [Type; N]
     if (this.current().type === '[') {
       this.advance();
-      const element = this.parseRustType();
+      const element = this.nest.nested(this.loc(), () => this.parseRustType());
       this.expect(';');
       const length = parseInt(this.expect('number').value, 10);
       this.expect(']');
@@ -831,6 +831,10 @@ class RustParser extends ParserCore<RustToken> {
   // -----------------------------------------------------------------------
 
   private parseStatement(): Statement {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement {
     const location = this.loc();
 
     // return [expr];
@@ -1004,7 +1008,7 @@ class RustParser extends ParserCore<RustToken> {
       this.advance();
       if (this.current().type === 'if') {
         // else if -> nested if_statement in the else branch
-        elseBranch = [this.parseIfStatement()];
+        elseBranch = [this.nest.nested(this.loc(), () => this.parseIfStatement())];
       } else {
         this.expect('{');
         elseBranch = [];
@@ -1204,7 +1208,7 @@ class RustParser extends ParserCore<RustToken> {
     const at = this.loc();
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary(), sourceLocation: at };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '-') {
       this.advance();
@@ -1219,17 +1223,17 @@ class RustParser extends ParserCore<RustToken> {
         for (let j = 1; j <= opens; j++) if (this.tokens[k + j]?.type !== ')') closed = false;
         if (closed) lit.negOnly = false;
       }
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary(), sourceLocation: at };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary(), sourceLocation: at };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     // Skip reference operator & in expression context
     if (this.current().type === '&') {
       this.advance();
       if (this.current().type === 'mut') this.advance();
-      return this.parseUnary();
+      return this.nest.nested(this.loc(), () => this.parseUnary());
     }
 
     let expr = this.parsePrimary();
@@ -1345,5 +1349,5 @@ export function parseRustSource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new RustParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

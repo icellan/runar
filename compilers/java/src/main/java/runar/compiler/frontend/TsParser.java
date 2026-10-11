@@ -79,7 +79,9 @@ public final class TsParser {
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser p = new Parser(tokens, filename, comments);
-        ContractNode contract = p.parseContract();
+        // F-213: measures (A) and (B). Counted to match the TS reference's
+        // ts-morph mapping (tsChildNesting in passes/01-parse.ts).
+        ContractNode contract = SourceNesting.guard(p::parseContract, ParseException::new);
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("\n", p.errors));
         }
@@ -518,6 +520,8 @@ public final class TsParser {
         final List<CommentInfo> comments;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         boolean fatal = false;
         String fatalMsg = null;
 
@@ -1046,7 +1050,7 @@ public final class TsParser {
 
             if (name.equals("FixedArray")) {
                 if (match(TOK_LT)) {
-                    TypeNode elem = parseType();
+                    TypeNode elem = nest.nested(this::parseType);
                     expect(TOK_COMMA);
                     Token sizeTok = expect(TOK_NUMBER);
                     int size;
@@ -1126,6 +1130,10 @@ public final class TsParser {
         // -- Statements -----------------------------------------------
 
         Statement parseStatement() throws ParseException {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() throws ParseException {
             SourceLocation location = loc();
             Token tok = peek();
 
@@ -1244,7 +1252,8 @@ public final class TsParser {
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
                     SourceLocation elifLoc = loc();
-                    Statement elifStmt = parseIf(elifLoc);
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement elifStmt = nest.nested(() -> parseIf(elifLoc));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(elifStmt);
                 } else {
@@ -1360,15 +1369,16 @@ public final class TsParser {
         // -- Expressions ----------------------------------------------
 
         Expression parseExpression() throws ParseException {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() throws ParseException {
             Expression expr = parseOr();
             if (match(TOK_QUESTION)) {
-                Expression consequent = parseTernary();
+                // F-213 A4: ternary arms recurse outside parseExpression.
+                Expression consequent = nest.nested(this::parseTernary);
                 expect(TOK_COLON);
-                Expression alternate = parseTernary();
+                Expression alternate = nest.nested(this::parseTernary);
                 return new TernaryExpr(expr, consequent, alternate);
             }
             return expr;
@@ -1510,23 +1520,23 @@ public final class TsParser {
 
         Expression parseUnary() throws ParseException {
             if (match(TOK_BANG)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.NOT, operand);
             }
             if (match(TOK_MINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.NEG, operand);
             }
             if (match(TOK_TILDE)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
             }
             if (match(TOK_PLUSPLUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new IncrementExpr(operand, true);
             }
             if (match(TOK_MINUSMINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new DecrementExpr(operand, true);
             }
             return parsePostfix();

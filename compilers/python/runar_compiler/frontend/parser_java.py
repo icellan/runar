@@ -37,6 +37,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, assert_ast_nesting, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -500,6 +501,8 @@ class _JavaParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     # -- Token helpers -------------------------------------------------------
 
@@ -640,6 +643,8 @@ class _JavaParser:
             methods=methods,
             source_file=self.file_name,
         )
+        # F-213: measure (B) before the recursive N-023 walk below.
+        assert_ast_nesting(contract)
         self._check_bare_property_assignments(contract)
         return contract
 
@@ -983,7 +988,8 @@ class _JavaParser:
         # FixedArray<T, N>
         if name == "FixedArray" and self.check(TOK_LT):
             self.advance()  # <
-            element = self._parse_type()
+            with self._nest.nested(self.loc):
+                element = self._parse_type()
             self.expect(TOK_COMMA, "',' in FixedArray")
             len_tok = self.expect(TOK_NUMBER, "integer literal length")
             try:
@@ -1030,6 +1036,10 @@ class _JavaParser:
         return stmts
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         loc = self.loc()
         tok = self.peek()
 
@@ -1264,7 +1274,8 @@ class _JavaParser:
     # -- Expressions (precedence climbing) -----------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         cond = self._parse_or()
@@ -1388,22 +1399,28 @@ class _JavaParser:
 
     def _parse_unary(self) -> Expression:
         if self.match_tok(TOK_BANG):
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="!", operand=self._parse_unary())
         if self.match_tok(TOK_TILDE):
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="~", operand=self._parse_unary())
         if self.match_tok(TOK_MINUS):
             # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
             # legal only as the direct operand of this minus.
             if self.check(TOK_NUMBER):
                 self.peek().neg_only = False
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="-", operand=self._parse_unary())
         if self.match_tok(TOK_PLUS):
             # Unary +x == x (matches Java parser reference).
-            return self._parse_unary()
+            with self._nest.nested(self.loc):
+                return self._parse_unary()
         if self.match_tok(TOK_PLUSPLUS):
-            return IncrementExpr(operand=self._parse_unary(), prefix=True)
+            with self._nest.nested(self.loc):
+                return IncrementExpr(operand=self._parse_unary(), prefix=True)
         if self.match_tok(TOK_MINUSMINUS):
-            return DecrementExpr(operand=self._parse_unary(), prefix=True)
+            with self._nest.nested(self.loc):
+                return DecrementExpr(operand=self._parse_unary(), prefix=True)
         return self._parse_postfix()
 
     def _parse_postfix(self) -> Expression:
@@ -1782,7 +1799,9 @@ def parse_java(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_java_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_java_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_java_tokens(source: str, file_name: str, lex: list) -> ParseResult:

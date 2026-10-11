@@ -18,6 +18,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -430,6 +431,8 @@ class _MoveParser:
         self.errors: list[Diagnostic] = []
         # F-017: (source spelling, Rúnar name) of every declared identifier.
         self.declared: list[tuple[str, str]] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -676,7 +679,8 @@ class _MoveParser:
 
         if name == "FixedArray" and self.check(TOK_LT):
             self.advance()  # <
-            inner = self._parse_move_type_node()
+            with self._nest.nested(self.loc):
+                inner = self._parse_move_type_node()
             self.expect(TOK_COMMA)
             len_tok = self.expect(TOK_NUMBER)
             try:
@@ -693,7 +697,8 @@ class _MoveParser:
 
         if name == "vector" and self.check(TOK_LT):
             self.advance()
-            self._parse_move_type_node()  # discard inner type
+            with self._nest.nested(self.loc):
+                self._parse_move_type_node()  # discard inner type
             self._consume_move_generic_close()
             return PrimitiveType(name="ByteString")
 
@@ -865,6 +870,10 @@ class _MoveParser:
     # -- Statement parsing ---------------------------------------------------
 
     def _parse_move_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_move_statement_inner()
+
+    def _parse_move_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         # let [mut] name [: Type] = expr;
@@ -976,7 +985,8 @@ class _MoveParser:
         else_block: list[Statement] = []
         if self.match_ident("else"):
             if self.check_ident("if"):
-                else_stmt = self._parse_move_if(self.loc())
+                with self._nest.nested(self.loc):
+                    else_stmt = self._parse_move_if(self.loc())
                 else_block = [else_stmt]
             else:
                 else_block = self._parse_move_block()
@@ -1066,7 +1076,8 @@ class _MoveParser:
     # -- Expression parsing (recursive descent with precedence) ---------------
 
     def _parse_move_expression(self) -> Expression:
-        return self._parse_move_or()
+        with self._nest.nested(self.loc):
+            return self._parse_move_or()
 
     def _parse_move_or(self) -> Expression:
         left = self._parse_move_and()
@@ -1179,22 +1190,27 @@ class _MoveParser:
 
     def _parse_move_unary(self) -> Expression:
         if self.match(TOK_BANG):
-            operand = self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_move_unary()
             return UnaryExpr(op="!", operand=operand)
         if self.match(TOK_MINUS):
-            operand = self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_move_unary()
             return UnaryExpr(op="-", operand=operand)
         if self.match(TOK_TILDE):
-            operand = self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_move_unary()
             return UnaryExpr(op="~", operand=operand)
         # Skip & (reference) -- it's a no-op in the Runar context
         if self.match(TOK_AMP):
             self.match_ident("mut")  # &mut expr -- skip both
-            return self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                return self._parse_move_unary()
         # Dereference * -- also a no-op
         if self.check(TOK_STAR) and self._is_deref():
             self.advance()
-            return self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                return self._parse_move_unary()
         return self._parse_move_postfix()
 
     def _is_deref(self) -> bool:
@@ -1565,7 +1581,9 @@ def parse_move(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_move_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_move_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_move_tokens(source: str, file_name: str, lex: list) -> ParseResult:

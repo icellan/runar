@@ -63,6 +63,35 @@
  *   the tree already sits at 93.6% of that. The next script family that
  *   clears ~2 MiB needs a coordinated seven-tier bump of this constant, not
  *   a local one: raising it in one tier splits the wire.
+ * - MAX_SOURCE_NESTING = 128 — the nesting bound for Rúnar SOURCE (F-213).
+ *   MAX_SOURCE_BYTES alone never bounded recursion: 2,000 nested parens is a
+ *   4 KB file, and before this bound the Rust tier SIGABRTed on it, Zig
+ *   SIGABRTed on a 5,000-term `a + a + …` chain, and Python/Ruby/Java/TS
+ *   answered with whatever recursion error their runtime threw first. A source
+ *   is refused, with the one diagnostic
+ *   `source nesting depth exceeds MAX_SOURCE_NESTING (limit=128)`, when
+ *   either of two measures exceeds this bound — every tier computes both, the
+ *   same way, on every surface:
+ *     (A) parse nesting: a counter the parser keeps, +1 per statement parsed
+ *         in a body (an else-if is a statement of the else branch), +1 per
+ *         entry into the full-expression parser (statement expressions,
+ *         conditions, initializers, parenthesised groups, call arguments,
+ *         index expressions, array elements, ternary arms), +1 per prefix
+ *         unary operand, +1 per nested type argument. Binary operands parsed
+ *         by the precedence loops and postfix chains add nothing.
+ *     (B) AST nesting: statement level (body top level = 1, +1 per if / else
+ *         / for body, for init/update at +1) plus expression-tree depth
+ *         (leaf = 1); a property initializer is at level 0.
+ *   (A) is what bounds the parsers' own recursion; (B) is what bounds every
+ *   later pass, and catches the left-deep trees the parsers build in loops.
+ *   Headroom, measured over all 1,131 git-tracked `*.runar.*` sources with the
+ *   TS reference parser: deepest statement nesting 10 (tic-tac-toe), deepest
+ *   expression tree 7 (integer-boundary), deepest statement + expression 14
+ *   (tic-tac-toe v2), deepest lexical `(`/`[` nesting 6 — so ~9× headroom on
+ *   (B). The ceiling is set by the most stack-hungry tier, not the corpus:
+ *   the Rust release build on a 2 MiB thread stack (Rust's default for
+ *   spawned threads, where `compile_check` may run) overflowed between 300
+ *   and 400 nested parens, so 256 would leave under 1.5× margin there.
  */
 export const InputLimits = {
   MAX_IR_BYTES: 16 * 1024 * 1024,       // 16 MiB — uncompressed ANF IR JSON
@@ -80,6 +109,9 @@ export const InputLimits = {
   MAX_SOURCE_BYTES: 4 * 1024 * 1024,    // 4 MiB — single Rúnar source file
                                          // (BUG-008 follow-up: source parser entry guard
                                          //  across all 7 tiers)
+  MAX_SOURCE_NESTING: 128,               // nesting depth of a Rúnar source (F-213):
+                                         // parse nesting (A) and AST nesting (B),
+                                         // both enforced in all 7 tiers
 } as const;
 
 export type InputLimitsKey = keyof typeof InputLimits;

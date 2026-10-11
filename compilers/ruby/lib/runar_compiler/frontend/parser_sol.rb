@@ -352,6 +352,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class SolParser
+      include InputLimits::NestingCounter
+
       include SolTokens
 
       def initialize(file_name)
@@ -761,6 +763,10 @@ module RunarCompiler
       # -- Statement parsing -------------------------------------------------
 
       def parse_sol_statement
+        nested { parse_sol_statement_inner }
+      end
+
+      def parse_sol_statement_inner
         location = loc
 
         # require(...) -> assert(...)
@@ -844,7 +850,7 @@ module RunarCompiler
         if match_ident("else")
           if check_ident("if")
             # else if -- recurse
-            else_stmt = parse_if_statement(loc)
+            else_stmt = nested { parse_if_statement(loc) }
             else_block = [else_stmt]
           else
             else_block = parse_sol_block
@@ -1000,7 +1006,7 @@ module RunarCompiler
       # -- Expression parsing (recursive descent with precedence) -----------
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
@@ -1154,24 +1160,24 @@ module RunarCompiler
 
       def parse_unary
         if match(TOK_BANG)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         if match(TOK_MINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "-", operand: operand)
         end
         if match(TOK_TILDE)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "~", operand: operand)
         end
         # Prefix increment/decrement
         if match(TOK_PLUSPLUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return IncrementExpr.new(operand: operand, prefix: true)
         end
         if match(TOK_MINUSMINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return DecrementExpr.new(operand: operand, prefix: true)
         end
         parse_postfix
@@ -1522,7 +1528,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_sol_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_sol_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_sol_tokens(source, file_name, lex)
@@ -1532,6 +1540,10 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+        # F-213 measure (B) before rewrite_sol_contract_props recurses on the AST.
+        InputLimits.assert_ast_nesting!(contract) unless contract.nil?
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

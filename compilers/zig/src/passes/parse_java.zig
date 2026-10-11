@@ -74,6 +74,11 @@ pub fn parseJava(allocator: Allocator, source: []const u8, file_name: []const u8
     }
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
+    // F-213: an over-nested source is refused with the one shared diagnostic,
+    // before anything here or downstream recurses over the tree.
+    if (input_limits.nestingGuardErrors(allocator, parser.nest_error, r.contract, file_name)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     // F-011: tokenize the whole source once more so an unterminated literal
     // is reported even where the parser stopped before reaching it.
     var t = Tokenizer.init(source);
@@ -420,12 +425,11 @@ const Parser = struct {
     current: Token,
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
-    depth: u32,
+    nest: input_limits.NestingCounter = .{},
+    nest_error: ?[]const u8 = null,
     /// F-026: the text of the one number token a unary minus has just
     /// licensed to be its negation-only minimum (`2147483648`, `128i8`).
     neg_allowed: ?[]const u8 = null,
-
-    const max_depth: u32 = 256;
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
@@ -436,10 +440,48 @@ const Parser = struct {
             .current = first,
             .file_name = file_name,
             .errors = .empty,
-            .depth = 0,
         };
         p.current = p.normalizeNumber(p.current);
         return p;
+    }
+
+    /// F-213 measure (A): enter one counted nesting level — a statement, a
+    /// full-expression parse, a prefix-unary operand, another self-recursion
+    /// or a nested type (see frontend/input_limits.zig). False once the source
+    /// is over-nested: the caller then returns without parsing, and must not
+    /// call `self.nest.exit()`.
+    fn enterNest(self: *Parser) bool {
+        if (self.nest.enter()) return true;
+        self.refuseNesting();
+        return false;
+    }
+
+    /// Record the shared F-213 diagnostic (once) and jump to end of input, so
+    /// every parse loop winds down; the parse entry then returns that
+    /// diagnostic alone. Called again on every later refused `enterNest`, so a
+    /// parse that rewinds the token stream after a refusal still ends.
+    fn refuseNesting(self: *Parser) void {
+        self.nest.exceeded = true;
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        self.tokenizer.pos = self.tokenizer.source.len;
+        self.current = self.fetch();
+    }
+
+    /// F-213 measure (A): run `f` one counted nesting level deeper — the
+    /// prefix-unary operand, ternary-arm, else-if and nested-type recursions.
+    fn nestedParse(self: *Parser, comptime T: type, comptime f: fn (*Parser) ?T) ?T {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return f(self);
+    }
+
+    /// F-213 measure (A) for the nested-type recursions, whose parse functions
+    /// return a value rather than an optional: `fallback` stands in for the
+    /// refused parse (the whole source is refused anyway).
+    fn nestedValue(self: *Parser, comptime T: type, fallback: T, comptime f: anytype, args: anytype) T {
+        if (!self.enterNest()) return fallback;
+        defer self.nest.exit();
+        return @call(.auto, f, .{self} ++ args);
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -592,6 +634,13 @@ const Parser = struct {
 
         if (!found_class) {
             self.addError("no class declaration found in Java source");
+            return .{ .contract = null, .errors = self.errors.items };
+        }
+
+        // F-213 measure (B), before the recursive bare-assignment walk below.
+        const ctor_too_deep = if (constructor_method) |cm| input_limits.stmtsTooDeep(cm.body, 1) != null else false;
+        if (self.nest.exceeded or ctor_too_deep or input_limits.membersTooDeep(properties.items, methods.items)) {
+            self.refuseNesting();
             return .{ .contract = null, .errors = self.errors.items };
         }
 
@@ -1094,7 +1143,7 @@ const Parser = struct {
             if (std.mem.eql(u8, name_text, "FixedArray")) {
                 _ = self.bump(); // consume '<'
                 // First type arg
-                const elem_node = self.parseType();
+                const elem_node = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parseType, .{});
                 // Expect ','
                 if (!self.match(.comma)) {
                     self.addError("FixedArray requires 2 type arguments (element, length)");
@@ -1157,6 +1206,12 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ?Statement {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return self.parseStatementInner();
+    }
+
+    fn parseStatementInner(self: *Parser) ?Statement {
         // N-053: an empty statement `;` is a no-op, as in the TS reference.
         if (self.current.kind == .semicolon) {
             _ = self.bump();
@@ -1294,7 +1349,7 @@ const Parser = struct {
         if (self.checkIdent("else")) {
             _ = self.bump();
             if (self.checkIdent("if")) {
-                const nested = self.parseIfStmt() orelse return null;
+                const nested = self.nestedParse(Statement, Parser.parseIfStmt) orelse return null;
                 const a = self.allocator.alloc(Statement, 1) catch return null;
                 a[0] = nested;
                 else_body = a;
@@ -1612,12 +1667,8 @@ const Parser = struct {
     // ==================================================================
 
     fn parseExpression(self: *Parser) ?Expression {
-        self.depth += 1;
-        defer self.depth -= 1;
-        if (self.depth > max_depth) {
-            self.addError("expression nesting depth exceeds maximum (256)");
-            return null;
-        }
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
         return self.parseTernary();
     }
 
@@ -1755,42 +1806,42 @@ const Parser = struct {
         if (self.current.kind == .plus) {
             // `+x` is the identity operator
             _ = self.bump();
-            return self.parseUnary();
+            return self.nestedParse(Expression, Parser.parseUnary);
         }
         if (self.current.kind == .minus) {
             _ = self.bump();
             // F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
             // legal only as the direct operand of this minus.
             if (self.current.kind == .number) self.neg_allowed = self.current.raw;
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .negate, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .bang) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .not, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .tilde) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .bitnot, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .plus_plus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const inc = self.allocator.create(IncrementExpr) catch return null;
             inc.* = .{ .operand = o, .prefix = true };
             return .{ .increment = inc };
         }
         if (self.current.kind == .minus_minus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const dec = self.allocator.create(DecrementExpr) catch return null;
             dec.* = .{ .operand = o, .prefix = true };
             return .{ .decrement = dec };

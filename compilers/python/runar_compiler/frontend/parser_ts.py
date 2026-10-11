@@ -19,6 +19,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -413,6 +414,8 @@ class _TsParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -903,7 +906,8 @@ class _TsParser:
         # FixedArray<T, N>
         if name == "FixedArray":
             if self.match(TOK_LT):
-                elem_type = self._parse_type()
+                with self._nest.nested(self.loc):
+                    elem_type = self._parse_type()
                 self.expect(TOK_COMMA)
                 size_tok = self.expect(TOK_NUMBER)
                 try:
@@ -977,6 +981,10 @@ class _TsParser:
     # -- Statement parsing ---------------------------------------------------
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         location = self.loc()
         tok = self.peek()
 
@@ -1097,7 +1105,8 @@ class _TsParser:
             if self.check_ident("if"):
                 # else if ...
                 elif_loc = self.loc()
-                elif_stmt = self._parse_if(elif_loc)
+                with self._nest.nested(self.loc):
+                    elif_stmt = self._parse_if(elif_loc)
                 else_block = [elif_stmt]
             else:
                 else_block = self._parse_block_or_statement()
@@ -1245,14 +1254,17 @@ class _TsParser:
     #   primary
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
         if self.match(TOK_QUESTION):
-            consequent = self._parse_ternary()
+            with self._nest.nested(self.loc):
+                consequent = self._parse_ternary()
             self.expect(TOK_COLON)
-            alternate = self._parse_ternary()
+            with self._nest.nested(self.loc):
+                alternate = self._parse_ternary()
             return TernaryExpr(
                 condition=expr, consequent=consequent, alternate=alternate
             )
@@ -1375,20 +1387,25 @@ class _TsParser:
 
     def _parse_unary(self) -> Expression:
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="!", operand=operand)
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="-", operand=operand)
         if self.match(TOK_TILDE):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="~", operand=operand)
         # Prefix ++ and --
         if self.match(TOK_PLUSPLUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return IncrementExpr(operand=operand, prefix=True)
         if self.match(TOK_MINUSMINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return DecrementExpr(operand=operand, prefix=True)
         return self._parse_postfix()
 
@@ -1814,7 +1831,9 @@ def parse_ts(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_ts_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_ts_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_ts_tokens(source: str, file_name: str, lex: list) -> ParseResult:

@@ -90,6 +90,11 @@ pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) 
     }
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
+    // F-213: an over-nested source is refused with the one shared diagnostic,
+    // before anything here or downstream recurses over the tree.
+    if (input_limits.nestingGuardErrors(allocator, parser.nest_error, r.contract, file_name)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     // F-011: tokenize the whole source once more so an unterminated literal
     // is reported even where the parser stopped before reaching it.
     var t = Tokenizer.init(source);
@@ -426,18 +431,17 @@ const Parser = struct {
     current: Token,
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
-    depth: u32,
+    nest: input_limits.NestingCounter = .{},
+    nest_error: ?[]const u8 = null,
     /// Byte offset one past the token most recently consumed by `bump()`. The
     /// leading comment trivia of `self.current` is `source[prev_token_end ..
     /// current.start]`. Used to detect `@embedAlways` / `@sighash` directives.
     prev_token_end: usize = 0,
 
-    const max_depth: u32 = 256;
-
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0, .prev_token_end = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .prev_token_end = 0 };
         p.current = p.normalizeNumber(p.current);
         return p;
     }
@@ -453,6 +457,45 @@ const Parser = struct {
         const end = self.current.start;
         if (start >= end or end > src.len) return "";
         return src[start..end];
+    }
+
+    /// F-213 measure (A): enter one counted nesting level — a statement, a
+    /// full-expression parse, a prefix-unary operand, another self-recursion
+    /// or a nested type (see frontend/input_limits.zig). False once the source
+    /// is over-nested: the caller then returns without parsing, and must not
+    /// call `self.nest.exit()`.
+    fn enterNest(self: *Parser) bool {
+        if (self.nest.enter()) return true;
+        self.refuseNesting();
+        return false;
+    }
+
+    /// Record the shared F-213 diagnostic (once) and jump to end of input, so
+    /// every parse loop winds down; the parse entry then returns that
+    /// diagnostic alone. Called again on every later refused `enterNest`, so a
+    /// parse that rewinds the token stream after a refusal still ends.
+    fn refuseNesting(self: *Parser) void {
+        self.nest.exceeded = true;
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        self.tokenizer.pos = self.tokenizer.source.len;
+        self.current = self.fetch();
+    }
+
+    /// F-213 measure (A): run `f` one counted nesting level deeper — the
+    /// prefix-unary operand, ternary-arm, else-if and nested-type recursions.
+    fn nestedParse(self: *Parser, comptime T: type, comptime f: fn (*Parser) ?T) ?T {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return f(self);
+    }
+
+    /// F-213 measure (A) for the nested-type recursions, whose parse functions
+    /// return a value rather than an optional: `fallback` stands in for the
+    /// refused parse (the whole source is refused anyway).
+    fn nestedValue(self: *Parser, comptime T: type, fallback: T, comptime f: anytype, args: anytype) T {
+        if (!self.enterNest()) return fallback;
+        defer self.nest.exit();
+        return @call(.auto, f, .{self} ++ args);
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -1087,7 +1130,7 @@ const Parser = struct {
         if (std.mem.eql(u8, name, "FixedArray")) {
             if (self.current.kind == .lt) {
                 _ = self.bump(); // '<'
-                const elem_type = self.parseTypeAnnotation();
+                const elem_type = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parseTypeAnnotation, .{});
                 _ = self.expect(.comma);
                 const size_tok = self.expect(.number) orelse return .{ .custom_type = "FixedArray" };
                 const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
@@ -1194,6 +1237,12 @@ const Parser = struct {
     // ---- Statements ----
 
     fn parseStatement(self: *Parser) ?Statement {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return self.parseStatementInner();
+    }
+
+    fn parseStatementInner(self: *Parser) ?Statement {
         // F-064: refuse every statement kind outside spec/grammar.md §9 with
         // the TS reference's diagnostic instead of falling through to the
         // expression parser (or silently skipping a `;`).
@@ -1332,7 +1381,7 @@ const Parser = struct {
             _ = self.bump();
             if (self.checkIdent("if")) {
                 // else if ...
-                const nested = self.parseIfStmt() orelse return null;
+                const nested = self.nestedParse(Statement, Parser.parseIfStmt) orelse return null;
                 const a = self.allocator.alloc(Statement, 1) catch return null;
                 a[0] = nested;
                 else_body = a;
@@ -1597,12 +1646,8 @@ const Parser = struct {
     //   primary
 
     fn parseExpression(self: *Parser) ?Expression {
-        self.depth += 1;
-        defer self.depth -= 1;
-        if (self.depth > max_depth) {
-            self.addError("expression nesting depth exceeds maximum (256)");
-            return null;
-        }
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
         return self.parseTernary();
     }
 
@@ -1610,9 +1655,9 @@ const Parser = struct {
         var expr = self.parseLogicalOr() orelse return null;
         if (self.current.kind == .question) {
             _ = self.bump();
-            const consequent = self.parseTernary() orelse return null;
+            const consequent = self.nestedParse(Expression, Parser.parseTernary) orelse return null;
             if (self.expect(.colon) == null) return null;
-            const alternate = self.parseTernary() orelse return null;
+            const alternate = self.nestedParse(Expression, Parser.parseTernary) orelse return null;
             const tern = self.allocator.create(Ternary) catch return null;
             tern.* = .{ .condition = expr, .then_expr = consequent, .else_expr = alternate };
             expr = .{ .ternary = tern };
@@ -1743,21 +1788,21 @@ const Parser = struct {
     fn parseUnary(self: *Parser) ?Expression {
         if (self.current.kind == .minus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .negate, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .bang) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .not, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .tilde) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .bitnot, .operand = o };
             return .{ .unary_op = uop };
@@ -1765,7 +1810,7 @@ const Parser = struct {
         // Prefix ++
         if (self.current.kind == .plus_plus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const inc = self.allocator.create(IncrementExpr) catch return null;
             inc.* = .{ .operand = o, .prefix = true };
             return .{ .increment = inc };
@@ -1773,7 +1818,7 @@ const Parser = struct {
         // Prefix --
         if (self.current.kind == .minus_minus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const dec = self.allocator.create(DecrementExpr) catch return null;
             dec.* = .{ .operand = o, .prefix = true };
             return .{ .decrement = dec };

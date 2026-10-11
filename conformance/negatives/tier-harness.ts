@@ -317,6 +317,15 @@ export type Verdict = 'accepted' | 'rejected';
  *   - and it is not a launcher failure.
  */
 export function verdict(tier: Tier, input: string): Verdict {
+  return judge(tier, input).verdict;
+}
+
+/**
+ * `verdict()` plus the diagnostic text the tier printed (stderr + stdout), for
+ * gates that must also check WHY a tier refused. Same spawn discipline, same
+ * `BrokenTier` cases — `verdict()` is this function, not a second mechanism.
+ */
+export function judge(tier: Tier, input: string): { verdict: Verdict; diag: string } {
   if (tier.cmd === null) throw new BrokenTier(`${tier.id}: no toolchain`);
   const argv = [...tier.prefix, ...tier.argsFor(input)];
   const res = spawnSync(tier.cmd, argv, {
@@ -340,7 +349,7 @@ export function verdict(tier: Tier, input: string): Verdict {
   if (res.status === null) {
     throw new BrokenTier(`${where} could not run: no exit status`);
   }
-  if (res.status === 0) return 'accepted';
+  if (res.status === 0) return { verdict: 'accepted', diag: `${res.stderr ?? ''}\n${res.stdout ?? ''}`.trim() };
 
   const diag = `${res.stderr ?? ''}\n${res.stdout ?? ''}`.trim();
   if (diag === '') {
@@ -361,7 +370,7 @@ export function verdict(tier: Tier, input: string): Verdict {
         `never started, so it has no opinion about this input:\n${diag.slice(0, 600)}`,
     );
   }
-  return 'rejected';
+  return { verdict: 'rejected', diag };
 }
 
 /**

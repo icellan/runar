@@ -68,7 +68,8 @@ public final class MoveParser {
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser p = new Parser(tokens, filename);
-        ContractNode contract = p.parseModule();
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(p::parseModule, ParseException::new);
         String collision = p.idents.message();
         if (collision != null) p.errors.add(collision);
         if (!p.errors.isEmpty()) {
@@ -469,6 +470,8 @@ public final class MoveParser {
         final String filename;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
@@ -744,7 +747,7 @@ public final class MoveParser {
 
             if (name.equals("FixedArray") && check(Kind.LT)) {
                 advance(); // <
-                TypeNode inner = parseTypeNode();
+                TypeNode inner = nest.nested(this::parseTypeNode);
                 expect(Kind.COMMA);
                 Token sizeTok = expect(Kind.NUMBER);
                 int length;
@@ -762,7 +765,7 @@ public final class MoveParser {
 
             if (name.equals("vector") && check(Kind.LT)) {
                 advance();
-                parseTypeNode();
+                nest.nested(this::parseTypeNode);
                 consumeGenericClose();
                 return new PrimitiveType(PrimitiveTypeName.BYTE_STRING);
             }
@@ -945,6 +948,10 @@ public final class MoveParser {
         // -- statements ------------------------------------------------------
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation location = loc();
 
             if (checkIdent("let")) return parseLetDecl(location);
@@ -1030,7 +1037,8 @@ public final class MoveParser {
             List<Statement> elseBlock = null;
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
-                    Statement nested = parseIf(loc());
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement nested = nest.nested(() -> parseIf(loc()));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(nested);
                 } else {
@@ -1125,7 +1133,7 @@ public final class MoveParser {
         // -- expressions (precedence climbing) ------------------------------
 
         Expression parseExpression() {
-            return parseOr();
+            return nest.nested(this::parseOr);
         }
 
         Expression parseOr() {
@@ -1264,21 +1272,21 @@ public final class MoveParser {
 
         Expression parseUnary() {
             if (match(Kind.BANG)) {
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
             }
             if (match(Kind.MINUS)) {
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
             }
             if (match(Kind.TILDE)) {
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
             }
             if (match(Kind.AMP)) {
                 matchIdent("mut");
-                return parseUnary();
+                return nest.nested(this::parseUnary);
             }
             if (check(Kind.STAR) && isDeref()) {
                 advance();
-                return parseUnary();
+                return nest.nested(this::parseUnary);
             }
             return parsePostfix();
         }

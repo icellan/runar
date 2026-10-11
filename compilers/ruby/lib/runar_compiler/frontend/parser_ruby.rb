@@ -708,6 +708,8 @@ module RunarCompiler
 
     # Recursive descent parser for Ruby-format Runar contracts.
     class RbParser
+      include InputLimits::NestingCounter
+
       include RubyTokens
 
       def initialize(tokens, file_name)
@@ -926,6 +928,10 @@ module RunarCompiler
         # +self.add_output(...)+ / +this.addOutput(...)+.
         intrinsic_methods = Set.new(%w[addOutput addRawOutput addDataOutput getStateScript])
         method_names = methods.map(&:name).to_set | intrinsic_methods
+        # F-213 measure (B) before the recursive rewrite below walks the AST.
+        InputLimits.assert_ast_nesting!(
+          ContractNode.new(properties: properties, constructor: constructor, methods: methods)
+        )
         methods.each do |m|
           Frontend.rewrite_bare_method_calls(m.body, method_names)
         end
@@ -1048,7 +1054,7 @@ module RunarCompiler
         # FixedArray[T, N] style generic
         if raw_name == "FixedArray" && peek.kind == TOK_LBRACKET
           advance # '['
-          elem_type = parse_type
+          elem_type = nested { parse_type }
           expect(TOK_COMMA, ",")
           size_tok = expect(TOK_NUMBER, "number")
           size = size_tok.value.to_i
@@ -1207,6 +1213,10 @@ module RunarCompiler
       end
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         current_loc = loc
         kind = peek.kind
 
@@ -1264,7 +1274,7 @@ module RunarCompiler
 
         if peek.kind == TOK_ELSIF
           elif_loc = loc
-          else_stmts = [parse_elsif_statement(elif_loc)]
+          else_stmts = [nested { parse_elsif_statement(elif_loc) }]
           @declared_locals = locals_before_then.dup
         elsif peek.kind == TOK_ELSE
           advance # 'else'
@@ -1298,7 +1308,7 @@ module RunarCompiler
 
         if peek.kind == TOK_ELSIF
           elif_loc = loc
-          else_stmts = [parse_elsif_statement(elif_loc)]
+          else_stmts = [nested { parse_elsif_statement(elif_loc) }]
           @declared_locals = locals_before_then.dup
         elsif peek.kind == TOK_ELSE
           advance # 'else'
@@ -1577,7 +1587,7 @@ module RunarCompiler
       # -------------------------------------------------------------------
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
@@ -1615,7 +1625,7 @@ module RunarCompiler
       def parse_not
         if peek.kind == TOK_NOT || peek.kind == TOK_BANG
           advance
-          operand = parse_not
+          operand = nested { parse_not }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         parse_bitwise_or
@@ -1762,15 +1772,15 @@ module RunarCompiler
         kind = peek.kind
         if kind == TOK_MINUS
           advance
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary })
         end
         if kind == TOK_TILDE
           advance
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
         end
         if kind == TOK_BANG
           advance
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary })
         end
         parse_power
       end
@@ -1780,7 +1790,7 @@ module RunarCompiler
         # +**+ is right-associative and maps to +pow(base, exp)+
         if peek.kind == TOK_STARSTAR
           advance
-          exp = parse_power # right-recursive for right-associativity
+          exp = nested { parse_power } # right-recursive for right-associativity
           return CallExpr.new(
             callee: Identifier.new(name: "pow"),
             args: [base, exp]
@@ -1966,7 +1976,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_ruby_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_ruby_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_ruby_tokens(source, file_name, lex)

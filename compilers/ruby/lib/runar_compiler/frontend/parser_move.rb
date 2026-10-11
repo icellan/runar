@@ -421,6 +421,8 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     class MoveParser
+      include InputLimits::NestingCounter
+
       include MoveTokens
 
       def initialize(file_name)
@@ -656,7 +658,7 @@ module RunarCompiler
         # `FixedArray<FixedArray<bigint, 2>, 2>` closes cleanly.
         if name == "FixedArray" && check(TOK_LT)
           advance # <
-          inner = parse_move_type
+          inner = nested { parse_move_type }
           expect(TOK_COMMA)
           size_tok = expect(TOK_NUMBER)
           size = begin
@@ -672,7 +674,7 @@ module RunarCompiler
         # vector<T> => treat as ByteString
         if name == "vector" && check(TOK_LT)
           advance # <
-          _inner = parse_move_type
+          _inner = nested { parse_move_type }
           consume_generic_close
           return PrimitiveType.new(name: "ByteString")
         end
@@ -824,6 +826,10 @@ module RunarCompiler
       # -- Statement parsing -------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # assert!(expr, code) -> assert(expr)
@@ -1208,7 +1214,7 @@ module RunarCompiler
       # -- Expression parsing (precedence climbing) -------------------------
 
       def parse_expression
-        parse_or
+        nested { parse_or }
       end
 
       def parse_or
@@ -1331,13 +1337,13 @@ module RunarCompiler
 
       def parse_unary
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary })
         end
         if match_tok(TOK_MINUS)
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary })
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
         end
         # Dereference & -- skip
         if check(TOK_AMP)
@@ -1483,7 +1489,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_move_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_move_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_move_tokens(source, file_name, lex)
@@ -1493,6 +1501,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

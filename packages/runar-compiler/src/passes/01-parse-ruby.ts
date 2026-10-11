@@ -33,7 +33,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -596,6 +596,8 @@ class RbParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
 
   /** Track locally declared variables per method scope to distinguish decl from assignment. */
   private declaredLocals: Set<string> = new Set();
@@ -970,7 +972,7 @@ class RbParser {
     // Check for FixedArray[T, N] style generic
     if (this.peek().type === '[' && rawName === 'FixedArray') {
       this.advance(); // '['
-      const elemType = this.parseType();
+      const elemType = this.nest.nested(this.loc(), () => this.parseType());
       this.expect(',');
       const sizeTok = this.expect('number');
       const size = parseInt(sizeTok.value, 10);
@@ -1134,6 +1136,10 @@ class RbParser {
   }
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const loc = this.loc();
 
     // assert statement: assert expr
@@ -1224,7 +1230,7 @@ class RbParser {
 
     if (this.peek().type === 'elsif') {
       const elifLoc = this.loc();
-      elseBranch = [this.parseElsifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElsifStatement(elifLoc))];
       this.declaredLocals = new Set(localsBeforeThen);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
@@ -1259,7 +1265,7 @@ class RbParser {
 
     if (this.peek().type === 'elsif') {
       const elifLoc = this.loc();
-      elseBranch = [this.parseElsifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElsifStatement(elifLoc))];
       this.declaredLocals = new Set(localsBeforeThen);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
@@ -1559,7 +1565,7 @@ class RbParser {
   // ---------------------------------------------------------------------------
 
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   // Ruby ternary: condition ? consequent : alternate
@@ -1600,7 +1606,7 @@ class RbParser {
   private parseNot(): Expression {
     if (this.peek().type === 'not' || this.peek().type === '!') {
       this.advance();
-      const operand = this.parseNot();
+      const operand = this.nest.nested(this.loc(), () => this.parseNot());
       return { kind: 'unary_expr', op: '!', operand };
     }
     return this.parseBitwiseOr();
@@ -1730,17 +1736,17 @@ class RbParser {
   private parseUnary(): Expression {
     if (this.peek().type === '-') {
       this.advance();
-      const operand = this.parseUnary();
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '-', operand };
     }
     if (this.peek().type === '~') {
       this.advance();
-      const operand = this.parseUnary();
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '~', operand };
     }
     if (this.peek().type === '!') {
       this.advance();
-      const operand = this.parseUnary();
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '!', operand };
     }
     return this.parsePower();
@@ -1752,7 +1758,7 @@ class RbParser {
     // ** is right-associative
     if (this.peek().type === '**') {
       this.advance();
-      const exp = this.parsePower(); // right-recursive for right-associativity
+      const exp = this.nest.nested(this.loc(), () => this.parsePower()); // right-recursive for right-associativity
       // ** maps to pow() call
       return {
         kind: 'call_expr',
@@ -1956,5 +1962,5 @@ export function parseRubySource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new RbParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

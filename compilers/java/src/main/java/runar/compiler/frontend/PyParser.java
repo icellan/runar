@@ -87,7 +87,8 @@ public final class PyParser {
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         impl.tokens = insertIndentation(raw);
         impl.pos = 0;
-        ContractNode contract = impl.parseContract();
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(impl::parseContract, ParseException::new);
         String collision = impl.idents.message();
         if (collision != null) impl.errors.add(collision);
         if (!impl.errors.isEmpty()) {
@@ -787,6 +788,8 @@ public final class PyParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
         /**
@@ -903,7 +906,7 @@ public final class PyParser {
 
             if (name.equals("Readonly")) {
                 if (match(TokKind.LBRACKET)) {
-                    TypeNode inner = parseTypeAnnotation();
+                    TypeNode inner = nest.nested(this::parseTypeAnnotation);
                     expect(TokKind.RBRACKET);
                     return inner;
                 }
@@ -912,7 +915,7 @@ public final class PyParser {
 
             if (name.equals("FixedArray")) {
                 if (match(TokKind.LBRACKET)) {
-                    TypeNode elem = parseTypeAnnotation();
+                    TypeNode elem = nest.nested(this::parseTypeAnnotation);
                     expect(TokKind.COMMA);
                     Token sizeTok = expect(TokKind.NUMBER);
                     int size;
@@ -1241,6 +1244,10 @@ public final class PyParser {
         // -- Statement parsing -----------------------------------------------
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation location = loc();
 
             if (checkIdent("assert") || checkIdent("assert_")) {
@@ -1351,7 +1358,8 @@ public final class PyParser {
             if (checkIdent("elif")) {
                 SourceLocation elifLoc = loc();
                 advance();
-                Statement elif = parseIfBody(elifLoc);
+                // F-213 A1: an elif is a statement of the else branch.
+                Statement elif = nest.nested(() -> parseIfBody(elifLoc));
                 declaredLocals = new HashSet<>(localsBefore);
                 elseBlock = new ArrayList<>();
                 elseBlock.add(elif);
@@ -1532,7 +1540,7 @@ public final class PyParser {
         // -- Expression parsing ----------------------------------------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1541,7 +1549,7 @@ public final class PyParser {
                 advance();
                 Expression condition = parseOr();
                 expectIdent("else");
-                Expression alternate = parseTernary();
+                Expression alternate = nest.nested(this::parseTernary);
                 return new TernaryExpr(condition, expr, alternate);
             }
             return expr;
@@ -1567,7 +1575,7 @@ public final class PyParser {
 
         Expression parseNot() {
             if (match(TokKind.BANG)) {
-                Expression operand = parseNot();
+                Expression operand = nest.nested(this::parseNot);
                 return new UnaryExpr(Expression.UnaryOp.NOT, operand);
             }
             return parseBitwiseOr();
@@ -1694,15 +1702,15 @@ public final class PyParser {
 
         Expression parseUnary() {
             if (match(TokKind.MINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.NEG, operand);
             }
             if (match(TokKind.TILDE)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
             }
             if (match(TokKind.BANG)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.NOT, operand);
             }
             return parsePower();
@@ -1711,7 +1719,8 @@ public final class PyParser {
         Expression parsePower() {
             Expression base = parsePostfix();
             if (match(TokKind.STARSTAR)) {
-                Expression exp = parseUnary();
+                // F-213 A4: the right operand recurses outside parseExpression.
+                Expression exp = nest.nested(this::parseUnary);
                 return new CallExpr(new Identifier("pow"), List.of(base, exp));
             }
             return base;

@@ -17,6 +17,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, SourceNestingError, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -483,6 +484,8 @@ class _RustParser:
         self.errors: list[Diagnostic] = []
         # F-017: (source spelling, Rúnar name) of every declared identifier.
         self.declared: list[tuple[str, str]] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -574,7 +577,8 @@ class _RustParser:
         # Ruby tiers build.
         if tok.kind == TOK_LBRACKET:
             self.advance()
-            element = self.parse_rust_type()
+            with self._nest.nested(self.loc):
+                element = self.parse_rust_type()
             self.expect(TOK_SEMI)
             length_tok = self.expect(TOK_NUMBER)
             try:
@@ -592,7 +596,8 @@ class _RustParser:
             # Handle FixedArray<T, N> syntax (Vec<T> is not FixedArray)
             if name == "FixedArray" and self.check(TOK_LT):
                 self.advance()  # consume <
-                elem_type = self.parse_rust_type()
+                with self._nest.nested(self.loc):
+                    elem_type = self.parse_rust_type()
                 self.expect(TOK_COMMA)
                 size_tok = self.expect(TOK_NUMBER)
                 try:
@@ -925,6 +930,10 @@ class _RustParser:
     # -- Statement parsing ---------------------------------------------------
 
     def parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         stmt_loc = self.loc()
 
         # assert!(expr)
@@ -1185,7 +1194,8 @@ class _RustParser:
     # -- Expression parsing (precedence climbing) ----------------------------
 
     def parse_expression(self) -> Expression:
-        return self._parse_or()
+        with self._nest.nested(self.loc):
+            return self._parse_or()
 
     def _parse_or(self) -> Expression:
         left = self._parse_and()
@@ -1298,7 +1308,8 @@ class _RustParser:
 
     def _parse_unary(self) -> Expression:
         if self.match_tok(TOK_BANG):
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="!", operand=self._parse_unary())
         if self.match_tok(TOK_MINUS):
             # F-026: a signed-suffix minimum (`128i8`) is legal under this
             # minus, through parentheses, as rustc's overflowing_literals lint.
@@ -1309,9 +1320,11 @@ class _RustParser:
             if k < len(self.tokens) and self.tokens[k].kind == TOK_NUMBER and self.tokens[k].neg_only:
                 if all(k + j < len(self.tokens) and self.tokens[k + j].kind == TOK_RPAREN for j in range(1, opens + 1)):
                     self.tokens[k].neg_only = False
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="-", operand=self._parse_unary())
         if self.match_tok(TOK_TILDE):
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="~", operand=self._parse_unary())
         # & and &mut are borrow operators -- ignore them for AST purposes
         if self.check(TOK_AMP):
             self.advance()
@@ -1455,7 +1468,9 @@ def parse_rust(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_rust_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_rust_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_rust_tokens(source: str, file_name: str, lex: list) -> ParseResult:
@@ -1466,6 +1481,8 @@ def _parse_rust_tokens(source: str, file_name: str, lex: list) -> ParseResult:
 
     try:
         contract = p.parse_contract()
+    except (SourceNestingError, RecursionError):
+        raise  # F-213: with_nesting_limit turns these into the shared diagnostic
     except Exception as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 

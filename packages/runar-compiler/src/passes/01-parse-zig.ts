@@ -31,7 +31,7 @@ import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -608,7 +608,7 @@ class ZigParser extends ParserCore<ZigToken> {
       const lengthToken = this.expect('number');
       const length = Number.parseInt(lengthToken.value, 10);
       this.expect(']');
-      const element = this.parseType();
+      const element = this.nest.nested(this.loc(), () => this.parseType());
       return {
         type: { kind: 'fixed_array_type', element: element.type, length: Number.isFinite(length) ? length : 0 },
         rawName: element.rawName,
@@ -622,7 +622,7 @@ class ZigParser extends ParserCore<ZigToken> {
       const name = this.expect('ident').value;
       if (name === 'Readonly' && this.current().type === '(') {
         this.expect('(');
-        const inner = this.parseType();
+        const inner = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(')');
         return { ...inner, readonly: true };
       }
@@ -732,6 +732,10 @@ class ZigParser extends ParserCore<ZigToken> {
   }
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const sourceLocation = this.loc();
 
     if (this.current().type === 'return') {
@@ -844,7 +848,7 @@ class ZigParser extends ParserCore<ZigToken> {
     if (this.current().type === 'else') {
       this.advance();
       if (this.current().type === 'if') {
-        elseBranch = [this.parseIfStatement()];
+        elseBranch = [this.nest.nested(this.loc(), () => this.parseIfStatement())];
       } else {
         elseBranch = this.parseBlockStatements();
       }
@@ -1003,15 +1007,15 @@ class ZigParser extends ParserCore<ZigToken> {
   protected parseUnary(): Expression {
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     // Zig's `&` is the address-of operator used for slice coercion at call
     // sites like `&.{sig1, sig2}` (an anonymous-struct literal coerced to a
@@ -1493,5 +1497,5 @@ export function parseZigSource(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new ZigParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

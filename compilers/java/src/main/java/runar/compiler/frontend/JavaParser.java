@@ -122,9 +122,17 @@ public final class JavaParser {
         } catch (ParserDispatch.ParseException e) {
             throw new ParseException(e.getMessage());
         }
-        Unit unit = parseToTree(source, filename);
-        ClassTree classTree = firstTopLevelClass(unit.cu(), filename);
-        return convertClass(classTree, filename, unit);
+        // F-213: measure (A) is recomputed over javac's tree (javac's parser
+        // cannot be instrumented) BEFORE the converter recurses into it;
+        // measure (B) runs on the converted contract. A StackOverflowError
+        // from javac itself or from the converter on a loop-built chain far
+        // past the limit is the backstop (SourceNesting.guard).
+        return SourceNesting.guard(() -> {
+            Unit unit = parseToTree(source, filename);
+            if (parseNestingViolation(unit.cu()) != null) throw new SourceNesting.LimitExceeded();
+            ClassTree classTree = firstTopLevelClass(unit.cu(), filename);
+            return convertClass(classTree, filename, unit);
+        }, ParseException::new);
     }
 
     // ---------------------------------------------------------------
@@ -153,8 +161,12 @@ public final class JavaParser {
         // name) matches a plain Java convention. The Rúnar filename is
         // preserved separately for source-location reporting.
         JavaFileObject fileObject = new StringSource(stripRunarInfix(filename), source);
+        // F-213: javac's own output (its "An exception has occurred in the
+        // compiler" banner on a stack overflow) is not this compiler's
+        // diagnostic; diagnostics proper go through the collector.
+        java.io.StringWriter javacOut = new java.io.StringWriter();
         JavacTask task = (JavacTask) compiler.getTask(
-            null,
+            javacOut,
             null,
             diagnostics,
             List.of("-proc:none"),
@@ -166,6 +178,13 @@ public final class JavaParser {
             units = task.parse();
         } catch (IOException e) {
             throw new ParseException("I/O error parsing " + filename + ": " + e.getMessage());
+        } catch (RuntimeException e) {
+            // F-213: javac wraps a StackOverflowError in its own parser (a
+            // source nested thousands deep) in a RuntimeException.
+            for (Throwable c = e; c != null; c = c.getCause()) {
+                if (c instanceof StackOverflowError) throw new SourceNesting.LimitExceeded();
+            }
+            throw e;
         }
         List<String> errors = new ArrayList<>();
         for (var d : diagnostics.getDiagnostics()) {
@@ -1226,6 +1245,132 @@ public final class JavaParser {
     }
 
     /** Unchecked exception for parse-time problems. */
+    // ---------------------------------------------------------------
+    // F-213 measure (A) over the javac tree
+    // ---------------------------------------------------------------
+
+    /** Collects a tree's immediate children without recursing into them. */
+    private static final class Children extends com.sun.source.util.TreeScanner<Void, List<Tree>> {
+        private static final Children INSTANCE = new Children();
+
+        @Override
+        public Void scan(Tree tree, List<Tree> out) {
+            if (tree != null) out.add(tree);
+            return null;
+        }
+
+        static List<Tree> of(Tree t) {
+            List<Tree> out = new ArrayList<>();
+            t.accept(INSTANCE, out);
+            return out;
+        }
+    }
+
+    /** A statement context: a block, or a statement other than a class declaration. */
+    private static boolean isStatementContext(Tree t) {
+        return t instanceof BlockTree || (t instanceof StatementTree && !(t instanceof ClassTree));
+    }
+
+    /**
+     * The parse-nesting counter (measure A) of {@code child}, given its
+     * parent's. Mirrors what the TS reference's hand-written .runar.java parser
+     * counts (01-parse-java.ts; same mapping as tsChildNesting in 01-parse.ts):
+     * a statement inside a body (+1; a block is free unless it is itself a
+     * nested statement), each expression slot of a statement / declaration, a
+     * parenthesised group, a call or {@code new} argument, an array-access
+     * index, an array-initializer element, a ternary arm, a prefix-unary
+     * operand, a type argument. Binary operands, assignment sides, member
+     * objects and callees add nothing. A for's init / update are parsed as
+     * part of the for (their expressions are its slots), and javac's
+     * parenthesised if / while / switch condition IS the slot, not a group
+     * inside it.
+     */
+    private static int childNesting(Tree parent, Tree child, int level) {
+        if (parent instanceof ForLoopTree fl) {
+            if (fl.getInitializer().contains(child) || fl.getUpdate().contains(child)) return level;
+            if (child == fl.getCondition()) return level + 1;
+        }
+        if (child instanceof StatementTree && isStatementContext(parent)) {
+            if (child instanceof BlockTree && !(parent instanceof BlockTree)) return level;
+            return level + 1;
+        }
+        if (parent instanceof ExpressionStatementTree es) {
+            return child == es.getExpression() ? level + 1 : level;
+        }
+        if (parent instanceof ReturnTree rt) {
+            return child == rt.getExpression() ? level + 1 : level;
+        }
+        if (parent instanceof com.sun.source.tree.ThrowTree tt) {
+            return child == tt.getExpression() ? level + 1 : level;
+        }
+        if (parent instanceof IfTree it) {
+            return child == it.getCondition() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof com.sun.source.tree.WhileLoopTree wt) {
+            return child == wt.getCondition() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof com.sun.source.tree.DoWhileLoopTree dt) {
+            return child == dt.getCondition() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof com.sun.source.tree.SwitchTree st) {
+            return child == st.getExpression() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof VariableTree v) {
+            return child == v.getInitializer() ? level + 1 : level;
+        }
+        if (parent instanceof ParenthesizedTree) {
+            return level + 1;
+        }
+        if (parent instanceof UnaryTree ut) {
+            return switch (ut.getKind()) {
+                case POSTFIX_INCREMENT, POSTFIX_DECREMENT -> level;
+                default -> level + 1;
+            };
+        }
+        if (parent instanceof NewArrayTree na) {
+            boolean slot = (na.getInitializers() != null && na.getInitializers().contains(child))
+                || (na.getDimensions() != null && na.getDimensions().contains(child));
+            return slot ? level + 1 : level;
+        }
+        if (parent instanceof MethodInvocationTree mi) {
+            return mi.getArguments().contains(child) ? level + 1 : level;
+        }
+        if (parent instanceof NewClassTree nc) {
+            return nc.getArguments().contains(child) ? level + 1 : level;
+        }
+        if (parent instanceof ArrayAccessTree aa) {
+            return child == aa.getIndex() ? level + 1 : level;
+        }
+        if (parent instanceof ConditionalExpressionTree ce) {
+            return child == ce.getCondition() ? level : level + 1;
+        }
+        if (parent instanceof ParameterizedTypeTree pt) {
+            return pt.getTypeArguments().contains(child) ? level + 1 : level;
+        }
+        return level;
+    }
+
+    /** javac keeps the parens of {@code if (c)}: they are the slot, so the group adds nothing. */
+    private static int conditionSlot(Tree cond, int level) {
+        return cond instanceof ParenthesizedTree ? level : level + 1;
+    }
+
+    private record Nesting(Tree tree, int level) {}
+
+    /** The first tree whose parse nesting exceeds the limit, or null. Iterative. */
+    private static Tree parseNestingViolation(CompilationUnitTree cu) {
+        java.util.ArrayDeque<Nesting> work = new java.util.ArrayDeque<>();
+        work.push(new Nesting(cu, 0));
+        while (!work.isEmpty()) {
+            Nesting n = work.pop();
+            if (n.level() > InputLimits.MAX_SOURCE_NESTING) return n.tree();
+            for (Tree child : Children.of(n.tree())) {
+                work.push(new Nesting(child, childNesting(n.tree(), child, n.level())));
+            }
+        }
+        return null;
+    }
+
     public static final class ParseException extends RuntimeException {
         public ParseException(String message) {
             super(message);

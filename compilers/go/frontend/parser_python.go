@@ -21,6 +21,10 @@ func ParsePython(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parsePythonSurface(source, fileName) })
+}
+
+func parsePythonSurface(source []byte, fileName string) *ParseResult {
 	p := &pyParser{
 		fileName: fileName,
 	}
@@ -112,6 +116,9 @@ type pyParser struct {
 	tokens   []pyToken
 	pos      int
 	errors   []Diagnostic
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
@@ -945,7 +952,7 @@ func (p *pyParser) parsePyTypeAnnotation() TypeNode {
 	// Check for Readonly[T]
 	if name == "Readonly" {
 		if p.match(pyTokLBracket) {
-			inner := p.parsePyTypeAnnotation()
+			inner := nested(&p.nest, p.loc(), p.parsePyTypeAnnotation)
 			p.expect(pyTokRBracket)
 			// Return the inner type — Readonly-ness is handled at the property level
 			return inner
@@ -956,7 +963,7 @@ func (p *pyParser) parsePyTypeAnnotation() TypeNode {
 	// Check for FixedArray[T, N]
 	if name == "FixedArray" {
 		if p.match(pyTokLBracket) {
-			elemType := p.parsePyTypeAnnotation()
+			elemType := nested(&p.nest, p.loc(), p.parsePyTypeAnnotation)
 			p.expect(pyTokComma)
 			sizeTok := p.expect(pyTokNumber)
 			size, err := strconv.Atoi(sizeTok.value)
@@ -1425,6 +1432,10 @@ func (p *pyParser) expectStatementEnd() {
 // ---------------------------------------------------------------------------
 
 func (p *pyParser) parsePyStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parsePyStatementInner)
+}
+
+func (p *pyParser) parsePyStatementInner() Statement {
 	loc := p.loc()
 
 	// assert expr or assert_(expr)
@@ -1558,7 +1569,7 @@ func (p *pyParser) parsePyIfBody(loc SourceLocation) Statement {
 		elifLoc := p.loc()
 		p.advance() // consume 'elif'
 		// Recurse using parsePyIfBody which handles the rest identically
-		elifStmt := p.parsePyIfBody(elifLoc)
+		elifStmt := nested(&p.nest, elifLoc, func() Statement { return p.parsePyIfBody(elifLoc) })
 		elseBlock = []Statement{elifStmt}
 		p.restoreLocals(localsBefore)
 	} else if p.matchIdent("else") {
@@ -1762,7 +1773,7 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *pyParser) parsePyExpression() Expression {
-	return p.parsePyTernary()
+	return nested(&p.nest, p.loc(), p.parsePyTernary)
 }
 
 // Python ternary: value_if_true if condition else value_if_false
@@ -1775,7 +1786,7 @@ func (p *pyParser) parsePyTernary() Expression {
 		p.advance() // consume 'if'
 		condition := p.parsePyOr()
 		p.expectIdent("else")
-		alternate := p.parsePyTernary()
+		alternate := nested(&p.nest, p.loc(), p.parsePyTernary)
 		return TernaryExpr{
 			Condition:  condition,
 			Consequent: expr,
@@ -1806,7 +1817,7 @@ func (p *pyParser) parsePyAnd() Expression {
 
 func (p *pyParser) parsePyNot() Expression {
 	if p.match(pyTokBang) {
-		operand := p.parsePyNot()
+		operand := nested(&p.nest, p.loc(), p.parsePyNot)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	return p.parsePyBitwiseOr()
@@ -1934,15 +1945,15 @@ func (p *pyParser) parsePyMultiplicative() Expression {
 
 func (p *pyParser) parsePyUnary() Expression {
 	if p.match(pyTokMinus) {
-		operand := p.parsePyUnary()
+		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
 		return UnaryExpr{Op: "-", Operand: operand}
 	}
 	if p.match(pyTokTilde) {
-		operand := p.parsePyUnary()
+		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
 	if p.match(pyTokBang) {
-		operand := p.parsePyUnary()
+		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	return p.parsePyPower()
@@ -1952,7 +1963,7 @@ func (p *pyParser) parsePyUnary() Expression {
 func (p *pyParser) parsePyPower() Expression {
 	base := p.parsePyPostfix()
 	if p.match(pyTokStarStar) {
-		exp := p.parsePyUnary() // right-associative
+		exp := nested(&p.nest, p.loc(), p.parsePyUnary) // right-associative
 		return CallExpr{Callee: Identifier{Name: "pow"}, Args: []Expression{base, exp}}
 	}
 	return base

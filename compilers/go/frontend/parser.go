@@ -157,6 +157,12 @@ func Parse(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseTsSurface(source, fileName) })
+}
+
+// parseTsSurface is the .runar.ts surface: tree-sitter parse, then conversion
+// to the Rúnar AST.
+func parseTsSurface(source []byte, fileName string) *ParseResult {
 	parser := sitter.NewParser()
 	parser.SetLanguage(typescript.GetLanguage())
 
@@ -169,6 +175,14 @@ func Parse(source []byte, fileName string) *ParseResult {
 	p := &parseContext{
 		source:   source,
 		fileName: fileName,
+	}
+
+	// F-213 measure (A), before anything walks the tree recursively.
+	// tree-sitter has no hook inside its parser, so the counter the
+	// hand-written surfaces keep is recomputed here, iteratively.
+	if bad := tsParseNestingViolation(root); bad != nil {
+		loc := p.loc(bad)
+		return sourceNestingResult(&loc)
 	}
 
 	// F-026: every number, extended over the [0-9A-Za-z_] characters glued to
@@ -221,14 +235,19 @@ type parseContext struct {
 	errors   []Diagnostic
 }
 
-// firstBadNode returns the first ERROR or MISSING node in the tree, so the
-// diagnostic can point at the offending line instead of the whole file.
 // checkNumericLiterals refuses every malformed .runar.ts numeric literal
 // (F-026, the TS reference's reportInvalidNumericLiterals).
+//
+// Iterative, in source order: it runs over the raw tree-sitter tree, and
+// measure (A) does not bound every node kind (a 4 MiB `&&&…&Int` type
+// annotation is a valid ~4M-deep intersection_type chain), so a recursive
+// walk overflowed the 1 GB goroutine stack (F-213 refuter, ref_type_rs).
 func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 	coveredTo := -1
-	var visit func(n *sitter.Node)
-	visit = func(n *sitter.Node) {
+	stack := []*sitter.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
 		if n.Type() == "number" && int(n.StartByte()) >= coveredTo {
 			start, end := int(n.StartByte()), int(n.EndByte())
 			for end < len(p.source) && isNumberContinue(p.source[end]) {
@@ -240,20 +259,26 @@ func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			visit(n.Child(i))
+		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
+			stack = append(stack, n.Child(i))
 		}
 	}
-	visit(root)
 }
 
-func firstBadNode(n *sitter.Node) *sitter.Node {
-	if n.IsError() || n.IsMissing() {
-		return n
-	}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		if bad := firstBadNode(n.Child(i)); bad != nil {
-			return bad
+// firstBadNode returns the first ERROR or MISSING node in the tree (pre-order,
+// source order), so the diagnostic can point at the offending line instead of
+// the whole file. Iterative for the same reason as checkNumericLiterals:
+// tree-sitter error recovery can leave an arbitrarily deep subtree.
+func firstBadNode(root *sitter.Node) *sitter.Node {
+	stack := []*sitter.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n.IsError() || n.IsMissing() {
+			return n
+		}
+		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
+			stack = append(stack, n.Child(i))
 		}
 	}
 	return nil
@@ -2181,4 +2206,164 @@ func (p *parseContext) findChildByType(node *sitter.Node, typeName string) *sitt
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// F-213 measure (A) for the .runar.ts surface
+// ---------------------------------------------------------------------------
+
+// tsNestFrame is one node on the iterative walk's path.
+type tsNestFrame struct {
+	typ   string
+	level int
+	// chain counts the edges above this node that each become one level of
+	// the Rúnar expression tree: a binary operand, a member / subscript
+	// object, a callee (see tsParseNestingViolation).
+	chain int
+	// condParen: a parenthesized_expression that is the syntactic condition
+	// of an if / while / do / switch (the TS AST has no node for it).
+	condParen bool
+	// prefix: an update_expression whose operator comes first (`++x`).
+	prefix bool
+	// genericArgs: a type_arguments list of a generic_type (`FixedArray<..>`).
+	genericArgs bool
+}
+
+func tsIsStatementType(t string) bool {
+	return t == "statement_block" || t == "lexical_declaration" || t == "variable_declaration" ||
+		strings.HasSuffix(t, "_statement")
+}
+
+// tsChildNestFrame is the frame of a child of parent, mirroring the TS
+// reference's tsChildNesting (packages/runar-compiler/src/passes/01-parse.ts)
+// over the tree-sitter tree: a statement inside a body (+1; a block is free
+// unless it is itself a nested statement), each expression slot of a
+// statement / declaration, a parenthesised group, a call or `new` argument,
+// a subscript index, an array element, a ternary arm, a prefix-unary operand,
+// a nested type argument. Binary operands, member objects and callees add
+// nothing. tree-sitter's else_clause, an if's condition parentheses and a
+// for's condition expression_statement have no TS AST node and are mapped
+// through.
+func tsChildNestFrame(parent tsNestFrame, child *sitter.Node, field string) tsNestFrame {
+	ct := child.Type()
+	f := tsNestFrame{typ: ct, level: parent.level, chain: parent.chain}
+	if !child.IsNamed() || ct == "comment" {
+		return f
+	}
+	switch parent.typ {
+	case "binary_expression":
+		f.chain++
+	case "member_expression", "subscript_expression":
+		if field == "object" {
+			f.chain++
+		}
+	case "call_expression":
+		if field == "function" {
+			f.chain++
+		}
+	}
+	pk := parent.typ
+	if pk == "else_clause" {
+		pk = "if_statement"
+	}
+	switch ct {
+	case "update_expression":
+		if first := child.Child(0); first != nil && !first.IsNamed() {
+			f.prefix = true
+		}
+	case "type_arguments":
+		f.genericArgs = pk == "generic_type"
+	}
+	if pk == "for_statement" {
+		switch field {
+		case "initializer", "condition":
+			return f
+		case "increment":
+			f.level++
+			return f
+		}
+	}
+	if tsIsStatementType(ct) && (pk == "statement_block" || tsIsStatementType(pk)) {
+		if !(ct == "statement_block" && pk != "statement_block") {
+			f.level++
+		}
+		return f
+	}
+	switch pk {
+	case "expression_statement", "return_statement", "throw_statement":
+		f.level++
+	case "if_statement", "while_statement", "do_statement", "switch_statement":
+		if field == "condition" || field == "value" {
+			f.level++
+			f.condParen = ct == "parenthesized_expression"
+		}
+	case "variable_declarator", "public_field_definition", "required_parameter", "optional_parameter":
+		if field == "value" {
+			f.level++
+		}
+	case "parenthesized_expression":
+		if !parent.condParen {
+			f.level++
+		}
+	case "unary_expression", "array", "arguments":
+		f.level++
+	case "update_expression":
+		if parent.prefix {
+			f.level++
+		}
+	case "subscript_expression":
+		if field == "index" {
+			f.level++
+		}
+	case "ternary_expression":
+		if field != "condition" {
+			f.level++
+		}
+	case "type_arguments":
+		if parent.genericArgs {
+			f.level++
+		}
+	}
+	return f
+}
+
+// tsParseNestingViolation returns the first node whose parse nesting
+// (measure A) exceeds MaxSourceNesting, or nil. It walks the tree with a
+// TreeCursor, iteratively, before any recursive pass touches the tree.
+//
+// It also refuses a node reached through more than MaxSourceNesting chain
+// edges (binary operand, member / subscript object, callee). The converter
+// turns each such parent into a Rúnar node holding the converted child, so a
+// path of k chain edges is a Rúnar expression at least k deep (k-1 if the
+// innermost edge is `this.x`, which becomes a leaf, plus 1 for the leaf):
+// measure (B) is then > MaxSourceNesting and withNestingLimit would refuse
+// the source anyway. Refusing it here keeps the recursive converter off the
+// left-deep chains the grammar builds by iteration (`a + a + …`, `a.b.b…`,
+// `a[0][0]…`), whose recursion on Go's stack is quadratic in GC stack
+// scanning and fatal past the 1 GB stack ceiling.
+func tsParseNestingViolation(root *sitter.Node) *sitter.Node {
+	cur := sitter.NewTreeCursor(root)
+	defer cur.Close()
+	stack := []tsNestFrame{{typ: root.Type()}}
+	for {
+		top := stack[len(stack)-1]
+		if top.level > MaxSourceNesting || top.chain > MaxSourceNesting {
+			return cur.CurrentNode()
+		}
+		if cur.GoToFirstChild() {
+			stack = append(stack, tsChildNestFrame(top, cur.CurrentNode(), cur.CurrentFieldName()))
+			continue
+		}
+		for {
+			if len(stack) == 1 {
+				return nil
+			}
+			if cur.GoToNextSibling() {
+				stack[len(stack)-1] = tsChildNestFrame(stack[len(stack)-2], cur.CurrentNode(), cur.CurrentFieldName())
+				break
+			}
+			cur.GoToParent()
+			stack = stack[:len(stack)-1]
+		}
+	}
 }

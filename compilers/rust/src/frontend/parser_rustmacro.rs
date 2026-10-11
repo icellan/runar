@@ -12,6 +12,7 @@ use super::ast::{
 use super::diagnostic::{lex_error, static_method_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -262,11 +263,43 @@ struct RustDslParser {
     errors: Vec<Diagnostic>,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: DeclaredIdents,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl RustDslParser {
     fn new(tokens: Vec<Token>, file: String) -> Self {
-        Self { tokens, pos: 0, file, errors: Vec::new(), idents: DeclaredIdents::default() }
+        Self { tokens, pos: 0, file, errors: Vec::new(), idents: DeclaredIdents::default(), nest: NestingCounter::new() }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn current(&self) -> &Token {
@@ -405,6 +438,9 @@ impl RustDslParser {
             parent_class = "StatefulSmartContract".to_string();
         }
 
+        if self.nest.exceeded() {
+            return nesting_refusal(None);
+        }
         if contract_name.is_empty() {
             self.errors.push(Diagnostic::error("No Rúnar contract struct found", None));
             return ParseResult { contract: None, errors: self.errors, source_size_err: None };
@@ -484,8 +520,12 @@ impl RustDslParser {
             source_file: self.file.clone(),
         };
 
+        // F-213 measure (A), then measure (B) on the finished tree.
+        if self.nest.exceeded() {
+            return nesting_refusal(None);
+        }
         self.errors.extend(self.idents.collision_diagnostic());
-        ParseResult { contract: Some(contract), errors: self.errors, source_size_err: None }
+        enforce_ast_nesting(ParseResult { contract: Some(contract), errors: self.errors, source_size_err: None })
     }
 
     /// Parse a bare `impl ContractName { ... }` block and return its methods.
@@ -549,7 +589,8 @@ impl RustDslParser {
         // Fixed-size array: `[T; N]` — maps to TypeNode::FixedArray.
         if matches!(self.current().typ, TokenType::LBracket) {
             self.advance_clone(); // consume [
-            let element = self.parse_rust_type();
+            // F-213: `[T; N]` element type is one level deeper (+1).
+            let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_rust_type());
             // Expect `;`
             self.match_tok(&TokenType::Semi);
             // Length must be a numeric literal.
@@ -660,6 +701,10 @@ impl RustDslParser {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         let loc = self.loc();
 
         // assert!(expr)
@@ -955,13 +1000,15 @@ impl RustDslParser {
     }
 
     // Expression parsing with precedence climbing
-    fn parse_expression(&mut self) -> Expression { self.parse_or() }
+    fn parse_expression(&mut self) -> Expression { self.nested(zero(), |p| p.parse_or()) }
 
     fn parse_or(&mut self) -> Expression {
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
             self.advance_clone();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right) };
         }
         left
@@ -969,9 +1016,11 @@ impl RustDslParser {
 
     fn parse_and(&mut self) -> Expression {
         let mut left = self.parse_bit_or();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
             self.advance_clone();
             let right = self.parse_bit_or();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right) };
         }
         left
@@ -979,33 +1028,43 @@ impl RustDslParser {
 
     fn parse_bit_or(&mut self) -> Expression {
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
             self.advance_clone();
-            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(self.parse_bit_xor()) };
+            let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
             self.advance_clone();
-            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(self.parse_bit_and()) };
+            let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
             self.advance_clone();
-            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(self.parse_equality()) };
+            let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::EqEq => BinaryOp::StrictEq,
@@ -1013,13 +1072,16 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_comparison()) };
+            let right = self.parse_comparison();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_comparison(&mut self) -> Expression {
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Lt => BinaryOp::Lt,
@@ -1029,13 +1091,16 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_shift()) };
+            let right = self.parse_shift();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_shift(&mut self) -> Expression {
         let mut left = self.parse_add_sub();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Shl => BinaryOp::Shl,
@@ -1043,13 +1108,16 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_add_sub()) };
+            let right = self.parse_add_sub();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_add_sub(&mut self) -> Expression {
         let mut left = self.parse_mul_div();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Plus => BinaryOp::Add,
@@ -1057,13 +1125,16 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_mul_div()) };
+            let right = self.parse_mul_div();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_mul_div(&mut self) -> Expression {
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Star => BinaryOp::Mul,
@@ -1072,14 +1143,16 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_unary()) };
+            let right = self.parse_unary();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
         }
         left
     }
 
     fn parse_unary(&mut self) -> Expression {
         match self.current().typ {
-            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.parse_unary()) } }
+            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.nested(zero(), |p| p.parse_unary())) } }
             TokenType::Minus => {
                 self.advance_clone();
                 // F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1096,9 +1169,9 @@ impl RustDslParser {
                         self.tokens[k].typ = TokenType::Number(v);
                     }
                 }
-                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.parse_unary()) }
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.nested(zero(), |p| p.parse_unary())) }
             }
-            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.parse_unary()) } }
+            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.nested(zero(), |p| p.parse_unary())) } }
             TokenType::Amp => {
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Mut) { self.advance_clone(); }
@@ -1110,6 +1183,7 @@ impl RustDslParser {
 
     fn parse_postfix(&mut self) -> Expression {
         let mut expr = self.parse_primary();
+        let mut dt = DepthTracker::new();
         loop {
             if matches!(self.current().typ, TokenType::LParen) {
                 self.advance_clone();
@@ -1128,10 +1202,13 @@ impl RustDslParser {
                     if let Expression::MemberExpr { object, property } = &expr {
                         if property == "clone" {
                             expr = (**object).clone();
+                            dt = DepthTracker::new();
                             continue;
                         }
                     }
                 }
+                let arg_refs: Vec<&Expression> = args.iter().collect();
+                if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                 expr = Expression::CallExpr { callee: Box::new(expr), args, asm_return_type: None };
             } else if matches!(self.current().typ, TokenType::Dot) {
                 self.advance_clone();
@@ -1146,20 +1223,24 @@ impl RustDslParser {
                 if let Expression::Identifier { ref name } = expr {
                     if name == "self" {
                         expr = Expression::PropertyAccess { property: prop };
+                        dt = DepthTracker::new();
                         continue;
                     }
                 }
+                if !self.grow(&mut dt, &expr, &[]) { break; }
                 expr = Expression::MemberExpr { object: Box::new(expr), property: prop };
             } else if matches!(self.current().typ, TokenType::ColonColon) {
                 self.advance_clone();
                 if let TokenType::Ident(name) = self.current().typ.clone() {
                     self.advance_clone();
                     expr = Expression::Identifier { name: snake_to_camel(&name) };
+                    dt = DepthTracker::new();
                 }
             } else if matches!(self.current().typ, TokenType::LBracket) {
                 self.advance_clone();
                 let index = self.parse_expression();
                 self.expect(&TokenType::RBracket);
+                if !self.grow(&mut dt, &expr, &[&index]) { break; }
                 expr = Expression::IndexAccess { object: Box::new(expr), index: Box::new(index) };
             } else {
                 break;
@@ -1233,6 +1314,11 @@ impl RustDslParser {
             }
         }
     }
+}
+
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,6 +1467,14 @@ pub fn parse_rust_dsl(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_rust_dsl_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_rust_dsl`], on the parse stack segment.
+fn parse_rust_dsl_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.rs").to_string();
     let mut lex_errors: Vec<Diagnostic> = Vec::new();
     let tokens = tokenize(source, &file, &mut lex_errors);

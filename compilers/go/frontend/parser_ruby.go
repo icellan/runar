@@ -20,6 +20,10 @@ func ParseRuby(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseRubySurface(source, fileName) })
+}
+
+func parseRubySurface(source []byte, fileName string) *ParseResult {
 	p := &rbParser{
 		fileName: fileName,
 	}
@@ -135,6 +139,9 @@ type rbParser struct {
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *rbParser) addError(msg string) {
@@ -767,7 +774,7 @@ func (p *rbParser) parseRbType() TypeNode {
 	// Check for FixedArray[T, N] style generic
 	if rawName == "FixedArray" && p.check(rbTokLBracket) {
 		p.advance() // '['
-		elemType := p.parseRbType()
+		elemType := nested(&p.nest, p.loc(), p.parseRbType)
 		p.expect(rbTokComma)
 		sizeTok := p.expect(rbTokNumber)
 		size, err := strconv.Atoi(sizeTok.value)
@@ -1231,6 +1238,10 @@ func (p *rbParser) parseStatements() []Statement {
 }
 
 func (p *rbParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *rbParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// assert statement: assert expr
@@ -1326,7 +1337,7 @@ func (p *rbParser) parseIfStatement(loc SourceLocation) Statement {
 
 	if p.check(rbTokElsif) {
 		elifLoc := p.loc()
-		elseBranch = []Statement{p.parseElsifStatement(elifLoc)}
+		elseBranch = []Statement{nested(&p.nest, elifLoc, func() Statement { return p.parseElsifStatement(elifLoc) })}
 		p.declaredLocals = copyStringSet(localsBeforeThen)
 	} else if p.check(rbTokElse) {
 		p.advance() // 'else'
@@ -1359,7 +1370,7 @@ func (p *rbParser) parseElsifStatement(loc SourceLocation) Statement {
 
 	if p.check(rbTokElsif) {
 		elifLoc := p.loc()
-		elseBranch = []Statement{p.parseElsifStatement(elifLoc)}
+		elseBranch = []Statement{nested(&p.nest, elifLoc, func() Statement { return p.parseElsifStatement(elifLoc) })}
 		p.declaredLocals = copyStringSet(localsBeforeThen)
 	} else if p.check(rbTokElse) {
 		p.advance() // 'else'
@@ -1656,7 +1667,7 @@ func (p *rbParser) parseIdentStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *rbParser) parseExpression() Expression {
-	return p.parseTernary()
+	return nested(&p.nest, p.loc(), p.parseTernary)
 }
 
 // Ruby ternary: condition ? consequent : alternate
@@ -1697,7 +1708,7 @@ func (p *rbParser) parseAnd() Expression {
 
 func (p *rbParser) parseNot() Expression {
 	if p.match(rbTokNot) || p.match(rbTokBang) {
-		operand := p.parseNot()
+		operand := nested(&p.nest, p.loc(), p.parseNot)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	return p.parseBitwiseOr()
@@ -1821,15 +1832,15 @@ func (p *rbParser) parseMultiplicative() Expression {
 
 func (p *rbParser) parseUnary() Expression {
 	if p.match(rbTokMinus) {
-		operand := p.parseUnary()
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "-", Operand: operand}
 	}
 	if p.match(rbTokTilde) {
-		operand := p.parseUnary()
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
 	if p.match(rbTokBang) {
-		operand := p.parseUnary()
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	return p.parsePower()
@@ -1839,7 +1850,7 @@ func (p *rbParser) parseUnary() Expression {
 func (p *rbParser) parsePower() Expression {
 	base := p.parsePostfix()
 	if p.match(rbTokStarStar) {
-		exp := p.parsePower() // right-recursive for right-associativity
+		exp := nested(&p.nest, p.loc(), p.parsePower) // right-recursive for right-associativity
 		return CallExpr{Callee: Identifier{Name: "pow"}, Args: []Expression{base, exp}}
 	}
 	return base

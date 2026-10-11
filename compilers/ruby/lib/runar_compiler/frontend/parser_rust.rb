@@ -499,6 +499,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class RustParser
+      include InputLimits::NestingCounter
+
       include RustTokens
 
       INT64_MAX = 9_223_372_036_854_775_807
@@ -800,13 +802,13 @@ module RunarCompiler
         if check(TOK_AMP)
           advance
           advance if check(TOK_MUT)
-          return parse_rust_type
+          return nested { parse_rust_type }
         end
 
         # Handle array types: [Type; N]
         if check(TOK_LBRACKET)
           advance
-          element = parse_rust_type
+          element = nested { parse_rust_type }
           expect(TOK_SEMI)
           length_tok = expect(TOK_NUMBER)
           length = begin
@@ -968,6 +970,10 @@ module RunarCompiler
       # -- Statement parsing -------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # return [expr];
@@ -1122,7 +1128,7 @@ module RunarCompiler
         if check(TOK_ELSE)
           advance
           if check(TOK_IF)
-            else_block = [parse_if_statement(loc)]
+            else_block = [nested { parse_if_statement(loc) }]
           else
             expect(TOK_LBRACE)
             else_block = []
@@ -1263,7 +1269,7 @@ module RunarCompiler
       #   primary
 
       def parse_expression
-        parse_or
+        nested { parse_or }
       end
 
       def parse_or
@@ -1402,7 +1408,7 @@ module RunarCompiler
 
       def parse_unary
         if match_tok(TOK_BANG)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         if match_tok(TOK_MINUS)
@@ -1415,11 +1421,11 @@ module RunarCompiler
              (1..opens).all? { |j| k + j < @tokens.length && @tokens[k + j].kind == TOK_RPAREN }
             @tokens[k].neg_only = false
           end
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "-", operand: operand)
         end
         if match_tok(TOK_TILDE)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "~", operand: operand)
         end
         # Skip reference operator & in expression context
@@ -1428,15 +1434,15 @@ module RunarCompiler
           # Check if this is & reference (not && which is already handled)
           advance
           advance if check(TOK_MUT)
-          return parse_unary
+          return nested { parse_unary }
         end
         # Prefix ++/--
         if match_tok(TOK_PLUSPLUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return IncrementExpr.new(operand: operand, prefix: true)
         end
         if match_tok(TOK_MINUSMINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return DecrementExpr.new(operand: operand, prefix: true)
         end
         parse_postfix
@@ -1655,7 +1661,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_rust_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_rust_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_rust_tokens(source, file_name, lex)
@@ -1665,6 +1673,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

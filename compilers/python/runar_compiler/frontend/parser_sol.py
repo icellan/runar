@@ -17,6 +17,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, assert_ast_nesting, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -325,6 +326,8 @@ class _SolParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -695,6 +698,10 @@ class _SolParser:
     # -- Statement parsing ---------------------------------------------------
 
     def parse_sol_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_sol_statement_inner()
+
+    def _parse_sol_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         # require(...) -> assert(...)
@@ -770,7 +777,8 @@ class _SolParser:
         if self.match_ident("else"):
             if self.check_ident("if"):
                 # else if -- recurse
-                else_stmt = self._parse_if(self.loc())
+                with self._nest.nested(self.loc):
+                    else_stmt = self._parse_if(self.loc())
                 else_block = [else_stmt]
             else:
                 else_block = self.parse_sol_block()
@@ -894,7 +902,8 @@ class _SolParser:
     # -- Expression parsing (recursive descent with precedence) --------------
 
     def parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
@@ -1018,20 +1027,25 @@ class _SolParser:
 
     def _parse_unary(self) -> Expression:
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="!", operand=operand)
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="-", operand=operand)
         if self.match(TOK_TILDE):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return UnaryExpr(op="~", operand=operand)
         # Prefix increment/decrement
         if self.match(TOK_PLUSPLUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return IncrementExpr(operand=operand, prefix=True)
         if self.match(TOK_MINUSMINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return DecrementExpr(operand=operand, prefix=True)
         return self._parse_postfix()
 
@@ -1360,7 +1374,9 @@ def parse_sol(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_sol_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_sol_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_sol_tokens(source: str, file_name: str, lex: list) -> ParseResult:
@@ -1375,6 +1391,8 @@ def _parse_sol_tokens(source: str, file_name: str, lex: list) -> ParseResult:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
     if contract is not None:
+        # F-213: measure (B) before the recursive property rewrite walks the tree.
+        assert_ast_nesting(contract)
         _rewrite_contract_props(contract)
 
     if p.errors:

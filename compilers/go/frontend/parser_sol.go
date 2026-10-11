@@ -18,6 +18,10 @@ func ParseSolidity(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseSolSurface(source, fileName) })
+}
+
+func parseSolSurface(source []byte, fileName string) *ParseResult {
 	p := &solParser{
 		fileName: fileName,
 	}
@@ -106,6 +110,8 @@ type solParser struct {
 	tokens   []solToken
 	pos      int
 	errors   []Diagnostic
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *solParser) addError(msg string) {
@@ -1080,6 +1086,10 @@ func (p *solParser) parseSolBlock() []Statement {
 // ---------------------------------------------------------------------------
 
 func (p *solParser) parseSolStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseSolStatementInner)
+}
+
+func (p *solParser) parseSolStatementInner() Statement {
 	loc := p.loc()
 
 	// require(...) -> assert(...)
@@ -1172,7 +1182,8 @@ func (p *solParser) parseSolIf(loc SourceLocation) Statement {
 	if p.matchIdent("else") {
 		if p.checkIdent("if") {
 			// else if — recurse
-			elseStmt := p.parseSolIf(p.loc())
+			elseLoc := p.loc()
+			elseStmt := nested(&p.nest, elseLoc, func() Statement { return p.parseSolIf(elseLoc) })
 			elseBlock = []Statement{elseStmt}
 		} else {
 			elseBlock = p.parseSolBlock()
@@ -1311,7 +1322,7 @@ func (p *solParser) parseSolExprStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *solParser) parseSolExpression() Expression {
-	return p.parseSolTernary()
+	return nested(&p.nest, p.loc(), p.parseSolTernary)
 }
 
 func (p *solParser) parseSolTernary() Expression {
@@ -1461,24 +1472,24 @@ func (p *solParser) parseSolMultiplicative() Expression {
 
 func (p *solParser) parseSolUnary() Expression {
 	if p.match(solTokBang) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	if p.match(solTokMinus) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return UnaryExpr{Op: "-", Operand: operand}
 	}
 	if p.match(solTokTilde) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
 	// Prefix increment/decrement
 	if p.match(solTokPlusPlus) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return IncrementExpr{Operand: operand, Prefix: true}
 	}
 	if p.match(solTokMinusMinus) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return DecrementExpr{Operand: operand, Prefix: true}
 	}
 	return p.parseSolPostfix()

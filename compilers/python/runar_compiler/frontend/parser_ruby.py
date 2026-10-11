@@ -30,6 +30,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nesting, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
@@ -718,6 +719,8 @@ class _RbParser:
         self._declared_locals: set[str] = set()
         # F-017: (source spelling, Rúnar name) of every declared identifier.
         self._declared: list[tuple[str, str]] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def _declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -917,6 +920,7 @@ class _RbParser:
         _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "addDataOutput", "getStateScript"}
         method_names = {m.name for m in methods} | _INTRINSIC_METHODS
         for method in methods:
+            assert_body_nesting(method.body)  # F-213: (B) before the recursive rewrite
             _rewrite_bare_method_calls(method.body, method_names)
 
         # Implicit return conversion for private methods.
@@ -1035,7 +1039,8 @@ class _RbParser:
         # FixedArray[T, N] style generic
         if raw_name == "FixedArray" and self._peek().kind == TOK_LBRACKET:
             self._advance()  # '['
-            elem_type = self._parse_type()
+            with self._nest.nested(self._loc):
+                elem_type = self._parse_type()
             self._expect(TOK_COMMA, ",")
             size_tok = self._expect(TOK_NUMBER, "number")
             try:
@@ -1204,6 +1209,10 @@ class _RbParser:
         return stmts
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self._loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         loc = self._loc()
         kind = self._peek().kind
 
@@ -1264,7 +1273,8 @@ class _RbParser:
 
         if self._peek().kind == TOK_ELSIF:
             elif_loc = self._loc()
-            else_stmts = [self._parse_elsif_statement(elif_loc)]
+            with self._nest.nested(self._loc):
+                else_stmts = [self._parse_elsif_statement(elif_loc)]
             self._declared_locals = set(locals_before_then)
         elif self._peek().kind == TOK_ELSE:
             self._advance()  # 'else'
@@ -1295,7 +1305,8 @@ class _RbParser:
 
         if self._peek().kind == TOK_ELSIF:
             elif_loc = self._loc()
-            else_stmts = [self._parse_elsif_statement(elif_loc)]
+            with self._nest.nested(self._loc):
+                else_stmts = [self._parse_elsif_statement(elif_loc)]
             self._declared_locals = set(locals_before_then)
         elif self._peek().kind == TOK_ELSE:
             self._advance()  # 'else'
@@ -1536,7 +1547,8 @@ class _RbParser:
     # -----------------------------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self._loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
@@ -1567,7 +1579,8 @@ class _RbParser:
     def _parse_not(self) -> Expression:
         if self._peek().kind in (TOK_NOT, TOK_BANG):
             self._advance()
-            operand = self._parse_not()
+            with self._nest.nested(self._loc):
+                operand = self._parse_not()
             return UnaryExpr(op="!", operand=operand)
         return self._parse_bitwise_or()
 
@@ -1691,13 +1704,16 @@ class _RbParser:
         kind = self._peek().kind
         if kind == TOK_MINUS:
             self._advance()
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="-", operand=self._parse_unary())
         if kind == TOK_TILDE:
             self._advance()
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="~", operand=self._parse_unary())
         if kind == TOK_BANG:
             self._advance()
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="!", operand=self._parse_unary())
         return self._parse_power()
 
     def _parse_power(self) -> Expression:
@@ -1705,7 +1721,8 @@ class _RbParser:
         # ``**`` is right-associative and maps to ``pow(base, exp)``
         if self._peek().kind == TOK_STARSTAR:
             self._advance()
-            exp = self._parse_power()  # right-recursive for right-associativity
+            with self._nest.nested(self._loc):
+                exp = self._parse_power()  # right-recursive for right-associativity
             return CallExpr(
                 callee=Identifier(name="pow"),
                 args=[base, exp],
@@ -1866,7 +1883,9 @@ def parse_ruby(source: str, file_name: str = "contract.runar.rb") -> ParseResult
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_ruby_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_ruby_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_ruby_tokens(source: str, file_name: str, lex: list) -> ParseResult:

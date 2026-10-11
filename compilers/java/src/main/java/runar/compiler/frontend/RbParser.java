@@ -89,7 +89,10 @@ public final class RbParser {
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser parser = new Parser(tokens, filename);
-        ContractNode contract = parser.parseTop();
+        // F-213: measures (A) and (B). parseClass's recursive bare-call
+        // rewrite runs inside this guard, so the StackOverflowError backstop
+        // covers it on a loop-built tree too deep for it.
+        ContractNode contract = SourceNesting.guard(parser::parseTop, ParseException::new);
         String collision = parser.idents.message();
         if (contract != null && collision != null) parser.errors.add(collision);
         if (!parser.errors.isEmpty()) {
@@ -654,6 +657,8 @@ public final class RbParser {
         final String file;
         int pos;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         Set<String> declaredLocals = new HashSet<>();
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
@@ -958,7 +963,7 @@ public final class RbParser {
             String rawName = t.value;
             if ("FixedArray".equals(rawName) && peek().kind == TK.LBRACKET) {
                 advance(); // '['
-                TypeNode elem = parseType();
+                TypeNode elem = nest.nested(this::parseType);
                 expect(TK.COMMA, ",");
                 Token sizeTok = expect(TK.NUMBER, "number");
                 int size;
@@ -1080,6 +1085,10 @@ public final class RbParser {
         }
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation l = loc();
             TK k = peek().kind;
             return switch (k) {
@@ -1133,7 +1142,8 @@ public final class RbParser {
             if (peek().kind == TK.ELSIF) {
                 SourceLocation elifLoc = loc();
                 elseStmts = new ArrayList<>();
-                elseStmts.add(parseElsifStatement(elifLoc));
+                // F-213 A1: an elsif is a statement of the else branch.
+                elseStmts.add(nest.nested(() -> parseElsifStatement(elifLoc)));
                 declaredLocals = new HashSet<>(localsBeforeThen);
             } else if (peek().kind == TK.ELSE) {
                 advance();
@@ -1157,7 +1167,8 @@ public final class RbParser {
             if (peek().kind == TK.ELSIF) {
                 SourceLocation elifLoc = loc();
                 elseStmts = new ArrayList<>();
-                elseStmts.add(parseElsifStatement(elifLoc));
+                // F-213 A1: an elsif is a statement of the else branch.
+                elseStmts.add(nest.nested(() -> parseElsifStatement(elifLoc)));
                 declaredLocals = new HashSet<>(localsBeforeThen);
             } else if (peek().kind == TK.ELSE) {
                 advance();
@@ -1371,7 +1382,7 @@ public final class RbParser {
         // ----------------------------------------------------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1409,7 +1420,7 @@ public final class RbParser {
         Expression parseNot() {
             if (peek().kind == TK.NOT || peek().kind == TK.BANG) {
                 advance();
-                Expression operand = parseNot();
+                Expression operand = nest.nested(this::parseNot);
                 return new UnaryExpr(Expression.UnaryOp.NOT, operand);
             }
             return parseBitOr();
@@ -1533,15 +1544,15 @@ public final class RbParser {
             TK k = peek().kind;
             if (k == TK.MINUS) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
             }
             if (k == TK.TILDE) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
             }
             if (k == TK.BANG) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
             }
             return parsePower();
         }
@@ -1550,7 +1561,7 @@ public final class RbParser {
             Expression base = parsePostfix();
             if (peek().kind == TK.STARSTAR) {
                 advance();
-                Expression exp = parsePower(); // right-associative
+                Expression exp = nest.nested(this::parsePower); // right-associative
                 return new CallExpr(new Identifier("pow"), List.of(base, exp));
             }
             return base;

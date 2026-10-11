@@ -18,6 +18,10 @@ func ParseMove(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseMoveSurface(source, fileName) })
+}
+
+func parseMoveSurface(source []byte, fileName string) *ParseResult {
 	p := &moveParser{
 		fileName: fileName,
 	}
@@ -110,6 +114,9 @@ type moveParser struct {
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *moveParser) addError(msg string) {
@@ -810,7 +817,7 @@ func (p *moveParser) parseMoveTypeNode() TypeNode {
 	// FixedArray<T, N> — nestable. Closes split `>>` shift tokens.
 	if name == "FixedArray" && p.check(moveTokLt) {
 		p.advance() // <
-		inner := p.parseMoveTypeNode()
+		inner := nested(&p.nest, p.loc(), p.parseMoveTypeNode)
 		p.expect(moveTokComma)
 		lenTok := p.expect(moveTokNumber)
 		length := 0
@@ -829,7 +836,7 @@ func (p *moveParser) parseMoveTypeNode() TypeNode {
 	if name == "vector" && p.check(moveTokLt) {
 		p.advance() // <
 		// Skip the inner type entirely — we don't model dynamic-length vectors.
-		p.parseMoveTypeNode()
+		nested(&p.nest, p.loc(), p.parseMoveTypeNode)
 		p.consumeMoveGenericClose()
 		return PrimitiveType{Name: "ByteString"}
 	}
@@ -1208,6 +1215,10 @@ func (p *moveParser) reportUnfoldedMoveWhiles(stmts []Statement) {
 // ---------------------------------------------------------------------------
 
 func (p *moveParser) parseMoveStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseMoveStatementInner)
+}
+
+func (p *moveParser) parseMoveStatementInner() Statement {
 	loc := p.loc()
 
 	// let [mut] name [: Type] = expr;
@@ -1333,7 +1344,8 @@ func (p *moveParser) parseMoveIf(loc SourceLocation) Statement {
 	var elseBlock []Statement
 	if p.matchIdent("else") {
 		if p.checkIdent("if") {
-			elseStmt := p.parseMoveIf(p.loc())
+			elseLoc := p.loc()
+			elseStmt := nested(&p.nest, elseLoc, func() Statement { return p.parseMoveIf(elseLoc) })
 			elseBlock = []Statement{elseStmt}
 		} else {
 			elseBlock = p.parseMoveBlock()
@@ -1438,7 +1450,7 @@ func (p *moveParser) parseMoveExprStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *moveParser) parseMoveExpression() Expression {
-	return p.parseMoveOr()
+	return nested(&p.nest, p.loc(), p.parseMoveOr)
 }
 
 func (p *moveParser) parseMoveOr() Expression {
@@ -1577,15 +1589,15 @@ func (p *moveParser) parseMoveMultiplicative() Expression {
 
 func (p *moveParser) parseMoveUnary() Expression {
 	if p.match(moveTokBang) {
-		operand := p.parseMoveUnary()
+		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
 		return UnaryExpr{Op: "!", Operand: operand}
 	}
 	if p.match(moveTokMinus) {
-		operand := p.parseMoveUnary()
+		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
 		return UnaryExpr{Op: "-", Operand: operand}
 	}
 	if p.match(moveTokTilde) {
-		operand := p.parseMoveUnary()
+		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
 	// Skip & (reference) — it's a no-op in the Rúnar context
@@ -1593,12 +1605,12 @@ func (p *moveParser) parseMoveUnary() Expression {
 		if p.matchIdent("mut") {
 			// &mut expr — skip both
 		}
-		return p.parseMoveUnary()
+		return nested(&p.nest, p.loc(), p.parseMoveUnary)
 	}
 	// Dereference * — also a no-op
 	if p.check(moveTokStar) && p.isDeref() {
 		p.advance()
-		return p.parseMoveUnary()
+		return nested(&p.nest, p.loc(), p.parseMoveUnary)
 	}
 	return p.parseMovePostfix()
 }

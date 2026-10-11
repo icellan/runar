@@ -107,8 +107,19 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
-    let mut errors: Vec<Diagnostic> = Vec::new();
     let file = file_name.unwrap_or("contract.ts");
+    // F-213: everything that holds or walks the swc AST -- the swc parse, the
+    // measure-(A) walk, the conversion, the drop of the swc AST -- runs on its
+    // own stack segment (see ts_nesting.rs); measure (B) then runs on the
+    // converted Rúnar AST.
+    let result = super::input_limits::run_on_parse_stack(|| parse_ts_surface(source, file));
+    super::input_limits::enforce_ast_nesting(result)
+}
+
+/// The `.runar.ts` surface: swc parse (behind the F-213 token guard), measure
+/// (A) over the swc AST, then conversion to the Rúnar AST.
+fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
+    let mut errors: Vec<Diagnostic> = Vec::new();
 
     // Set up SWC parser. Collect comments so the author-facing directives
     // `/** @embedAlways */` (#109) and `/** @sighash <FLAGS> */` (#123) — which
@@ -133,15 +144,35 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         StringInput::from(&*fm),
         Some(&comments),
     );
-    let mut parser = Parser::new_from(lexer);
+    // F-213 layer 1: the guard ends the token stream once the AST swc is
+    // building gets too deep (or the parse stack runs low), so swc never
+    // recurses, or builds a tree, past what this stack segment holds.
+    let guarded = super::ts_nesting::GuardedTokens::new(lexer);
+    let too_deep = guarded.tripped_flag();
+    let mut parser = Parser::new_from(guarded);
 
-    let module = match parser.parse_module() {
+    let parsed = parser.parse_module();
+    if too_deep.get() {
+        return super::input_limits::nesting_refusal(None);
+    }
+    let module = match parsed {
         Ok(m) => m,
         Err(e) => {
             errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
             return ParseResult { contract: None, errors, source_size_err: None };
         }
     };
+
+    // F-213 measure (A), over the whole module, before anything else walks it
+    // (the TS reference's tsParseNestingViolation).
+    if let Some(span) = super::ts_nesting::parse_nesting_violation(&module) {
+        let at = cm.lookup_char_pos(span.lo);
+        return super::input_limits::nesting_refusal(Some(SourceLocation {
+            file: file.to_string(),
+            line: at.line,
+            column: at.col_display,
+        }));
+    }
 
     // Collect any parser errors
     for e in parser.take_errors() {

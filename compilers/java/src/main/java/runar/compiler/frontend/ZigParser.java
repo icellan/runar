@@ -85,7 +85,10 @@ public final class ZigParser {
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         State s = new State(tokens, filename);
-        return s.parseTopLevel();
+        // F-213: measures (A) and (B). parseTopLevel's recursive bare-call
+        // rewrite runs inside this guard, so the StackOverflowError backstop
+        // covers it on a loop-built tree too deep for it.
+        return SourceNesting.guard(s::parseTopLevel, ParseException::new);
     }
 
     /** Checked exception raised on parse-time problems. */
@@ -434,6 +437,8 @@ public final class ZigParser {
         final String file;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
 
         // Contract being built.
         String contractName = "UnnamedContract";
@@ -828,7 +833,7 @@ public final class ZigParser {
                 Token len = expect(Kind.NUMBER, "array length");
                 int length = parseLongLiteral(len.value).intValueExact();
                 expect(Kind.RBRACKET, "]");
-                ParsedType elem = parseType();
+                ParsedType elem = nest.nested(this::parseType);
                 return new ParsedType(new FixedArrayType(elem.type, length), elem.rawName, false);
             }
 
@@ -842,7 +847,7 @@ public final class ZigParser {
 
                 if ("Readonly".equals(name) && current().kind == Kind.LPAREN) {
                     expect(Kind.LPAREN, "(");
-                    ParsedType inner = parseType();
+                    ParsedType inner = nest.nested(this::parseType);
                     expect(Kind.RPAREN, ")");
                     return new ParsedType(inner.type, inner.rawName, true);
                 }
@@ -968,6 +973,10 @@ public final class ZigParser {
         }
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation l = loc();
 
             if (current().kind == Kind.RETURN) {
@@ -1065,7 +1074,8 @@ public final class ZigParser {
                 advance();
                 if (current().kind == Kind.IF) {
                     elseBranch = new ArrayList<>();
-                    elseBranch.add(parseIfStatement());
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    elseBranch.add(nest.nested(this::parseIfStatement));
                 } else {
                     elseBranch = parseBlockStatements();
                 }
@@ -1148,7 +1158,7 @@ public final class ZigParser {
         // ------------------ Expressions (precedence climbing) ------------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1304,15 +1314,15 @@ public final class ZigParser {
             Kind k = current().kind;
             if (k == Kind.BANG) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
             }
             if (k == Kind.MINUS) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
             }
             if (k == Kind.TILDE) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
             }
             Expression expr = parsePrimary();
             return parsePostfixChain(expr);

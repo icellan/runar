@@ -445,6 +445,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class JavaParser
+      include InputLimits::NestingCounter
+
       include JavaTokens
 
       INT64_MAX = 9_223_372_036_854_775_807
@@ -633,6 +635,8 @@ module RunarCompiler
       # the end of its block, a for-loop variable inside the loop. Bare reads
       # are not touched.
       def check_bare_property_assignments(contract)
+        # F-213 measure (B) before the recursive walk below.
+        InputLimits.assert_ast_nesting!(contract)
         props = contract.properties.map(&:name)
         return if props.empty?
 
@@ -958,7 +962,7 @@ module RunarCompiler
         if check(TOK_LT)
           if simple == "FixedArray"
             advance # <
-            element = parse_type
+            element = nested { parse_type }
             expect(TOK_COMMA, "','")
             # Length must be an integer literal
             if !check(TOK_NUMBER)
@@ -983,6 +987,10 @@ module RunarCompiler
       # -- Statement parsing ------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # N-053: an empty statement `;` is a no-op, as in the TS reference.
@@ -1176,7 +1184,9 @@ module RunarCompiler
         else_block = nil
         if match_tok(TOK_ELSE)
           if check(TOK_IF)
-            else_block = [parse_if_statement(loc)]
+            # +1 as a statement of the else branch: the TS reference reaches
+            # this if through parseBlockOrSingle -> parseStatement.
+            else_block = [nested { parse_if_statement(loc) }]
           else
             else_block = parse_block_or_single_statement
           end
@@ -1278,7 +1288,7 @@ module RunarCompiler
       #   postfix (. [] () postfix ++ --)
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
@@ -1448,26 +1458,26 @@ module RunarCompiler
 
       def parse_unary
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary })
         end
         if match_tok(TOK_MINUS)
           # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
           # legal only as the direct operand of this minus.
           peek.neg_only = false if check(TOK_NUMBER)
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary })
         end
         if match_tok(TOK_PLUS)
           # Unary plus is a no-op in Java (+x == x).
-          return parse_unary
+          return nested { parse_unary }
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
         end
         if match_tok(TOK_PLUSPLUS)
-          return IncrementExpr.new(operand: parse_unary, prefix: true)
+          return IncrementExpr.new(operand: nested { parse_unary }, prefix: true)
         end
         if match_tok(TOK_MINUSMINUS)
-          return DecrementExpr.new(operand: parse_unary, prefix: true)
+          return DecrementExpr.new(operand: nested { parse_unary }, prefix: true)
         end
         parse_postfix(parse_primary)
       end
@@ -1898,7 +1908,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_java_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_java_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_java_tokens(source, file_name, lex)
@@ -1908,6 +1920,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

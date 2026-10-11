@@ -51,6 +51,7 @@ use super::diagnostic::{
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // F-205: the annotation names Rúnar recognizes at member position, matching
@@ -75,14 +76,26 @@ pub fn parse_java(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_java_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_java`], on the parse stack segment.
+fn parse_java_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.java");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
     let tokens = tokenize(source, file, &mut errors);
     let mut parser = JavaParser::new(tokens, file, &mut errors);
     let contract = parser.parse();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +526,8 @@ struct JavaParser<'a> {
     /// Name of the enclosing contract class (used to distinguish the
     /// constructor from a method with the same name).
     contract_name: String,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> JavaParser<'a> {
@@ -524,7 +539,38 @@ impl<'a> JavaParser<'a> {
             errors,
             type_args_depth: 0,
             contract_name: String::new(),
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn current(&self) -> &Token {
@@ -1053,7 +1099,8 @@ impl<'a> JavaParser<'a> {
                     self.advance();
                     length_arg = Some(n as usize);
                 } else {
-                    let inner = self.parse_type();
+                    // F-213: a nested type argument is one level deeper (+1).
+                    let inner = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
                     args.push(inner);
                 }
                 if !self.match_tok(&TokenType::Comma) {
@@ -1131,6 +1178,10 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         let loc = self.loc();
 
         match self.current().typ.clone() {
@@ -1484,7 +1535,7 @@ impl<'a> JavaParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expr(&mut self) -> Option<Expression> {
-        self.parse_ternary()
+        self.nested(None, |p| p.parse_ternary())
     }
 
     fn parse_ternary(&mut self) -> Option<Expression> {
@@ -1505,9 +1556,11 @@ impl<'a> JavaParser<'a> {
 
     fn parse_or(&mut self) -> Option<Expression> {
         let mut left = self.parse_and()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
             self.advance();
             let right = self.parse_and()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
@@ -1519,9 +1572,11 @@ impl<'a> JavaParser<'a> {
 
     fn parse_and(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitor()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
             self.advance();
             let right = self.parse_bitor()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
@@ -1533,9 +1588,11 @@ impl<'a> JavaParser<'a> {
 
     fn parse_bitor(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitxor()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
             self.advance();
             let right = self.parse_bitxor()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
@@ -1547,9 +1604,11 @@ impl<'a> JavaParser<'a> {
 
     fn parse_bitxor(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitand()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
             self.advance();
             let right = self.parse_bitand()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
@@ -1561,9 +1620,11 @@ impl<'a> JavaParser<'a> {
 
     fn parse_bitand(&mut self) -> Option<Expression> {
         let mut left = self.parse_equality()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
             self.advance();
             let right = self.parse_equality()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
@@ -1575,6 +1636,7 @@ impl<'a> JavaParser<'a> {
 
     fn parse_equality(&mut self) -> Option<Expression> {
         let mut left = self.parse_relational()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::EqEq => BinaryOp::StrictEq,
@@ -1583,13 +1645,20 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_relational()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            // compareTo folding can make the node shallower; re-measure then.
+            let refolds = compare_to_receiver_arg(&left).is_some() || compare_to_receiver_arg(&right).is_some();
             left = fold_compare_to_zero(op, left, right);
+            if refolds {
+                dt = DepthTracker::new();
+            }
         }
         Some(left)
     }
 
     fn parse_relational(&mut self) -> Option<Expression> {
         let mut left = self.parse_shift()?;
+        let mut dt = DepthTracker::new();
         loop {
             // Inside a generic type-argument list, `>` is a closer, not an operator.
             if self.type_args_depth > 0
@@ -1606,13 +1675,20 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_shift()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            // compareTo folding can make the node shallower; re-measure then.
+            let refolds = compare_to_receiver_arg(&left).is_some() || compare_to_receiver_arg(&right).is_some();
             left = fold_compare_to_zero(op, left, right);
+            if refolds {
+                dt = DepthTracker::new();
+            }
         }
         Some(left)
     }
 
     fn parse_shift(&mut self) -> Option<Expression> {
         let mut left = self.parse_additive()?;
+        let mut dt = DepthTracker::new();
         loop {
             if self.type_args_depth > 0 && matches!(self.current().typ, TokenType::Shr) {
                 break;
@@ -1624,6 +1700,7 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_additive()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op,
                 left: Box::new(left),
@@ -1635,6 +1712,7 @@ impl<'a> JavaParser<'a> {
 
     fn parse_additive(&mut self) -> Option<Expression> {
         let mut left = self.parse_multiplicative()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Plus => BinaryOp::Add,
@@ -1643,6 +1721,7 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_multiplicative()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op,
                 left: Box::new(left),
@@ -1654,6 +1733,7 @@ impl<'a> JavaParser<'a> {
 
     fn parse_multiplicative(&mut self) -> Option<Expression> {
         let mut left = self.parse_unary()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Star => BinaryOp::Mul,
@@ -1663,6 +1743,7 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_unary()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op,
                 left: Box::new(left),
@@ -1676,7 +1757,7 @@ impl<'a> JavaParser<'a> {
         match self.current().typ.clone() {
             TokenType::Bang => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
@@ -1689,20 +1770,20 @@ impl<'a> JavaParser<'a> {
                 if let TokenType::NegOnlyNumber(n, _) = self.current().typ.clone() {
                     self.tokens[self.pos].typ = TokenType::Number(n);
                 }
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
                 })
             }
             TokenType::Plus => {
-                // Unary `+` is identity.
+                // Unary `+` is identity. F-213: it still recurses (+1).
                 self.advance();
-                self.parse_unary()
+                self.nested(None, |p| p.parse_unary())
             }
             TokenType::Tilde => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
@@ -1710,7 +1791,7 @@ impl<'a> JavaParser<'a> {
             }
             TokenType::PlusPlus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::IncrementExpr {
                     operand: Box::new(operand),
                     prefix: true,
@@ -1718,7 +1799,7 @@ impl<'a> JavaParser<'a> {
             }
             TokenType::MinusMinus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::DecrementExpr {
                     operand: Box::new(operand),
                     prefix: true,
@@ -1730,15 +1811,22 @@ impl<'a> JavaParser<'a> {
 
     fn parse_postfix(&mut self) -> Option<Expression> {
         let mut expr = self.parse_primary()?;
+        let mut dt = DepthTracker::new();
 
         loop {
             match self.current().typ.clone() {
                 TokenType::Dot => {
                     self.advance();
                     let prop = self.expect_ident();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
 
                     if matches!(self.current().typ, TokenType::LParen) {
                         let args = self.parse_call_args();
+                        // The member node above is accounted; now the call.
+                        let arg_refs: Vec<&Expression> = args.iter().collect();
+                        if !self.grow(&mut dt, &expr, &arg_refs) { break; }
+                        // A promoted literal is a leaf: re-measure from it.
+                        dt = DepthTracker::new();
                         expr = promote_literal_calls(Expression::CallExpr {
                             callee: Box::new(Expression::MemberExpr {
                                 object: Box::new(expr),
@@ -1758,6 +1846,7 @@ impl<'a> JavaParser<'a> {
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect_tok(&TokenType::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -1765,6 +1854,10 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::LParen => {
                     let args = self.parse_call_args();
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
+                    // A promoted literal is a leaf: re-measure from it.
+                    dt = DepthTracker::new();
                     expr = promote_literal_calls(Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -1773,6 +1866,7 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::PlusPlus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::IncrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1780,6 +1874,7 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::MinusMinus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::DecrementExpr {
                         operand: Box::new(expr),
                         prefix: false,

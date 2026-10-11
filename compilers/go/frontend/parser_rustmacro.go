@@ -21,6 +21,10 @@ func ParseRustMacro(source []byte, fileName string) *ParseResult {
 	if res := sourceSizeGuardResult(source); res != nil {
 		return res
 	}
+	return withNestingLimit(func() *ParseResult { return parseRustMacroSurface(source, fileName) })
+}
+
+func parseRustMacroSurface(source []byte, fileName string) *ParseResult {
 	tokens, lexErrors := rustTokenize(string(source), fileName)
 	p := &rustMacroParser{
 		tokens:   tokens,
@@ -435,6 +439,9 @@ type rustMacroParser struct {
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *rustMacroParser) current() rustToken {
@@ -726,7 +733,7 @@ func (p *rustMacroParser) parseRustType() TypeNode {
 	// tiers build.
 	if p.current().kind == rustTokLBracket {
 		p.advance()
-		element := p.parseRustType()
+		element := nested(&p.nest, p.loc(), p.parseRustType)
 		p.expect(rustTokSemi)
 		lengthTok := p.current()
 		p.expect(rustTokNumber)
@@ -913,6 +920,10 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 // ---------------------------------------------------------------------------
 
 func (p *rustMacroParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *rustMacroParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// assert!(expr)
@@ -1187,7 +1198,9 @@ func rustConvertSelfAccess(expr Expression) Expression {
 // Expression parsing — precedence climbing
 // ---------------------------------------------------------------------------
 
-func (p *rustMacroParser) parseExpression() Expression { return p.parseOr() }
+func (p *rustMacroParser) parseExpression() Expression {
+	return nested(&p.nest, p.loc(), p.parseOr)
+}
 
 func (p *rustMacroParser) parseOr() Expression {
 	left := p.parseAnd()
@@ -1331,7 +1344,7 @@ func (p *rustMacroParser) parseUnary() Expression {
 	switch p.current().kind {
 	case rustTokBang:
 		p.advance()
-		return UnaryExpr{Op: "!", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
 	case rustTokMinus:
 		p.advance()
 		// F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1352,15 +1365,16 @@ func (p *rustMacroParser) parseUnary() Expression {
 				p.tokens[k].negOnly = false
 			}
 		}
-		return UnaryExpr{Op: "-", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
 	case rustTokTilde:
 		p.advance()
-		return UnaryExpr{Op: "~", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
 	case rustTokAmp:
-		// & and &mut are reference-taking operators — skip them
+		// & and &mut are reference-taking operators — skip them. Counted
+		// as a prefix operator (F-213), as the TS reference counts it.
 		p.advance()
 		p.match(rustTokMut)
-		return p.parsePostfix()
+		return nested(&p.nest, p.loc(), p.parsePostfix)
 	}
 	return p.parsePostfix()
 }

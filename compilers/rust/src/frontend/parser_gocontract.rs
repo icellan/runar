@@ -44,6 +44,7 @@ use super::ast::{
 };
 use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,14 @@ pub fn parse_go_contract(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_go_contract_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_go_contract`], on the parse stack segment.
+fn parse_go_contract_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.go");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
@@ -68,12 +77,16 @@ pub fn parse_go_contract(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = GoParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
     let collision = parser.idents.collision_diagnostic();
     if contract.is_some() {
         errors.extend(collision);
     }
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +688,8 @@ struct GoParser<'a> {
     idents: super::identifier_collision::DeclaredIdents,
     /// N-056: top-level unparenthesised operator of the last parsed operand.
     ladder_top: Option<BinaryOp>,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> GoParser<'a> {
@@ -687,7 +702,38 @@ impl<'a> GoParser<'a> {
             receiver_name: "c".to_string(),
             idents: Default::default(),
             ladder_top: None,
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn current(&self) -> &Token {
@@ -1099,6 +1145,14 @@ impl<'a> GoParser<'a> {
             self.advance(); // '['
             if matches!(self.current().typ, TokenType::RBracket) {
                 self.advance(); // ']'
+                // F-213: `[][]…T` is consumed iteratively; the element type
+                // is parsed only to consume it.
+                while matches!(self.current().typ, TokenType::LBracket)
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.typ), Some(TokenType::RBracket))
+                {
+                    self.advance();
+                    self.advance();
+                }
                 let inner = self.parse_type();
                 // []byte -> ByteString
                 if let TypeNode::Primitive(PrimitiveTypeName::Bigint) = &inner {
@@ -1114,7 +1168,8 @@ impl<'a> GoParser<'a> {
                 0
             };
             self.match_tok(&TokenType::RBracket);
-            let inner = self.parse_type();
+            // F-213: a nested element type is one level deeper (+1).
+            let inner = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
             return TypeNode::FixedArray { element: Box::new(inner), length: size };
         }
 
@@ -1420,6 +1475,10 @@ impl<'a> GoParser<'a> {
     // ---------------------------------------------------------------------------
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         let loc = self.loc();
 
         match self.current().typ.clone() {
@@ -1838,7 +1897,7 @@ impl<'a> GoParser<'a> {
     // ---------------------------------------------------------------------------
 
     fn parse_expr(&mut self) -> Option<Expression> {
-        self.parse_or()
+        self.nested(None, |p| p.parse_or())
     }
 
     /// N-056: build `left op right`, refusing an unparenthesised operand edge
@@ -1861,10 +1920,12 @@ impl<'a> GoParser<'a> {
 
     fn parse_or(&mut self) -> Option<Expression> {
         let mut left = self.parse_and()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_and()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(BinaryOp::Or, left, left_top, right);
         }
         Some(left)
@@ -1872,10 +1933,12 @@ impl<'a> GoParser<'a> {
 
     fn parse_and(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitor()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_bitor()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(BinaryOp::And, left, left_top, right);
         }
         Some(left)
@@ -1883,10 +1946,12 @@ impl<'a> GoParser<'a> {
 
     fn parse_bitor(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitxor()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_bitxor()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(BinaryOp::BitOr, left, left_top, right);
         }
         Some(left)
@@ -1894,10 +1959,12 @@ impl<'a> GoParser<'a> {
 
     fn parse_bitxor(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitand()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_bitand()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(BinaryOp::BitXor, left, left_top, right);
         }
         Some(left)
@@ -1905,10 +1972,12 @@ impl<'a> GoParser<'a> {
 
     fn parse_bitand(&mut self) -> Option<Expression> {
         let mut left = self.parse_equality()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_equality()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(BinaryOp::BitAnd, left, left_top, right);
         }
         Some(left)
@@ -1916,6 +1985,7 @@ impl<'a> GoParser<'a> {
 
     fn parse_equality(&mut self) -> Option<Expression> {
         let mut left = self.parse_relational()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::EqEq => BinaryOp::StrictEq,
@@ -1925,6 +1995,7 @@ impl<'a> GoParser<'a> {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_relational()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
@@ -1932,6 +2003,7 @@ impl<'a> GoParser<'a> {
 
     fn parse_relational(&mut self) -> Option<Expression> {
         let mut left = self.parse_shift()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Lt => BinaryOp::Lt,
@@ -1943,6 +2015,7 @@ impl<'a> GoParser<'a> {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_shift()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
@@ -1950,6 +2023,7 @@ impl<'a> GoParser<'a> {
 
     fn parse_shift(&mut self) -> Option<Expression> {
         let mut left = self.parse_additive()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Shl => BinaryOp::Shl,
@@ -1959,6 +2033,7 @@ impl<'a> GoParser<'a> {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_additive()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
@@ -1966,6 +2041,7 @@ impl<'a> GoParser<'a> {
 
     fn parse_additive(&mut self) -> Option<Expression> {
         let mut left = self.parse_multiplicative()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Plus => BinaryOp::Add,
@@ -1975,6 +2051,7 @@ impl<'a> GoParser<'a> {
             let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_multiplicative()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
@@ -1982,6 +2059,7 @@ impl<'a> GoParser<'a> {
 
     fn parse_multiplicative(&mut self) -> Option<Expression> {
         let mut left = self.parse_unary()?;
+        let mut dt = DepthTracker::new();
         self.ladder_top = None; // N-056: a unary/primary operand is an atom
         loop {
             let op = match self.current().typ {
@@ -1994,6 +2072,7 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_unary()?;
             self.ladder_top = None;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
@@ -2003,17 +2082,17 @@ impl<'a> GoParser<'a> {
         match self.current().typ.clone() {
             TokenType::Bang => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(operand) })
             }
             TokenType::Minus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(operand) })
             }
             TokenType::Tilde | TokenType::Caret => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(operand) })
             }
             _ => self.parse_postfix(),
@@ -2022,6 +2101,7 @@ impl<'a> GoParser<'a> {
 
     fn parse_postfix(&mut self) -> Option<Expression> {
         let mut expr = self.parse_primary()?;
+        let mut dt = DepthTracker::new();
 
         loop {
             match self.current().typ.clone() {
@@ -2029,10 +2109,14 @@ impl<'a> GoParser<'a> {
                     self.advance();
                     let prop_raw = self.expect_ident();
                     let prop = go_to_camel(&prop_raw);
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
 
                     // Check if it's a call: expr.method(...)
                     if matches!(self.current().typ, TokenType::LParen) {
                         let args = self.parse_call_args();
+                        // The member node above is accounted; now the call.
+                        let arg_refs: Vec<&Expression> = args.iter().collect();
+                        if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                         expr = Expression::CallExpr {
                             callee: Box::new(Expression::MemberExpr {
                                 object: Box::new(expr),
@@ -2051,12 +2135,15 @@ impl<'a> GoParser<'a> {
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect_tok(&TokenType::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess { object: Box::new(expr), index: Box::new(index) };
                 }
 
                 TokenType::LParen => {
                     // Direct call: func(...)
                     let args = self.parse_call_args();
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr { callee: Box::new(expr), args, asm_return_type: None };
                 }
 
@@ -2310,7 +2397,9 @@ impl<'a> GoParser<'a> {
         let mut elements: Vec<Expression> = Vec::new();
         while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
             if matches!(self.current().typ, TokenType::LBrace) {
-                elements.push(self.parse_go_brace_literal());
+                // F-213: a nested brace element is an array element (+1).
+                let el = self.nested(None, |p| Some(p.parse_go_brace_literal()));
+                elements.extend(el);
             } else if let Some(e) = self.parse_expr() {
                 elements.push(e);
             } else {

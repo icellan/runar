@@ -14,6 +14,9 @@ from typing import Any
 
 from runar_compiler.ir.types import ANFProgram, bigint_json_value
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT as _SIGHASH_DEFAULT
+# F-213: every source entry point runs with recursion headroom for a
+# MAX_SOURCE_NESTING-deep program (see input_limits.COMPILE_RECURSION_LIMIT).
+from runar_compiler.frontend.input_limits import recursion_headroom
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +583,7 @@ def compile_from_source(
     return artifact
 
 
+@recursion_headroom()
 def compile_from_source_collecting_warnings(
     source_path: str,
     disable_constant_folding: bool = False,
@@ -663,6 +667,7 @@ def _dropped_readonly_field_warnings(contract: Any, program: ANFProgram) -> list
     ]
 
 
+@recursion_headroom()
 def compile_source_to_ir(
     source_path: str,
     disable_constant_folding: bool = False,
@@ -1384,6 +1389,7 @@ def compile_from_source_str_with_result(
     )
 
 
+@recursion_headroom()
 def _compile_from_source_str_with_result(
     source: str,
     file_name: str,

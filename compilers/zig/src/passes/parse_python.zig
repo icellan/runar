@@ -81,6 +81,11 @@ pub fn parsePython(allocator: Allocator, source: []const u8, file_name: []const 
     }
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
+    // F-213: an over-nested source is refused with the one shared diagnostic,
+    // before anything here or downstream recurses over the tree.
+    if (input_limits.nestingGuardErrors(allocator, parser.nest_error, r.contract, file_name)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     // F-011: report an unterminated literal (the tokenizer records it).
     var unterminated: ?lex_diag.Pos = null;
     var escape: ?LiteralError = null;
@@ -806,7 +811,8 @@ const Parser = struct {
     current: Token,
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
-    depth: u32,
+    nest: input_limits.NestingCounter = .{},
+    nest_error: ?[]const u8 = null,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: identifier_collision.DeclaredIdents = .{},
     /// N-046: the locals already bound in the current method, so a later
@@ -817,8 +823,6 @@ const Parser = struct {
     /// Snapshot/restored around if-branches and loop bodies exactly as the
     /// Ruby parser's `declared_locals`.
     declared_locals: std.StringHashMapUnmanaged(void) = .empty,
-
-    const max_depth: u32 = 256;
 
     /// N-046: a copy of the tracked locals (restored after a branch / body).
     fn snapshotLocals(self: *Parser) std.StringHashMapUnmanaged(void) {
@@ -848,9 +852,48 @@ const Parser = struct {
         const tokens = insertIndentation(allocator, raw);
         var tokenizer = Tokenizer.initFromTokens(tokens);
         const first = tokenizer.next();
-        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty };
         p.current = p.normalizeNumber(p.current);
         return p;
+    }
+
+    /// F-213 measure (A): enter one counted nesting level — a statement, a
+    /// full-expression parse, a prefix-unary operand, another self-recursion
+    /// or a nested type (see frontend/input_limits.zig). False once the source
+    /// is over-nested: the caller then returns without parsing, and must not
+    /// call `self.nest.exit()`.
+    fn enterNest(self: *Parser) bool {
+        if (self.nest.enter()) return true;
+        self.refuseNesting();
+        return false;
+    }
+
+    /// Record the shared F-213 diagnostic (once) and jump to end of input, so
+    /// every parse loop winds down; the parse entry then returns that
+    /// diagnostic alone. Called again on every later refused `enterNest`, so a
+    /// parse that rewinds the token stream after a refusal still ends.
+    fn refuseNesting(self: *Parser) void {
+        self.nest.exceeded = true;
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        self.tokenizer.pos = self.tokenizer.tokens.len;
+        self.current = self.fetch();
+    }
+
+    /// F-213 measure (A): run `f` one counted nesting level deeper — the
+    /// prefix-unary operand, ternary-arm, else-if and nested-type recursions.
+    fn nestedParse(self: *Parser, comptime T: type, comptime f: fn (*Parser) ?T) ?T {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return f(self);
+    }
+
+    /// F-213 measure (A) for the nested-type recursions, whose parse functions
+    /// return a value rather than an optional: `fallback` stands in for the
+    /// refused parse (the whole source is refused anyway).
+    fn nestedValue(self: *Parser, comptime T: type, fallback: T, comptime f: anytype, args: anytype) T {
+        if (!self.enterNest()) return fallback;
+        defer self.nest.exit();
+        return @call(.auto, f, .{self} ++ args);
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -1159,7 +1202,7 @@ const Parser = struct {
         // Readonly[T] — return inner type, readonly-ness handled at property level
         if (std.mem.eql(u8, name, "Readonly")) {
             if (self.match(.lbracket)) {
-                const inner = self.parsePyTypeAnnotation();
+                const inner = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parsePyTypeAnnotation, .{});
                 _ = self.expect(.rbracket);
                 return inner;
             }
@@ -1169,7 +1212,7 @@ const Parser = struct {
         // FixedArray[T, N]
         if (std.mem.eql(u8, name, "FixedArray")) {
             if (self.match(.lbracket)) {
-                const elem_type = self.parsePyTypeAnnotation();
+                const elem_type = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parsePyTypeAnnotation, .{});
                 _ = self.expect(.comma);
                 const size_tok = self.expect(.number) orelse return .{ .custom_type = "FixedArray" };
                 const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
@@ -1453,6 +1496,12 @@ const Parser = struct {
     // ---- Statements ----
 
     fn parseStatement(self: *Parser) ?Statement {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return self.parseStatementInner();
+    }
+
+    fn parseStatementInner(self: *Parser) ?Statement {
         // assert expr or assert_(expr)
         if (self.checkIdent("assert") or self.checkIdent("assert_")) {
             return self.parsePyAssert();
@@ -1579,7 +1628,11 @@ const Parser = struct {
         if (self.checkIdent("elif")) {
             const elif_loc = self.currentSourceLoc();
             _ = self.bump(); // consume 'elif'
-            const nested = self.parsePyIfBody(elif_loc) orelse return null;
+            // F-213 (A): an elif is an if statement of the else branch.
+            if (!self.enterNest()) return null;
+            const nested_if = self.parsePyIfBody(elif_loc);
+            self.nest.exit();
+            const nested = nested_if orelse return null;
             self.restoreLocals(&locals_before);
             const a = self.allocator.alloc(Statement, 1) catch return null;
             a[0] = nested;
@@ -1845,12 +1898,8 @@ const Parser = struct {
     //   primary
 
     fn parseExpression(self: *Parser) ?Expression {
-        self.depth += 1;
-        defer self.depth -= 1;
-        if (self.depth > max_depth) {
-            self.addError("expression nesting depth exceeds maximum (256)");
-            return null;
-        }
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
         return self.parseTernary();
     }
 
@@ -1866,7 +1915,7 @@ const Parser = struct {
                 self.addError("expected 'else' in ternary expression");
                 return null;
             }
-            const alternate = self.parseTernary() orelse return null;
+            const alternate = self.nestedParse(Expression, Parser.parseTernary) orelse return null;
             const tern = self.allocator.create(Ternary) catch return null;
             tern.* = .{ .condition = condition, .then_expr = expr, .else_expr = alternate };
             expr = .{ .ternary = tern };
@@ -1898,7 +1947,7 @@ const Parser = struct {
     fn parseLogicalNot(self: *Parser) ?Expression {
         if (self.current.kind == .bang) {
             _ = self.bump();
-            const operand = self.parseLogicalNot() orelse return null;
+            const operand = self.nestedParse(Expression, Parser.parseLogicalNot) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .not, .operand = operand };
             return .{ .unary_op = uop };
@@ -2011,21 +2060,21 @@ const Parser = struct {
     fn parseUnary(self: *Parser) ?Expression {
         if (self.current.kind == .minus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .negate, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .tilde) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .bitnot, .operand = o };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .bang) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .not, .operand = o };
             return .{ .unary_op = uop };
@@ -2038,7 +2087,7 @@ const Parser = struct {
         const base = self.parsePostfix() orelse return null;
         if (self.current.kind == .star_star) {
             _ = self.bump();
-            const exp = self.parseUnary() orelse return null; // right-associative
+            const exp = self.nestedParse(Expression, Parser.parseUnary) orelse return null; // right-associative
             const call = self.allocator.create(CallExpr) catch return null;
             const args = self.allocator.alloc(Expression, 2) catch return null;
             args[0] = base;
@@ -2163,7 +2212,7 @@ const Parser = struct {
             .minus => blk: {
                 // Unary minus at primary level (for negative literals)
                 _ = self.bump();
-                const o = self.parseUnary() orelse break :blk null;
+                const o = self.nestedParse(Expression, Parser.parseUnary) orelse break :blk null;
                 const uop = self.allocator.create(UnaryOp) catch break :blk null;
                 uop.* = .{ .op = .negate, .operand = o };
                 break :blk Expression{ .unary_op = uop };

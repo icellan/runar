@@ -93,7 +93,8 @@ public final class GoParser {
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         ParserState state = new ParserState(filename, tokens);
-        ContractNode contract = state.parseFile();
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(state::parseFile, ParseException::new);
         String collision = state.idents.message();
         if (contract != null && collision != null) state.errors.add(collision);
         if (contract == null) {
@@ -716,6 +717,8 @@ public final class GoParser {
         final List<Token> tokens;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         /** N-056: expression operands (primaries, calls, parenthesised groups). */
         final Set<Expression> goAtoms = Collections.newSetFromMap(new IdentityHashMap<>());
         String receiverName = "";
@@ -1076,16 +1079,16 @@ public final class GoParser {
                         addError("line " + sizeTok.line + ": array size must be integer");
                     }
                     expect(Tok.RBRACKET);
-                    TypeNode elem = parseType();
+                    TypeNode elem = nest.nested(this::parseType);
                     return new FixedArrayType(elem, size);
                 }
                 expect(Tok.RBRACKET);
-                return parseType();
+                return nest.nested(this::parseType);
             }
 
             if (check(Tok.STAR)) {
                 advance();
-                return parseType();
+                return nest.nested(this::parseType);
             }
 
             Token tok = peek();
@@ -1341,6 +1344,10 @@ public final class GoParser {
         }
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation location = loc();
             if (checkIdent("if")) return parseIf(location);
             if (checkIdent("for")) return parseFor(location);
@@ -1358,7 +1365,8 @@ public final class GoParser {
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
                     SourceLocation elifLoc = loc();
-                    Statement elif = parseIf(elifLoc);
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement elif = nest.nested(() -> parseIf(elifLoc));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(elif);
                 } else {
@@ -1513,6 +1521,10 @@ public final class GoParser {
         // -- Expressions --------------------------------------------------
 
         Expression parseExpression() {
+            return nest.nested(this::parseExpressionInner);
+        }
+
+        Expression parseExpressionInner() {
             Expression expr = parseOr();
             // N-056: refuse an unparenthesised operand edge that groups
             // differently under Go precedence; nested ( ... ) groups were
@@ -1675,14 +1687,14 @@ public final class GoParser {
 
         Expression parseUnary() {
             if (match(Tok.MINUS)) {
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
             }
             if (match(Tok.BANG)) {
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
             }
             if (match(Tok.CARET)) {
                 // Go uses ^ as unary bitwise NOT.
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
             }
             Expression expr = parsePostfix();
             goAtoms.add(expr); // N-056: an operand is an atom
@@ -1899,7 +1911,8 @@ public final class GoParser {
             List<Expression> elements = new ArrayList<>();
             while (!check(Tok.RBRACE) && !check(Tok.EOF)) {
                 if (check(Tok.LBRACE)) {
-                    elements.add(parseBraceLiteral());
+                    // F-213 A2: a nested brace element is an array element.
+                    elements.add(nest.nested(this::parseBraceLiteral));
                 } else {
                     elements.add(parseExpression());
                 }

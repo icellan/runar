@@ -33,7 +33,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -631,6 +631,8 @@ class PyParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
   /** F-017: (source spelling, Rúnar name) of every declared identifier. */
   private declared: Array<[string, string]> = [];
   /**
@@ -912,7 +914,7 @@ class PyParser {
       // E.g., FixedArray[T, N]
       if (rawName === 'FixedArray') {
         this.advance(); // '['
-        const elemType = this.parseType();
+        const elemType = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(',');
         const sizeTok = this.expect('number');
         const size = parseInt(sizeTok.value, 10);
@@ -1091,6 +1093,10 @@ class PyParser {
   }
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const loc = this.loc();
 
     // assert statement: assert expr or assert_(expr)
@@ -1178,7 +1184,7 @@ class PyParser {
     if (this.peek().type === 'elif') {
       // elif -> else { if ... }
       const elifLoc = this.loc();
-      elseBranch = [this.parseElifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElifStatement(elifLoc))];
       this.declaredLocals = new Set(localsBefore);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
@@ -1216,7 +1222,7 @@ class PyParser {
 
     if (this.peek().type === 'elif') {
       const elifLoc = this.loc();
-      elseBranch = [this.parseElifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElifStatement(elifLoc))];
       this.declaredLocals = new Set(localsBefore);
     } else if (this.peek().type === 'else') {
       this.advance();
@@ -1503,7 +1509,7 @@ class PyParser {
   // ---------------------------------------------------------------------------
 
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   // Python conditional expression: x if cond else y
@@ -1515,7 +1521,7 @@ class PyParser {
       this.advance(); // 'if'
       const condition = this.parseOr();
       this.expect('else');
-      const alternate = this.parseTernary();
+      const alternate = this.nest.nested(this.loc(), () => this.parseTernary());
       return { kind: 'ternary_expr', condition, consequent: expr, alternate };
     }
 
@@ -1545,7 +1551,7 @@ class PyParser {
   private parseNot(): Expression {
     if (this.peek().type === 'not') {
       this.advance();
-      const operand = this.parseNot();
+      const operand = this.nest.nested(this.loc(), () => this.parseNot());
       return { kind: 'unary_expr', op: '!', operand };
     }
     return this.parseBitwiseOr();
@@ -1680,17 +1686,17 @@ class PyParser {
   private parseUnary(): Expression {
     if (this.peek().type === '-') {
       this.advance();
-      const operand = this.parseUnary();
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '-', operand };
     }
     if (this.peek().type === '~') {
       this.advance();
-      const operand = this.parseUnary();
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '~', operand };
     }
     if (this.peek().type === '!') {
       this.advance();
-      const operand = this.parseUnary();
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '!', operand };
     }
     return this.parsePostfix();
@@ -1876,5 +1882,5 @@ export function parsePythonSource(source: string, fileName: string): ParseResult
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, fileName, errors);
   const parser = new PyParser(tokens, fileName, errors);
-  return parser.parse();
+  return withNestingLimit(fileName, () => parser.parse());
 }

@@ -380,6 +380,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class ZigParser
+      include InputLimits::NestingCounter
+
       # Define token constants directly on the class to avoid Ruby's lexical
       # constant lookup finding identically-named constants from other parsers
       # that leak into the Frontend module (e.g., parser_ruby.rb defines
@@ -636,6 +638,12 @@ module RunarCompiler
         expect(TOK_RBRACE)
         match_tok(TOK_SEMICOLON)
 
+        # F-213 measure (B) before the recursive walks below (mutation
+        # collection, bare-method-call rewriting) recurse on the AST.
+        InputLimits.assert_ast_nesting!(
+          ContractNode.new(properties: @properties, constructor: @constructor_node, methods: @methods)
+        )
+
         # Collect set of property names mutated in any method body so we can
         # determine readonly flags in stateful contracts (matches TS rule).
         mutated = Set.new
@@ -863,7 +871,7 @@ module RunarCompiler
             0
           end
           expect(TOK_RBRACKET)
-          element = parse_type
+          element = nested { parse_type }
           return { type: FixedArrayType.new(element: element[:type], length: size), raw_name: element[:raw_name] }
         end
 
@@ -877,7 +885,7 @@ module RunarCompiler
           # runar.Readonly(T)
           if name == "Readonly" && check(TOK_LPAREN)
             expect(TOK_LPAREN)
-            inner = parse_type
+            inner = nested { parse_type }
             expect(TOK_RPAREN)
             return { type: inner[:type], raw_name: inner[:raw_name], readonly: true }
           end
@@ -1004,6 +1012,10 @@ module RunarCompiler
       # -- Statement parsing ------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         source_location = loc
 
         # return
@@ -1119,7 +1131,7 @@ module RunarCompiler
         if check(TOK_ELSE)
           advance
           if check(TOK_IF)
-            else_branch = [parse_if_statement]
+            else_branch = [nested { parse_if_statement }]
           else
             else_branch = parse_block_statements
           end
@@ -1235,7 +1247,7 @@ module RunarCompiler
       #   primary
 
       def parse_expression
-        parse_or
+        nested { parse_or }
       end
 
       def parse_or
@@ -1374,15 +1386,15 @@ module RunarCompiler
 
       def parse_unary
         if match_tok(TOK_BANG)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         if match_tok(TOK_MINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "-", operand: operand)
         end
         if match_tok(TOK_TILDE)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "~", operand: operand)
         end
 
@@ -1886,7 +1898,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_zig_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_zig_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_zig_tokens(source, file_name, lex)
@@ -1896,6 +1910,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

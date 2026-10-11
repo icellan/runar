@@ -51,6 +51,7 @@ use super::ast::{
 };
 use super::diagnostic::{lex_error_at_index, static_method_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 use std::collections::HashSet;
 
@@ -71,6 +72,15 @@ pub fn parse_zig(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_zig_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_zig`], on the parse stack segment.
+fn parse_zig_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
+    use super::diagnostic::Diagnostic;
     let file = file_name.unwrap_or("contract.runar.zig");
     let mut str_errors: Vec<String> = Vec::new();
 
@@ -79,11 +89,15 @@ pub fn parse_zig(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = ZigParser::new(tokens, file, &mut str_errors);
 
     let contract = parser.parse_contract();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
 
     let mut errors = lex_errors;
     errors.extend(str_errors.into_iter().map(|msg| Diagnostic::error(msg, None)));
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +406,8 @@ struct ZigParser<'a> {
     self_names: HashSet<String>,
     /// Names of parameters typed as `StatefulContext`.
     stateful_context_names: HashSet<String>,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> ZigParser<'a> {
@@ -404,7 +420,38 @@ impl<'a> ZigParser<'a> {
             contract_name: String::new(),
             self_names: HashSet::new(),
             stateful_context_names: HashSet::new(),
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn peek(&self) -> &Token {
@@ -737,7 +784,9 @@ impl<'a> ZigParser<'a> {
                 }
             };
             self.expect(&Token::RBracket);
-            let (element, readonly) = self.parse_type();
+            // F-213: a nested element type is one level deeper (+1).
+            let (element, readonly) =
+                self.nested((TypeNode::Custom("_error".to_string()), false), |p| p.parse_type());
             return (
                 TypeNode::FixedArray {
                     element: Box::new(element),
@@ -758,7 +807,8 @@ impl<'a> ZigParser<'a> {
             // runar.Readonly(T)
             if name == "Readonly" && *self.peek() == Token::LParen {
                 self.advance(); // (
-                let (inner, _) = self.parse_type();
+                let (inner, _) =
+                    self.nested((TypeNode::Custom("_error".to_string()), false), |p| p.parse_type());
                 self.expect(&Token::RParen);
                 return (inner, true);
             }
@@ -1087,6 +1137,10 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         // return
         if *self.peek() == Token::Return {
             return Some(self.parse_return_statement());
@@ -1206,7 +1260,8 @@ impl<'a> ZigParser<'a> {
         let else_branch = if *self.peek() == Token::Else {
             self.advance(); // else
             if *self.peek() == Token::If {
-                Some(vec![self.parse_if_statement()])
+                // F-213: the nested `if` is a statement of the else branch (+1).
+                self.nested(Some(Vec::new()), |p| Some(vec![p.parse_if_statement()]))
             } else {
                 Some(self.parse_block_statements())
             }
@@ -1368,7 +1423,7 @@ impl<'a> ZigParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Expression {
-        self.parse_ternary()
+        self.nested(zero(), |p| p.parse_ternary())
     }
 
     /// No ternary operator in Zig, but parse_ternary provides the top level.
@@ -1378,9 +1433,11 @@ impl<'a> ZigParser<'a> {
 
     fn parse_or(&mut self) -> Expression {
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::OrOr {
             self.advance();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
@@ -1392,9 +1449,11 @@ impl<'a> ZigParser<'a> {
 
     fn parse_and(&mut self) -> Expression {
         let mut left = self.parse_bit_or();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::AndAnd {
             self.advance();
             let right = self.parse_bit_or();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
@@ -1406,9 +1465,11 @@ impl<'a> ZigParser<'a> {
 
     fn parse_bit_or(&mut self) -> Expression {
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
             self.advance();
             let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
@@ -1420,9 +1481,11 @@ impl<'a> ZigParser<'a> {
 
     fn parse_bit_xor(&mut self) -> Expression {
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
             self.advance();
             let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
@@ -1434,9 +1497,11 @@ impl<'a> ZigParser<'a> {
 
     fn parse_bit_and(&mut self) -> Expression {
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
             self.advance();
             let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
@@ -1448,11 +1513,13 @@ impl<'a> ZigParser<'a> {
 
     fn parse_equality(&mut self) -> Expression {
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::EqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
@@ -1463,6 +1530,7 @@ impl<'a> ZigParser<'a> {
                 Token::NotEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictNe,
@@ -1478,11 +1546,13 @@ impl<'a> ZigParser<'a> {
 
     fn parse_comparison(&mut self) -> Expression {
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
@@ -1492,6 +1562,7 @@ impl<'a> ZigParser<'a> {
                 Token::Le => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
@@ -1501,6 +1572,7 @@ impl<'a> ZigParser<'a> {
                 Token::Gt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
@@ -1510,6 +1582,7 @@ impl<'a> ZigParser<'a> {
                 Token::Ge => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
@@ -1524,11 +1597,13 @@ impl<'a> ZigParser<'a> {
 
     fn parse_shift(&mut self) -> Expression {
         let mut left = self.parse_additive();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::LShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
@@ -1538,6 +1613,7 @@ impl<'a> ZigParser<'a> {
                 Token::RShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
@@ -1552,11 +1628,13 @@ impl<'a> ZigParser<'a> {
 
     fn parse_additive(&mut self) -> Expression {
         let mut left = self.parse_multiplicative();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Plus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Add,
                         left: Box::new(left),
@@ -1566,6 +1644,7 @@ impl<'a> ZigParser<'a> {
                 Token::Minus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
@@ -1580,11 +1659,13 @@ impl<'a> ZigParser<'a> {
 
     fn parse_multiplicative(&mut self) -> Expression {
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
@@ -1594,6 +1675,7 @@ impl<'a> ZigParser<'a> {
                 Token::Slash => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
@@ -1603,6 +1685,7 @@ impl<'a> ZigParser<'a> {
                 Token::Percent => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
@@ -1619,7 +1702,7 @@ impl<'a> ZigParser<'a> {
         match self.peek() {
             Token::Bang => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
@@ -1627,7 +1710,7 @@ impl<'a> ZigParser<'a> {
             }
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
@@ -1635,7 +1718,7 @@ impl<'a> ZigParser<'a> {
             }
             Token::Tilde => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
@@ -1895,12 +1978,15 @@ impl<'a> ZigParser<'a> {
 
     /// Parse postfix operations: `.prop`, `(args)`, `[index]`.
     fn parse_postfix(&mut self, mut expr: Expression) -> Expression {
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::LParen => {
                     self.advance(); // (
                     let args = self.parse_list_elements(&Token::RParen);
                     self.expect(&Token::RParen);
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -1917,6 +2003,7 @@ impl<'a> ZigParser<'a> {
                             expr = Expression::PropertyAccess {
                                 property: prop,
                             };
+                            dt = DepthTracker::new();
                             continue;
                         }
                         // StatefulContext param -> PropertyAccess for intrinsics
@@ -1928,11 +2015,13 @@ impl<'a> ZigParser<'a> {
                                 || prop == "addDataOutput"
                             {
                                 expr = Expression::PropertyAccess { property: prop };
+                                dt = DepthTracker::new();
                                 continue;
                             }
                         }
                     }
 
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::MemberExpr {
                         object: Box::new(expr),
                         property: prop,
@@ -1942,6 +2031,7 @@ impl<'a> ZigParser<'a> {
                     self.advance(); // [
                     let index = self.parse_expression();
                     self.expect(&Token::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -1952,6 +2042,11 @@ impl<'a> ZigParser<'a> {
         }
         expr
     }
+}
+
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
 }
 
 // ---------------------------------------------------------------------------

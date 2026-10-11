@@ -49,7 +49,7 @@ import {
   UNTERMINATED_STRING_LITERAL,
 } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -322,6 +322,8 @@ class JavaParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[]) {
     this.tokens = tokens;
@@ -722,7 +724,7 @@ class JavaParser {
       // Only `FixedArray<element, length>` is a supported generic type.
       if (last === 'FixedArray') {
         this.advance(); // consume '<'
-        const element = this.parseType();
+        const element = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(',');
         // length literal
         const lenTok = this.current();
@@ -767,6 +769,10 @@ class JavaParser {
   // ----- statements -----
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const loc = this.loc();
     const t = this.current();
 
@@ -983,7 +989,7 @@ class JavaParser {
   // ----- expressions -----
 
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   private parseTernary(): Expression {
@@ -1092,7 +1098,7 @@ class JavaParser {
     const t = this.current().type;
     if (t === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (t === '-') {
       this.advance();
@@ -1100,24 +1106,24 @@ class JavaParser {
       // legal only as the direct operand of this minus.
       const next = this.current();
       if (next.type === 'number' && next.negOnly) next.negOnly = false;
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (t === '+') {
       // unary plus: just the operand
       this.advance();
-      return this.parseUnary();
+      return this.nest.nested(this.loc(), () => this.parseUnary());
     }
     if (t === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
     }
     if (t === '++') {
       this.advance();
-      return { kind: 'increment_expr', operand: this.parseUnary(), prefix: true };
+      return { kind: 'increment_expr', operand: this.nest.nested(this.loc(), () => this.parseUnary()), prefix: true };
     }
     if (t === '--') {
       this.advance();
-      return { kind: 'decrement_expr', operand: this.parseUnary(), prefix: true };
+      return { kind: 'decrement_expr', operand: this.nest.nested(this.loc(), () => this.parseUnary()), prefix: true };
     }
     return this.parsePostfix();
   }
@@ -1774,5 +1780,5 @@ export function parseJavaSource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new JavaParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

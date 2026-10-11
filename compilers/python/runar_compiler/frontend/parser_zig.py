@@ -32,6 +32,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nesting, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     ZIG_LIST_COMMA,
@@ -499,6 +500,8 @@ class _ZigParser:
         self._constructor: MethodNode | None = None
         self._self_names: set[str] = set()
         self._stateful_context_names: set[str] = set()
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     # -----------------------------------------------------------------------
     # Token navigation
@@ -670,6 +673,11 @@ class _ZigParser:
         # Collect property names mutated in any method body so we can
         # determine readonly flags in stateful contracts.
         mutated: set[str] = set()
+        # F-213: measure (B) before the recursive passes below walk the bodies.
+        for method in self._methods:
+            assert_body_nesting(method.body)
+        if self._constructor is not None:
+            assert_body_nesting(self._constructor.body)
         for method in self._methods:
             _collect_mutated_properties(method.body, mutated)
 
@@ -866,7 +874,8 @@ class _ZigParser:
             length_tok = self._expect(TOK_NUMBER, "array length")
             length = int(length_tok.value, 0) if length_tok.value else 0
             self._expect(TOK_RBRACKET, "]")
-            elem = self._parse_type()
+            with self._nest.nested(self._loc):
+                elem = self._parse_type()
             return (
                 FixedArrayType(element=elem[0], length=length),
                 elem[1],
@@ -883,7 +892,8 @@ class _ZigParser:
 
             if name == "Readonly" and self._current().kind == TOK_LPAREN:
                 self._expect(TOK_LPAREN, "(")
-                inner = self._parse_type()
+                with self._nest.nested(self._loc):
+                    inner = self._parse_type()
                 self._expect(TOK_RPAREN, ")")
                 return (inner[0], inner[1], True)
 
@@ -1001,6 +1011,10 @@ class _ZigParser:
         return None
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self._loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         loc = self._loc()
 
         # return [expr];
@@ -1112,7 +1126,8 @@ class _ZigParser:
         if self._current().kind == TOK_ELSE:
             self._advance()
             if self._current().kind == TOK_IF:
-                else_branch = [self._parse_if_statement()]
+                with self._nest.nested(self._loc):
+                    else_branch = [self._parse_if_statement()]
             else:
                 else_branch = self._parse_block_statements()
 
@@ -1212,7 +1227,8 @@ class _ZigParser:
     # -----------------------------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self._loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         # Zig does not have ternary `? :` but the TS reference parser still
@@ -1356,13 +1372,16 @@ class _ZigParser:
         kind = self._current().kind
         if kind == TOK_BANG:
             self._advance()
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="!", operand=self._parse_unary())
         if kind == TOK_MINUS:
             self._advance()
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="-", operand=self._parse_unary())
         if kind == TOK_TILDE:
             self._advance()
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="~", operand=self._parse_unary())
 
         expr = self._parse_primary()
         return self._parse_postfix_chain(expr)
@@ -1706,7 +1725,9 @@ def parse_zig(source: str, file_name: str = "Contract.runar.zig") -> ParseResult
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
     lex: list = []
-    return with_lex_errors(_parse_zig_tokens(source, file_name, lex), lex)
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_zig_tokens(source, file_name, lex)), lex
+    )
 
 
 def _parse_zig_tokens(source: str, file_name: str, lex: list) -> ParseResult:

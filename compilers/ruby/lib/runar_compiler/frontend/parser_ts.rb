@@ -411,6 +411,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class TsParser
+      include InputLimits::NestingCounter
+
       include TsTokens
       # Re-define token constants directly on the class so that Ruby's lexical
       # constant lookup finds them here instead of identically-named constants
@@ -968,7 +970,7 @@ module RunarCompiler
         # FixedArray<T, N>
         if name == "FixedArray"
           if match(TOK_LT)
-            elem_type = parse_type
+            elem_type = nested { parse_type }
             expect(TOK_COMMA)
             size_tok = expect(TOK_NUMBER)
             size = begin
@@ -1062,6 +1064,10 @@ module RunarCompiler
       }.freeze
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
         tok = peek
 
@@ -1192,7 +1198,7 @@ module RunarCompiler
           if check_ident("if")
             # else if ...
             elif_loc = loc
-            elif_stmt = parse_if(elif_loc)
+            elif_stmt = nested { parse_if(elif_loc) }
             else_block = [elif_stmt]
           else
             else_block = parse_block_or_statement
@@ -1353,15 +1359,15 @@ module RunarCompiler
       #   primary
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
         expr = parse_or
         if match(TOK_QUESTION)
-          consequent = parse_ternary
+          consequent = nested { parse_ternary }
           expect(TOK_COLON)
-          alternate = parse_ternary
+          alternate = nested { parse_ternary }
           return TernaryExpr.new(
             condition: expr,
             consequent: consequent,
@@ -1513,24 +1519,24 @@ module RunarCompiler
 
       def parse_unary
         if match(TOK_BANG)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         if match(TOK_MINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "-", operand: operand)
         end
         if match(TOK_TILDE)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "~", operand: operand)
         end
         # Prefix ++ and --
         if match(TOK_PLUSPLUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return IncrementExpr.new(operand: operand, prefix: true)
         end
         if match(TOK_MINUSMINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return DecrementExpr.new(operand: operand, prefix: true)
         end
         parse_postfix
@@ -1993,7 +1999,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_ts_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_ts_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_ts_tokens(source, file_name, lex)
@@ -2005,6 +2013,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

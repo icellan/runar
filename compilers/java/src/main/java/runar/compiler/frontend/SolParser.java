@@ -88,7 +88,8 @@ public final class SolParser {
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         p.pos = 0;
-        ContractNode contract = p.parseContract();
+        // F-213: measures (A) and (B) — before the recursive prop rewrite.
+        ContractNode contract = SourceNesting.guard(p::parseContract, ParseException::new);
         rewriteContractProps(contract);
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("; ", p.errors));
@@ -441,6 +442,8 @@ public final class SolParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
 
         Parser(String fileName) {
             this.fileName = fileName;
@@ -850,6 +853,10 @@ public final class SolParser {
         // ---- Statements -----------------------------------------------
 
         Statement parseSolStatement() {
+            return nest.nested(this::parseSolStatementInner);
+        }
+
+        Statement parseSolStatementInner() {
             SourceLocation location = loc();
 
             if (checkIdent("require")) {
@@ -931,7 +938,8 @@ public final class SolParser {
             List<Statement> elseBlock = null;
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
-                    Statement elseStmt = parseIf(loc());
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement elseStmt = nest.nested(() -> parseIf(loc()));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(elseStmt);
                 } else {
@@ -1061,7 +1069,7 @@ public final class SolParser {
         // ---- Expression parsing (precedence climbing) -----------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1211,23 +1219,23 @@ public final class SolParser {
 
         Expression parseUnary() {
             if (match(TOK_BANG)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.NOT, operand);
             }
             if (match(TOK_MINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.NEG, operand);
             }
             if (match(TOK_TILDE)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
             }
             if (match(TOK_PLUSPLUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new IncrementExpr(operand, true);
             }
             if (match(TOK_MINUSMINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new DecrementExpr(operand, true);
             }
             return parsePostfix();

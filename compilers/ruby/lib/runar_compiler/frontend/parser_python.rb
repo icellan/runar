@@ -644,6 +644,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class PythonParser
+      include InputLimits::NestingCounter
+
       include PythonTokens
 
       INT64_MAX = 9_223_372_036_854_775_807
@@ -935,7 +937,7 @@ module RunarCompiler
         # FixedArray[T, N]
         if raw_name == "FixedArray" && check(TOK_LBRACKET)
           advance # '['
-          elem_type = parse_type
+          elem_type = nested { parse_type }
           expect(TOK_COMMA)
           size_tok = expect(TOK_NUMBER)
           size = begin
@@ -1111,6 +1113,10 @@ module RunarCompiler
       end
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # assert statement: assert expr
@@ -1202,7 +1208,7 @@ module RunarCompiler
 
         if check_ident("elif")
           elif_loc = loc
-          else_block = [parse_elif_statement(elif_loc)]
+          else_block = [nested { parse_elif_statement(elif_loc) }]
           @declared_locals = locals_before.dup
         elsif check_ident("else")
           advance # 'else'
@@ -1239,7 +1245,7 @@ module RunarCompiler
 
         if check_ident("elif")
           elif_loc = loc
-          else_block = [parse_elif_statement(elif_loc)]
+          else_block = [nested { parse_elif_statement(elif_loc) }]
           @declared_locals = locals_before.dup
         elsif check_ident("else")
           advance
@@ -1511,7 +1517,7 @@ module RunarCompiler
       #   primary
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       # Python conditional: expr if cond else alternate
@@ -1521,7 +1527,7 @@ module RunarCompiler
           advance # 'if'
           condition = parse_or
           expect_ident("else")
-          alternate = parse_ternary
+          alternate = nested { parse_ternary }
           return TernaryExpr.new(condition: condition, consequent: expr, alternate: alternate)
         end
         expr
@@ -1547,7 +1553,7 @@ module RunarCompiler
 
       def parse_not
         if match_tok(TOK_BANG) # 'not' mapped to TOK_BANG
-          operand = parse_not
+          operand = nested { parse_not }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         parse_bitwise_or
@@ -1674,15 +1680,15 @@ module RunarCompiler
 
       def parse_unary
         if match_tok(TOK_MINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "-", operand: operand)
         end
         if match_tok(TOK_TILDE)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "~", operand: operand)
         end
         if match_tok(TOK_BANG)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return UnaryExpr.new(op: "!", operand: operand)
         end
         parse_postfix
@@ -1875,7 +1881,9 @@ module RunarCompiler
       # just _parse_source. N-136.
       RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
-      Frontend.with_lex_errors(_parse_python_tokens(source, file_name, lex), lex)
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_python_tokens(source, file_name, lex) }, lex
+      )
     end
 
     def self._parse_python_tokens(source, file_name, lex)
@@ -1885,6 +1893,8 @@ module RunarCompiler
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

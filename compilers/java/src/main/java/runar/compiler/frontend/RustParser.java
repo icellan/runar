@@ -94,7 +94,8 @@ public final class RustParser {
         state.tokens = tokenize(source, filename, lex);
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
-        ContractNode contract = parseContract(state);
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(() -> parseContract(state), ParseException::new);
         String collision = state.idents.message();
         if (collision != null) state.errors.add(collision);
         if (!state.errors.isEmpty()) {
@@ -592,6 +593,8 @@ public final class RustParser {
         final List<String> errors = new ArrayList<>();
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
 
         State(String filename) {
             this.filename = filename;
@@ -695,7 +698,7 @@ public final class RustParser {
         // build.
         if (tok.kind == TOK_LBRACKET) {
             s.advance();
-            TypeNode element = parseRustType(s);
+            TypeNode element = s.nest.nested(() -> parseRustType(s));
             s.expect(TOK_SEMI);
             Token lengthTok = s.expect(TOK_NUMBER);
             int length;
@@ -716,7 +719,7 @@ public final class RustParser {
             // FixedArray<T, N>
             if (name.equals("FixedArray") && s.check(TOK_LT)) {
                 s.advance(); // <
-                TypeNode element = parseRustType(s);
+                TypeNode element = s.nest.nested(() -> parseRustType(s));
                 s.expect(TOK_COMMA);
                 Token sizeTok = s.expect(TOK_NUMBER);
                 int size;
@@ -1080,6 +1083,10 @@ public final class RustParser {
     // -----------------------------------------------------------------
 
     private static Statement parseStatement(State s) {
+        return s.nest.nested(() -> parseStatementInner(s));
+    }
+
+    private static Statement parseStatementInner(State s) {
         SourceLocation stmtLoc = s.loc();
 
         // assert!(expr)
@@ -1328,7 +1335,7 @@ public final class RustParser {
     // -----------------------------------------------------------------
 
     private static Expression parseExpression(State s) {
-        return parseOr(s);
+        return s.nest.nested(() -> parseOr(s));
     }
 
     private static Expression parseOr(State s) {
@@ -1467,7 +1474,7 @@ public final class RustParser {
 
     private static Expression parseUnary(State s) {
         if (s.matchTok(TOK_BANG)) {
-            return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary(s));
+            return new UnaryExpr(Expression.UnaryOp.NOT, s.nest.nested(() -> parseUnary(s)));
         }
         if (s.matchTok(TOK_MINUS)) {
             // F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1482,10 +1489,10 @@ public final class RustParser {
                 }
                 if (closed) s.tokens.get(k).negOnly = false;
             }
-            return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary(s));
+            return new UnaryExpr(Expression.UnaryOp.NEG, s.nest.nested(() -> parseUnary(s)));
         }
         if (s.matchTok(TOK_TILDE)) {
-            return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary(s));
+            return new UnaryExpr(Expression.UnaryOp.BIT_NOT, s.nest.nested(() -> parseUnary(s)));
         }
         if (s.check(TOK_AMP)) {
             // & or &mut — borrow operators, no AST node.

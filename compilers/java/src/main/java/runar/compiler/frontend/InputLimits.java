@@ -20,6 +20,15 @@ public final class InputLimits {
     public static final int MAX_SOURCE_BYTES = 4 * 1024 * 1024;
 
     /**
+     * Mirrors {@code InputLimits.MAX_SOURCE_NESTING} (128) from
+     * {@code packages/runar-ir-schema/src/input-limits.ts}, which defines the
+     * two measures it bounds: (A) parse nesting, counted by every parser
+     * ({@link SourceNesting.Counter}), and (B) AST nesting, checked on the
+     * finished tree ({@link SourceNesting#astTooDeep}). F-213.
+     */
+    public static final int MAX_SOURCE_NESTING = 128;
+
+    /**
      * Thrown when a source payload exceeds {@link #MAX_SOURCE_BYTES} at a
      * public parser entry point. Distinct typed exception so callers can
      * distinguish DoS-bound rejection from generic syntax errors.

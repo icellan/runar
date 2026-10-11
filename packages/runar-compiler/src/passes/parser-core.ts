@@ -18,6 +18,7 @@
 import type { Expression, BinaryOp, SourceLocation } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { NestingCounter } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Token interface
@@ -39,6 +40,8 @@ export abstract class ParserCore<T extends Token = Token> {
   protected pos = 0;
   protected file: string;
   protected errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting (see ./source-limits.ts). */
+  protected readonly nest = new NestingCounter();
 
   /**
    * `errors` is passed in (rather than created here) so a tokenizer can seed
@@ -101,7 +104,7 @@ export abstract class ParserCore<T extends Token = Token> {
   // Subclasses must implement parseUnary() which is called by parseMulDiv().
 
   protected parseExpression(): Expression {
-    return this.parseOr();
+    return this.nest.nested(this.loc(), () => this.parseOr());
   }
 
   private parseOr(): Expression {
