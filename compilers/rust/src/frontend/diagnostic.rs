@@ -145,3 +145,24 @@ pub fn lex_error_at_index(message: &str, file: &str, chars: &[char], idx: usize)
     let column = before.iter().rev().take_while(|&&c| c != '\n').count();
     lex_error(message, file, line, column)
 }
+
+/// F-337: the (1-based line, 1-based column) of each char index in `starts`
+/// — the AST's SourceLocation convention (codegen/emit.rs converts to the
+/// source map's 0-based column). `starts` must be non-decreasing.
+pub fn char_index_positions(chars: &[char], starts: &[usize]) -> Vec<(usize, usize)> {
+    let (mut line, mut line_start, mut scanned) = (1usize, 0usize, 0usize);
+    starts
+        .iter()
+        .map(|&idx| {
+            let idx = idx.min(chars.len());
+            while scanned < idx {
+                if chars[scanned] == '\n' {
+                    line += 1;
+                    line_start = scanned + 1;
+                }
+                scanned += 1;
+            }
+            (line, idx - line_start + 1)
+        })
+        .collect()
+}

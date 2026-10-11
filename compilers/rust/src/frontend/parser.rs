@@ -233,10 +233,10 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
     let properties = parse_properties(class, file, &mut errors, &comments);
 
     // Extract constructor
-    let constructor_node = parse_constructor(class, file, &mut errors);
+    let constructor_node = parse_constructor(class, file, &mut errors, &cm);
 
     // Extract methods
-    let methods = parse_methods(class, file, &mut errors, &comments);
+    let methods = parse_methods(class, file, &mut errors, &comments, &cm);
 
     let contract = ContractNode {
         name: contract_name,
@@ -345,12 +345,17 @@ fn parse_properties(
 // Constructor
 // ---------------------------------------------------------------------------
 
-fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) -> MethodNode {
+fn parse_constructor(
+    class: &Class,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> MethodNode {
     for member in &class.body {
         if let ClassMember::Constructor(ctor) = member {
             let params = parse_constructor_params(&ctor.params, file, errors);
             let body = if let Some(ref block) = ctor.body {
-                parse_block_stmts(&block.stmts, file, errors)
+                parse_block_stmts(&block.stmts, file, errors, cm)
             } else {
                 Vec::new()
             };
@@ -426,6 +431,7 @@ fn parse_methods(
     file: &str,
     errors: &mut Vec<Diagnostic>,
     comments: &SingleThreadedComments,
+    cm: &SourceMap,
 ) -> Vec<MethodNode> {
     let mut result = Vec::new();
 
@@ -454,7 +460,7 @@ fn parse_methods(
             };
 
             let body = if let Some(ref block) = method.function.body {
-                parse_block_stmts(&block.stmts, file, errors)
+                parse_block_stmts(&block.stmts, file, errors, cm)
             } else {
                 Vec::new()
             };
@@ -781,25 +787,52 @@ fn extract_type_literal_number(ts_type: &TsType) -> Option<usize> {
 // Statements
 // ---------------------------------------------------------------------------
 
-fn parse_block_stmts(stmts: &[Stmt], file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Statement> {
+fn parse_block_stmts(
+    stmts: &[Stmt],
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Vec<Statement> {
     let mut result = Vec::new();
     for stmt in stmts {
-        if let Some(parsed) = parse_statement(stmt, file, errors) {
+        if let Some(parsed) = parse_statement(stmt, file, errors, cm) {
             result.push(parsed);
         }
     }
     result
 }
 
-fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<Diagnostic>) -> Option<Statement> {
+fn parse_statement(
+    stmt: &Stmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Option<Statement> {
+    // F-337: every statement is located at its first character (1-based
+    // line and char column, the AST convention; codegen/emit.rs converts the
+    // column to the source map's 0-based one).
+    let mut parsed = parse_statement_at_default_loc(stmt, file, errors, cm);
+    if let Some(s) = parsed.as_mut() {
+        let at = cm.lookup_char_pos(stmt.span().lo);
+        *s.source_location_mut() = loc(file, at.line, at.col.0 + 1);
+    }
+    parsed
+}
+
+fn parse_statement_at_default_loc(
+    stmt: &Stmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Option<Statement> {
     match stmt {
         Stmt::Decl(Decl::Var(var_decl)) => parse_variable_statement(var_decl, file, errors),
 
         Stmt::Expr(expr_stmt) => parse_expression_statement(&expr_stmt.expr, file, errors),
 
-        Stmt::If(if_stmt) => Some(parse_if_statement(if_stmt, file, errors)),
+        Stmt::If(if_stmt) => Some(parse_if_statement(if_stmt, file, errors, cm)),
 
-        Stmt::For(for_stmt) => Some(parse_for_statement(for_stmt, file, errors)),
+        Stmt::For(for_stmt) => Some(parse_for_statement(for_stmt, file, errors, cm)),
 
         Stmt::Return(ret_stmt) => Some(parse_return_statement(ret_stmt, file, errors)),
 
@@ -1042,14 +1075,19 @@ fn parse_assign_target(
     }
 }
 
-fn parse_if_statement(if_stmt: &IfStmt, file: &str, errors: &mut Vec<Diagnostic>) -> Statement {
+fn parse_if_statement(
+    if_stmt: &IfStmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Statement {
     let condition = parse_expression(&if_stmt.test, file, errors);
-    let then_branch = parse_stmt_or_block(&if_stmt.cons, file, errors);
+    let then_branch = parse_stmt_or_block(&if_stmt.cons, file, errors, cm);
 
     let else_branch = if_stmt
         .alt
         .as_ref()
-        .map(|alt| parse_stmt_or_block(alt, file, errors));
+        .map(|alt| parse_stmt_or_block(alt, file, errors, cm));
 
     Statement::IfStatement {
         condition,
@@ -1063,11 +1101,12 @@ fn parse_stmt_or_block(
     stmt: &Stmt,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Vec<Statement> {
     match stmt {
-        Stmt::Block(block) => parse_block_stmts(&block.stmts, file, errors),
+        Stmt::Block(block) => parse_block_stmts(&block.stmts, file, errors, cm),
         _ => {
-            if let Some(s) = parse_statement(stmt, file, errors) {
+            if let Some(s) = parse_statement(stmt, file, errors, cm) {
                 vec![s]
             } else {
                 Vec::new()
@@ -1076,7 +1115,12 @@ fn parse_stmt_or_block(
     }
 }
 
-fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnostic>) -> Statement {
+fn parse_for_statement(
+    for_stmt: &ForStmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Statement {
     // Parse initializer
     let init = if let Some(ref init_expr) = for_stmt.init {
         match init_expr {
@@ -1120,7 +1164,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnost
     };
 
     // Parse body
-    let body = parse_stmt_or_block(&for_stmt.body, file, errors);
+    let body = parse_stmt_or_block(&for_stmt.body, file, errors, cm);
 
     Statement::ForStatement {
         init: Box::new(init),

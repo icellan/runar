@@ -86,8 +86,8 @@ fn parse_ruby_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResu
     let mut str_errors: Vec<String> = Vec::new();
 
     let mut lex_errors: Vec<Diagnostic> = Vec::new();
-    let tokens = tokenize(source, file, &mut lex_errors);
-    let mut parser = RbParser::new(tokens, file, &mut str_errors);
+    let (tokens, positions) = tokenize(source, file, &mut lex_errors);
+    let mut parser = RbParser::new(tokens, positions, file, &mut str_errors);
 
     let contract = parser.parse_contract();
     // F-213 measure (A), then measure (B) on the finished tree.
@@ -415,8 +415,17 @@ fn rb_token_text(tok: &Token) -> String {
     }
 }
 
-fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagnostic>) -> Vec<Token> {
+/// Returns the tokens and, index for index, the (1-based line, 1-based
+/// column — the AST convention; codegen/emit.rs converts) where each one
+/// starts (F-337).
+fn tokenize(
+    source: &str,
+    file: &str,
+    errors: &mut Vec<super::diagnostic::Diagnostic>,
+) -> (Vec<Token>, Vec<(usize, usize)>) {
     let mut tokens = Vec::new();
+    let mut positions: Vec<(usize, usize)> = Vec::new();
+    let mut at: (usize, usize) = (1, 0);
     let lines: Vec<&str> = source.split('\n').collect();
     let mut paren_depth: usize = 0;
     // Line number of an open `=begin` embedded document, or 0.
@@ -459,6 +468,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
         let mut pos = start_offset;
 
         while pos < chars.len() {
+            // Tokens pushed by the previous iteration started at `at`.
+            positions.resize(tokens.len(), at);
+            at = (line_num, pos + 1);
             let ch = chars[pos];
 
             // Whitespace within line
@@ -834,6 +846,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
             // Skip unrecognised characters
             pos += 1;
         }
+        positions.resize(tokens.len(), at);
 
         // Emit NEWLINE at end of significant line (only if not inside parens)
         if paren_depth == 0 {
@@ -854,7 +867,8 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
     }
 
     tokens.push(Token::Eof);
-    tokens
+    positions.resize(tokens.len(), at);
+    (tokens, positions)
 }
 
 /// Whether `line` starts at column 0 with `marker` (`=begin` or `=end`) as a
@@ -872,6 +886,8 @@ fn is_embedded_doc_marker(line: &str, marker: &str) -> bool {
 
 struct RbParser<'a> {
     tokens: Vec<Token>,
+    /// F-337: start (line, column) of each token in `tokens`.
+    positions: Vec<(usize, usize)>,
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<String>,
@@ -884,9 +900,15 @@ struct RbParser<'a> {
 }
 
 impl<'a> RbParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<String>) -> Self {
+    fn new(
+        tokens: Vec<Token>,
+        positions: Vec<(usize, usize)>,
+        file: &'a str,
+        errors: &'a mut Vec<String>,
+    ) -> Self {
         Self {
             tokens,
+            positions,
             pos: 0,
             file,
             errors,
@@ -975,11 +997,18 @@ impl<'a> RbParser<'a> {
         matches!(self.peek(), Token::Ident(ref n) if n == name)
     }
 
+    /// Where the current token starts (F-337).
     fn loc(&self) -> SourceLocation {
+        let (line, column) = self
+            .positions
+            .get(self.pos)
+            .or_else(|| self.positions.last())
+            .copied()
+            .unwrap_or((1, 0));
         SourceLocation {
             file: self.file.to_string(),
-            line: 1,
-            column: 0,
+            line,
+            column,
         }
     }
 
@@ -1484,7 +1513,14 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
-        self.nested(None, |p| p.parse_statement_inner())
+        // F-337: a statement is located at its first token; the inner
+        // parsers build it only after consuming it.
+        let start = self.loc();
+        let mut stmt = self.nested(None, |p| p.parse_statement_inner());
+        if let Some(s) = stmt.as_mut() {
+            *s.source_location_mut() = start;
+        }
+        stmt
     }
 
     fn parse_statement_inner(&mut self) -> Option<Statement> {
@@ -1600,6 +1636,8 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_elsif_statement(&mut self) -> Statement {
+        // F-337: located at the `elsif` token (parse_statement never sees it).
+        let loc = self.loc();
         self.advance(); // consume 'elsif'
         let condition = self.parse_expression();
         self.skip_newlines();
@@ -1631,7 +1669,7 @@ impl<'a> RbParser<'a> {
             condition,
             then_branch,
             else_branch,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 

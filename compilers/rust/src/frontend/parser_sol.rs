@@ -35,7 +35,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{char_index_positions, lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, type_too_deep, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -66,8 +66,8 @@ fn parse_solidity_on_parse_stack(source: &str, file_name: Option<&str>) -> Parse
     let file = file_name.unwrap_or("contract.runar.sol");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source, file, &mut errors);
-    let mut parser = SolParser::new(tokens, file, &mut errors);
+    let (tokens, positions) = tokenize(source, file, &mut errors);
+    let mut parser = SolParser::new(tokens, positions, file, &mut errors);
 
     let contract = parser.parse_contract();
     // F-213 measure (A), then measure (B) on the finished tree.
@@ -161,13 +161,26 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
+/// Returns the tokens and, index for index, the (1-based line, 1-based
+/// column — the AST convention; codegen/emit.rs converts) where each one
+/// starts (F-337).
+fn tokenize(
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) -> (Vec<Token>, Vec<(usize, usize)>) {
     let mut tokens = Vec::new();
+    // F-337: char index where each token starts.
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0usize;
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
+        // Tokens pushed by the previous iteration started at `at`.
+        starts.resize(tokens.len(), at);
+        at = i;
         let ch = chars[i];
 
         // Whitespace
@@ -404,7 +417,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
     }
 
     tokens.push(Token::Eof);
-    tokens
+    starts.resize(tokens.len(), at);
+    let positions = char_index_positions(&chars, &starts);
+    (tokens, positions)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +428,8 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
 
 struct SolParser<'a> {
     tokens: Vec<Token>,
+    /// F-337: start (line, column) of each token in `tokens`.
+    positions: Vec<(usize, usize)>,
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<Diagnostic>,
@@ -421,9 +438,15 @@ struct SolParser<'a> {
 }
 
 impl<'a> SolParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<Diagnostic>) -> Self {
+    fn new(
+        tokens: Vec<Token>,
+        positions: Vec<(usize, usize)>,
+        file: &'a str,
+        errors: &'a mut Vec<Diagnostic>,
+    ) -> Self {
         Self {
             tokens,
+            positions,
             pos: 0,
             file,
             errors,
@@ -496,11 +519,18 @@ impl<'a> SolParser<'a> {
         }
     }
 
+    /// Where the current token starts (F-337).
     fn loc(&self) -> SourceLocation {
+        let (line, column) = self
+            .positions
+            .get(self.pos)
+            .or_else(|| self.positions.last())
+            .copied()
+            .unwrap_or((1, 0));
         SourceLocation {
             file: self.file.to_string(),
-            line: 1,
-            column: 0,
+            line,
+            column,
         }
     }
 
@@ -953,7 +983,14 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
-        self.nested(None, |p| p.parse_statement_inner())
+        // F-337: a statement is located at its first token; the inner
+        // parsers build it only after consuming it.
+        let start = self.loc();
+        let mut stmt = self.nested(None, |p| p.parse_statement_inner());
+        if let Some(s) = stmt.as_mut() {
+            *s.source_location_mut() = start;
+        }
+        stmt
     }
 
     fn parse_statement_inner(&mut self) -> Option<Statement> {
@@ -1161,6 +1198,9 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_if(&mut self) -> Statement {
+        // F-337: located at the `if` token (an `else if` never passes
+        // through parse_statement).
+        let loc = self.loc();
         self.advance(); // consume 'if'
         self.expect(&Token::LParen);
         let condition = self.parse_expression();
@@ -1185,7 +1225,7 @@ impl<'a> SolParser<'a> {
             condition,
             then_branch,
             else_branch,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 

@@ -216,6 +216,22 @@ pub enum Statement {
     },
 }
 
+impl Statement {
+    /// Mutable access to the statement's own source location (every variant
+    /// carries one). Parsers that build a statement after consuming it use
+    /// this to stamp the position of its first token (F-337).
+    pub fn source_location_mut(&mut self) -> &mut SourceLocation {
+        match self {
+            Statement::VariableDecl { source_location, .. }
+            | Statement::Assignment { source_location, .. }
+            | Statement::IfStatement { source_location, .. }
+            | Statement::ForStatement { source_location, .. }
+            | Statement::ReturnStatement { source_location, .. }
+            | Statement::ExpressionStatement { source_location, .. } => source_location,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
