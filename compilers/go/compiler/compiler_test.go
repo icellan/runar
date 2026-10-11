@@ -729,35 +729,64 @@ func TestCompile_AllConformanceTests(t *testing.T) {
 // Test: Push data encoding for various sizes
 // ---------------------------------------------------------------------------
 
+// F-373: this table named PUSHDATA1/2 boundaries but never tested them. The
+// data it built (strings.Repeat("ab", tc.dataLen)) was discarded via `_ =
+// data`, and even wired up it would have proven nothing: `x` here is a
+// constructor-arg property, and constructor args are compiled as a 1-byte
+// OP_0 placeholder (emitPlaceholder in codegen/emit.go) spliced with the real
+// bytes only at deployment time, never as a literal push in the compiled
+// script. So no source-compile path through a constructor property can ever
+// exercise encodePushData's length-boundary branches.
+//
+// The fix drives the boundary directly: an IR literal (`load_const` with a
+// hex ConstString) always lowers through encodePushValue -> encodePushData
+// (stack.go lowerLoadConst), so a tc.dataLen-byte literal in the IR produces
+// a tc.dataLen-byte push in the script, letting the test assert on the exact
+// opcode prefix encodePushData must choose at each boundary.
 func TestPushDataEncoding(t *testing.T) {
 	tests := []struct {
-		name    string
-		dataLen int
+		name          string
+		dataLen       int
+		wantHexPrefix string // the opcode(s) that must prefix the literal push of dataLen bytes
 	}{
-		{"empty_data", 0},
-		{"1_byte", 1},
-		{"75_bytes_direct_push", 75},
-		{"76_bytes_pushdata1_boundary", 76},
-		{"255_bytes_pushdata1_max", 255},
-		{"256_bytes_pushdata2_boundary", 256},
+		{"empty_data", 0, "00"},                        // OP_0
+		{"1_byte", 1, "01"},                             // direct push: length byte 0x01
+		{"75_bytes_direct_push", 75, "4b"},              // direct push: length byte 0x4b = 75
+		{"76_bytes_pushdata1_boundary", 76, "4c4c"},     // OP_PUSHDATA1 (4c) + length byte 4c = 76
+		{"255_bytes_pushdata1_max", 255, "4cff"},        // OP_PUSHDATA1 (4c) + length byte ff = 255
+		{"256_bytes_pushdata2_boundary", 256, "4d0001"}, // OP_PUSHDATA2 (4d) + LE16 length 0001 = 256
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// 1-byte data must not land in encodePushData's MINIMALDATA
+			// special-case (OP_1..OP_16 for values 1-16, OP_1NEGATE for
+			// 0x81), so use 0xab for the single-byte case too.
 			data := strings.Repeat("ab", tc.dataLen) // hex-encoded data, 2 hex chars per byte
-			source := fmt.Sprintf(`import { SmartContract, assert, ByteString, len } from 'runar-lang';
-export class PD extends SmartContract {
-	readonly x: ByteString;
-	constructor(x: ByteString) { super(x); this.x = x; }
-	public check(): void { assert(len(this.x) == %dn); }
-}`, tc.dataLen)
-			result := CompileFromSourceStrWithResult(source, "PD.runar.ts")
-			if !result.Success {
-				t.Fatalf("compile error for %d-byte data: %v", tc.dataLen, result.Diagnostics)
-			}
-			if result.ScriptHex == "" {
+
+			irJSON := fmt.Sprintf(`{
+				"contractName": "PushDataTest",
+				"properties": [],
+				"methods": [{
+					"name": "check",
+					"params": [],
+					"body": [
+						{"name": "t0", "value": {"kind": "load_const", "value": %q}},
+						{"name": "t1", "value": {"kind": "load_const", "value": %q}},
+						{"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1", "result_type": "bytes"}},
+						{"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+					],
+					"isPublic": true
+				}]
+			}`, data, data)
+
+			artifact := mustCompile(t, irJSON)
+
+			if artifact.Script == "" {
 				t.Errorf("expected non-empty script for %d-byte data", tc.dataLen)
 			}
-			_ = data // data would be used as constructor arg at deployment time
+			if !strings.HasPrefix(artifact.Script, tc.wantHexPrefix) {
+				t.Errorf("%d-byte push: expected script to start with opcode(s) %s, got %s", tc.dataLen, tc.wantHexPrefix, artifact.Script[:min(len(artifact.Script), 12)])
+			}
 		})
 	}
 }
