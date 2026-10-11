@@ -337,13 +337,26 @@ classified by encoding:
 
 If the declared length extends past the end of the script, the parser
 emits the opcode with **whatever data is available** (silently
-truncated) and stops parsing. No additional finding is emitted —
-truncation is observable through:
+truncated). Truncation consumes every remaining byte, so the truncated
+push is necessarily the last opcode the parser produces — there is no
+further opcode for it to perturb. No additional finding is emitted.
+This is acceptable, not merely unnoticed:
 
-- `STACK_UNDERFLOW` findings downstream (if subsequent analysis sees a
-  smaller stack effect), or
-- The script's stack effect simply being short.
+- The truncated push's own stack effect is still `(0, 1)` (§8.1): a
+  push counts as pushing exactly one item regardless of how much data
+  it actually carries, so truncation does not change depth tracking.
+- Even disregarding the point above, §8.2's underflow check only fires
+  when `initialDepth > 0`; the default `initialDepth = 0` analysis
+  (locking scripts analyzed in isolation, which is how the checked-in
+  goldens are produced) never emits `STACK_UNDERFLOW` regardless of
+  what truncation does to depth.
 
+So a truncated push cannot manifest as a `STACK_UNDERFLOW` finding
+"downstream" — both because there is no downstream opcode to analyze,
+and because the one analysis mode that could in principle underflow
+(`initialDepth > 0`) is not the one applied to a standalone script. A
+malformed script missing opcodes a well-formed one would need (e.g. an
+unclosed `OP_IF`) is instead caught by `UNBALANCED_IF_ENDIF` (§7.1).
 This matches the reference behavior; the spec does NOT introduce a
 `TRUNCATED_PUSH` code.
 
