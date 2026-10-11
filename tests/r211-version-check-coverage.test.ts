@@ -66,6 +66,19 @@ const COMPILER_VERSION_FILES: Array<{ path: string; body: (v: string) => string 
   },
 ];
 
+/**
+ * RubyGems normalizes a hyphenated prerelease to dot-pre-dot form
+ * (`Gem::Version.new("1.0.0-rc.1").to_s == "1.0.0.pre.rc.1"`), so a Gemfile.lock
+ * that bundler wrote never carries the raw "X.Y.Z-rc.N" spelling the rest of
+ * this script compares against. Mirrors the derivation in
+ * scripts/bump-version.sh (`sed -E 's/-/.pre./'`) — replace only the first
+ * hyphen; a version with none is unchanged.
+ */
+function rubygemsSpelling(v: string): string {
+  const i = v.indexOf('-');
+  return i === -1 ? v : `${v.slice(0, i)}.pre.${v.slice(i + 1)}`;
+}
+
 const MANIFESTS: Array<{ path: string; body: (v: string) => string; label: string }> = [
   {
     label: 'Zig package manifest',
@@ -147,6 +160,63 @@ const GENERIC_FILES: Array<{ path: string; body: (v: string) => string }> = [
       `.{\n    .version = "0.1.0",\n` +
       `            .url = "https://github.com/icellan/runar/archive/refs/tags/runar-zig-v${v}.tar.gz",\n}\n` +
       `This SDK is at **v${v}** (see [build.zig.zon](build.zig.zon)).\n`,
+  },
+  // N-080: the 4 Ruby Gemfile.lock files bump_version rewrites, read with the
+  // RubyGems spelling (see rubygemsSpelling above) rather than the raw string.
+  ...[
+    'packages/runar-rb/Gemfile.lock',
+    'integration/ruby/Gemfile.lock',
+    'examples/ruby/Gemfile.lock',
+    'examples/end2end-example/ruby/Gemfile.lock',
+  ].map((p) => ({
+    path: p,
+    body: (v: string) =>
+      `PATH\n  remote: .\n  specs:\n    runar-lang (${rubygemsSpelling(v)})\n\n` +
+      `GEM\n  remote: https://rubygems.org/\n  specs:\n\nPLATFORMS\n  ruby\n\n` +
+      `DEPENDENCIES\n  runar-lang!\n\nBUNDLED WITH\n   2.6.2\n`,
+  })),
+  // N-080: hard-coded version expectations in the Go / Rust / Python compiler
+  // test suites that bump_version rewrites via a blind `runar-v$OLD` -> `runar-v$NEW`
+  // substitution, but `--check` never read.
+  {
+    path: 'compilers/go/compiler/compiler_test.go',
+    body: (v) =>
+      `if parsed["version"] != "runar-v${v}" {\n\tt.Errorf("expected version runar-v${v}, got %v", parsed["version"])\n}\n`,
+  },
+  {
+    path: 'compilers/go/compiler/integration_test.go',
+    body: (v) =>
+      `if artifact.Version != "runar-v${v}" {\n\tt.Errorf("expected version runar-v${v}, got %s", artifact.Version)\n}\n`,
+  },
+  {
+    path: 'compilers/rust/tests/compiler_tests.rs',
+    body: (v) => `assert_eq!(artifact.version, "runar-v${v}");\n`,
+  },
+  {
+    path: 'compilers/python/tests/test_compiler.py',
+    body: (v) => `assert d["version"] == "runar-v${v}"\n`,
+  },
+  {
+    // N-080: mirrors the real file's `__tests__/assembler.test.ts` shape —
+    // an `artifact.version` assertion AND two DIFFERENT `artifact.compilerVersion`
+    // assertions: one tracking the DEFAULT (must equal $expected) and one
+    // pinned to a fixed override fixture ('1.2.3') that must NEVER be compared
+    // against $expected, since it tests the explicit-override code path, not
+    // version drift. A regex that cannot tell these two apart would either miss
+    // real drift in the default or cry wolf on the override.
+    path: 'packages/runar-compiler/src/__tests__/assembler.test.ts',
+    body: (v) =>
+      `describe('compiler version', () => {\n` +
+      `  it('stamps artifact.version', () => {\n` +
+      `    expect(artifact.version).toBe('runar-v${v}');\n` +
+      `  });\n` +
+      `  it('uses default compiler version', () => {\n` +
+      `    expect(artifact.compilerVersion).toBe('${v}');\n` +
+      `  });\n` +
+      `  it('allows overriding compiler version', () => {\n` +
+      `    expect(artifact.compilerVersion).toBe('1.2.3');\n` +
+      `  });\n` +
+      `});\n`,
   },
 ];
 
@@ -284,8 +354,8 @@ describe('R-211: --check must cover every file --bump rewrites', () => {
  * version string can be found fails it too (a rename cannot silently exit the
  * gate).
  * Does not prove: that the file list itself is complete against every file
- * that hard-codes a version (Gemfile.lock and the compiler test expectations
- * that bump rewrites are still not read by --check).
+ * that hard-codes a version (the Gemfile.lock and compiler test-expectation
+ * gap this comment used to describe is closed by N-080 below).
  */
 describe('F-085: --check compares every versioned file exactly, in the rc family', () => {
   const RC = '1.0.0-rc.1';
@@ -380,5 +450,139 @@ describe('F-085: --check compares every versioned file exactly, in the rc family
     const { status, out } = runCheck();
     expect(status, out).not.toBe(0);
     expect(out).toContain('packages/runar-compiler/src/artifact/assembler.ts');
+  });
+});
+
+/**
+ * N-080 (dispatcher baseline finding): `--check` did not read the 4 Ruby
+ * Gemfile.lock files, or the hard-coded version expectations in
+ * assembler.test.ts / compiler_test.go / integration_test.go /
+ * compiler_tests.rs / test_compiler.py — all of which bump_version rewrites.
+ * The fixtures above were added to GENERIC_FILES so the consistent-tree
+ * controls and the RC-family drift sweep (F-085) already exercise them; this
+ * block adds the cases that sweep doesn't cover: the RubyGems-spelling
+ * wrinkle in Gemfile.lock, and the compilerVersion-override ambiguity in
+ * assembler.test.ts.
+ *
+ * Proves: a Gemfile.lock spelled with the raw (non-RubyGems) "-rc.N" form is
+ * flagged even though it names the textually "right" version; and a drifted
+ * default-compiler-version assertion in assembler.test.ts is caught WITHOUT
+ * the unrelated override fixture ('1.2.3') ever being flagged, in either
+ * direction.
+ * Does not prove: that every file bump_version rewrites is now read — only
+ * the files named in this item's brief.
+ */
+describe('N-080: --check covers Gemfile.lock (RubyGems spelling) and test-expectation files', () => {
+  const RC = '1.0.0-rc.1';
+
+  it('passes when every Gemfile.lock already uses the RubyGems-normalized spelling (control)', () => {
+    layDownConsistentRepo(RC);
+    const { status, out } = runCheck();
+    expect(status, `--check rejected a consistent tree:\n${out}`).toBe(0);
+  });
+
+  it('catches a Gemfile.lock spelled with the raw "-rc.N" form instead of RubyGems\' ".pre.rc.N"', () => {
+    layDownConsistentRepo(RC);
+    // This is the exact defect found in examples/ruby/Gemfile.lock and
+    // examples/end2end-example/ruby/Gemfile.lock at HEAD: the same version,
+    // spelled the way a human would type it rather than the way bundler
+    // normalizes and writes it.
+    put(
+      'examples/ruby/Gemfile.lock',
+      `PATH\n  remote: .\n  specs:\n    runar-lang (${RC})\n\nDEPENDENCIES\n  runar-lang!\n`,
+    );
+    const { status, out } = runCheck();
+    expect(status, `--check accepted the raw "-rc.N" spelling:\n${out}`).not.toBe(0);
+    expect(out).toContain('examples/ruby/Gemfile.lock');
+  });
+
+  it('catches real version drift in a Gemfile.lock (both canonically spelled)', () => {
+    layDownConsistentRepo(RC);
+    put(
+      'integration/ruby/Gemfile.lock',
+      `PATH\n  remote: .\n  specs:\n    runar-lang (${rubygemsSpelling('1.2.3')})\n\nDEPENDENCIES\n  runar-lang!\n`,
+    );
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('integration/ruby/Gemfile.lock');
+  });
+
+  it('fails when a Gemfile.lock no longer names the gem at all', () => {
+    layDownConsistentRepo(RC);
+    put('packages/runar-rb/Gemfile.lock', 'PATH\n  remote: .\n  specs:\n\nDEPENDENCIES\n');
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('packages/runar-rb/Gemfile.lock');
+  });
+
+  for (const f of [
+    'compilers/go/compiler/compiler_test.go',
+    'compilers/go/compiler/integration_test.go',
+    'compilers/rust/tests/compiler_tests.rs',
+    'compilers/python/tests/test_compiler.py',
+  ]) {
+    it(`catches drift in the hard-coded version expectation (${f})`, () => {
+      layDownConsistentRepo(RC);
+      const drifted = GENERIC_FILES.find((g) => g.path === f)!;
+      put(f, drifted.body('1.0.0-rc.2'));
+      const { status, out } = runCheck();
+      expect(status, `--check passed with ${f} stuck at the old version:\n${out}`).not.toBe(0);
+      expect(out).toContain(f);
+    });
+  }
+
+  it('catches drift in the assembler.test.ts default-compiler-version assertion', () => {
+    layDownConsistentRepo(RC);
+    put(
+      'packages/runar-compiler/src/__tests__/assembler.test.ts',
+      `describe('compiler version', () => {\n` +
+        `  it('stamps artifact.version', () => {\n` +
+        `    expect(artifact.version).toBe('runar-v${RC}');\n` +
+        `  });\n` +
+        `  it('uses default compiler version', () => {\n` +
+        `    expect(artifact.compilerVersion).toBe('1.0.0-rc.2');\n` + // drifted
+        `  });\n` +
+        `  it('allows overriding compiler version', () => {\n` +
+        `    expect(artifact.compilerVersion).toBe('1.2.3');\n` +
+        `  });\n` +
+        `});\n`,
+    );
+    const { status, out } = runCheck();
+    expect(status, `--check passed with the default compiler version stuck at the old value:\n${out}`).not.toBe(0);
+    expect(out).toContain('packages/runar-compiler/src/__tests__/assembler.test.ts');
+  });
+
+  it('catches drift in the assembler.test.ts artifact.version assertion', () => {
+    layDownConsistentRepo(RC);
+    put(
+      'packages/runar-compiler/src/__tests__/assembler.test.ts',
+      `describe('compiler version', () => {\n` +
+        `  it('stamps artifact.version', () => {\n` +
+        `    expect(artifact.version).toBe('runar-v1.0.0-rc.2');\n` + // drifted
+        `  });\n` +
+        `  it('uses default compiler version', () => {\n` +
+        `    expect(artifact.compilerVersion).toBe('${RC}');\n` +
+        `  });\n` +
+        `  it('allows overriding compiler version', () => {\n` +
+        `    expect(artifact.compilerVersion).toBe('1.2.3');\n` +
+        `  });\n` +
+        `});\n`,
+    );
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('packages/runar-compiler/src/__tests__/assembler.test.ts');
+  });
+
+  it('never flags the compilerVersion override fixture (1.2.3), even though it never equals $expected', () => {
+    layDownConsistentRepo(RC);
+    // Everything is consistent EXCEPT that the override fixture ('1.2.3') is
+    // (deliberately) never equal to RC. A check that cannot distinguish the
+    // override assertion from the default one would fail this tree.
+    const { status, out } = runCheck();
+    expect(
+      status,
+      `--check flagged the compilerVersion override fixture as drift:\n${out}`,
+    ).toBe(0);
+    expect(out).not.toContain('1.2.3');
   });
 });

@@ -109,6 +109,11 @@ check_versions() {
 
   echo "Expected version: $expected"
   local ok=true
+  # Shared semver shape (one capture group around the whole thing where used
+  # bare): digits.digits.digits, optionally followed by a -/.  /+ prerelease
+  # or build identifier run. Declared here so it is available to the N-080
+  # checks below as well as the compiler-version-file sweep further down.
+  local semver='[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z]+)*'
 
   # TypeScript
   for f in "${TS_FILES[@]}"; do
@@ -237,13 +242,78 @@ check_versions() {
     fi
   fi
 
+  # Ruby Gemfile.lock files (path gem version). N-080: `--check` read none of
+  # these, so a hand-edit or a bump that silently failed to rewrite one (see
+  # the matching note in bump_version below) could drift forever. RubyGems
+  # normalizes a hyphenated prerelease to dot-pre-dot form
+  # (Gem::Version.new("1.0.0-rc.1").to_s == "1.0.0.pre.rc.1"), so the
+  # committed lockfile spells it that way, not as the raw semver string
+  # everywhere else in this script compares against.
+  local rubygems_expected
+  rubygems_expected=$(printf '%s' "$expected" | sed -E 's/-/.pre./')
+  local lockfile
+  for lockfile in \
+    "$ROOT/packages/runar-rb/Gemfile.lock" \
+    "$ROOT/integration/ruby/Gemfile.lock" \
+    "$ROOT/examples/ruby/Gemfile.lock" \
+    "$ROOT/examples/end2end-example/ruby/Gemfile.lock"; do
+    [ -f "$lockfile" ] || continue
+    local rel="${lockfile#"$ROOT"/}" found=0 v
+    while IFS= read -r v; do
+      found=1
+      if [ "$v" != "$rubygems_expected" ]; then
+        echo "  ✗ $rel: $v"
+        ok=false
+      fi
+    done < <(sed -nE "s/.*runar-lang \(([^)]*)\).*/\1/p" "$lockfile")
+    if [ "$found" -eq 0 ]; then
+      echo "  ✗ $rel: no version string found"
+      ok=false
+    fi
+  done
+
+  # N-080: the hard-coded version expectations in the per-tier compiler test
+  # suites. bump_version rewrites these with a blind `runar-v$OLD` -> `runar-v$NEW`
+  # substitution; --check never read them back.
+  # Note: $semver itself contains a parenthesized group, so each ERE below has
+  # two capture groups, not the "exactly one" check_exact's header describes.
+  # \1 still lands on the outer (first-opened) group, which is the one that
+  # spans the whole version — this is deliberate, not a bug to "simplify".
+  check_exact "$ROOT/compilers/go/compiler/compiler_test.go" "runar-v(${semver})"
+  check_exact "$ROOT/compilers/go/compiler/integration_test.go" "runar-v(${semver})"
+  check_exact "$ROOT/compilers/rust/tests/compiler_tests.rs" "runar-v(${semver})"
+  check_exact "$ROOT/compilers/python/tests/test_compiler.py" "runar-v(${semver})"
+
+  # assembler.test.ts: the `.version` assertion is unique in the file and safe
+  # for check_exact. The `.compilerVersion` DEFAULT assertion is NOT —
+  # `uses default compiler version` (track $expected) sits right next to
+  # `allows overriding compiler version` (a fixed '1.2.3' fixture that must
+  # never be compared against $expected), and both share the identical
+  # `expect(artifact.compilerVersion).toBe('...')` shape. A line-only regex
+  # cannot tell them apart, so this reads the DEFAULT block by name instead.
+  local assembler_test="$ROOT/packages/runar-compiler/src/__tests__/assembler.test.ts"
+  check_exact "$assembler_test" "artifact\.version\)\.toBe\('runar-v([^']*)'\)"
+  if [ -f "$assembler_test" ]; then
+    local dcv
+    dcv=$(awk '/uses default compiler version/{f=1} f && /\.toBe\(/{print; exit}' "$assembler_test" \
+      | sed -E "s/.*\.toBe\('([^']*)'\).*/\1/")
+    local rel="${assembler_test#"$ROOT"/}"
+    if [ -z "$dcv" ]; then
+      echo "  ✗ $rel: no default compiler version assertion found"
+      ok=false
+    elif [ "$dcv" != "$expected" ]; then
+      echo "  ✗ $rel: $dcv"
+      ok=false
+    fi
+  fi
+
   # Every `runar-v<semver>` and `<semver>-<tier>` token in the six files must be
   # $expected. Matching the tokens rather than each tier's syntax keeps this
   # working when a tier renames its constant. F-085: the token's prerelease part
   # may itself contain `-` (`1.0.0-rc.1-go`), which the old token regex could
   # not parse, so an rc-family compilerVersion drift went unread; and the TS
   # tier stamps an unsuffixed DEFAULT_COMPILER_VERSION that no token matched.
-  local semver='[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z]+)*'
+  # ($semver is declared once, near the top of this function.)
   for f in "${COMPILER_VERSION_FILES[@]}"; do
     [ -f "$f" ] || continue
     local found=0 bad
@@ -343,13 +413,19 @@ bump_version() {
     echo "  ✓ packages/runar-rb/runar.gemspec"
   fi
 
-  # Ruby Gemfile.lock files (path gem version)
+  # Ruby Gemfile.lock files (path gem version). N-080: a literal `runar-lang
+  # ($OLD)` match misses a lockfile bundler already normalized to RubyGems'
+  # dot-pre-dot spelling (Gem::Version.new("1.0.0-rc.1").to_s ==
+  # "1.0.0.pre.rc.1"), silently leaving it at the old version. Match whatever
+  # spelling is on disk and always write the RubyGems-canonical one for $NEW.
+  local new_rubygems
+  new_rubygems=$(printf '%s' "$NEW" | sed -E 's/-/.pre./')
   for lockfile in "$ROOT/packages/runar-rb/Gemfile.lock" \
                   "$ROOT/integration/ruby/Gemfile.lock" \
                   "$ROOT/examples/ruby/Gemfile.lock" \
                   "$ROOT/examples/end2end-example/ruby/Gemfile.lock"; do
     if [ -f "$lockfile" ]; then
-      sed -i '' "s/runar-lang ($OLD)/runar-lang ($NEW)/g" "$lockfile"
+      sed -i '' -E "s/runar-lang \([^)]*\)/runar-lang ($new_rubygems)/g" "$lockfile"
       echo "  ✓ $(echo "$lockfile" | sed "s|$ROOT/||")"
     fi
   done
