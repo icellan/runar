@@ -76,17 +76,24 @@ pub fn unsupportedDirectiveError(source: []const u8) ?[]const u8 {
 
 var source_size_exceeded_fallback = [_][]const u8{"source exceeds MAX_SOURCE_BYTES"};
 
+/// The size-guard refusal text, shared by `sourceSizeGuardErrors` and the CLI,
+/// which refuses an over-cap file while reading it (main.zig) and so never
+/// holds the whole source to hand to the guard.
+pub fn sourceSizeExceededMessage(allocator: std.mem.Allocator, actual: u64) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "source exceeds MAX_SOURCE_BYTES (limit={d}, actual={d})",
+        .{ MAX_SOURCE_BYTES, actual },
+    );
+}
+
 /// Returns an allocated one-element `[][]const u8` carrying the DoS-bound
 /// size-exceeded diagnostic when `source` exceeds `MAX_SOURCE_BYTES`, or
 /// `null` when it is within bounds (strictly: `source.len <=
 /// MAX_SOURCE_BYTES` is accepted, matching `assertSourceBytesUnderLimit`).
 pub fn sourceSizeGuardErrors(allocator: std.mem.Allocator, source: []const u8) ?[][]const u8 {
     if (source.len <= MAX_SOURCE_BYTES) return null;
-    const text = std.fmt.allocPrint(
-        allocator,
-        "source exceeds MAX_SOURCE_BYTES (limit={d}, actual={d})",
-        .{ MAX_SOURCE_BYTES, source.len },
-    ) catch return source_size_exceeded_fallback[0..];
+    const text = sourceSizeExceededMessage(allocator, source.len) catch return source_size_exceeded_fallback[0..];
     const out = allocator.alloc([]const u8, 1) catch return source_size_exceeded_fallback[0..];
     out[0] = text;
     return out;

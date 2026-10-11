@@ -6,6 +6,7 @@ const peephole = @import("passes/peephole.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
 const emit = @import("codegen/emit.zig");
 const compiler_api = @import("compiler_api.zig");
+const input_limits = @import("frontend/input_limits.zig");
 
 const CompileOptions = struct {
     emit_ir: bool = false,
@@ -343,7 +344,21 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     defer arena.deinit();
     const work_allocator = arena.allocator();
 
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(1 * 1024 * 1024));
+    // Read every source the MAX_SOURCE_BYTES cap admits (`.limited(n)` accepts
+    // fewer than n bytes). A larger file is refused with the library size
+    // guard's diagnostic (actual size from stat, since it is never read whole)
+    // and `error.SourceSizeExceeded` through the CLI's normal error path. This
+    // read used to stop at 1 MiB, refusing a 1-4 MiB source the cap admits with
+    // a bare `StreamTooLong`.
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(input_limits.MAX_SOURCE_BYTES + 1)) catch |err| switch (err) {
+        error.StreamTooLong => {
+            const st = try std.Io.Dir.cwd().statFile(io, path, .{});
+            const msg = try input_limits.sourceSizeExceededMessage(work_allocator, st.size);
+            std.debug.print("  parse error: {s}\n", .{msg});
+            return error.SourceSizeExceeded;
+        },
+        else => return err,
+    };
 
     // Fail-closed on anything no surface parser claims. `.anf.json` is a
     // compiler *output*, so it is a mistake here too — `--source` routes it to
