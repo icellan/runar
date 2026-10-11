@@ -123,7 +123,7 @@ There is no `revert`, no `throw`, no `require`. Other format frontends accept `r
 | `===`, `!==` | Equality / inequality | No `==` / `!=`. |
 | `+`, `-`, `*`, `/`, `%` | Arithmetic on `bigint` | Division is integer; see also `safediv`. |
 | `<`, `<=`, `>`, `>=` | Comparison | `bigint` only. |
-| `&&`, `\|\|`, `!` | Boolean logic | Both branches evaluated; no short-circuit script-level. |
+| `&&`, `\|\|`, `!` | Boolean logic | **Short-circuit.** `a && b` lowers as `a ? b : false` and `a \|\| b` as `a ? true : b` — real `OP_IF`/`OP_ELSE` branches, so the skipped operand's opcodes never run. See `language-reference.md` for detail. |
 | `<<`, `>>` | `OP_LSHIFT` / `OP_RSHIFT` | Bitwise shifts on `bigint`. |
 | `&`, `\|`, `^`, `~` | Bitwise on `bigint` and `ByteString` | Operand types must match. |
 | `condition ? a : b` | Ternary | Compiles to `OP_IF`/`OP_ELSE`/`OP_ENDIF`. |
