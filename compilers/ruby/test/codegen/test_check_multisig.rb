@@ -145,15 +145,54 @@ class TestCheckMultiSigCodegen < Minitest::Test
     # OP_CHECKMULTISIG opcode byte (0xae) OR its peephole-folded variant
     # OP_CHECKMULTISIGVERIFY (0xaf). We assert one OR the other, since
     # the surrounding +assert(checkMultiSig(...))+ may trigger the fold.
+    #
+    # F-329: this used to be a raw +hex.include?('ae')+ substring search,
+    # which is not aligned to opcode boundaries -- see
+    # +test_hex_pin_rejects_unaligned_push_data_collision+ below for a
+    # script where that search finds "ae" with no OP_CHECKMULTISIG present
+    # at all. We scan +aligned_opcode_bytes+ instead, which decodes
+    # Bitcoin Script's push encodings so push-data payloads can never be
+    # mistaken for opcodes.
     artifact = compile_ts_source(MULTISIG_2OF3_SRC, 'MultiSig2of3.runar.ts')
     # +artifact.script+ is already a lower-case hex string (the canonical
     # serialised form). Don't double-encode it.
     hex = artifact.script
     refute_empty hex, 'hex must not be empty'
-    has_multisig = hex.include?('ae')
-    has_multisig_verify = hex.include?('af')
+    opcodes = aligned_opcode_bytes(hex)
+    has_multisig = opcodes.include?(0xae)
+    has_multisig_verify = opcodes.include?(0xaf)
     assert(has_multisig || has_multisig_verify,
-           "hex must contain OP_CHECKMULTISIG (ae) or OP_CHECKMULTISIGVERIFY (af); got:\n#{hex}")
+           "hex must contain OP_CHECKMULTISIG (ae) or OP_CHECKMULTISIGVERIFY (af) " \
+           "at an opcode-aligned position; got:\n#{hex}")
+  end
+
+  def test_hex_pin_rejects_unaligned_push_data_collision
+    # Proves the F-329 bug class directly: a hex string can contain the
+    # substring "ae" with NO real OP_CHECKMULTISIG opcode anywhere in it,
+    # because push-data bytes 0x1a and 0xe3 happen to encode as the
+    # adjacent hex characters "...1a" + "e3..." -- the "a" from the first
+    # byte and the "e" from the second spell "ae" across a byte boundary
+    # that has nothing to do with any opcode.
+    #
+    # Script: OP_PUSHBYTES_2 0x1a 0xe3, OP_DROP, OP_1 (truthy, no
+    # multisig check at all -- this is what a buggy lowerer that forgot to
+    # emit OP_CHECKMULTISIG would produce).
+    bad_hex = '021ae37551'
+
+    # The OLD assertion technique: a naive unaligned substring search.
+    # It is fooled by the push-data collision.
+    naive_match = bad_hex.include?('ae') || bad_hex.include?('af')
+    assert(naive_match,
+           'sanity check: the crafted hex must reproduce the collision the ' \
+           'naive substring search was blind to')
+
+    # The FIX: scanning only opcode-aligned bytes correctly finds no
+    # OP_CHECKMULTISIG / OP_CHECKMULTISIGVERIFY in this script.
+    opcodes = aligned_opcode_bytes(bad_hex)
+    assert_equal [0x75, 0x51], opcodes,
+                 'aligned walk must see OP_DROP, OP_1 and nothing from the push payload'
+    refute(opcodes.include?(0xae) || opcodes.include?(0xaf),
+           'aligned opcode scan must not be fooled by the push-data collision')
   end
 
   # -------------------- determinism --------------------
