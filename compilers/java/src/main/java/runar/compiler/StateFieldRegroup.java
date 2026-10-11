@@ -2,13 +2,14 @@ package runar.compiler;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.anf.AnfProperty.SyntheticArrayLevel;
 
 /**
- * N-086: regroup synthetic {@code FixedArray} state-field leaves back into
- * one logical {@code stateFields} entry, so the Java artifact matches every
- * other tier's.
+ * N-086 / N-229: regroup synthetic {@code FixedArray} leaves back into one
+ * logical published entry, so the Java artifact matches every other tier's —
+ * for {@code stateFields} (N-086) and {@code abi.constructor.params} (N-229).
  *
  * <p>Pass 3b ({@code ExpandFixedArrays}) desugars a property like
  * {@code table: FixedArray<bigint, 4>} into 4 scalar siblings
@@ -17,21 +18,23 @@ import runar.compiler.ir.anf.AnfProperty.SyntheticArrayLevel;
  * from (N-095). Every other tier's artifact assembler reads that chain back
  * off the ANF program to republish one {@code fixedArray}-tagged entry for
  * the user-facing ABI/state view; this tier's {@code Cli#writeArtifact}
- * instead published each leaf as its own scalar {@code stateFields} entry, on
- * both the {@code --source} and the {@code --ir} path, because it never
- * consulted the chain.
+ * instead published each leaf as its own scalar entry, on both the
+ * {@code --source} and the {@code --ir} path, because it never consulted the
+ * chain. N-086 fixed this for {@code stateFields}; N-229 ports the same fix
+ * to {@code abi.constructor.params} — reachable from a readonly (or mutable)
+ * {@code FixedArray} property with no compile-time initializer, which every
+ * source frontend's own constructor-param validation forbids, so only a
+ * crafted {@code --ir} input exercises it (e.g. the Java/compiler tests), not
+ * any of the nine source-format fixtures.
  *
  * <p>Direct port of the TS reference's {@code regroupSyntheticRuns} in
  * {@code packages/runar-compiler/src/artifact/assembler.ts}, equivalently
- * {@code compilers/go/compiler/regroup.go}: same algorithm, same grouping
- * rules, same refusal messages for a chain pass 3b could not have written.
- * Grouping is marker-driven, not pattern-driven — a hand-named
- * {@code foo__0}, {@code foo__1} pair with no chain is left as two
- * independent scalars.
- *
- * <p>Scope: {@code stateFields} only (N-086's testable assertion). The
- * constructor ABI ({@code abi.constructor.params}) still publishes expanded
- * leaves as scalars on this tier — a sibling gap, not this item.
+ * {@code compilers/go/compiler/compiler.go} ({@code ctorEntries} for the
+ * constructor ABI, {@code stateEntries} for state fields — same regroup
+ * helper, different input filter): same algorithm, same grouping rules, same
+ * refusal messages for a chain pass 3b could not have written. Grouping is
+ * marker-driven, not pattern-driven — a hand-named {@code foo__0},
+ * {@code foo__1} pair with no chain is left as two independent scalars.
  */
 final class StateFieldRegroup {
 
@@ -50,15 +53,41 @@ final class StateFieldRegroup {
      * list (constructor arg order), matching every other tier.
      */
     static List<Grouped> run(List<AnfProperty> properties) {
+        return regroup(properties, AnfProperty::readonly, true);
+    }
+
+    /**
+     * Regroup every property WITHOUT a compile-time initializer — readonly
+     * AND mutable — into their published {@code abi.constructor.params}
+     * shape, matching Go's {@code ctorEntries}/{@code assembleArtifact}.
+     * {@code index} on each output is the original property's position in
+     * the full properties list, same convention as {@link #run}, though the
+     * constructor ABI JSON does not publish it (neither does Go's
+     * {@code ABIParam}). Constructor params never carry an
+     * {@code initialValue} (a property with one is excluded here, same as
+     * every other tier — it is baked in, not deploy-time-supplied).
+     */
+    static List<Grouped> runCtor(List<AnfProperty> properties) {
+        return regroup(properties, p -> p.initialValue() != null, false);
+    }
+
+    /**
+     * Shared regroup core for {@link #run} and {@link #runCtor}: flatten the
+     * properties {@code skip} does not exclude into {@link Entry}s (carrying
+     * {@code initialValue} only when {@code carryInitialValue}), then run the
+     * iterative synthetic-array regrouper over them.
+     */
+    private static List<Grouped> regroup(
+            List<AnfProperty> properties, Predicate<AnfProperty> skip, boolean carryInitialValue) {
         List<Entry> flat = new ArrayList<>();
         for (int i = 0; i < properties.size(); i++) {
             AnfProperty p = properties.get(i);
-            if (p.readonly()) continue;
+            if (skip.test(p)) continue;
             Entry e = new Entry();
             e.name = p.name();
             e.type = p.type();
             e.chain = p.syntheticArrayChain() == null ? List.of() : p.syntheticArrayChain();
-            e.initialValue = p.initialValue();
+            e.initialValue = carryInitialValue ? p.initialValue() : null;
             e.index = i;
             flat.add(e);
         }

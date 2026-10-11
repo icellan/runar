@@ -55,10 +55,11 @@ import runar.compiler.Cli;
  *
  * <h2>What these tests do NOT prove</h2>
  * <ul>
- *   <li>The constructor ABI ({@code abi.constructor.params}) is NOT regrouped
- *       by this fix — a readonly {@code FixedArray} (e.g. {@code fixed-array-index})
- *       still publishes N scalar constructor params on this tier. That is a
- *       sibling gap, not part of N-086's testable assertion (stateFields only).</li>
+ *   <li>The constructor ABI ({@code abi.constructor.params}) — that was a
+ *       sibling gap at the time of this fix, not part of N-086's testable
+ *       assertion (stateFields only). It is now covered separately by
+ *       {@code StateFieldRegroup#runCtor} and
+ *       {@code N229CtorAbiFixedArrayRegroupTest}.</li>
  *   <li>Spendability. Nothing here broadcasts or runs the resulting script;
  *       that is the integration / SDK suites' job.</li>
  * </ul>

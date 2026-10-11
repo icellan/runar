@@ -14,7 +14,6 @@ import runar.compiler.canonical.Jcs;
 import runar.compiler.frontend.ParserDispatch;
 import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfProgram;
-import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.ast.ContractNode;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.passes.AnfLoader;
@@ -420,13 +419,11 @@ public final class Cli {
      *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
      *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
      *       which therefore stays silent for Java-built artifacts.</li>
-     *   <li>{@code fixedArray} regrouping on {@code abi.constructor.params} —
-     *       a readonly FixedArray property still publishes its expanded
-     *       siblings as individual constructor params rather than one logical
-     *       entry. (N-086 fixed this for {@code stateFields}, via
-     *       {@link StateFieldRegroup}; the constructor ABI is a sibling gap,
-     *       not yet ported.)</li>
      * </ul>
+     *
+     * <p>{@code fixedArray} regrouping on both {@code stateFields} (N-086) and
+     * {@code abi.constructor.params} (N-229) is handled by
+     * {@link StateFieldRegroup}.
      *
      * <p>Returns 0 on success, non-zero on failure.
      */
@@ -438,11 +435,11 @@ public final class Cli {
             Emit.EmitResultFull emit = Emit.runResultFull(optimised);
 
             // Constructor params: every property WITHOUT a compile-time default
-            // (initialised properties are not constructor arguments).
-            List<AnfProperty> ctorProps = new ArrayList<>();
-            for (AnfProperty p : anf.properties()) {
-                if (p.initialValue() == null) ctorProps.add(p);
-            }
+            // (initialised properties are not constructor arguments). N-229: a
+            // FixedArray property's expanded scalar leaves (pass 3b) are
+            // regrouped back into one `fixedArray`-tagged entry here, the way
+            // every other tier's assembler does — see StateFieldRegroup#runCtor.
+            List<StateFieldRegroup.Grouped> ctorProps = StateFieldRegroup.runCtor(anf.properties());
             // State fields: the mutable properties. `index` is the property's
             // position in declaration order (matching constructor arg order),
             // NOT a sequential mutable counter — the SDK relies on that.
@@ -533,9 +530,22 @@ public final class Cli {
             b.append("  \"abi\": {\n    \"constructor\": {\n      \"params\": [");
             for (int i = 0; i < ctorProps.size(); i++) {
                 if (i > 0) b.append(", ");
-                b.append("{\"name\": ").append(jsonString(ctorProps.get(i).name()))
-                    .append(", \"type\": ").append(jsonString(ctorProps.get(i).type()))
-                    .append('}');
+                StateFieldRegroup.Grouped cp = ctorProps.get(i);
+                b.append("{\"name\": ").append(jsonString(cp.name()))
+                    .append(", \"type\": ").append(jsonString(cp.type()));
+                if (cp.fixedArray() != null) {
+                    b.append(", \"fixedArray\": {\"elementType\": ")
+                        .append(jsonString(cp.fixedArray().elementType()))
+                        .append(", \"length\": ").append(cp.fixedArray().length())
+                        .append(", \"syntheticNames\": [");
+                    List<String> names = cp.fixedArray().syntheticNames();
+                    for (int k = 0; k < names.size(); k++) {
+                        if (k > 0) b.append(", ");
+                        b.append(jsonString(names.get(k)));
+                    }
+                    b.append("]}");
+                }
+                b.append('}');
             }
             b.append("]\n    },\n    \"methods\": [");
             appendJoined(b, methodJson);
