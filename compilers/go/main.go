@@ -352,7 +352,7 @@ func runGroth16WA() error {
 	vkPath := fs.String("vk", "", "path to .groth16.vk.json verifying key file (required)")
 	outPath := fs.String("out", "", "output artifact JSON path (required)")
 	contractName := fs.String("name", "", "contract name in the output artifact (default \"Groth16Verifier\")")
-	moduloThreshold := fs.Int("modulo-threshold", 0, "bytes threshold for deferred mod reduction; 0 = strict (recommended, ~718 KB for SP1 v6); 2048 follows the nChain paper but is MUCH slower on today's interpreters")
+	moduloThreshold := fs.Int("modulo-threshold", 0, "bytes threshold for deferred mod reduction; 0 = strict (recommended, ~1.4 MB for SP1 v6's MSM-bound verifier); 2048 follows the nChain paper but is MUCH slower on today's interpreters")
 	var pubInputs groth16PubInputFlag
 	fs.Var(&pubInputs, "pub", "public-input scalar to pin into the verifier, as a decimal integer; repeat once per public input (required)")
 	fs.Usage = func() {

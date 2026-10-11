@@ -48,7 +48,10 @@ type Groth16WAOpts struct {
 	// field arithmetic. It is forwarded verbatim to codegen.Groth16Config.
 	//
 	// Default: 0 (strict — every intermediate is reduced mod p). This
-	// produces a LARGER script (~718 KB for SP1) but is dramatically
+	// produces a LARGER script (~1.4 MB for SP1's MSM-bound verifier,
+	// which pins the public inputs; an earlier unbound variant measured
+	// ~718 KB here, but that number is stale — see
+	// TestCompileGroth16WA_DefaultsToThreshold0) but is dramatically
 	// faster on the go-sdk interpreter because Bitcoin Script bignum
 	// multiplication is O(n²) in the schoolbook sense. The 2048-byte
 	// threshold from the nChain paper is NOT recommended for real
