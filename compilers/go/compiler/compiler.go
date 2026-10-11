@@ -255,6 +255,19 @@ func buildLowerOptions(o CompileOptions) (codegen.LowerToStackOptions, error) {
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
 
+	// F-223: applyConstructorArgs below mutates Properties slice elements in
+	// place (program.Properties[i].InitialValue = v, see options.go). Clone
+	// the program first so baking never mutates the caller's own
+	// *ir.ANFProgram — a caller that loads a program once and calls
+	// CompileFromProgram on it twice (e.g. with different ConstructorArgs)
+	// would otherwise see the second call's bake leak backward into the
+	// object it still holds. Mirrors FoldConstants' own copy-on-write below
+	// and the Rust tier's compile_from_program_with_options, which clones
+	// its &ir::ANFProgram borrow for the same reason.
+	clonedProgram := *program
+	clonedProgram.Properties = append([]ir.ANFProperty(nil), program.Properties...)
+	program = &clonedProgram
+
 	// R-012 / F-007: the IR entry points never run frontend.Validate, so the
 	// verifySP1FRI refusal has to be re-asserted here against the ANF
 	// observable. Unconditional: the verifier is not implemented for v1.

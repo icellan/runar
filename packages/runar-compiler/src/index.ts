@@ -630,7 +630,13 @@ export function compileFromANF(
 ): CompileFromANFResult {
   const opts = options ?? {};
 
-  const anf: ANFProgram = program;
+  // F-223: do not alias the caller's ANFProgram — constructor-arg baking
+  // below writes `prop.initialValue` directly onto property objects, and
+  // without a structural copy that mutates the caller's own `program`,
+  // making a second compileFromANF call on the same object inherit the
+  // first call's baked values. structuredClone handles the bigint
+  // `initialValue`s ANF properties carry (JSON.stringify would throw).
+  const anf: ANFProgram = structuredClone(program);
 
   // N-071: IR input skips 02-validate, whose endsWithAssert rule is what makes
   // a public method's script a covenant. Stack lowering leaves the method's
