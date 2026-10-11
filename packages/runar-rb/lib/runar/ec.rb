@@ -109,6 +109,16 @@ module Runar
         # stands in for, so `assert(ec_on_curve(r))` passed off-chain and failed
         # on-chain for r = O -- an unspendable output found only after deploy.
         # O is now reachable from ec_add(P, -P), so this matters in practice.
+        #
+        # CL-BUG-161 / F-243: coordinate canonicity. decode_point parses each
+        # half as an unsigned big-endian integer with no range check, so a
+        # coordinate written as x0 + EC_P (still 32 bytes, still a valid script
+        # number) reaches the field arithmetic below, which reduces it mod
+        # EC_P and silently accepts it as if it were x0. The compiled script
+        # range-checks x < EC_P and y < EC_P BEFORE the curve-equation check
+        # (GAP-301), so this mock must reject what the script rejects.
+        return false if x >= EC_P || y >= EC_P
+
         lhs = (y * y) % EC_P
         rhs = (x * x * x + 7) % EC_P
         lhs == rhs

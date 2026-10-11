@@ -152,3 +152,22 @@ class TestOnCurve:
     def test_wrong_length_raises(self):
         with pytest.raises(ValueError, match='64 bytes'):
             ec_on_curve(b'\x00' * 32)
+
+    def test_rejects_noncanonical_x(self):
+        """CL-BUG-161 / F-243: coordinate canonicity.
+
+        x0 = 1 is a genuine secp256k1 curve point (y0 below). _decode_point
+        parses each half as an unsigned big-endian int with no range check,
+        so a coordinate written as x0 + EC_P (still exactly 32 bytes) reaches
+        the field arithmetic below, which reduces it mod EC_P and accepts it
+        as if it were x0. The compiled script range-checks x < p AND y < p
+        BEFORE the curve-equation check (GAP-301), so this mock must reject
+        what the script rejects. Verified against the real compiled script
+        via @bsv/sdk's Spend in
+        packages/runar-testing/src/__tests__/r117-coordinate-canonicity.test.ts
+        ("the predicate stays TOTAL: onCurve(alias) is false").
+        """
+        y0 = 0x4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee
+        noncanonical_x = EC_P + 1
+        alias_point = ec_make_point(noncanonical_x, y0)
+        assert ec_on_curve(alias_point) is False

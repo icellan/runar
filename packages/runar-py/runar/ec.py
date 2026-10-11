@@ -105,6 +105,16 @@ def ec_on_curve(p: bytes) -> bool:
     # stands in for, so `assert(ec_on_curve(r))` passed off-chain and failed
     # on-chain for r = O -- an unspendable output found only after deploy.
     # O is now reachable from ec_add(P, -P), so this matters in practice.
+    #
+    # CL-BUG-161 / F-243: coordinate canonicity. _decode_point parses each
+    # half as an unsigned big-endian int with no range check, so a
+    # coordinate written as x0 + EC_P (still exactly 32 bytes) reaches the
+    # field arithmetic below, which reduces it mod EC_P and accepts it as if
+    # it were x0. The compiled script range-checks x < p AND y < p BEFORE the
+    # curve-equation check (GAP-301), so this mock must reject what the
+    # script rejects.
+    if x >= EC_P or y >= EC_P:
+        return False
     lhs = (y * y) % EC_P
     rhs = (x * x * x + 7) % EC_P
     return lhs == rhs

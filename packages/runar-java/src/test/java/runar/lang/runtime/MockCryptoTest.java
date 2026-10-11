@@ -194,6 +194,26 @@ class MockCryptoTest {
     }
 
     @Test
+    void ecOnCurveRejectsNonCanonicalX() {
+        // CL-BUG-161 / F-243: coordinate canonicity. x0 = 1 is a genuine
+        // secp256k1 curve point (y0 below). Point.fromRaw64 parses each half
+        // as an unsigned BigInteger with no range check, so a coordinate
+        // written as x0 + EC_P (still exactly 32 bytes) reaches the field
+        // arithmetic in ecOnCurve, which reduces it mod EC_P and accepts it
+        // as if it were x0. The compiled script range-checks x < p AND y < p
+        // BEFORE the curve-equation check (GAP-301), so this mock must
+        // reject what the script rejects. Verified against the real
+        // compiled script via @bsv/sdk's Spend in
+        // packages/runar-testing/src/__tests__/r117-coordinate-canonicity.test.ts
+        // ("the predicate stays TOTAL: onCurve(alias) is false").
+        BigInteger y0 = new BigInteger("4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee", 16);
+        BigInteger ecP = new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16);
+        BigInteger noncanonicalX = ecP.add(BigInteger.ONE);
+        MockCrypto.Point aliasPoint = new MockCrypto.Point(noncanonicalX, y0);
+        assertFalse(MockCrypto.ecOnCurve(aliasPoint));
+    }
+
+    @Test
     void ecNegateRoundTrip() {
         MockCrypto.Point negG = MockCrypto.ecNegate(MockCrypto.EC_G);
         MockCrypto.Point sum = MockCrypto.ecAdd(MockCrypto.EC_G, negG);

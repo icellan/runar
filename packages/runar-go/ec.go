@@ -156,6 +156,16 @@ func EcNegate(p Point) Point {
 // EcOnCurve checks if a point is on the secp256k1 curve: y^2 = x^3 + 7 (mod p).
 func EcOnCurve(p Point) bool {
 	x, y := pointToCoords(p)
+	// CL-BUG-161 / F-243: coordinate canonicity. pointToCoords parses each
+	// half as an unsigned big.Int with no range check, so a coordinate
+	// written as x0 + ecP (still exactly 32 bytes) reaches the field
+	// arithmetic below, which reduces it mod ecP and accepts it as if it
+	// were x0. The compiled script range-checks x < p AND y < p BEFORE the
+	// curve-equation check (GAP-301), so this mock must reject what the
+	// script rejects.
+	if x.Cmp(ecP) >= 0 || y.Cmp(ecP) >= 0 {
+		return false
+	}
 	// y^2 mod p
 	lhs := new(big.Int).Mul(y, y)
 	lhs.Mod(lhs, ecP)

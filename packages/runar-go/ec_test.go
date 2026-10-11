@@ -39,6 +39,25 @@ func TestEcOnCurve_BadPoint(t *testing.T) {
 	}
 }
 
+// CL-BUG-161 / F-243: coordinate canonicity. x0 = 1 is a genuine secp256k1
+// curve point (y0 below). pointToCoords parses each half as an unsigned
+// big.Int with no range check, so x = x0 + ecP (still exactly 32 bytes) flows
+// into the field arithmetic, which reduces it mod ecP and accepts it as if it
+// were x0. The compiled script range-checks x < p AND y < p BEFORE the
+// curve-equation check (GAP-301), so this mock must reject what the script
+// rejects. Verified against the real compiled script via @bsv/sdk's Spend in
+// packages/runar-testing/src/__tests__/r117-coordinate-canonicity.test.ts
+// ("the predicate stays TOTAL: onCurve(alias) is false").
+func TestEcOnCurve_RejectsNonCanonicalX(t *testing.T) {
+	y0, _ := new(big.Int).SetString("4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee", 16)
+	ecP, _ := new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
+	noncanonicalX := new(big.Int).Add(ecP, big.NewInt(1))
+	aliasPoint := EcMakePoint(noncanonicalX, y0)
+	if EcOnCurve(aliasPoint) {
+		t.Fatal("x = p + 1 (non-canonical encoding of x0 = 1) must be rejected")
+	}
+}
+
 func TestEcAdd_G_Plus_G_Equals_EcMul_G_2(t *testing.T) {
 	g := ecG()
 	sum := EcAdd(g, g)
