@@ -1311,8 +1311,13 @@ jobs:
         working-directory: runar-verification
         run: ./scripts/check-tcb-drift.sh
       - name: Verify all discovered fixtures parse + satisfy WF
+        id: golden-load-gate
         working-directory: runar-verification
-        run: lake env ./.lake/build/bin/goldenLoad | tee /tmp/goldenload.out
+        run: |
+          set -o pipefail
+          lake env ./.lake/build/bin/goldenLoad | tee /tmp/goldenload.out
+          total=$(grep -oE 'found [0-9]+ expected-ir.json files' /tmp/goldenload.out | grep -oE '[0-9]+' | head -n1)
+          echo "golden_total=${total}" >> "$GITHUB_OUTPUT"
       - name: Assert README discovered-count matches goldenLoad runtime count
         working-directory: runar-verification
         # DOC-003 drift guard: goldenLoad walks conformance/tests with readDir
@@ -1336,8 +1341,13 @@ jobs:
             exit 1
           fi
       - name: Verify all discovered fixtures round-trip through ANF JSON
+        id: roundtrip-gate
         working-directory: runar-verification
-        run: lake env ./.lake/build/bin/roundtrip
+        run: |
+          set -o pipefail
+          lake env ./.lake/build/bin/roundtrip | tee /tmp/roundtrip.out
+          total=$(grep -oE 'round-trip checking [0-9]+ goldens' /tmp/roundtrip.out | grep -oE '[0-9]+' | head -n1)
+          echo "roundtrip_total=${total}" >> "$GITHUB_OUTPUT"
       - name: Verify pipelineConformance (2-tier classifier)
         id: conformance-gate
         # Wraps the pipelineConformance binary with ulimit -s unlimited
@@ -1345,10 +1355,19 @@ jobs:
         # fixtures. The wrapper exits nonzero only on hard-failure buckets
         # (DEFERRED-parse-failure, DEFERRED-not-well-formed); soft buckets
         # (DEFERRED-compile-safe-error, DEFERRED-no-public-method) are
-        # reported but do not fail the gate. Current expected:
-        # VERIFIED-modulo-codegen-axioms = 63/63 (discovered dynamically),
-        # 0 hard failures.
-        run: ./runar-verification/scripts/run-pipeline-conformance.sh | tee /tmp/pconf.out
+        # reported but do not fail the gate. Counts below (pconf_total,
+        # pconf_modulo_codegen) are read back out of the harness's own
+        # legend block, never hand-maintained.
+        run: |
+          set -o pipefail
+          ./runar-verification/scripts/run-pipeline-conformance.sh | tee /tmp/pconf.out
+          total=$(grep -oE 'PipelineConformance: [0-9]+ fixtures' /tmp/pconf.out | grep -oE '[0-9]+' | head -n1)
+          hard_parse=$(grep -oE 'DEFERRED-parse-failure +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          hard_wf=$(grep -oE 'DEFERRED-not-well-formed +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          soft_compile=$(grep -oE 'DEFERRED-compile-safe-error +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          soft_no_public=$(grep -oE 'DEFERRED-no-public-method +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          echo "pconf_total=${total}" >> "$GITHUB_OUTPUT"
+          echo "pconf_modulo_codegen=$((total - hard_parse - hard_wf - soft_compile - soft_no_public))" >> "$GITHUB_OUTPUT"
       - name: Verify byte-exact regression gate (34/49 live fixtures)
         id: byte-exact-gate
         working-directory: runar-verification
@@ -1374,23 +1393,43 @@ jobs:
       - name: Emit verification step summary
         if: always()
         env:
-          # Internal output from previous step — produced entirely by
+          # Internal outputs from previous steps — produced entirely by
           # tools in this repo, never by user-controlled GitHub event
-          # data. Quoted via env: per workflow-injection guidelines.
+          # data. Quoted via env: per workflow-injection guidelines. Each
+          # is empty when its step never ran or failed before writing it
+          # (e.g. a hard failure in run-pipeline-conformance.sh), so the
+          # summary falls back to an honest "(did not run)" instead of
+          # repeating a stale pass count.
+          GOLDEN_TOTAL: ${{ steps.golden-load-gate.outputs.golden_total }}
+          ROUNDTRIP_TOTAL: ${{ steps.roundtrip-gate.outputs.roundtrip_total }}
+          PCONF_TOTAL: ${{ steps.conformance-gate.outputs.pconf_total }}
+          PCONF_MODULO_CODEGEN: ${{ steps.conformance-gate.outputs.pconf_modulo_codegen }}
           BYTE_EXACT: ${{ steps.byte-exact-gate.outputs.byte_exact }}
         run: |
           {
             printf '## Rúnar Lean 4 Verification\n\n'
             printf '| Check | Result |\n'
             printf '|-------|--------|\n'
-            printf '| Parse + WF | 56/56 |\n'
-            printf '| ANF JSON round-trip | 56/56 |\n'
+            if [ -n "${GOLDEN_TOTAL:-}" ]; then
+              printf '| Parse + WF | %s/%s |\n' "$GOLDEN_TOTAL" "$GOLDEN_TOTAL"
+            else
+              printf '| Parse + WF | (did not run) |\n'
+            fi
+            if [ -n "${ROUNDTRIP_TOTAL:-}" ]; then
+              printf '| ANF JSON round-trip | %s/%s |\n' "$ROUNDTRIP_TOTAL" "$ROUNDTRIP_TOTAL"
+            else
+              printf '| ANF JSON round-trip | (did not run) |\n'
+            fi
             if [ -n "${BYTE_EXACT:-}" ]; then
               printf '| Byte-exact vs. TS reference | %s |\n' "$BYTE_EXACT"
             else
               printf '| Byte-exact vs. TS reference | (binary did not run) |\n'
             fi
-            printf '| pipelineConformance (modulo codegen axioms) | 56/56 |\n'
+            if [ -n "${PCONF_MODULO_CODEGEN:-}" ] && [ -n "${PCONF_TOTAL:-}" ]; then
+              printf '| pipelineConformance (modulo codegen axioms) | %s/%s |\n' "$PCONF_MODULO_CODEGEN" "$PCONF_TOTAL"
+            else
+              printf '| pipelineConformance (modulo codegen axioms) | (did not run) |\n'
+            fi
             printf '\n'
             printf 'Trust manifest: see `runar-verification/TRUST_MANIFEST.md`\n'
             printf 'Phase history: see `runar-verification/HANDOFF.md`\n'
