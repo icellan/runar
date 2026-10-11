@@ -93,11 +93,15 @@ fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.len() > 1 && !raw_args[1].starts_with('-') {
         if raw_args[1] == "debug" {
-            if let Err(e) = debug_subcommand::run(&raw_args[2..]) {
-                eprintln!("debug: {}", e);
-                process::exit(1);
+            match debug_subcommand::run(&raw_args[2..]) {
+                Ok(true) => return,
+                // Script failed: the verdict is already on stdout (F-221).
+                Ok(false) => process::exit(1),
+                Err(e) => {
+                    eprintln!("debug: {}", e);
+                    process::exit(1);
+                }
             }
-            return;
         }
         // Unknown positional: fall through to clap, which will emit a
         // standard usage error.

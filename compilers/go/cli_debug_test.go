@@ -71,7 +71,8 @@ func TestCLI_Debug_RequiresInput(t *testing.T) {
 }
 
 // TestCLI_Debug_FailingScript verifies a falsy script (OP_0) reports
-// final: fail without crashing the wrapper.
+// final: fail and exits non-zero, so CI / scripts can rely on the exit
+// status (F-221). It does not prove anything about the interpreter itself.
 func TestCLI_Debug_FailingScript(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping CLI smoke test on -short")
@@ -88,14 +89,8 @@ func TestCLI_Debug_FailingScript(t *testing.T) {
 	// OP_0 — pushes empty bytes, which is falsy.
 	cmd := exec.Command(binPath, "debug", "--script", "00")
 	stdout, err := cmd.Output()
-	if err != nil {
-		// A falsy script is not a wrapper error; the wrapper should still
-		// exit 0 and report the failure in its final line.
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = string(ee.Stderr)
-		}
-		t.Fatalf("debug on OP_0 must exit 0 (wrapper-wise), got: %v\nstderr: %s", err, stderr)
+	if _, ok := err.(*exec.ExitError); !ok {
+		t.Fatalf("debug on OP_0 must exit non-zero, got: %v\nstdout: %s", err, string(stdout))
 	}
 	out := string(stdout)
 	if !strings.Contains(out, "final: fail") {

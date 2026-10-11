@@ -72,11 +72,15 @@ def test_debug_missing_input_errors() -> None:
 
 
 def test_debug_falsy_script_reports_fail() -> None:
-    """OP_0 (hex 00) — pushes empty bytes; falsy. Wrapper must still exit 0."""
+    """OP_0 (hex 00) — pushes empty bytes; falsy. Must exit non-zero (F-221).
+
+    Proves the failing verdict is reported both on stdout and as the exit
+    status, so CI / scripts can rely on it. Does not prove anything about the
+    interpreter itself.
+    """
     proc = _run(["debug", "--script", "00"])
-    # A falsy script is not a wrapper error.
-    assert proc.returncode == 0, (
-        f"wrapper must exit 0 for falsy scripts; got: {proc.returncode}\n"
+    assert proc.returncode != 0, (
+        f"debug on a falsy script must exit non-zero; got: {proc.returncode}\n"
         f"stderr: {proc.stderr}"
     )
     assert "final: fail" in proc.stdout, f"expected 'final: fail' for OP_0, got:\n{proc.stdout}"

@@ -43,20 +43,45 @@ fn debug_trivial_script_passes() {
 
 #[test]
 fn debug_falsy_script_reports_fail() {
-    // OP_0 — pushes empty bytes (falsy) → final: fail (wrapper still exits 0).
+    // OP_0 — pushes empty bytes (falsy) → final: fail, and the process must
+    // exit non-zero so CI / scripts can rely on the exit status (F-221).
+    // Proves: a false-result script is reported on stdout AND as a failing
+    // exit status. Does not prove anything about the interpreter itself.
     let out = Command::new(bin_path())
         .args(["debug", "--script", "00"])
         .output()
         .expect("spawn binary");
     assert!(
-        out.status.success(),
-        "wrapper must exit 0 even for falsy scripts; got: {:?}",
+        !out.status.success(),
+        "debug on a falsy script must exit non-zero; got: {:?}",
         out.status
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("final: fail"),
         "expected 'final: fail' for OP_0, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn debug_interpreter_error_exits_nonzero() {
+    // OP_VERIFY on an empty stack — an interpreter error, not a false
+    // result. Must still print the final-fail diagnostic and exit non-zero
+    // (F-221). Does not prove which error the interpreter raised.
+    let out = Command::new(bin_path())
+        .args(["debug", "--script", "69"])
+        .output()
+        .expect("spawn binary");
+    assert!(
+        !out.status.success(),
+        "debug on an erroring script must exit non-zero; got: {:?}",
+        out.status
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("final: fail (interpreter error"),
+        "expected 'final: fail (interpreter error' for OP_VERIFY on empty stack, got:\n{}",
         stdout
     );
 }

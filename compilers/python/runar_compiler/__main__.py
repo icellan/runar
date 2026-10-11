@@ -534,6 +534,8 @@ def _run_debug_subcommand(argv: list[str]) -> None:
     status = "pass" if vm.is_success else "fail"
     final_stack = _format_stack(vm.current_stack, args.max_stack_bytes)
     print(f"final: {status}  ops={step_n}  stack={final_stack}")
+    if not vm.is_success:
+        sys.exit(1)  # F-221: a failing script must not exit 0
 
 
 def _format_stack(stack: list, max_bytes: int) -> str:

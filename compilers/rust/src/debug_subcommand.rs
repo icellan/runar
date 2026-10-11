@@ -38,8 +38,9 @@ struct ArtifactProbe {
 
 /// Parse the `debug` subcommand's arguments from the slice that follows
 /// the subcommand name. Returns a wrapper error on malformed flags; an
-/// execution failure is reported via stdout, not as an error.
-pub fn run(argv: &[String]) -> Result<(), String> {
+/// execution failure is reported via stdout and as `Ok(false)` so the
+/// caller can exit non-zero (F-221). `Ok(true)` means the script passed.
+pub fn run(argv: &[String]) -> Result<bool, String> {
     let parsed = parse_args(argv)?;
 
     // Resolve the locking script hex: either --script direct, or --artifact's
@@ -89,15 +90,17 @@ pub fn run(argv: &[String]) -> Result<(), String> {
     match spend.validate() {
         Ok(true) => {
             println!("final: pass");
+            Ok(true)
         }
         Ok(false) => {
             println!("final: fail (script evaluated to false)");
+            Ok(false)
         }
         Err(e) => {
             println!("final: fail (interpreter error: {:?})", e);
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 fn parse_args(argv: &[String]) -> Result<DebugArgs, String> {

@@ -28,7 +28,7 @@ import (
 // runDebug parses the `debug` subcommand's flags and prints a per-opcode
 // trace of the loaded script. Returns a wrapper error only if the inputs
 // are malformed; a script that *legitimately* fails (e.g. OP_VERIFY on
-// false) is reported as a non-zero final-status line, not as an error.
+// false) is reported on its final-status line and then exits 1 (F-221).
 func runDebug() error {
 	fs := flag.NewFlagSet("debug", flag.ExitOnError)
 	scriptHex := fs.String("script", "", "locking-script hex (required unless --artifact is used)")
@@ -93,6 +93,9 @@ func runDebug() error {
 		status = "pass"
 	}
 	fmt.Printf("final: %s  ops=%d  stack=%s\n", status, stepN, formatStack(vm.Stack(), *maxStackBytes))
+	if !vm.IsSuccess() {
+		os.Exit(1)
+	}
 	return nil
 }
 
