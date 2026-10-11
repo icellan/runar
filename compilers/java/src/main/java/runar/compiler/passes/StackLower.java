@@ -1249,7 +1249,12 @@ public final class StackLower {
                 if (v.sourceLoc() == null) v.setSourceLoc(sl);
                 return v;
             }
-            // RawBytesOp has no sourceLoc field — skip.
+            if (op instanceof runar.compiler.ir.stack.RawBytesOp r) {
+                // F-316: a raw_script span (asm({...})) is stamped like every
+                // other op, matching the TS reference's generic emitOp.
+                if (r.sourceLoc() != null) return r;
+                return new runar.compiler.ir.stack.RawBytesOp(r.bytes(), r.inArity(), r.outArity(), sl);
+            }
             return op;
         }
 

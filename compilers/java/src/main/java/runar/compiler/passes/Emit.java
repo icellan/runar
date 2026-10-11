@@ -455,7 +455,8 @@ public final class Emit {
         if (op instanceof PlaceholderOp o) return o.sourceLoc();
         if (op instanceof PushCodeSepIndexOp o) return o.sourceLoc();
         if (op instanceof VerifyCodePartLenOp o) return o.sourceLoc();
-        // RawBytesOp / others have no sourceLoc.
+        // F-316: a raw_script span (asm({...})) now carries a sourceLoc too.
+        if (op instanceof RawBytesOp o) return o.sourceLoc();
         return null;
     }
 
