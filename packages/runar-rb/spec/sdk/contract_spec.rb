@@ -227,6 +227,40 @@ RSpec.describe Runar::SDK::RunarContract do
       op_return_pos = Runar::SDK::State.find_last_op_return(contract.get_locking_script)
       expect(op_return_pos).to eq(-1)
     end
+
+    # R84: a ctor arg with no constructorSlots entry is never appended. This
+    # used to fall back to appending the raw arg to the end of the script
+    # ("backward compat" for pre-slot-splicing artifacts). That shape —
+    # constructorSlots empty, abi ctor params non-empty — is byte-identical
+    # to what TODAY's compiler emits when every ctor-needed property is
+    # eliminated by DCE (no method ever reads it), so the old fallback
+    # silently deployed a script that was NOT the compiled template: the
+    # appended bytes leave extra items on the stack and the spend fails the
+    # consensus clean-stack rule (proved against the real @bsv/sdk Spend
+    # oracle in
+    # packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+    # Matches the Java SDK, which never had this fallback.
+    it 'R84: a stateless ctor arg with no constructorSlots entry is not appended' do
+      no_slot_artifact_json = JSON.generate(
+        version:          '1.0',
+        compilerVersion:  '0.1.0',
+        contractName:     'Unused',
+        abi:              {
+          constructor: { params: [{ name: 'target', type: 'bigint' }] },
+          methods:     [{ name: 'check', params: [], isPublic: true }]
+        },
+        script:           '009c',
+        asm:              '',
+        stateFields:      [],
+        constructorSlots: []
+      )
+      no_slot_artifact = Runar::SDK::RunarArtifact.from_json(no_slot_artifact_json)
+      contract = described_class.new(no_slot_artifact, [42])
+
+      # New behavior (R84): nothing is appended; the deployed script is
+      # exactly the compiled template.
+      expect(contract.get_locking_script).to eq('009c')
+    end
   end
 
   # ---------------------------------------------------------------------------

@@ -3391,16 +3391,16 @@ pub const RunarContract = struct {
                 }
                 try patchCodePartLenSlots(self.artifact, script, shifts, script.len / 2 + envelope_len);
             }
-        } else if (self.artifact.state_fields.len == 0) {
-            // Backward compatibility: old stateless artifacts without constructorSlots
-            for (self.constructor_args) |arg| {
-                const encoded = try state_mod.encodeArg(self.allocator, arg);
-                defer self.allocator.free(encoded);
-                const new_script = try std.mem.concat(self.allocator, u8, &[_][]const u8{ script, encoded });
-                self.allocator.free(script);
-                script = new_script;
-            }
         }
+        // R84: no fallback append for args without a constructor slot. A
+        // ctor arg with no corresponding constructor_slots entry means the
+        // property it initializes was eliminated by DCE (never read by any
+        // surviving method), so there is no placeholder in the compiled
+        // template for it to fill -- appending it would deploy a script
+        // that is not the one the compiler produced (and fails the
+        // consensus clean-stack rule on spend; see packages/runar-sdk's
+        // n013-dce-eliminated-ctor-args.test.ts). Matches the Java SDK,
+        // which never had this fallback.
 
         return script;
     }
@@ -4083,8 +4083,14 @@ test "RunarContract.init and getLockingScript for stateless contract" {
 
     const ls = try contract.getLockingScript();
     defer allocator.free(ls);
-    // Stateless with no constructor slots appends args: "76a914" + push("aabbccdd") = "76a914" + "04aabbccdd"
-    try std.testing.expect(std.mem.startsWith(u8, ls, "76a914"));
+    // R84: a ctor arg with no constructorSlots entry is never appended --
+    // the deployed script is exactly the compiled template ("76a914").
+    // Previously this appended the raw arg ("76a914" + push("aabbccdd")),
+    // which deploys a script the compiler never produced and fails the
+    // consensus clean-stack rule on spend (see packages/runar-sdk's
+    // n013-dce-eliminated-ctor-args.test.ts, proved against the real
+    // @bsv/sdk Spend oracle).
+    try std.testing.expectEqualStrings("76a914", ls);
 }
 
 // Issue #42: terminal-method sighash subscript byte-walker.

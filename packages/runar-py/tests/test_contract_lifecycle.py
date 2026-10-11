@@ -381,19 +381,34 @@ class TestGetLockingScript:
         # script starts with OP_1 then OP_2 then OP_ADD
         assert '51' in script or '52' in script  # at least one replacement happened
 
-    def test_no_slot_artifact_arg_appended_to_script(self):
-        """Without constructor slots, arg is appended to the base script (row 456)."""
+    def test_no_slot_artifact_arg_is_not_appended_to_script(self):
+        """R84: a ctor arg with no constructor_slots entry is never appended.
+
+        This used to fall back to appending the raw arg to the end of the
+        script ("old behavior" for pre-slot-splicing artifacts). That shape
+        -- constructor_slots absent, abi ctor params non-empty -- is
+        byte-identical to what TODAY's compiler emits when every ctor-needed
+        property is eliminated by DCE (no method ever reads it), so the old
+        fallback silently deployed a script that was NOT the compiled
+        template: the appended bytes leave extra items on the stack and the
+        spend fails the consensus clean-stack rule (proved against the real
+        @bsv/sdk Spend oracle in
+        packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+        R84: drop the fallback, matching the Java SDK, which never had it --
+        an arg with no slot is simply not spliced anywhere, and the deployed
+        script equals the template.
+        """
         artifact = _make_artifact('76a9', [
             AbiMethod(name='check', params=[], is_public=True),
         ], ctor_params=[AbiParam(name='target', type='bigint')])
-        # No constructor_slots set — uses old behavior
+        # No constructor_slots set.
 
         contract = RunarContract(artifact, [42])
         script = contract.get_locking_script()
 
-        # Base script "76a9" followed by encoded 42 ("012a")
-        assert script.startswith('76a9')
-        assert '012a' in script or script.endswith('012a')
+        # New behavior (R84): nothing is appended; the deployed script is
+        # exactly the compiled template.
+        assert script == '76a9'
 
 
 # ---------------------------------------------------------------------------

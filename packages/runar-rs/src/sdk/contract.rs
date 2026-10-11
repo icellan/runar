@@ -2361,20 +2361,15 @@ impl RunarContract {
             let code_part_len = script.len() / 2 + envelope_len;
             return patch_code_part_len_slots(&self.artifact, &script, &subs, code_part_len);
         }
-
-        // Backward compatibility: old stateless artifacts without constructorSlots.
-        // For stateful contracts, constructor args initialize the state section
-        // (after OP_RETURN), not the code portion.
-        let is_stateful = self
-            .artifact
-            .state_fields
-            .as_ref()
-            .map_or(false, |f| !f.is_empty());
-        if !is_stateful {
-            for arg in &self.constructor_args {
-                script.push_str(&encode_arg(arg));
-            }
-        }
+        // R84: no fallback append for args without a constructor slot. A
+        // ctor arg with no corresponding constructor_slots entry means the
+        // property it initializes was eliminated by DCE (never read by any
+        // surviving method), so there is no placeholder in the compiled
+        // template for it to fill — appending it would deploy a script that
+        // is not the one the compiler produced (and fails the consensus
+        // clean-stack rule on spend; see packages/runar-sdk's
+        // n013-dce-eliminated-ctor-args.test.ts). Matches the Java SDK,
+        // which never had this fallback.
 
         Ok(script)
     }
@@ -3303,8 +3298,21 @@ mod tests {
         assert_eq!(ls, expected);
     }
 
+    // R84: a ctor arg with no constructor_slots entry used to fall back to
+    // being appended to the end of the script ("backward compat" for
+    // pre-slot-splicing artifacts). That shape — constructor_slots absent,
+    // abi.constructor.params non-empty — is byte-identical to what TODAY's
+    // compiler emits when every ctor-needed property is eliminated by DCE
+    // (no method ever reads it), so the old fallback silently deployed a
+    // script that was NOT the compiled template: the appended bytes leave
+    // extra items on the stack and the spend fails the consensus
+    // clean-stack rule (proved against the real @bsv/sdk Spend oracle in
+    // packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+    // R84: drop the fallback, matching the Java SDK, which never had it — an
+    // arg with no slot is simply not spliced anywhere, and the deployed
+    // script equals the template.
     #[test]
-    fn fallback_append_without_constructor_slots() {
+    fn no_slot_arg_is_not_appended() {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
@@ -3337,9 +3345,9 @@ mod tests {
         );
         let ls = contract.get_locking_script();
 
-        // Old behavior: args appended to end of script
-        let encoded_hash = format!("14{}", pub_key_hash);
-        assert_eq!(ls, format!("76a90088ac{}", encoded_hash));
+        // New behavior (R84): nothing is appended; the deployed script is
+        // exactly the compiled template.
+        assert_eq!(ls, "76a90088ac");
     }
 
     #[test]

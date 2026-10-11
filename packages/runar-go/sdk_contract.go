@@ -2268,14 +2268,15 @@ func (c *RunarContract) buildCodeScript() string {
 			panic(err)
 		}
 		script = patched
-	} else if len(c.Artifact.StateFields) == 0 {
-		// Backward compatibility: old stateless artifacts without constructorSlots.
-		// For stateful contracts, constructor args initialize the state section
-		// (after OP_RETURN), not the code portion.
-		for _, arg := range c.constructorArgs {
-			script += encodeArg(arg)
-		}
 	}
+	// R84: no fallback append for args without a constructor slot. A ctor arg
+	// with no corresponding ConstructorSlots entry means the property it
+	// initializes was eliminated by DCE (never read by any surviving
+	// method), so there is no placeholder in the compiled template for it to
+	// fill — appending it would deploy a script that is not the one the
+	// compiler produced (and fails the consensus clean-stack rule on spend;
+	// see packages/runar-sdk's n013-dce-eliminated-ctor-args.test.ts).
+	// Matches the Java SDK, which never had this fallback.
 
 	return script
 }

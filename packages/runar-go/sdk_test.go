@@ -458,7 +458,20 @@ func TestGetLockingScript_MultipleConstructorSlots(t *testing.T) {
 	}
 }
 
-func TestGetLockingScript_FallbackAppend(t *testing.T) {
+// TestGetLockingScript_NoSlotArgIsNotAppended — R84. A ctor arg with no
+// ConstructorSlots entry used to fall back to being appended to the end of
+// the script ("backward compat" for pre-slot-splicing artifacts). That shape
+// — ConstructorSlots absent/empty, ABI constructor params non-empty — is
+// byte-identical to what TODAY's compiler emits when every ctor-needed
+// property is eliminated by DCE (no method ever reads it), so the old
+// fallback silently deployed a script that was NOT the compiled template:
+// the appended bytes leave extra items on the stack and the spend fails the
+// consensus clean-stack rule (proved against the real @bsv/sdk Spend oracle
+// in packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+// R84: drop the fallback, matching the Java SDK, which never had it — an arg
+// with no slot is simply not spliced anywhere, and the deployed script
+// equals the template.
+func TestGetLockingScript_NoSlotArgIsNotAppended(t *testing.T) {
 	pubKeyHash := strings.Repeat("ab", 20)
 	artifact := makeArtifact("76a90088ac", ABI{
 		Constructor: ABIConstructor{
@@ -466,14 +479,14 @@ func TestGetLockingScript_FallbackAppend(t *testing.T) {
 		},
 		Methods: []ABIMethod{{Name: "unlock", Params: nil, IsPublic: true}},
 	})
-	// No constructorSlots — old artifact format
+	// No constructorSlots.
 
 	c := NewRunarContract(artifact, []interface{}{pubKeyHash})
 	lockingScript := c.GetLockingScript()
 
-	// Old behavior: args appended to end of script
-	encodedHash := "14" + pubKeyHash
-	expected := "76a90088ac" + encodedHash
+	// New behavior (R84): nothing is appended; the deployed script is
+	// exactly the compiled template.
+	expected := "76a90088ac"
 	if lockingScript != expected {
 		t.Errorf("expected %s, got %s", expected, lockingScript)
 	}
@@ -2685,8 +2698,17 @@ func TestBuildCodeScript_WithSlots_NoFallbackAppend(t *testing.T) {
 	}
 }
 
-func TestBuildCodeScript_WithoutSlots_FallbackAppends(t *testing.T) {
-	// Old artifact format: no constructor slots, args appended to script
+// TestBuildCodeScript_WithoutSlots_ArgIsNotAppended — R84. No
+// ConstructorSlots entry for "target" used to fall back to appending the arg
+// to the end of the script. That shape is byte-identical to what TODAY's
+// compiler emits when a ctor-needed property is eliminated by DCE, so the
+// old fallback silently deployed a script that was NOT the compiled
+// template and fails the consensus clean-stack rule on spend (proved against
+// the real @bsv/sdk Spend oracle in
+// packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+// R84: drop the fallback, matching Java — the arg is simply not spliced
+// anywhere and the deployed script equals the template.
+func TestBuildCodeScript_WithoutSlots_ArgIsNotAppended(t *testing.T) {
 	artifact := makeArtifact("009c", ABI{
 		Constructor: ABIConstructor{
 			Params: []ABIParam{{Name: "target", Type: "bigint"}},
@@ -2699,8 +2721,9 @@ func TestBuildCodeScript_WithoutSlots_FallbackAppends(t *testing.T) {
 	c := NewRunarContract(artifact, []interface{}{int64(42)})
 	lockingScript := c.GetLockingScript()
 
-	// Fallback: "009c" + encoded(42) = "009c" + "012a"
-	expected := "009c" + "012a"
+	// New behavior (R84): nothing is appended; the deployed script is
+	// exactly the compiled template.
+	expected := "009c"
 	if lockingScript != expected {
 		t.Errorf("expected locking script %q, got %q", expected, lockingScript)
 	}

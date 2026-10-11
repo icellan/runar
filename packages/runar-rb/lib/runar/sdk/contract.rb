@@ -1131,10 +1131,16 @@ module Runar
                            0
                          end
           script = patch_code_part_len_slots(script, substitutions, script.length / 2 + envelope_len)
-        elsif @artifact.state_fields.empty?
-          # Backward compatibility: stateless artifacts without constructorSlots.
-          @constructor_args.each { |arg| script += encode_arg(arg) }
         end
+        # R84: no fallback append for args without a constructor slot. A
+        # ctor arg with no corresponding constructor_slots entry means the
+        # property it initializes was eliminated by DCE (never read by any
+        # surviving method), so there is no placeholder in the compiled
+        # template for it to fill -- appending it would deploy a script
+        # that is not the one the compiler produced (and fails the
+        # consensus clean-stack rule on spend; see packages/runar-sdk's
+        # n013-dce-eliminated-ctor-args.test.ts). Matches the Java SDK,
+        # which never had this fallback.
 
         script
       end

@@ -2283,14 +2283,16 @@ export class RunarContract {
         ? buildInscriptionEnvelope(this._inscription.contentType, this._inscription.data).length / 2
         : 0;
       script = patchCodePartLenSlots(this.artifact, script, subs, script.length / 2 + envelopeLen);
-    } else if (!this.artifact.stateFields || this.artifact.stateFields.length === 0) {
-      // Backward compatibility: old stateless artifacts without constructorSlots.
-      // For stateful contracts, constructor args initialize the state section
-      // (after OP_RETURN), not the code portion.
-      for (const arg of this.constructorArgs) {
-        script += encodeArg(arg);
-      }
     }
+    // R84: no fallback append for args without a constructor slot. A ctor arg
+    // with no corresponding `constructorSlots` entry means the property it
+    // initializes was eliminated by DCE (never read by any surviving method),
+    // so there is no placeholder in the compiled template for it to fill —
+    // appending it would deploy a script that is not the one the compiler
+    // produced (and fails the consensus clean-stack rule on spend; see
+    // n013-dce-eliminated-ctor-args.test.ts). Matches the Java SDK, which
+    // never had this fallback. If there are no slots at all, the script is
+    // already the compiled template and needs no further changes.
 
     return script;
   }

@@ -86,23 +86,35 @@ describe('getLockingScript — constructor slot splicing', () => {
     expect(lockingScript).toBe(expected);
   });
 
-  it('falls back to append when artifact has no constructorSlots (backward compat)', () => {
+  it('R84: a ctor arg with no constructorSlots entry is never appended (not spliced, not tacked on)', () => {
+    // Previously this fell back to appending the raw arg to the end of the
+    // script ("backward compat" for pre-slot-splicing artifacts). That shape
+    // — constructorSlots absent, abi.constructor.params non-empty — is
+    // byte-identical to what TODAY's compiler emits when every ctor-needed
+    // property is eliminated by DCE (no method ever reads it), so the old
+    // fallback silently deployed a script that was NOT the compiled
+    // template: the appended bytes leave extra items on the stack and the
+    // spend fails the consensus clean-stack rule (see
+    // n013-dce-eliminated-ctor-args.test.ts, which proves this against the
+    // real `@bsv/sdk` Spend oracle). R84: drop the fallback, matching the
+    // Java SDK, which never had it — an arg with no slot is simply not
+    // spliced anywhere, and the deployed script equals the template.
     const artifact = makeArtifact({
       script: '76a90088ac',
       abi: {
         constructor: { params: [{ name: 'pubKeyHash', type: 'Addr' }] },
         methods: [{ name: 'unlock', params: [], isPublic: true }],
       },
-      // No constructorSlots — old artifact format
+      // No constructorSlots.
     });
 
     const pubKeyHash = 'ab'.repeat(20);
     const contract = new RunarContract(artifact, [pubKeyHash]);
     const lockingScript = contract.getLockingScript();
 
-    // Old behavior: args appended to end of script
-    const encodedHash = '14' + pubKeyHash; // 14 = 20 in hex
-    expect(lockingScript).toBe('76a90088ac' + encodedHash);
+    // New behavior (R84): nothing is appended; the deployed script is
+    // exactly the compiled template.
+    expect(lockingScript).toBe('76a90088ac');
   });
 
   it('splices a bigint constructor arg correctly', () => {
