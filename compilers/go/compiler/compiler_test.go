@@ -84,36 +84,16 @@ func TestLoadIR_BasicP2PKH(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCompile_BasicP2PKH(t *testing.T) {
-	// The conformance expected script hex for P2PKH.
-	// From the TypeScript compiler: DUP HASH160 <pubKeyHash> EQUALVERIFY CHECKSIG
-	// But since pubKeyHash has no initialValue, it's provided as a placeholder (OP_0).
-	// The actual conformance test hex is: 76a97c7e7e87a988ac
-	// Which translates to: OP_DUP OP_HASH160 OP_SWAP ... (depends on stack lowering)
-
-	irJSON := `{
-		"contractName": "P2PKH",
-		"properties": [
-			{"name": "pubKeyHash", "type": "Addr", "readonly": true}
-		],
-		"methods": [{
-			"name": "unlock",
-			"params": [
-				{"name": "sig", "type": "Sig"},
-				{"name": "pubKey", "type": "PubKey"}
-			],
-			"body": [
-				{"name": "t0", "value": {"kind": "load_param", "name": "sig"}},
-				{"name": "t1", "value": {"kind": "load_param", "name": "pubKey"}},
-				{"name": "t2", "value": {"kind": "load_prop", "name": "pubKeyHash"}},
-				{"name": "t3", "value": {"kind": "call", "func": "hash160", "args": ["t1"]}},
-				{"name": "t4", "value": {"kind": "bin_op", "op": "===", "left": "t3", "right": "t2"}},
-				{"name": "t5", "value": {"kind": "assert", "value": "t4"}},
-				{"name": "t6", "value": {"kind": "call", "func": "checkSig", "args": ["t0", "t1"]}},
-				{"name": "t7", "value": {"kind": "assert", "value": "t6"}}
-			],
-			"isPublic": true
-		}]
-	}`
+	// F-307: this test used to compile an inline, hand-written IR literal and
+	// never compared the resulting Script against anything beyond
+	// "non-empty". A stale comment here claimed the expected hex was
+	// "76a97c7e7e87a988ac" — that was never actually true of the inline IR
+	// (which in fact compiled to "0078a97c9dac"), nor of the real
+	// conformance golden loaded below ("76a90088ac"); the comment named a
+	// value but nothing ever checked it. Load the real "basic-p2pkh"
+	// conformance fixture instead and assert the compiled Script
+	// byte-for-byte against its on-disk golden hex.
+	irJSON := string(mustLoadConformanceIR(t, "basic-p2pkh"))
 
 	artifact := mustCompile(t, irJSON)
 
@@ -127,6 +107,11 @@ func TestCompile_BasicP2PKH(t *testing.T) {
 		t.Error("expected non-empty ASM")
 	}
 
+	wantHex := mustLoadConformanceHex(t, "basic-p2pkh")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/basic-p2pkh/expected-script.hex)", artifact.Script, wantHex)
+	}
+
 	t.Logf("P2PKH script hex: %s", artifact.Script)
 	t.Logf("P2PKH script asm: %s", artifact.ASM)
 }
@@ -136,34 +121,14 @@ func TestCompile_BasicP2PKH(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCompile_Arithmetic(t *testing.T) {
-	irJSON := `{
-		"contractName": "Arithmetic",
-		"properties": [
-			{"name": "target", "type": "bigint", "readonly": true}
-		],
-		"methods": [{
-			"name": "verify",
-			"params": [
-				{"name": "a", "type": "bigint"},
-				{"name": "b", "type": "bigint"}
-			],
-			"body": [
-				{"name": "t0", "value": {"kind": "load_param", "name": "a"}},
-				{"name": "t1", "value": {"kind": "load_param", "name": "b"}},
-				{"name": "t2", "value": {"kind": "bin_op", "op": "+", "left": "t0", "right": "t1"}},
-				{"name": "t3", "value": {"kind": "bin_op", "op": "-", "left": "t0", "right": "t1"}},
-				{"name": "t4", "value": {"kind": "bin_op", "op": "*", "left": "t0", "right": "t1"}},
-				{"name": "t5", "value": {"kind": "bin_op", "op": "/", "left": "t0", "right": "t1"}},
-				{"name": "t6", "value": {"kind": "bin_op", "op": "+", "left": "t2", "right": "t3"}},
-				{"name": "t7", "value": {"kind": "bin_op", "op": "+", "left": "t6", "right": "t4"}},
-				{"name": "t8", "value": {"kind": "bin_op", "op": "+", "left": "t7", "right": "t5"}},
-				{"name": "t9", "value": {"kind": "load_prop", "name": "target"}},
-				{"name": "t10", "value": {"kind": "bin_op", "op": "===", "left": "t8", "right": "t9"}},
-				{"name": "t11", "value": {"kind": "assert", "value": "t10"}}
-			],
-			"isPublic": true
-		}]
-	}`
+	// F-307: previously compiled an inline, hand-written IR literal and never
+	// asserted anything about the resulting Script beyond "non-empty" plus
+	// ASM opcode-name substrings — a codegen bug that moves a byte value
+	// without touching the opcode's name string (e.g. a wrong entry in the
+	// opcode table) would pass right through. Load the real "arithmetic"
+	// conformance fixture and assert the compiled Script byte-for-byte
+	// against its on-disk golden hex.
+	irJSON := string(mustLoadConformanceIR(t, "arithmetic"))
 
 	artifact := mustCompile(t, irJSON)
 
@@ -181,6 +146,11 @@ func TestCompile_Arithmetic(t *testing.T) {
 		}
 	}
 
+	wantHex := mustLoadConformanceHex(t, "arithmetic")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/arithmetic/expected-script.hex)", artifact.Script, wantHex)
+	}
+
 	t.Logf("Arithmetic script hex: %s", artifact.Script)
 	t.Logf("Arithmetic script asm: %s", artifact.ASM)
 }
@@ -190,40 +160,12 @@ func TestCompile_Arithmetic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCompile_IfElse(t *testing.T) {
-	irJSON := `{
-		"contractName": "IfElse",
-		"properties": [
-			{"name": "limit", "type": "bigint", "readonly": true}
-		],
-		"methods": [{
-			"name": "check",
-			"params": [
-				{"name": "value", "type": "bigint"},
-				{"name": "mode", "type": "boolean"}
-			],
-			"body": [
-				{"name": "t0", "value": {"kind": "load_param", "name": "value"}},
-				{"name": "t1", "value": {"kind": "load_param", "name": "mode"}},
-				{"name": "t2", "value": {"kind": "load_const", "value": 0}},
-				{"name": "t3", "value": {
-					"kind": "if",
-					"cond": "t1",
-					"then": [
-						{"name": "t4", "value": {"kind": "load_prop", "name": "limit"}},
-						{"name": "t5", "value": {"kind": "bin_op", "op": "+", "left": "t0", "right": "t4"}}
-					],
-					"else": [
-						{"name": "t6", "value": {"kind": "load_prop", "name": "limit"}},
-						{"name": "t7", "value": {"kind": "bin_op", "op": "-", "left": "t0", "right": "t6"}}
-					]
-				}},
-				{"name": "t8", "value": {"kind": "load_const", "value": 0}},
-				{"name": "t9", "value": {"kind": "bin_op", "op": ">", "left": "t3", "right": "t8"}},
-				{"name": "t10", "value": {"kind": "assert", "value": "t9"}}
-			],
-			"isPublic": true
-		}]
-	}`
+	// F-307: previously compiled an inline, hand-written IR literal and never
+	// asserted anything about the resulting Script beyond ASM opcode-name
+	// substrings, which a hex-changing but name-preserving codegen bug would
+	// not trip. Load the real "if-else" conformance fixture and assert the
+	// compiled Script byte-for-byte against its on-disk golden hex.
+	irJSON := string(mustLoadConformanceIR(t, "if-else"))
 
 	artifact := mustCompile(t, irJSON)
 
@@ -236,6 +178,11 @@ func TestCompile_IfElse(t *testing.T) {
 	}
 	if !strings.Contains(artifact.ASM, "OP_ENDIF") {
 		t.Error("expected ASM to contain OP_ENDIF")
+	}
+
+	wantHex := mustLoadConformanceHex(t, "if-else")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/if-else/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("IfElse script hex: %s", artifact.Script)
@@ -283,6 +230,22 @@ func TestCompile_BooleanLogic(t *testing.T) {
 		if !strings.Contains(artifact.ASM, op) {
 			t.Errorf("expected ASM to contain %s", op)
 		}
+	}
+
+	// F-307: this test's IR is hand-written above, not loaded from any
+	// conformance fixture — it is kept that way (rather than switched to the
+	// real "boolean-logic" fixture like its siblings) because that fixture's
+	// TS source lowers && via control flow and never emits OP_BOOLAND, which
+	// would force dropping the OP_BOOLAND assertion above. wantHex is
+	// therefore a regression pin on this inline IR's current, verified-
+	// correct compiled output, not a conformance golden read from disk —
+	// there is no cross-tier provenance behind it. It still closes the gap:
+	// previously nothing here checked the Script bytes at all, so a codegen
+	// bug that moves a byte value without changing an opcode's ASM name
+	// (e.g. a wrong entry in the opcode table) passed through undetected.
+	const wantHex = "767600877c51879b697b7b7b00537a78a0537a7ba06e9a7b7b9b7b919a9b"
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s", artifact.Script, wantHex)
 	}
 
 	t.Logf("BooleanLogic script hex: %s", artifact.Script)
@@ -521,6 +484,23 @@ func mustLoadConformanceIR(t *testing.T, testName string) []byte {
 	return data
 }
 
+// mustLoadConformanceHex reads the conformance golden expected-script.hex for
+// testName, trimmed of trailing whitespace/newline. Used to assert the
+// compiled artifact's Script field byte-for-byte against the on-disk golden
+// (F-307): several TestCompile_* tests previously only checked that the
+// script was non-empty, or that certain opcodes appeared in the ASM, both of
+// which a hex-changing codegen bug (e.g. a wrong opcode byte value) can pass
+// right through undetected since the ASM mnemonic string is unaffected.
+func mustLoadConformanceHex(t *testing.T, testName string) string {
+	t.Helper()
+	path := filepath.Join(conformanceDir(), testName, "expected-script.hex")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read conformance script hex %s: %v", path, err)
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // ---------------------------------------------------------------------------
 // Test: Bounded loop conformance
 // ---------------------------------------------------------------------------
@@ -540,6 +520,14 @@ func TestCompile_BoundedLoop(t *testing.T) {
 	}
 	if artifact.ASM == "" {
 		t.Error("expected non-empty ASM")
+	}
+
+	// F-307: previously nothing compared Script against the on-disk golden
+	// this IR was loaded from, so a byte-moving codegen bug (opcode name
+	// unchanged, byte value wrong) would pass undetected.
+	wantHex := mustLoadConformanceHex(t, "bounded-loop")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/bounded-loop/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("BoundedLoop script hex: %s", artifact.Script)
@@ -567,6 +555,14 @@ func TestCompile_MultiMethod(t *testing.T) {
 	// Multi-method contracts must produce a dispatch table with OP_IF
 	if !strings.Contains(artifact.ASM, "OP_IF") {
 		t.Error("expected ASM to contain OP_IF for method dispatch")
+	}
+
+	// F-307: previously nothing compared Script against the on-disk golden
+	// this IR was loaded from, so a byte-moving codegen bug (opcode name
+	// unchanged, byte value wrong) would pass undetected.
+	wantHex := mustLoadConformanceHex(t, "multi-method")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/multi-method/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("MultiMethod script hex: %s", artifact.Script)
@@ -604,6 +600,14 @@ func TestCompile_Stateful(t *testing.T) {
 	// Should have state fields in the artifact
 	if len(artifact.StateFields) == 0 {
 		t.Error("expected non-empty stateFields for stateful contract")
+	}
+
+	// F-307: previously nothing compared Script against the on-disk golden
+	// this IR was loaded from, so a byte-moving codegen bug (opcode name
+	// unchanged, byte value wrong) would pass undetected.
+	wantHex := mustLoadConformanceHex(t, "stateful")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/stateful/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("Stateful script hex: %s", artifact.Script)
