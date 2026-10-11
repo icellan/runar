@@ -124,6 +124,41 @@ function assertEquivalent(
   }
 }
 
+/**
+ * F-345: `PEEPHOLE_RULES` is a documentation mirror that `optimizeStackIR`
+ * never reads, so comparing its pattern against its replacement says nothing
+ * about the runtime matcher. Also run what `optimizeStackIR` really emits for
+ * the pattern window: it must behave like the unfused pattern (and so like the
+ * documented replacement) on this witness, and it must be the documented
+ * rewrite — `optimizeStackIR(pattern)` equals `optimizeStackIR(replacement)`,
+ * i.e. the replacement up to any later peephole step (fold-chain to a sum of 1
+ * goes on to OP_1ADD). The second check is what catches a matcher that was
+ * deleted or no longer fires: the untouched pattern behaves like itself.
+ */
+function assertRuntimeRule(
+  ruleName: string,
+  label: string,
+  witness: StackOp[],
+  pattern: StackOp[],
+  replacement: StackOp[],
+): void {
+  assertEquivalent(ruleName, label, witness, pattern, replacement);
+  const optimised = optimizeStackIR(pattern);
+  const before = runEffect([...witness, ...pattern]);
+  const actual = runEffect([...witness, ...optimised]);
+  if (!effectsEqual(before, actual)) {
+    throw new Error(
+      `optimizeStackIR's rewrite for '${ruleName}' is NOT stack-effect preserving for ${label}\n` +
+        `  emitted     → ${JSON.stringify(optimised, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v))}\n` +
+        `  pattern     → success=${before.success} stack=[${before.stack.join(', ')}]\n` +
+        `  optimised   → success=${actual.success} stack=[${actual.stack.join(', ')}]`,
+    );
+  }
+  expect(optimised, `optimizeStackIR no longer applies '${ruleName}' to its window (${label})`).toEqual(
+    optimizeStackIR(replacement),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Real-crypto witnesses for the signature-verification fusions (F-226)
 // ---------------------------------------------------------------------------
@@ -252,6 +287,10 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
       const { frame, cases } = SIG_SWEEPS[sweep.kind];
       it(`${rule.name}: pattern ≡ replacement on real signed witnesses`, () => {
         const optimised = optimizeStackIR(rule.pattern);
+        // F-345: the runtime matcher still performs the documented fusion.
+        expect(optimised, `optimizeStackIR no longer applies '${rule.name}' to its window`).toEqual(
+          optimizeStackIR(rule.replacement),
+        );
         for (const c of cases) {
           for (const isRelaxed of [false, true]) {
             const mode = isRelaxed ? 'relaxed' : 'strict';
@@ -265,12 +304,19 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
       continue;
     }
 
-    it(`${rule.name}: pattern ≡ replacement over edge domain`, () => {
+    // F-345. Proves: for every witness in the edge domain, the documented
+    // replacement AND what `optimizeStackIR` actually emits for the window
+    // have the unfused pattern's full stack effect on the ScriptVM, and the
+    // runtime matcher still performs the documented rewrite. Does NOT prove:
+    // anything about windows embedded in longer programs (overlapping matches,
+    // raw_bytes spans, if-branches), operands outside the edge domains, or
+    // other tiers' optimizers.
+    it(`${rule.name}: pattern ≡ replacement ≡ optimizeStackIR(pattern) over edge domain`, () => {
       if (sweep.kind === 'stack') {
         const domain = sweep.domain === 'bool' ? EDGE_BOOL : EDGE_NUM;
         for (const inputs of cartesian(domain, sweep.inputs)) {
           const witness = [SENTINEL, ...inputs.map(push)];
-          assertEquivalent(rule.name, `inputs=[${inputs.join(',')}]`, witness, rule.pattern, rule.replacement);
+          assertRuntimeRule(rule.name, `inputs=[${inputs.join(',')}]`, witness, rule.pattern, rule.replacement);
         }
         return;
       }
@@ -278,7 +324,7 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
       if (sweep.kind === 'bytes') {
         for (const val of EDGE_BYTES) {
           const witness: StackOp[] = [SENTINEL, { op: 'push', value: val }];
-          assertEquivalent(rule.name, `bytes(len=${val.length})`, witness, rule.pattern, rule.replacement);
+          assertRuntimeRule(rule.name, `bytes(len=${val.length})`, witness, rule.pattern, rule.replacement);
         }
         return;
       }
@@ -291,7 +337,7 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
               op === 'OP_ADD' ? a + b : op === 'OP_SUB' ? a - b : a * b;
             const pattern = [push(a), push(b), opc(op)];
             const replacement = [push(folded)];
-            assertEquivalent(rule.name, `a=${a} b=${b}`, [SENTINEL], pattern, replacement);
+            assertRuntimeRule(rule.name, `a=${a} b=${b}`, [SENTINEL], pattern, replacement);
           }
         }
         return;
@@ -304,7 +350,7 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
           const pattern = [push(a), opc(op), push(b), opc(op)];
           const replacement = [push(a + b), opc(op)];
           for (const x of EDGE_NUM) {
-            assertEquivalent(rule.name, `x=${x} a=${a} b=${b}`, [SENTINEL, push(x)], pattern, replacement);
+            assertRuntimeRule(rule.name, `x=${x} a=${a} b=${b}`, [SENTINEL, push(x)], pattern, replacement);
           }
         }
       }
