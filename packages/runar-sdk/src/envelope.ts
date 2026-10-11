@@ -51,6 +51,13 @@ export interface SignEnvelopeOpts {
   signer: EnvelopeSigner;
   /** TTL in milliseconds. Default 30_000. */
   ttlMs?: number;
+  /**
+   * Timestamp (ms since epoch) embedded as `nonce`. Default `Date.now()`.
+   * Mirrors the other six tiers' injectable sign-time clock (Go `NowMs`,
+   * Python `now_ms`, …), exposed for deterministic testing and for replaying
+   * the frozen cross-tier fixtures in conformance/sdk-envelope/. F-359.
+   */
+  nowMs?: number;
 }
 
 /**
@@ -60,7 +67,7 @@ export interface SignEnvelopeOpts {
  */
 export async function signEnvelope(opts: SignEnvelopeOpts): Promise<SignedEnvelope> {
   const ttlMs = opts.ttlMs ?? 30_000;
-  const nonce = Date.now();
+  const nonce = opts.nowMs ?? Date.now();
   const expiresAt = nonce + ttlMs;
   const payload = canonicalJson({ ...opts.data, nonce, expiresAt });
   const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
@@ -148,6 +155,14 @@ export interface VerifyEnvelopeOpts {
   expectedKeys?: string[];
   /** Allowed wall-clock skew in ms when checking `expiresAt`. Default 5_000. */
   clockSkewMs?: number;
+  /**
+   * Wall-clock override (ms since epoch) used for the expiry check. Default
+   * `Date.now()`. Mirrors the other six tiers' injectable verify-time clock
+   * (Go `NowMs`, Python `now_ms`, …), exposed for deterministic testing and
+   * for replaying the frozen cross-tier fixtures in conformance/sdk-envelope/.
+   * F-359.
+   */
+  nowMs?: number;
 }
 
 export interface VerifyEnvelopeResult {
@@ -166,6 +181,7 @@ export interface VerifyEnvelopeResult {
 export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   const env = opts.envelope;
   const clockSkewMs = opts.clockSkewMs ?? 5_000;
+  const nowMs = opts.nowMs ?? Date.now();
 
   // 0. DoS-bound size guard. Reject envelopes whose string fields exceed
   //    `InputLimits` BEFORE running JSON.parse, hashing, or ECDSA verify
@@ -217,7 +233,7 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   }
 
   // 2. Expiry.
-  if (env.expiresAt < Date.now() - clockSkewMs) {
+  if (env.expiresAt < nowMs - clockSkewMs) {
     return { ok: false, reason: 'expired' };
   }
 

@@ -308,10 +308,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Validate envelope fixture against the TS reference (drift guard)
         run: cd conformance && npx tsx sdk-envelope/validate-fixtures.ts
-      - name: Assert every non-TS SDK has an envelope interop test wired to the fixture
+      - name: Assert every SDK has an envelope interop test wired to the fixture
         run: |
           set -euo pipefail
           files=(
+            "packages/runar-sdk/src/__tests__/f359-envelope-interop-fixture.test.ts"
             "packages/runar-go/sdk_envelope_interop_test.go"
             "packages/runar-rs/tests/envelope_interop.rs"
             "packages/runar-py/tests/test_envelope_interop.py"
@@ -333,7 +334,7 @@ jobs:
             echo "Cross-tier envelope interop coverage is incomplete. See conformance/sdk-envelope/."
             exit 1
           fi
-          echo "All 6 non-TS SDK envelope interop tests present and wired to the fixture."
+          echo "All 7 SDK envelope interop tests present and wired to the fixture."
 
   sdk-bip143-fixtures:
     # Guards the cross-tier BIP-143 transaction-sighash fixture (GAP-003). The

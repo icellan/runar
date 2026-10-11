@@ -279,9 +279,11 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
   });
 
   // R-115 / CL-BUG-066. The fixture's `v23-lone-surrogate-payload-bad-json`
-  // vector covers the six tiers whose verify takes an injectable clock; the TS
-  // verify reads `Date.now()` directly, so it gets the same envelope built
-  // around a live clock instead.
+  // vector covers the six tiers whose verify takes an injectable clock. TS's
+  // verifyEnvelope now also accepts an injectable `nowMs` (F-359 —
+  // f359-envelope-interop-fixture.test.ts replays the committed vector
+  // directly through it); this test predates that option and still builds
+  // the same envelope shape around a live clock instead.
   it('rejects a payload containing an unpaired surrogate with bad-json', () => {
     const now = Date.now();
     const payload = `{"expiresAt":${now + 60_000},"msg":"x\\ud800y","nonce":${now}}`;
@@ -340,10 +342,11 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
 //
 // Every tier now enforces MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT with
 // a NON-RECURSIVE bracket scan run before the stock parser, so the answer is
-// the same everywhere and the guard itself cannot overflow. TS's verify reads
-// `Date.now()` directly rather than taking an injectable clock, so — as with
-// the R-115 lone-surrogate vector — it replays the fixture's SHAPE around a
-// live clock instead of the fixture's frozen envelope.
+// the same everywhere and the guard itself cannot overflow. TS's verifyEnvelope
+// now also accepts an injectable `nowMs` (F-359), but — as with the R-115
+// lone-surrogate vector above — this file predates that option and still
+// replays the fixture's SHAPE around a live clock rather than the fixture's
+// frozen `depth_vectors` envelopes.
 // ---------------------------------------------------------------------------
 
 describe('verifyEnvelope payload depth bound (R-260)', () => {
@@ -474,10 +477,11 @@ describe('verifyEnvelope payload depth bound (R-260)', () => {
 // cross-tier valid envelope, 2000 ms past expiry with clockSkewMs explicitly
 // 0: go ok:true, rust/python/ruby/zig/java all expired.
 //
-// TS's verify reads Date.now() directly rather than taking an injectable
-// clock, so it cannot replay the fixture's frozen clock_skew_vectors the way
-// the six other tiers do; it covers the same shape against a live clock. TS
-// was already correct here, so these are REGRESSION guards, not a fix.
+// TS's verifyEnvelope now also accepts an injectable `nowMs` (F-359) —
+// f359-envelope-interop-fixture.test.ts replays the fixture's frozen
+// clock_skew_vectors directly through it. This file predates that option and
+// still covers the same shape against a live clock via `Date.now()` alone.
+// TS was already correct here, so these are REGRESSION guards, not a fix.
 // ---------------------------------------------------------------------------
 
 describe('verifyEnvelope clockSkewMs (R-261)', () => {
@@ -533,8 +537,10 @@ describe('verifyEnvelope clockSkewMs (R-261)', () => {
 // this tier (the reference) delegates to @bsv/sdk's raw ECDSA verify, which
 // has no low-S check — so a high-S envelope signature is ACCEPTED. Ruby used
 // to reject it as bad-sig. The fixture's malleability_vectors pin the verdict
-// for all seven tiers; TS replays them with Date.now() pinned to the fixture's
-// verify_now_ms, since its verify has no injectable clock.
+// for all seven tiers; TS replays them here with Date.now() pinned (via
+// `vi.spyOn`) to the fixture's verify_now_ms. TS's verifyEnvelope now also
+// accepts an injectable `nowMs` (F-359); this test keeps the `vi.spyOn`
+// mechanism rather than migrating to it.
 //
 // Proves: TS's verdict on the committed high-S vector is what the fixture
 // says, and the vector really is high-S. Does not prove anything about
@@ -589,7 +595,9 @@ describe('verifyEnvelope malleability vectors (F-138)', () => {
 // accepts an INTEGER whose top bit is set without the sign pad, so TS verified
 // three of them as ok; the six other tiers replay the same vectors through
 // their generic rejection_vectors loop. TS replays them here with Date.now()
-// pinned, since its verify has no injectable clock.
+// pinned (via `vi.spyOn`). TS's verifyEnvelope now also accepts an injectable
+// `nowMs` (F-359); this test keeps the `vi.spyOn` mechanism rather than
+// migrating to it.
 //
 // Proves: every `der-*` vector's control envelope verifies, and the re-encoded
 // one is bad-sig. Does not prove anything about checkSig / the ANF interpreter

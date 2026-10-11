@@ -424,6 +424,11 @@
         },
         {
           "kind": "cross-tier-golden",
+          "path": "packages/runar-sdk/src/__tests__/f359-envelope-interop-fixture.test.ts",
+          "note": "F-359. TS side. Until this file, TS was the only tier whose signEnvelope/verifyEnvelope read the wall clock directly, so it could not replay valid_envelope/rejection_vectors/clock_skew_vectors against the fixture's own frozen verify_now_ms the way the six other tiers do. Now exercises the accept case and every rejection_vectors + clock_skew_vectors entry through the new injectable nowMs option."
+        },
+        {
+          "kind": "cross-tier-golden",
           "path": "packages/runar-go/sdk_envelope_interop_test.go",
           "note": "Asserts payload == expected_payload and der == expected_sig, not merely that its own sign/verify pair agrees."
         },
