@@ -533,3 +533,51 @@ class SimpleClose extends StatefulSmartContract {
     expect(itemCount).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-360: the `CallOptions.dryRun` docstring in contract.ts (lines ~44-56)
+// justifies the default being OFF by claiming `dryRunContractInput` REJECTS
+// `Auction.bid()` while the independent real-crypto oracle (`runStatefulSpend`
+// via `witnesses/real-crypto/auction.json`) ACCEPTS it. That is not what
+// happens: `runStatefulSpend` itself calls `contract.call(..., { dryRun: true
+// })` (real-crypto-execution.ts:645), so it is structurally incapable of
+// reporting "accept" for anything the dry-run rejects — and empirically, this
+// exact `bid()` call does NOT get rejected by the dry-run today either. This
+// test reproduces the scenario the docstring cites (same contract, same
+// `codeseparator-signing.test.ts` setup, a real `LocalSigner`) directly with
+// `{ dryRun: true }` and asserts no throw, disproving the cited disagreement.
+// ---------------------------------------------------------------------------
+
+describe('F-360: dryRun docstring premise (Auction.bid() vs the real-crypto oracle)', () => {
+  it('dryRun:true does NOT reject Auction.bid() signed by a real LocalSigner', async () => {
+    const artifact = compileContract('examples/ts/auction/Auction.runar.ts');
+
+    const { provider, signer, pubKeyHex } = await setupFundedProvider(100_000);
+
+    const contract = new RunarContract(artifact, [
+      pubKeyHex,   // auctioneer
+      pubKeyHex,   // highestBidder (self initially)
+      100n,        // highestBid
+      999999999n,  // deadline far in the future
+    ]);
+
+    await contract.deploy(provider, signer, { satoshis: 50_000 });
+
+    // Same bid() call as "should push _codePart for non-terminal methods
+    // (bid method)" above, with the C8 local pre-broadcast dry-run opted in.
+    // The contract.ts docstring used to claim this throws ("OP_CHECKSIGVERIFY
+    // requires that a valid signature is provided") — disproved by this test
+    // and corrected there (F-360). If this assertion ever starts failing, the
+    // original (now-removed) claim has become true again: restore it in the
+    // docstring along with re-opening the dryRun-default-OFF justification.
+    await expect(
+      contract.call(
+        'bid',
+        [null, pubKeyHex, 200n],
+        provider,
+        signer,
+        { satoshis: 50_000 + 200, dryRun: true },
+      ),
+    ).resolves.toMatchObject({ txid: expect.any(String) });
+  });
+});

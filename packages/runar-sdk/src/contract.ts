@@ -44,24 +44,41 @@ declare module './types.js' {
      * broadcasting when the input would be rejected on-chain.
      *
      * **Default: OFF (opt-in).** C8 asked for this to default ON, and that is
-     * still the goal — but it is not yet safe to. The local harness currently
-     * produces at least one FALSE REJECTION: it rejects `Auction.bid()`
-     * (`codeseparator-signing.test.ts`, a real contract signed by a real
-     * `LocalSigner`) with "OP_CHECKSIGVERIFY requires that a valid signature
-     * is provided", while the independent real-crypto oracle
-     * (`conformance/witnesses/real-crypto/auction.json`, which drives the same
-     * method deploy->call->Spend through `runStatefulSpend`) ACCEPTS it — so
-     * the transaction is valid and the dry-run's tx modelling is wrong, not
-     * the signature. Nine other pre-existing tests fail the same way on
-     * synthetic stub artifacts whose scripts do not consume their pushed args
-     * (clean-stack violations).
+     * still the goal — but it is not yet safe to. Flipping the internal
+     * default to ON (F-360 investigation, 2026-10) shows 11 pre-existing tests
+     * across 5 files (`sdk-fixes.test.ts`, `intent-witness-values.test.ts`,
+     * `c19-multisig-sighash-digest.test.ts`, `c20-c27-branch-semantics.test.ts`,
+     * `f045-token-wallet-signs-broadcast-tx.test.ts`) start failing their
+     * broadcast with "The clean stack rule requires exactly one item to be on
+     * the stack after script execution" — synthetic/stub artifacts whose
+     * scripts were never written to consume every item they push, because
+     * those tests assert something else about the broadcast tx and have
+     * nothing to do with on-chain validity. The dry-run's verdict on them is
+     * CORRECT (the production `Spend` engine would reject the same bytes on a
+     * real network) — turning it on by default would just break those tests,
+     * not uncover a modelling bug, so it stays opt-in until those 11 fixtures
+     * are made clean-stack-valid (or explicitly opted out) and
+     * `dryRunContractInput` agrees with `runStatefulSpend` on every
+     * `witnesses/real-crypto/*.json` accept case.
+     *
+     * `Auction.bid()` was previously (through 2026-10) cited here as a case
+     * where this dry-run FALSELY rejects a legitimate call that the
+     * independent real-crypto oracle (`conformance/witnesses/real-crypto/
+     * auction.json`, driven via `runStatefulSpend`) ACCEPTS. That claim was
+     * wrong on two counts (F-360): `runStatefulSpend` itself calls
+     * `contract.call(..., { dryRun: true })` (`real-crypto-execution.ts`), so
+     * it is structurally incapable of reporting "accept" for anything THIS
+     * dry-run rejects — the oracle is not independent of it, and can never be
+     * used to prove a disagreement exists. And empirically, `Auction.bid()`
+     * signed by a real `LocalSigner` does not get rejected by the dry-run
+     * today (`codeseparator-signing.test.ts`, "F-360" describe block) — there
+     * never was a disagreement to point to, on top of the oracle being unable
+     * to show one either way.
      *
      * For a FAIL-CLOSED pre-broadcast gate a false rejection is worse than the
      * hole it closes: it would block legitimate calls and strand funds. So the
-     * capability ships opt-in until its fidelity is proven against the
-     * real-crypto oracle across the fixture corpus. Flip the default to ON
-     * once `dryRunContractInput` agrees with `runStatefulSpend` on every
-     * `witnesses/real-crypto/*.json` accept case.
+     * capability stays opt-in until the 11 fixtures above are resolved and the
+     * real-crypto accept corpus agrees, as described above.
      *
      * Set `true` to opt in. Do not enable it for setups the local harness
      * cannot model — e.g. a covenant whose correctness depends on OTHER
