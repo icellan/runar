@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, constants, statSync } from 'fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, constants, statSync, realpathSync } from 'fs';
 import { join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = resolve(join(__dirname, '..', '..', '..'));
 
-interface SdkResult {
+export interface SdkResult {
   sdk: string;
   hex: string;
   success: boolean;
@@ -26,7 +26,7 @@ interface TestResult {
   expectedRefusal?: boolean;
 }
 
-interface SdkTool {
+export interface SdkTool {
   name: string;
   cmd: string;
   args: (inputPath: string) => string[];
@@ -65,19 +65,20 @@ function resolveTsxCmd(): { cmd: string; prefix: string[] } {
   return { cmd: 'npx', prefix: ['tsx'] };
 }
 
-function buildSdkTools(): SdkTool[] {
-  const toolsDir = join(ROOT, 'conformance', 'sdk-output', 'tools');
+/**
+ * `toolsDirOverride` lets tests point this at a scratch directory so the
+ * "binary not yet built" fallback branches (go build / cargo build) can be
+ * exercised deterministically, without depending on whether the real
+ * tools/ directory happens to already contain a built driver.
+ */
+export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
+  const toolsDir = toolsDirOverride ?? join(ROOT, 'conformance', 'sdk-output', 'tools');
   const tsx = resolveTsxCmd();
   const tools: SdkTool[] = [
     {
       name: 'typescript',
       cmd: tsx.cmd,
       args: (input) => [...tsx.prefix, join(toolsDir, 'ts-sdk-tool.ts'), input],
-    },
-    {
-      name: 'go',
-      cmd: 'go',
-      args: (input) => ['run', join(toolsDir, 'go-sdk-tool.go'), input],
     },
     {
       name: 'python',
@@ -92,7 +93,43 @@ function buildSdkTools(): SdkTool[] {
     },
   ];
 
-  // Rust: prefer pre-built binary, fall back to cargo run
+  // Go: prefer a pre-built binary; otherwise build it once via a separate
+  // `go build` step (preBuild) before ever invoking it — see the N-091 note
+  // on the Rust tool below for why the build and the run must not share one
+  // invocation.
+  const goBin = join(toolsDir, 'go-sdk-tool-bin');
+  const goSrc = join(toolsDir, 'go-sdk-tool.go');
+  if (isExecutable(goBin)) {
+    tools.push({
+      name: 'go',
+      cmd: goBin,
+      args: (input) => [input],
+    });
+  } else {
+    tools.push({
+      name: 'go',
+      cmd: goBin,
+      args: (input) => [input],
+      preBuild: () => {
+        execFileSync('go', ['build', '-o', goBin, goSrc], {
+          cwd: ROOT,
+          stdio: 'pipe',
+          timeout: 120_000,
+        });
+      },
+    });
+  }
+
+  // Rust: prefer pre-built binary; otherwise build it once via a separate
+  // `cargo build` step (preBuild) before ever invoking it, the same pattern
+  // the zig/java tools below already use. N-091: the previous fallback ran
+  // `cargo run`, which compiles AND runs in a single invocation, so cargo's
+  // own build log ('Compiling ...', warnings) lands in the SAME stderr
+  // stream that `evaluateRefusal` matches a refusal reason against on a
+  // cold run — build noise can stand in for the driver's own diagnostic, or
+  // push it past the 500-char error slice. Building separately (and
+  // discarding that output) means the stderr the runner ever sees is the
+  // driver's own.
   const rsBin = join(toolsDir, 'rs-sdk-tool', 'target', 'release', 'rs-sdk-tool');
   if (isExecutable(rsBin)) {
     tools.push({
@@ -103,12 +140,24 @@ function buildSdkTools(): SdkTool[] {
   } else {
     tools.push({
       name: 'rust',
-      cmd: 'cargo',
-      args: (input) => [
-        'run', '--release',
-        '--manifest-path', join(toolsDir, 'rs-sdk-tool', 'Cargo.toml'),
-        '--', input,
-      ],
+      cmd: rsBin,
+      args: (input) => [input],
+      preBuild: () => {
+        execFileSync('cargo', [
+          'build', '--release',
+          '--manifest-path', join(toolsDir, 'rs-sdk-tool', 'Cargo.toml'),
+        ], {
+          cwd: ROOT,
+          stdio: 'pipe',
+          // A from-scratch build pulls in rs-sdk-tool's full dependency tree
+          // (aws-lc-sys, swc, k256, ...); measured at 4m48s in a dev
+          // environment under concurrent CPU load, so 180s was not enough.
+          // CI never exercises this branch — it prebuilds rs-sdk-tool in its
+          // own step before invoking this runner — so this timeout only
+          // protects a cold local dev run.
+          timeout: 600_000,
+        });
+      },
     });
   }
 
@@ -192,7 +241,7 @@ function buildSdkTools(): SdkTool[] {
   return tools;
 }
 
-function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
+export function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
   const start = Date.now();
   try {
     if (tool.preBuild) {
@@ -241,7 +290,7 @@ function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
  * suite exists to catch, and a tier that refuses for an unrelated reason (a
  * parse failure, a missing binary) is not a passing tier.
  */
-function evaluateRefusal(
+export function evaluateRefusal(
   expect: { pattern: string; reason?: string },
   sdkResults: SdkResult[],
   errors: string[],
@@ -545,4 +594,7 @@ function main(): void {
   process.exit(anyFail ? 1 : 0);
 }
 
-main();
+// Run main() only when executed directly (not when imported by the unit test).
+const thisFile = realpathSync(fileURLToPath(import.meta.url));
+const entry = process.argv[1] ? realpathSync(process.argv[1]) : '';
+if (entry === thisFile) main();
