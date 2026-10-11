@@ -3735,9 +3735,16 @@ func helper(x int) int {
 }
 "#;
     let result = parse_source(bad_source, Some("Bad.runar.go"));
+    // F-340: require an actual diagnostic, not just "no contract" -- the old
+    // `!errors.is_empty() || contract.is_none()` form was satisfied by a
+    // parser that silently returns no contract AND no errors, which is
+    // exactly the failure mode this test exists to catch.
+    // Proves: the parser reports why it rejected Go source with no
+    // Rúnar contract struct. Does not prove: the diagnostic's text or
+    // location, or coverage of other malformed Go inputs.
     assert!(
-        !result.errors.is_empty() || result.contract.is_none(),
-        "expected an error or no contract for invalid Go source"
+        !result.errors.is_empty(),
+        "expected a diagnostic for invalid Go source"
     );
 }
 
