@@ -36,6 +36,7 @@ test {
     _ = @import("tests/n050_static_methods.zig");
     _ = @import("tests/f011_unterminated_literal.zig");
     _ = @import("tests/f203_py_bytes_escape.zig");
+    _ = @import("tests/java_parenthesised_expression.zig");
     _ = @import("tests/f026_int_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");
     _ = @import("tests/n038_sighash_single_stateful.zig");

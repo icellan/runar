@@ -2057,17 +2057,10 @@ const Parser = struct {
             },
             .lparen => blk: {
                 _ = self.bump();
-                // Cast expression: `(Type) expr` — tolerated by consuming and
-                // returning the inner expression. We detect a cast by peeking
-                // for an ident followed by `)` AND a non-operator token after.
-                // For simplicity, we treat `(ident)` followed by a unary-start
-                // token as a cast to that type.
-                if (self.current.kind == .ident and self.looksLikeCast()) {
-                    // Consume type, `)`, then parse the operand
-                    _ = self.parseType();
-                    _ = self.expect(.rparen);
-                    break :blk self.parseUnary();
-                }
+                // A parenthesised expression, never a cast: Rúnar Java has no
+                // casts, as in the TS reference and the Go tier. This arm used
+                // to read every `(ident)` as a cast `(Type) operand`, which
+                // refused `(((value)))` and compiled `(a) - b` as `-b`.
                 const inner = self.parseExpression() orelse break :blk null;
                 _ = self.expect(.rparen);
                 break :blk inner;
@@ -2097,51 +2090,6 @@ const Parser = struct {
                 break :blk null;
             },
         };
-    }
-
-    /// Look ahead to determine whether the current `(` begins a cast `(Type)`.
-    /// Caller has already consumed `(` and the parser is pointing at an ident.
-    /// Returns true only if the shape is `ident <typeargs?> <brackets?> )` and
-    /// the next token after `)` begins a unary-expression start.
-    fn looksLikeCast(self: *Parser) bool {
-        const save_pos = self.tokenizer.pos;
-        const save_line = self.tokenizer.line;
-        const save_col = self.tokenizer.col;
-        const save_current = self.current;
-
-        // Consume type-like shape
-        if (self.current.kind != .ident) {
-            self.restoreState(save_pos, save_line, save_col, save_current);
-            return false;
-        }
-        _ = self.bump();
-        while (self.current.kind == .dot) {
-            _ = self.bump();
-            if (self.current.kind == .ident) _ = self.bump() else {
-                self.restoreState(save_pos, save_line, save_col, save_current);
-                return false;
-            }
-        }
-        if (self.current.kind == .lt) self.skipTypeArgs();
-        while (self.current.kind == .lbracket) {
-            _ = self.bump();
-            if (self.current.kind != .rbracket) {
-                self.restoreState(save_pos, save_line, save_col, save_current);
-                return false;
-            }
-            _ = self.bump();
-        }
-
-        const is_rparen = self.current.kind == .rparen;
-        self.restoreState(save_pos, save_line, save_col, save_current);
-        return is_rparen;
-    }
-
-    fn restoreState(self: *Parser, pos: usize, line: u32, col: u32, current: Token) void {
-        self.tokenizer.pos = pos;
-        self.tokenizer.line = line;
-        self.tokenizer.col = col;
-        self.current = current;
     }
 
     /// Parse `new T[]{a, b, c}` (array literals) or
