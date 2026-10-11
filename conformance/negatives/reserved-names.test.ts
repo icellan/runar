@@ -69,7 +69,13 @@ const writeFile = (fileName: string, content: string): string => {
 };
 
 const SOURCE_TIERS: Tier[] = buildSourceTiers().filter((t) => t.id !== 'ts' && t.cmd !== null);
-const IR_TIERS: Tier[] = buildIrTiers().filter((t) => t.cmd !== null);
+// F-342: `buildIrTiers()` now includes `ts` (it has a real --from-ir CLI
+// mode), but this file already covers `ts` on the --ir path directly via
+// `tsIrHex` above (no subprocess, no tsx cold start) — same reason
+// SOURCE_TIERS excludes it. Filtering it out of IR_TIERS keeps that one
+// `ts`-via-CLI redundant spawn out of this file's loops rather than silently
+// doubling every IR assertion below.
+const IR_TIERS: Tier[] = buildIrTiers().filter((t) => t.id !== 'ts' && t.cmd !== null);
 
 /** Run a tier's CLI; no interpretation beyond "it ran to completion". */
 function run(tier: Tier, input: string): { status: number; out: string; diag: string } {

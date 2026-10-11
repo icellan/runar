@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  ALL_TIER_IDS,
   BrokenTier,
   IR_TIER_IDS,
   REPO,
@@ -35,15 +36,29 @@ import {
  * accept, and every available tier must refuse all of them.
  *
  * ---------------------------------------------------------------------------
- * Six tiers, not seven
+ * Seven tiers (F-342)
  * ---------------------------------------------------------------------------
  *
- * TypeScript is absent BY DESIGN and this is the one place it is legitimate.
- * The reference tier ships no IR-consuming CLI mode at all; `runar-cli compile`
- * takes source. runner.ts's `IR_PARITY_COMPILERS` excludes `ts` for the same
- * reason on the positive side. `IR_TIER_IDS` in the harness records that, and
- * the vacuity guard below asserts the matrix matches it — so a tier dropping
- * out of this lane still fails loudly, which is the property R-100 was about.
+ * This used to say TypeScript was absent BY DESIGN because "the reference
+ * tier ships no IR-consuming CLI mode at all" — that was false, not a design
+ * choice. `runar-cli compile --from-ir <path>` (backed by `loadANFFromJSON` /
+ * `compileFromANF`) has shipped since GAP-016, reproduces the checked-in
+ * golden hex (verified against `asm-raw-script`, `bounded-loop`,
+ * `multi-method`, `fixed-array-index` and `stateful-counter` below), and is
+ * held to this gate exactly like the other six.
+ *
+ * Note this is NOT the same claim as runner.ts's `IR_PARITY_COMPILERS`, which
+ * still deliberately excludes `ts` — but for a different, still-valid reason:
+ * it also drives the `--emit-ir` -> `--ir` ROUND-TRIP check (F-038), which
+ * compares `parentClass`/`abi`/`stateFields` across full artifacts, and TS's
+ * `--from-ir` writes only a minimal `{contractName, script, asm}` artifact.
+ * `IR_TIER_IDS` here is scoped to the hex-producing REJECTION gate only; it no
+ * longer needs to match `IR_PARITY_COMPILERS` 1:1, and nothing in this file
+ * asserts that it does.
+ *
+ * The vacuity guard below asserts the matrix matches `IR_TIER_IDS` — so a
+ * tier dropping out of this lane still fails loudly, which is the property
+ * R-100 was about.
  *
  * ---------------------------------------------------------------------------
  * The corpus lives in ./ir/, not alongside the source fixtures
@@ -216,8 +231,17 @@ const available = TIERS.filter((t) => t.cmd !== null);
 describe('cross-tier rejection parity (--ir path)', () => {
   // -- vacuity guards -------------------------------------------------------
 
-  it('the matrix names all six IR-capable tiers (a dropped tier fails here)', () => {
+  it('the matrix names all seven IR-capable tiers (a dropped tier fails here)', () => {
     expect([...TIERS.map((t) => t.id)].sort()).toEqual([...IR_TIER_IDS].sort());
+  });
+
+  // F-342: `runar-cli compile --from-ir` (packages/runar-cli/src/bin.ts,
+  // backed by `loadANFFromJSON`/`compileFromANF`) has shipped since GAP-016 —
+  // TS is not missing an IR-consuming CLI mode, so this lane is a seven-tier
+  // gate, not a six-tier one. A tier quietly dropping back out of the lane
+  // (TS included) must fail here, the same way a dropped native tier does.
+  it('the IR-capable tier set is all seven tiers, not six (TS has --from-ir)', () => {
+    expect([...IR_TIER_IDS].sort()).toEqual([...ALL_TIER_IDS].sort());
   });
 
   it('the corpus is non-empty and every control is a checked-in golden', () => {
@@ -292,8 +316,9 @@ describe('cross-tier rejection parity (--ir path)', () => {
   // R-100's regression tests, re-run against the IR argv shapes. The failure
   // they encode is lane-independent (a tier that cannot start scores a perfect
   // rejection rate) but the argv is not, and it is the argv this lane gets
-  // wrong: three of the six tiers take `--ir`, one takes a positional
-  // subcommand, and two are launched through a runtime.
+  // wrong: most of the seven tiers take `--ir`, Zig takes a positional
+  // subcommand (`compile-ir`), TS takes `--from-ir` (F-342), and more than one
+  // is launched through a runtime rather than a standalone binary.
 
   describe('verdict() distinguishes a rejection from a broken run', () => {
     const witness = available[0];

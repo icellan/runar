@@ -38,15 +38,19 @@ export const REPO = resolve(__dirname, '../..');
 export const ALL_TIER_IDS = ['go', 'java', 'python', 'ruby', 'rust', 'ts', 'zig'] as const;
 
 /**
- * The six tiers with an `--ir` CLI mode.
+ * The seven tiers with an `--ir`-equivalent CLI mode.
  *
- * TypeScript is absent BY DESIGN, not by oversight: the reference tier has no
- * IR-consuming CLI mode at all, which is why `IR_PARITY_COMPILERS`
- * (runner.ts) excludes it from the positive `--ir` parity run too. The `--ir`
- * lane is therefore a six-tier gate, and this constant is asserted against
- * that one so the two never drift apart.
+ * TypeScript is NOT absent: `runar-cli compile --from-ir <path>`
+ * (packages/runar-cli/src/bin.ts, backed by `loadANFFromJSON` /
+ * `compileFromANF` in runar-compiler) has shipped since GAP-016 and reproduces
+ * the same checked-in golden hex every other tier's `--ir` mode does (F-342).
+ * This constant used to read `['go', 'java', 'python', 'ruby', 'rust',
+ * 'zig']` with a comment claiming the reference tier "has no IR-consuming CLI
+ * mode at all" — that claim was simply false, not a deliberate scoping
+ * decision, and it kept TS out of this rejection gate while the other six
+ * were held to it.
  */
-export const IR_TIER_IDS = ['go', 'java', 'python', 'ruby', 'rust', 'zig'] as const;
+export const IR_TIER_IDS = ['go', 'java', 'python', 'ruby', 'rust', 'ts', 'zig'] as const;
 
 /**
  * Tier binaries are resolved through the RUNNER's own finders, never by
@@ -182,15 +186,21 @@ export function buildSourceTiers(): Tier[] {
 }
 
 /**
- * The six tiers driven through their `IR JSON -> hex` CLI mode.
+ * The seven tiers driven through their `IR JSON -> hex` CLI mode.
  *
- * The argv shapes are NOT invented here — they are the ones
- * `runIrToHex()` in runner.ts uses for the positive `--ir-parity` run, copied
- * deliberately so this gate exercises the same entrypoint the parity run
- * measures. In particular Zig's IR consumer is a positional subcommand
- * (`compile-ir <file>`) and takes no fold flag, which is exactly the kind of
- * per-tier detail that, got wrong, produces a usage error the old bare catch
- * would have scored as a clean rejection.
+ * The argv shapes for the six native tiers are NOT invented here — they are
+ * the ones `runIrToHex()` in runner.ts uses for the positive `--ir-parity`
+ * run, copied deliberately so this gate exercises the same entrypoint the
+ * parity run measures. In particular Zig's IR consumer is a positional
+ * subcommand (`compile-ir <file>`) and takes no fold flag, which is exactly
+ * the kind of per-tier detail that, got wrong, produces a usage error the old
+ * bare catch would have scored as a clean rejection.
+ *
+ * TS's entry (F-342) mirrors `buildSourceTiers`'s `ts` row: no standalone
+ * binary, so it is `runar-cli` under tsx, with `compile --from-ir <path>
+ * --hex --disable-constant-folding` as its one-shot IR->hex contract — the
+ * same flags `packages/runar-cli/src/commands/compile.ts`'s `--from-ir`
+ * branch accepts.
  */
 export function buildIrTiers(): Tier[] {
   const go = splitCmd(findGoBinary());
@@ -199,10 +209,20 @@ export function buildIrTiers(): Tier[] {
   const ruby = splitCmd(findRubyBinary());
   const python = splitCmd(findPythonBinary());
   const jar = findJavaJarPath();
+  const tsxLoader = resolveTsxLoader();
+  const tsCli = join(REPO, 'packages/runar-cli/src/bin.ts');
 
   const irArgs = (p: string) => ['--ir', p, '--hex', '--disable-constant-folding'];
 
   return [
+    {
+      id: 'ts',
+      cmd: tsxLoader && existsSync(tsCli) ? process.execPath : null,
+      prefix: tsxLoader ? ['--import', tsxLoader, tsCli, 'compile'] : [],
+      argsFor: (p) => ['--from-ir', p, '--hex', '--disable-constant-folding'],
+      cwd: REPO,
+      timeoutMs: TS_TIMEOUT,
+    },
     {
       id: 'go',
       cmd: go.cmd,
