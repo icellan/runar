@@ -39,12 +39,29 @@ func optimizeNestedIf(op StackOp) StackOp {
 			optimizedElse = OptimizeStackOps(op.Else)
 		}
 		return StackOp{
-			Op:   "if",
-			Then: optimizedThen,
-			Else: optimizedElse,
+			Op:        "if",
+			Then:      optimizedThen,
+			Else:      optimizedElse,
+			SourceLoc: op.SourceLoc,
 		}
 	}
 	return op
+}
+
+// withHeadSourceLoc gives every replacement op that has no location of its
+// own the location of the first op of the matched window (F-179; the TS,
+// Python and Rust convention), so the emitter still maps the fused /
+// rewritten opcode to its statement.
+func withHeadSourceLoc(head StackOp, replacement []StackOp) []StackOp {
+	if head.SourceLoc == nil {
+		return replacement
+	}
+	for i := range replacement {
+		if replacement[i].SourceLoc == nil {
+			replacement[i].SourceLoc = head.SourceLoc
+		}
+	}
+	return replacement
 }
 
 func applyOnePass(ops []StackOp) ([]StackOp, bool) {
@@ -56,7 +73,7 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 		// Try 4-op window
 		if i+3 < len(ops) {
 			if replacement, ok := matchWindow4(ops[i], ops[i+1], ops[i+2], ops[i+3]); ok {
-				result = append(result, replacement...)
+				result = append(result, withHeadSourceLoc(ops[i], replacement)...)
 				i += 4
 				changed = true
 				continue
@@ -65,7 +82,7 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 		// Try 3-op window
 		if i+2 < len(ops) {
 			if replacement, ok := matchWindow3(ops[i], ops[i+1], ops[i+2]); ok {
-				result = append(result, replacement...)
+				result = append(result, withHeadSourceLoc(ops[i], replacement)...)
 				i += 3
 				changed = true
 				continue
@@ -74,7 +91,7 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 		// Try 2-op window
 		if i+1 < len(ops) {
 			if replacement, ok := matchWindow2(ops[i], ops[i+1]); ok {
-				result = append(result, replacement...)
+				result = append(result, withHeadSourceLoc(ops[i], replacement)...)
 				i += 2
 				changed = true
 				continue

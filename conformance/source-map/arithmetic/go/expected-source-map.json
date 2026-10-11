@@ -1,6 +1,12 @@
 {
   "mappings": [
     {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/go/arithmetic/Arithmetic.runar.go",
+      "line": 11,
+      "column": 1
+    },
+    {
       "opcodeIndex": 1,
       "sourceFile": "examples/go/arithmetic/Arithmetic.runar.go",
       "line": 11,

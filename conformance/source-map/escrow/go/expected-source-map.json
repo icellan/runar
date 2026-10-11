@@ -13,6 +13,12 @@
       "column": 1
     },
     {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/go/escrow/Escrow.runar.go",
+      "line": 41,
+      "column": 1
+    },
+    {
       "opcodeIndex": 8,
       "sourceFile": "examples/go/escrow/Escrow.runar.go",
       "line": 42,
@@ -32,6 +38,12 @@
     },
     {
       "opcodeIndex": 14,
+      "sourceFile": "examples/go/escrow/Escrow.runar.go",
+      "line": 48,
+      "column": 1
+    },
+    {
+      "opcodeIndex": 15,
       "sourceFile": "examples/go/escrow/Escrow.runar.go",
       "line": 48,
       "column": 1
