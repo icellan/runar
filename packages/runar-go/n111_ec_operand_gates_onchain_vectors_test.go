@@ -106,6 +106,8 @@ func n111Run(t *testing.T, r n111Row) (got string, panicked bool) {
 		return (*big.Int)(EcPointY(n111Point(t, r.P))).String(), false
 	case "ecEncodeCompressed":
 		return hex.EncodeToString([]byte(EcEncodeCompressed(n111Point(t, r.P)))), false
+	case "ecOnCurve":
+		return strconv.FormatBool(EcOnCurve(n111Point(t, r.P))), false
 	}
 	t.Fatalf("unknown fn %s", r.Fn)
 	return "", false

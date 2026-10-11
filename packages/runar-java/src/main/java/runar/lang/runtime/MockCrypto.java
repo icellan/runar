@@ -963,6 +963,23 @@ public final class MockCrypto {
         return lhs.equals(rhs);
     }
 
+    /**
+     * N-184: a byte-level overload for untrusted, possibly wrong-width input.
+     * {@code Point#fromRaw64} is the only bytes-to-Point path and throws on
+     * anything but 64 bytes -- correct for ecAdd / ecMul / ecNegate, whose
+     * compiled scripts abort on the wrong width too. ecOnCurve is a
+     * PREDICATE and must stay total: the compiled emitPointLengthGate ANDs a
+     * width flag into the result instead of aborting, so a 63- or 65-byte
+     * blob is false, not a thrown exception (packages/runar-testing's
+     * r052-point-length-gate.test.ts pins this on @bsv/sdk Spend). This
+     * overload answers that question directly, without going through the
+     * strict {@code fromRaw64} gate.
+     */
+    public static boolean ecOnCurve(byte[] raw) {
+        if (raw.length != 64) return false;
+        return ecOnCurve(Point.fromRaw64(raw));
+    }
+
     public static BigInteger ecModReduce(BigInteger value, BigInteger modulus) {
         return mod(value, modulus);
     }

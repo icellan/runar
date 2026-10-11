@@ -214,6 +214,25 @@ class MockCryptoTest {
     }
 
     @Test
+    void ecOnCurveRejectsWrongWidthBytes() {
+        // N-184: the compiled ecOnCurve is a PREDICATE over untrusted bytes --
+        // for a 63- or 65-byte blob the script answers false, it does not
+        // abort (emitPointLengthGate ANDs a width flag into the result; see
+        // packages/runar-testing/src/__tests__/r052-point-length-gate.test.ts
+        // "onCurve(G <plus> surplus) is FALSE, not true", executed on @bsv/sdk
+        // Spend). MockCrypto.Point#fromRaw64 is the only bytes-to-Point path
+        // and throws on the wrong width -- correct for ecAdd/ecMul/ecNegate,
+        // which abort on the wrong width too -- so ecOnCurve needs a
+        // byte-level overload that answers false instead of routing through
+        // fromRaw64.
+        byte[] g = HEX.parseHex(MockCrypto.EC_G.toHex());
+        byte[] short63 = java.util.Arrays.copyOf(g, 63);
+        byte[] long65 = java.util.Arrays.copyOf(g, 65);
+        assertFalse(MockCrypto.ecOnCurve(short63));
+        assertFalse(MockCrypto.ecOnCurve(long65));
+    }
+
+    @Test
     void ecNegateRoundTrip() {
         MockCrypto.Point negG = MockCrypto.ecNegate(MockCrypto.EC_G);
         MockCrypto.Point sum = MockCrypto.ecAdd(MockCrypto.EC_G, negG);

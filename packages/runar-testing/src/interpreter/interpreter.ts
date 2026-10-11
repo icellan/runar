@@ -2292,6 +2292,14 @@ function ecNegateImpl(pt: Uint8Array): Uint8Array {
 }
 
 function ecOnCurveImpl(pt: Uint8Array): boolean {
+  // N-184: a predicate over untrusted bytes must stay total. The compiled
+  // emitPointLengthGate ANDs a width flag into the result instead of
+  // aborting, so a 63- or 65-byte blob is false, not a thrown error --
+  // matching the `if (ecOnCurve(p)) {...} else {...}` idiom the codegen
+  // itself documents for this builtin. ecDecodePoint throws on the wrong
+  // width, which is correct for ecAdd/ecMul/ecNegate (the script aborts
+  // there too) but wrong here, so this check must run before it.
+  if (pt.length !== 64) return false;
   const [x, y] = ecDecodePoint(pt);
   // GAP-301: reject non-canonical coordinate encodings (x ≥ p or y ≥ p) to
   // match the compiled script, which range-checks the coordinates before the

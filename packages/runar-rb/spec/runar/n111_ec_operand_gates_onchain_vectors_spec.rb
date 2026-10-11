@@ -37,6 +37,7 @@ RSpec.describe 'N-111 EC builtins match the on-chain operand gates' do
     when 'ecPointX' then Runar::EC.ec_point_x(p).to_s
     when 'ecPointY' then Runar::EC.ec_point_y(p).to_s
     when 'ecEncodeCompressed' then Runar::EC.ec_encode_compressed(p)
+    when 'ecOnCurve' then Runar::EC.ec_on_curve(p).to_s
     else raise "unknown fn #{row['fn']}"
     end
   end

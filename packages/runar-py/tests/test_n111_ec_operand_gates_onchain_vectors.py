@@ -23,7 +23,7 @@ import pytest
 
 from runar.ec import (
     ec_add, ec_mul, ec_mul_gen, ec_negate, ec_point_x, ec_point_y,
-    ec_encode_compressed,
+    ec_encode_compressed, ec_on_curve,
 )
 
 
@@ -60,6 +60,8 @@ def _run(row):
         return str(ec_point_y(p))
     if fn == 'ecEncodeCompressed':
         return ec_encode_compressed(p).hex()
+    if fn == 'ecOnCurve':
+        return str(ec_on_curve(p)).lower()
     raise AssertionError(f'unknown fn {fn}')
 
 

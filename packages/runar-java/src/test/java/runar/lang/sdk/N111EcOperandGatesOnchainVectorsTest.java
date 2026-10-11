@@ -62,6 +62,10 @@ class N111EcOperandGatesOnchainVectorsTest {
             case "ecPointX" -> MockCrypto.ecPointX(pt(r.get("p"))).toString();
             case "ecPointY" -> MockCrypto.ecPointY(pt(r.get("p"))).toString();
             case "ecEncodeCompressed" -> HEX.formatHex(MockCrypto.ecEncodeCompressed(pt(r.get("p"))).toByteArray());
+            // N-184: ecOnCurve is a total predicate over raw bytes -- route
+            // around pt()/fromRaw64, which throws on the wrong width (that
+            // throw is what the ecAdd/ecMul/ecNegate rows above rely on).
+            case "ecOnCurve" -> String.valueOf(MockCrypto.ecOnCurve(HEX.parseHex((String) r.get("p"))));
             default -> throw new AssertionError("unknown fn " + r.get("fn"));
         };
     }

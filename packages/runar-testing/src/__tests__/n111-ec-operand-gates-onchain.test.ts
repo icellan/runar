@@ -33,7 +33,7 @@ import { ScriptExecutionContract } from '../script-execution.js';
 const REPO = resolve(__dirname, '../../../..');
 
 interface GateRow {
-  fn: 'ecAdd' | 'ecMul' | 'ecMulGen' | 'ecNegate' | 'ecPointX' | 'ecPointY' | 'ecEncodeCompressed';
+  fn: 'ecAdd' | 'ecMul' | 'ecMulGen' | 'ecNegate' | 'ecPointX' | 'ecPointY' | 'ecEncodeCompressed' | 'ecOnCurve';
   p?: string;
   q?: string;
   k?: string;
@@ -53,22 +53,28 @@ const G = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
   + '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8';
 
 const INT_FNS = new Set(['ecPointX', 'ecPointY']);
+const BOOL_FNS = new Set(['ecOnCurve']);
 
 /** The witness that equals the real result (or any witness, for an abort). */
-function witness(r: GateRow): string | bigint {
-  if (r.expect !== 'abort') return INT_FNS.has(r.fn) ? BigInt(r.expect) : r.expect;
+function witness(r: GateRow): string | bigint | boolean {
+  if (r.expect !== 'abort') {
+    if (INT_FNS.has(r.fn)) return BigInt(r.expect);
+    if (BOOL_FNS.has(r.fn)) return r.expect === 'true';
+    return r.expect;
+  }
   if (INT_FNS.has(r.fn)) return 0n;
   return r.fn === 'ecEncodeCompressed' ? '02' + G.slice(0, 64) : G;
 }
 
 /** A witness that must NOT equal the real result. */
-function wrongWitness(r: GateRow): string | bigint {
+function wrongWitness(r: GateRow): string | bigint | boolean {
   if (INT_FNS.has(r.fn)) return BigInt(r.expect) + 1n;
+  if (BOOL_FNS.has(r.fn)) return r.expect !== 'true';
   const last = (parseInt(r.expect.slice(-2), 16) ^ 0xff).toString(16).padStart(2, '0');
   return r.expect.slice(0, -2) + last;
 }
 
-function args(r: GateRow, e: string | bigint): unknown[] {
+function args(r: GateRow, e: string | bigint | boolean): unknown[] {
   const out: unknown[] = [];
   if (r.p !== undefined) out.push(r.p);
   if (r.q !== undefined) out.push(r.q);
@@ -86,11 +92,13 @@ const PROBES: Array<[string, string, string]> = [
   ['ecPointX', 'p: Point, e: bigint', 'ecPointX(p)'],
   ['ecPointY', 'p: Point, e: bigint', 'ecPointY(p)'],
   ['ecEncodeCompressed', 'p: Point, e: ByteString', 'ecEncodeCompressed(p)'],
+  // N-184: ecOnCurve is boolean, so the eq/ne probe compares a boolean.
+  ['ecOnCurve', 'p: Point, e: boolean', 'ecOnCurve(p)'],
 ];
 
 function probeSource(): string {
   const lines = [
-    `import { SmartContract, assert, ecAdd, ecMul, ecMulGen, ecNegate, ecPointX, ecPointY, ecEncodeCompressed } from 'runar-lang';`,
+    `import { SmartContract, assert, ecAdd, ecMul, ecMulGen, ecNegate, ecPointX, ecPointY, ecEncodeCompressed, ecOnCurve } from 'runar-lang';`,
     `import type { Point, ByteString } from 'runar-lang';`,
     `class N111EcGateProbe extends SmartContract {`,
     `  constructor() { super(); }`,

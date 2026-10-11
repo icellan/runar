@@ -113,6 +113,16 @@ module Runar
 
       # Check if point is on the secp256k1 curve.
       def ec_on_curve(p)
+        # N-184: a predicate over untrusted bytes must stay total. The
+        # compiled emitPointLengthGate ANDs a width flag into the result
+        # instead of aborting, so a 63- or 65-byte blob is false, not a raise
+        # -- matching the `if ec_on_curve(p) ... else ... end` idiom this
+        # module tells contract authors to write. decode_point raises on the
+        # wrong width, which is correct for ec_add/ec_mul/ec_negate (the
+        # script aborts there too) but wrong here, so this check must run
+        # before it.
+        return false unless p.length == 128
+
         x, y = decode_point(p)
         # The all-zero blob is this codegen's encoding of the point at infinity,
         # and it is NOT on the curve: the emitted ec_on_curve is exactly

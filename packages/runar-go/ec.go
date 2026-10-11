@@ -171,6 +171,16 @@ func EcNegate(p Point) Point {
 
 // EcOnCurve checks if a point is on the secp256k1 curve: y^2 = x^3 + 7 (mod p).
 func EcOnCurve(p Point) bool {
+	// N-184: a predicate over untrusted bytes must stay total. The compiled
+	// emitPointLengthGate ANDs a width flag into the result instead of
+	// aborting, so a 63- or 65-byte blob is `false`, not a panic — matching
+	// `if (ecOnCurve(p)) {...} else {...}`, the idiom the codegen itself
+	// documents for this builtin. pointToCoords panics on the wrong width,
+	// which is correct for ecAdd/ecMul/ecNegate (the script aborts there too)
+	// but wrong here, so this check must run before it.
+	if len([]byte(p)) != 64 {
+		return false
+	}
 	x, y := pointToCoords(p)
 	// CL-BUG-161 / F-243: coordinate canonicity. pointToCoords parses each
 	// half as an unsigned big.Int with no range check, so a coordinate

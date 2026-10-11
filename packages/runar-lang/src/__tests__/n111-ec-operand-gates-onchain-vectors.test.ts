@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  ecAdd, ecMul, ecMulGen, ecNegate, ecPointX, ecPointY, ecEncodeCompressed,
+  ecAdd, ecMul, ecMulGen, ecNegate, ecPointX, ecPointY, ecEncodeCompressed, ecOnCurve,
 } from '../runtime/index.js';
 
 // N-111: the native TS runtime (`runar-lang/runtime`, what a .runar.ts
@@ -40,6 +40,7 @@ function run(r: Row): unknown {
     case 'ecPointX': return ecPointX(p);
     case 'ecPointY': return ecPointY(p);
     case 'ecEncodeCompressed': return ecEncodeCompressed(p);
+    case 'ecOnCurve': return ecOnCurve(p);
     default: throw new Error(`unknown fn ${r.fn}`);
   }
 }
@@ -51,7 +52,9 @@ describe('N-111: runar-lang runtime EC builtins match the on-chain operand gates
         expect(() => run(r)).toThrow();
         return;
       }
-      const want = r.fn === 'ecPointX' || r.fn === 'ecPointY' ? BigInt(r.expect) : r.expect;
+      const want = r.fn === 'ecPointX' || r.fn === 'ecPointY' ? BigInt(r.expect)
+        : r.fn === 'ecOnCurve' ? r.expect === 'true'
+        : r.expect;
       expect(run(r)).toBe(want);
     });
   }

@@ -68,6 +68,19 @@ test "N-111: native EC builtins match the on-chain operand gates for every share
         const k: i64 = if (obj.get("k")) |v| try std.fmt.parseInt(i64, v.string, 10) else 0;
         checked += 1;
 
+        // N-184: ecOnCurve is a boolean predicate, not a hex-encoded value --
+        // compare it directly rather than through hexAlloc/runPlain, whose
+        // want_bytes path assumes a hex-string `expect`.
+        if (std.mem.eql(u8, name, "ecOnCurve")) {
+            const want_bool = std.mem.eql(u8, want, "true");
+            const got = builtins.ecOnCurve(p);
+            if (got != want_bool) {
+                mismatches += 1;
+                std.debug.print("N-111 {s} [{s}]: got {}, want {s}\n", .{ name, obj.get("why").?.string, got, want });
+            }
+            continue;
+        }
+
         if (std.mem.eql(u8, want, "abort")) {
             if (runChecked(name, p, q, k)) |got| {
                 mismatches += 1;

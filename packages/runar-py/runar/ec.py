@@ -102,6 +102,15 @@ def ec_point_y(p: bytes) -> int:
 
 def ec_on_curve(p: bytes) -> bool:
     """Check if point is on secp256k1 curve."""
+    # N-184: a predicate over untrusted bytes must stay total. The compiled
+    # emitPointLengthGate ANDs a width flag into the result instead of
+    # aborting, so a 63- or 65-byte blob is False, not a raise -- matching
+    # the `if ec_on_curve(p): ... else: ...` idiom this module tells
+    # contract authors to write. _decode_point raises on the wrong width,
+    # which is correct for ec_add/ec_mul/ec_negate (the script aborts there
+    # too) but wrong here, so this check must run before it.
+    if len(p) != 64:
+        return False
     x, y = _decode_point(p)
     # The all-zero blob is this codegen's encoding of the point at infinity,
     # and it is NOT on the curve: the emitted ecOnCurve is exactly

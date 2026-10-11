@@ -552,8 +552,17 @@ export function ecNegate(p: Point): Point {
 }
 
 export function ecOnCurve(p: Point): boolean {
-  const x = BigInt('0x' + (p as string).slice(0, 64));
-  const y = BigInt('0x' + (p as string).slice(64, 128));
+  const h = p as string;
+  // N-184: a predicate over untrusted bytes must stay total. The compiled
+  // emitPointLengthGate ANDs a width flag into the result instead of
+  // aborting, so a 63- or 65-byte blob is false, not computed on whatever
+  // `slice` happens to return (a 65-byte blob used to re-slice the real
+  // x, y out of the first 64 bytes and silently accept it — fail-open,
+  // worse than a raise). ecAdd/ecMul/ecNegate still abort on the wrong
+  // width via ecDecode; only this predicate stays total.
+  if (h.length !== 128) return false;
+  const x = BigInt('0x' + h.slice(0, 64));
+  const y = BigInt('0x' + h.slice(64, 128));
   // GAP-301: reject non-canonical coordinate encodings (x ≥ p or y ≥ p). The
   // compiled script range-checks the coordinates before the field arithmetic
   // reduces them mod p, so the interpreter must too or it would accept a point

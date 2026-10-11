@@ -16,7 +16,8 @@
 use std::panic;
 
 use runar_lang::prelude::{
-    ec_add, ec_encode_compressed, ec_mul, ec_mul_gen, ec_negate, ec_point_x, ec_point_y,
+    ec_add, ec_encode_compressed, ec_mul, ec_mul_gen, ec_negate, ec_on_curve, ec_point_x,
+    ec_point_y,
 };
 
 fn from_hex(s: &str) -> Vec<u8> {
@@ -42,6 +43,7 @@ fn run(c: &serde_json::Value) -> String {
         "ecPointX" => ec_point_x(p.as_ref().unwrap()).to_string(),
         "ecPointY" => ec_point_y(p.as_ref().unwrap()).to_string(),
         "ecEncodeCompressed" => to_hex(&ec_encode_compressed(p.as_ref().unwrap())),
+        "ecOnCurve" => ec_on_curve(p.as_ref().unwrap()).to_string(),
         other => panic!("unknown fn {other}"),
     }
 }
