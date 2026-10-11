@@ -45,11 +45,13 @@ class ConformanceGoldensTest < Minitest::Test
     config_path = File.join(test_dir, 'source.json')
     return nil unless File.exist?(config_path)
 
-    begin
-      cfg = JSON.parse(File.read(config_path))
-    rescue JSON::ParserError, StandardError
-      return nil
-    end
+    # F-264: fail closed. A broad `rescue ... StandardError` here used to
+    # swallow every failure reading source.json (permission errors,
+    # directories where a file is expected, malformed JSON, ...) and
+    # silently treat the fixture as having no allowlist at all. Let it
+    # raise -- a malformed or unreadable config must surface, not be
+    # misreported downstream as a generic "missing-source" failure.
+    cfg = JSON.parse(File.read(config_path))
 
     list = cfg['compilers']
     list.is_a?(Array) ? list : nil
@@ -64,15 +66,16 @@ class ConformanceGoldensTest < Minitest::Test
   def find_ruby_source(test_dir)
     config_path = File.join(test_dir, 'source.json')
     if File.exist?(config_path)
-      begin
-        cfg = JSON.parse(File.read(config_path))
-        rel = cfg.dig('sources', '.runar.rb')
-        if rel.is_a?(String)
-          resolved = File.expand_path(rel, test_dir)
-          return resolved if File.exist?(resolved)
-        end
-      rescue JSON::ParserError, StandardError
-        # fall through to glob
+      # F-264: fail closed (see read_compiler_allowlist above). A broad
+      # `rescue ... StandardError` here used to swallow every failure
+      # reading source.json and fall through to the *.runar.rb glob as if
+      # no config existed, misreporting the real cause (e.g. a permission
+      # error) as a plain "missing-source" failure.
+      cfg = JSON.parse(File.read(config_path))
+      rel = cfg.dig('sources', '.runar.rb')
+      if rel.is_a?(String)
+        resolved = File.expand_path(rel, test_dir)
+        return resolved if File.exist?(resolved)
       end
     end
 
@@ -368,6 +371,67 @@ class ConformanceGoldensTest < Minitest::Test
       assert_empty result[:failures],
                    "a ruby-excluded fixture must not be reported as a failure (got: #{result.inspect})"
       assert_includes result[:skipped], 'go-only-fixture'
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # F-264: `read_compiler_allowlist` and `find_ruby_source` each wrapped
+  # their `source.json` read in `rescue JSON::ParserError, StandardError`
+  # -- the second clause is a superset of the first, so it swallows EVERY
+  # failure (permission errors, a directory where a file is expected,
+  # malformed JSON, ...), not just a genuinely absent/malformed config,
+  # and silently falls through to "nil allowlist" / "glob for *.runar.rb"
+  # as if source.json had never existed. A fixture whose source.json is
+  # unreadable for an unrelated reason (e.g. EISDIR, EACCES) then gets
+  # misclassified as a generic "missing-source" failure -- the operator
+  # sees "no .runar.rb source found" and never learns the real cause.
+  #
+  # Project standing rule (fail-closed): a malformed config must surface,
+  # not be swallowed -- mirrors F-225 (multi-format.test.ts), which
+  # removed an identical swallow-to-empty-config try/catch.
+  #
+  # What this proves: a non-JSON::ParserError StandardError raised while
+  # reading a fixture's source.json (here: EISDIR, because `source.json`
+  # is a directory, not a file) propagates out of `scan_fixtures` instead
+  # of being silently reclassified as "missing-source".
+  #
+  # What this does NOT prove: that the real conformance/tests corpus
+  # contains such a fixture today -- it does not; this is a synthetic,
+  # throwaway fixture (via Dir.mktmpdir) that exercises the swallow
+  # directly.
+  def test_scan_fixtures_surfaces_non_json_error_reading_source_json
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'source-json-is-a-dir')
+      FileUtils.mkdir_p(fixture_dir)
+      # A directory named `source.json` makes `File.read` raise
+      # Errno::EISDIR (a StandardError, but never a JSON::ParserError).
+      Dir.mkdir(File.join(fixture_dir, 'source.json'))
+
+      error = assert_raises(SystemCallError) do
+        scan_fixtures([fixture_dir])
+      end
+      assert_kind_of Errno::EISDIR, error
+    end
+  end
+
+  # What this proves: malformed JSON in source.json (the canonical
+  # "malformed config" case) also propagates rather than being silently
+  # treated as "no config" -- closing both exception classes the old
+  # `rescue JSON::ParserError, StandardError` clause caught.
+  #
+  # What this does NOT prove: anything about the TS runner's own
+  # `readFixtureCompilerAllowlist`, which still swallows malformed JSON
+  # to `null` (conformance/runner/runner.ts) -- a pre-existing,
+  # out-of-scope inconsistency in that file, not mirrored here.
+  def test_scan_fixtures_surfaces_malformed_json_in_source_json
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'malformed-source-json')
+      FileUtils.mkdir_p(fixture_dir)
+      File.write(File.join(fixture_dir, 'source.json'), '{not valid json')
+
+      assert_raises(JSON::ParserError) do
+        scan_fixtures([fixture_dir])
+      end
     end
   end
 end
