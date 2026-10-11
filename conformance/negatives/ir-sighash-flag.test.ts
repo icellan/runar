@@ -74,6 +74,27 @@ function counter(edit: (method: Json, checkPreimage: Json) => void): Json {
 }
 
 /**
+ * N-038: a SIGHASH_SINGLE stateful continuation commits only the same-index
+ * output, so it carries no change segment and no `_changePKH` /
+ * `_changeAmount`. stateful-counter's change-carrying continuation is
+ * therefore not a valid SINGLE program; the SINGLE-base controls are the
+ * N-038 contract's `bump` (methods[1]) instead, from the gated sdk-call IR pin
+ * conformance/sdk-call/expected-ir.json — same body layout (t1 =
+ * check_preimage, t5 = the pinned sighash-type constant).
+ */
+const SINGLE_GOLDEN = join(REPO, 'conformance/sdk-call/expected-ir.json');
+function single(edit: (method: Json, checkPreimage: Json) => void): Json {
+  const ir = JSON.parse(readFileSync(SINGLE_GOLDEN, 'utf8')) as Json;
+  const method = ir.methods[1];
+  const cp = method.body[1].value;
+  if (method.name !== 'bump' || cp.kind !== 'check_preimage') {
+    throw new Error('conformance/sdk-call/expected-ir.json no longer has bump.t1 = check_preimage');
+  }
+  edit(method, cp);
+  return ir;
+}
+
+/**
  * The nested control: a check_preimage inside an `if` arm or a `loop` body.
  * No golden nests one, so this is the smallest program all six CLIs accept
  * (asserted below before any of its negatives is graded).
@@ -149,12 +170,13 @@ const ACCEPTED: Array<{ name: string; ir: Json; flag: number }> = [
     name: `flag 0x${f.toString(16)} with sigHashType 0x${f.toString(16)}`,
     // N-101: the auto-injected sighash-type assert (increment.t5) pins the
     // declared mode too, as the frontend emits it for `@sighash`.
-    ir: counter((m, cp) => {
+    ir: ((f & 0x1f) === 0x03 ? single : counter)((m, cp) => {
+      const from = m.sigHashType ?? 0x41;
       cp.sighashFlag = f;
       m.sigHashType = f;
       const pinned = m.body[5].value;
-      if (pinned.kind !== 'load_const' || pinned.value !== 65) {
-        throw new Error('stateful-counter golden no longer has increment.t5 = load_const 65');
+      if (pinned.kind !== 'load_const' || pinned.value !== from) {
+        throw new Error(`${m.name}.t5 is no longer load_const ${from}`);
       }
       pinned.value = f;
     }),

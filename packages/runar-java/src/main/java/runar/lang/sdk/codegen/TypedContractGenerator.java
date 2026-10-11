@@ -564,10 +564,8 @@ public final class TypedContractGenerator {
     private static boolean isTerminal(ABIMethod m, boolean isStateful) {
         if (!isStateful) return true;
         if (m.isTerminal() != null) return m.isTerminal();
-        for (ABIParam p : m.params()) {
-            if ("_changePKH".equals(p.name())) return false;
-        }
-        return true;
+        // N-038: a SIGHASH_SINGLE method continues without declaring `_changePKH`.
+        return !m.hasContinuation();
     }
 
     /** Drop-in parity with TS/Go {@code classifyParams}. */

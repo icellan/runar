@@ -174,6 +174,12 @@ module Runar
         return true unless is_stateful
         return method.is_terminal unless method.is_terminal.nil?
 
+        # N-038: a SIGHASH_SINGLE method continues without _changePKH (BIP-143
+        # SINGLE does not commit the change output); the compiler omits
+        # isTerminal for it.
+        sig_hash_type = method.respond_to?(:sig_hash_type) ? method.sig_hash_type : nil
+        return false if !sig_hash_type.nil? && (sig_hash_type & 0x1F) == 0x03
+
         # Fallback: terminal if no _changePKH param
         method.params.none? { |p| p.name == '_changePKH' }
       end

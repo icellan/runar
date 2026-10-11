@@ -81,7 +81,10 @@ def _prologue(e: _Emitter, sighash_mode: int, has_mutable_state: bool) -> None:
         e.emit(ANFValue(kind="deserialize_state", preimage=p3))
 
 
-def _continuation(e: _Emitter, needs_change: bool, state_refs: list[str], data_refs: list[str]) -> None:
+def _continuation(
+    e: _Emitter, needs_change: bool, includes_change: bool,
+    state_refs: list[str], data_refs: list[str],
+) -> None:
     if not needs_change:
         return
     if not state_refs:
@@ -89,15 +92,18 @@ def _continuation(e: _Emitter, needs_change: bool, state_refs: list[str], data_r
         amount = e.emit(_call("extractAmount", p))
         new_amount = e.emit(_param("_newAmount"))
         e.emit(_assert(e.emit(_bin(">=", new_amount, amount))))
-    pkh = e.emit(_param("_changePKH"))
-    amt = e.emit(_param("_changeAmount"))
-    zero = e.emit(ANFValue(kind="load_const", const_big_int=0))
-    non_zero = e.emit(_bin("!==", amt, zero))
-    then_e = e.sub()
-    then_e.emit(_call("buildChangeOutput", pkh, amt))
-    else_e = e.sub()
-    else_e.emit(ANFValue(kind="load_const", const_string=""))
-    change = e.emit(ANFValue(kind="if", cond=non_zero, then=then_e.out, else_=else_e.out))
+    # N-038: under a SIGHASH_SINGLE base no change segment exists.
+    change: str | None = None
+    if includes_change:
+        pkh = e.emit(_param("_changePKH"))
+        amt = e.emit(_param("_changeAmount"))
+        zero = e.emit(ANFValue(kind="load_const", const_big_int=0))
+        non_zero = e.emit(_bin("!==", amt, zero))
+        then_e = e.sub()
+        then_e.emit(_call("buildChangeOutput", pkh, amt))
+        else_e = e.sub()
+        else_e.emit(ANFValue(kind="load_const", const_string=""))
+        change = e.emit(ANFValue(kind="if", cond=non_zero, then=then_e.out, else_=else_e.out))
     if state_refs:
         acc = state_refs[0]
         for r in state_refs[1:]:
@@ -109,7 +115,8 @@ def _continuation(e: _Emitter, needs_change: bool, state_refs: list[str], data_r
         acc = e.emit(_call("computeStateOutput", p, script, new_amount))
     for r in data_refs:
         acc = e.emit(_call("cat", acc, r))
-    acc = e.emit(_call("cat", acc, change))
+    if change is not None:
+        acc = e.emit(_call("cat", acc, change))
     digest = e.emit(_call("hash256", acc))
     p = e.emit(_param("txPreimage"))
     out_hash = e.emit(_call("extractOutputHash", p))
@@ -128,7 +135,7 @@ def _contains(bindings: list[ANFBinding], kinds: frozenset[str]) -> bool:
     )
 
 
-def _shape(program: ANFProgram, method: ANFMethod) -> tuple[bool, bool]:
+def _shape(program: ANFProgram, method: ANFMethod) -> tuple[bool, bool, bool]:
     """The frontend's side-effect summary, read off the IR (update_prop is a
     state mutation, add_output / add_raw_output a state output,
     add_data_output a data output) at any depth and through method_calls to
@@ -158,7 +165,11 @@ def _shape(program: ANFProgram, method: ANFMethod) -> tuple[bool, bool]:
 
     walk(method.body)
     mutates, state, data = effects["mutates"], effects["state"], effects["data"]
-    return mutates or state or data, (mutates or data) and not state
+    needs_change = mutates or state or data
+    # N-038: a SIGHASH_SINGLE base commits no change output.
+    mode = method.sighash_type if method.sighash_type is not None else SIGHASH_DEFAULT
+    includes_change = needs_change and (mode & 0x1F) != 0x03
+    return needs_change, includes_change, (mutates or data) and not state
 
 
 def _describe(v: ANFValue) -> str:
@@ -276,11 +287,11 @@ def stateful_scaffold_error(program: ANFProgram) -> str | None:
     for m in program.methods:
         if not m.is_public or m.name == "constructor":
             continue
-        needs_change, needs_new_amount = _shape(program, m)
+        needs_change, includes_change, needs_new_amount = _shape(program, m)
 
         # (1) the parameters, contiguous and once each.
         required: list[tuple[str, str]] = []
-        if needs_change:
+        if includes_change:
             required += [("_changePKH", "Ripemd160"), ("_changeAmount", "bigint")]
         if needs_new_amount:
             required.append(("_newAmount", "bigint"))
@@ -333,7 +344,7 @@ def stateful_scaffold_error(program: ANFProgram) -> str | None:
                 elif any(_contains(n, _DATA_OUTPUT_KINDS) for n in _nested(b.value)):
                     data_out.append(b)
         tail = _Emitter(taken, counter)
-        _continuation(tail, needs_change, [b.name for b in state_out], [b.name for b in data_out])
+        _continuation(tail, needs_change, includes_change, [b.name for b in state_out], [b.name for b in data_out])
         offset = len(rest) - len(tail.out)
         for i, e in enumerate(tail.out):
             if offset + i < 0 or not match.binding(e, rest[offset + i]):

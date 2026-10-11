@@ -84,7 +84,13 @@ fn prologue(e: &mut Emitter, sighash_mode: i64, has_mutable_state: bool) {
     }
 }
 
-fn continuation(e: &mut Emitter, needs_change: bool, state_refs: &[String], data_refs: &[String]) {
+fn continuation(
+    e: &mut Emitter,
+    needs_change: bool,
+    includes_change: bool,
+    state_refs: &[String],
+    data_refs: &[String],
+) {
     if !needs_change {
         return;
     }
@@ -95,16 +101,21 @@ fn continuation(e: &mut Emitter, needs_change: bool, state_refs: &[String], data
         let ok = e.emit(bin_op(">=", &na, &input, None));
         e.emit(assert(&ok, false));
     }
-    let pkh = e.emit(load_param("_changePKH"));
-    let amt = e.emit(load_param("_changeAmount"));
-    let zero = e.emit(ANFValue::LoadConst { value: serde_json::Value::from(0) });
-    let non_zero = e.emit(bin_op("!==", &amt, &zero, None));
-    let mut then_e = e.sub();
-    then_e.emit(call("buildChangeOutput", &[&pkh, &amt]));
-    let mut else_e = e.sub();
-    else_e.emit(ANFValue::LoadConst { value: serde_json::Value::from("") });
-    let (then, else_branch) = (then_e.out, else_e.out);
-    let change = e.emit(ANFValue::If { cond: non_zero, then, else_branch, results: Vec::new() });
+    // N-038: no change segment under a SIGHASH_SINGLE base.
+    let change = if includes_change {
+        let pkh = e.emit(load_param("_changePKH"));
+        let amt = e.emit(load_param("_changeAmount"));
+        let zero = e.emit(ANFValue::LoadConst { value: serde_json::Value::from(0) });
+        let non_zero = e.emit(bin_op("!==", &amt, &zero, None));
+        let mut then_e = e.sub();
+        then_e.emit(call("buildChangeOutput", &[&pkh, &amt]));
+        let mut else_e = e.sub();
+        else_e.emit(ANFValue::LoadConst { value: serde_json::Value::from("") });
+        let (then, else_branch) = (then_e.out, else_e.out);
+        Some(e.emit(ANFValue::If { cond: non_zero, then, else_branch, results: Vec::new() }))
+    } else {
+        None
+    };
 
     let mut acc = if let Some((first, more)) = state_refs.split_first() {
         let mut acc = first.clone();
@@ -121,7 +132,9 @@ fn continuation(e: &mut Emitter, needs_change: bool, state_refs: &[String], data
     for r in data_refs {
         acc = e.emit(call("cat", &[&acc, r]));
     }
-    acc = e.emit(call("cat", &[&acc, &change]));
+    if let Some(change) = change {
+        acc = e.emit(call("cat", &[&acc, &change]));
+    }
     let hash = e.emit(call("hash256", &[&acc]));
     let p = e.emit(load_param("txPreimage"));
     let out_hash = e.emit(call("extractOutputHash", &[&p]));
@@ -151,7 +164,9 @@ fn contains(bindings: &[ANFBinding], pred: fn(&ANFValue) -> bool) -> bool {
 /// The frontend's side-effect summary, read off the IR (update_prop is a state
 /// mutation, add_output / add_raw_output a state output, add_data_output a
 /// data output) at any depth and through method_calls to private methods.
-fn shape(program: &ANFProgram, method: &ANFMethod) -> (bool, bool) {
+/// (needs_change, includes_change, needs_new_amount) — `includes_change` reads
+/// the method's own `sigHashType` (N-038).
+pub(crate) fn shape(program: &ANFProgram, method: &ANFMethod) -> (bool, bool, bool) {
     let privates: HashMap<&str, &ANFMethod> = program
         .methods
         .iter()
@@ -179,7 +194,12 @@ fn shape(program: &ANFProgram, method: &ANFMethod) -> (bool, bool) {
             stack.extend(nested(&b.value));
         }
     }
-    (mutates || state_out || data_out, (mutates || data_out) && !state_out)
+    let needs_change = mutates || state_out || data_out;
+    let includes_change = crate::frontend::side_effect_summary::includes_change_output(
+        needs_change,
+        method.sighash_type.unwrap_or(crate::frontend::sighash_directive::SIGHASH_DEFAULT),
+    );
+    (needs_change, includes_change, (mutates || data_out) && !state_out)
 }
 
 fn describe(v: &ANFValue) -> String {
@@ -312,11 +332,11 @@ pub(crate) fn check_ir_stateful_scaffolding(program: &ANFProgram) -> Result<(), 
         if !m.is_public || m.name == "constructor" {
             continue;
         }
-        let (needs_change, needs_new_amount) = shape(program, m);
+        let (needs_change, includes_change, needs_new_amount) = shape(program, m);
 
         // (1) the parameters, contiguous and once each.
         let mut required: Vec<(&str, &str)> = Vec::new();
-        if needs_change {
+        if includes_change {
             required.push(("_changePKH", "Ripemd160"));
             required.push(("_changeAmount", "bigint"));
         }
@@ -377,7 +397,7 @@ pub(crate) fn check_ir_stateful_scaffolding(program: &ANFProgram) -> Result<(), 
         let state_refs: Vec<String> = state_out.iter().map(|b| b.name.clone()).collect();
         let data_refs: Vec<String> = data_out.iter().map(|b| b.name.clone()).collect();
         let mut tail = Emitter::new(&taken, &next);
-        continuation(&mut tail, needs_change, &state_refs, &data_refs);
+        continuation(&mut tail, needs_change, includes_change, &state_refs, &data_refs);
         let offset = rest.len() as isize - tail.out.len() as isize;
         for (i, e) in tail.out.iter().enumerate() {
             let idx = offset + i as isize;

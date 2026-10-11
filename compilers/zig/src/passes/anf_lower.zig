@@ -17,6 +17,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const stateful_scaffold = @import("../ir/stateful_scaffold.zig");
 const typecheck = @import("typecheck.zig");
 const validate = @import("validate.zig");
 
@@ -630,7 +631,12 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             // Methods that use addOutput, addDataOutput, or mutate state need hashOutputs
             // verification (i.e. change output support).
             const has_data_output = methodHasAddDataOutput(method, contract);
-            const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method, contract) or has_data_output;
+            // N-038: under a SIGHASH_SINGLE base the change output is not
+            // committed, so the method takes no _changePKH / _changeAmount.
+            const needs_change_output = stateful_scaffold.includesChange(
+                methodMutatesState(method, contract) or methodHasAddOutput(method, contract) or has_data_output,
+                method.sighash_type,
+            );
             // Single-output continuation needs _newAmount to allow changing the UTXO
             // satoshis. Multi-output (addOutput) methods specify amounts explicitly.
             // Methods that emit only data outputs (no addOutput) still run the
@@ -751,7 +757,13 @@ fn lowerStatefulPublicMethod(
     // Methods that use addOutput, addDataOutput, or mutate state need hashOutputs
     // verification (change output support).
     const has_data_output = methodHasAddDataOutput(method, contract);
-    const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method, contract) or has_data_output;
+    // N-038: under a SIGHASH_SINGLE base the change output is not committed
+    // (hashOutputs = hash256(output[inputIndex])), so there are no change
+    // params and the continuation hash has no change segment.
+    const needs_change_output = stateful_scaffold.includesChange(
+        methodMutatesState(method, contract) or methodHasAddOutput(method, contract) or has_data_output,
+        method.sighash_type,
+    );
     // Single-output continuation needs _newAmount. Methods that emit only data
     // outputs (no addOutput) still run the single-output continuation path, so
     // they also need _newAmount.
@@ -879,30 +891,35 @@ fn lowerStatefulPublicMethod(
         // the P2PKH change output when non-zero, and empty bytes (cat with empty
         // is a no-op) when zero, reproducing the omission. For any change > 0 the
         // hashed bytes are unchanged; only the emitted script gains the guard.
-        const change_pkh_ref = try ctx.emit(.{ .load_param = .{ .name = "_changePKH" } });
-        const change_amount_ref = try ctx.emit(.{ .load_param = .{ .name = "_changeAmount" } });
-        const zero_ref = try ctx.emit(makeLoadConstInt(0));
-        const change_nonzero_ref = try ctx.emit(.{ .bin_op = .{
-            .op = "!==",
-            .left = change_amount_ref,
-            .right = zero_ref,
-        } });
-        var change_then_ctx = try ctx.subContext();
-        _ = try change_then_ctx.emit(.{ .call = .{
-            .func = "buildChangeOutput",
-            .args = try change_then_ctx.allocSlice(&.{ change_pkh_ref, change_amount_ref }),
-        } });
-        ctx.syncCounter(&change_then_ctx);
-        var change_else_ctx = try ctx.subContext();
-        _ = try change_else_ctx.emit(makeLoadConstString(change_else_ctx.allocator, ""));
-        ctx.syncCounter(&change_else_ctx);
-        const change_if = try ctx.allocator.create(types.ANFIf);
-        change_if.* = .{
-            .cond = change_nonzero_ref,
-            .then = try change_then_ctx.bindings.toOwnedSlice(ctx.allocator),
-            .@"else" = try change_else_ctx.bindings.toOwnedSlice(ctx.allocator),
-        };
-        const change_output_ref = try ctx.emit(.{ .@"if" = change_if });
+        //
+        // N-038: under a SIGHASH_SINGLE base there is no change segment.
+        var change_output_ref: ?[]const u8 = null;
+        if (needs_change_output) {
+            const change_pkh_ref = try ctx.emit(.{ .load_param = .{ .name = "_changePKH" } });
+            const change_amount_ref = try ctx.emit(.{ .load_param = .{ .name = "_changeAmount" } });
+            const zero_ref = try ctx.emit(makeLoadConstInt(0));
+            const change_nonzero_ref = try ctx.emit(.{ .bin_op = .{
+                .op = "!==",
+                .left = change_amount_ref,
+                .right = zero_ref,
+            } });
+            var change_then_ctx = try ctx.subContext();
+            _ = try change_then_ctx.emit(.{ .call = .{
+                .func = "buildChangeOutput",
+                .args = try change_then_ctx.allocSlice(&.{ change_pkh_ref, change_amount_ref }),
+            } });
+            ctx.syncCounter(&change_then_ctx);
+            var change_else_ctx = try ctx.subContext();
+            _ = try change_else_ctx.emit(makeLoadConstString(change_else_ctx.allocator, ""));
+            ctx.syncCounter(&change_else_ctx);
+            const change_if = try ctx.allocator.create(types.ANFIf);
+            change_if.* = .{
+                .cond = change_nonzero_ref,
+                .then = try change_then_ctx.bindings.toOwnedSlice(ctx.allocator),
+                .@"else" = try change_else_ctx.bindings.toOwnedSlice(ctx.allocator),
+            };
+            change_output_ref = try ctx.emit(.{ .@"if" = change_if });
+        }
 
         if (add_output_refs.len > 0) {
             // Multi-output: concat all state outputs, then all data outputs,
@@ -920,10 +937,12 @@ fn lowerStatefulPublicMethod(
                     .args = try ctx.allocSlice(&.{ accumulated, dref }),
                 } });
             }
-            accumulated = try ctx.emit(.{ .call = .{
-                .func = "cat",
-                .args = try ctx.allocSlice(&.{ accumulated, change_output_ref }),
-            } });
+            if (change_output_ref) |cref| {
+                accumulated = try ctx.emit(.{ .call = .{
+                    .func = "cat",
+                    .args = try ctx.allocSlice(&.{ accumulated, cref }),
+                } });
+            }
             const hash_ref = try ctx.emit(.{ .call = .{
                 .func = "hash256",
                 .args = try ctx.allocSlice(&.{accumulated}),
@@ -958,10 +977,10 @@ fn lowerStatefulPublicMethod(
                     .args = try ctx.allocSlice(&.{ accumulated, dref }),
                 } });
             }
-            const all_outputs = try ctx.emit(.{ .call = .{
+            const all_outputs = if (change_output_ref) |cref| try ctx.emit(.{ .call = .{
                 .func = "cat",
-                .args = try ctx.allocSlice(&.{ accumulated, change_output_ref }),
-            } });
+                .args = try ctx.allocSlice(&.{ accumulated, cref }),
+            } }) else accumulated;
             const hash_ref = try ctx.emit(.{ .call = .{
                 .func = "hash256",
                 .args = try ctx.allocSlice(&.{all_outputs}),

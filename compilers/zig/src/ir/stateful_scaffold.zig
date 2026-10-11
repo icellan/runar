@@ -31,6 +31,25 @@ pub const Error = error{ StatefulScaffoldMismatch, OutOfMemory };
 
 const sighash_default: i32 = 0x41;
 
+/// N-038: whether a method's continuation commits (and its ABI takes) the
+/// change output. Under a SIGHASH_SINGLE base BIP-143 commits hashOutputs to
+/// hash256(output[inputIndex]) only, so the change output is not part of the
+/// committed set and the method takes no `_changePKH` / `_changeAmount`.
+pub fn includesChange(needs_change: bool, sighash_type: ?i32) bool {
+    return needs_change and ((sighash_type orelse sighash_default) & 0x1f) != 0x03;
+}
+
+/// Whether a public stateful method produces a continuation (mutates state or
+/// declares outputs, at any depth and through private method_calls). The
+/// artifact's `isTerminal` is its negation.
+pub fn hasContinuation(alloc: std.mem.Allocator, methods: []const types.ANFMethod, bindings: []const types.ANFBinding) Error!bool {
+    var fx: Effects = .{};
+    var visited: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer visited.deinit(alloc);
+    try walkEffects(alloc, methods, bindings, &fx, &visited);
+    return fx.mutates or fx.state or fx.data;
+}
+
 const Ref = union(enum) { local: usize, outside: []const u8 };
 
 const Kind = enum { load_param, load_const_int, load_const_str, check_preimage, assert, call, bin_op, deserialize_state, get_state_script, @"if" };
@@ -104,7 +123,7 @@ fn prologue(b: *Builder, seq: *std.ArrayListUnmanaged(usize), sighash_mode: i32,
     }
 }
 
-fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: bool, state_out: []const *const types.ANFBinding, data_out: []const *const types.ANFBinding) Error!void {
+fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: bool, includes_change: bool, state_out: []const *const types.ANFBinding, data_out: []const *const types.ANFBinding) Error!void {
     if (!needs_change) return;
     if (state_out.len == 0) {
         const p = try b.emit(seq, param("txPreimage"));
@@ -113,13 +132,17 @@ fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: 
         const ok = try b.emit(seq, binop(">=", na, amount, false));
         _ = try b.emit(seq, assertOf(ok));
     }
-    const pkh = try b.emit(seq, param("_changePKH"));
-    const amt = try b.emit(seq, param("_changeAmount"));
-    const zero = try b.emit(seq, .{ .kind = .load_const_int, .int = 0 });
-    const non_zero = try b.emit(seq, binop("!==", amt, zero, false));
-    const then_id = try b.add(call2("buildChangeOutput", pkh, amt));
-    const else_id = try b.add(.{ .kind = .load_const_str, .text = "" });
-    const change = try b.emit(seq, .{ .kind = .@"if", .refs = refs1(non_zero), .nrefs = 1, .then_id = then_id, .else_id = else_id });
+    // N-038: no change segment under a SIGHASH_SINGLE base.
+    var change: ?Ref = null;
+    if (includes_change) {
+        const pkh = try b.emit(seq, param("_changePKH"));
+        const amt = try b.emit(seq, param("_changeAmount"));
+        const zero = try b.emit(seq, .{ .kind = .load_const_int, .int = 0 });
+        const non_zero = try b.emit(seq, binop("!==", amt, zero, false));
+        const then_id = try b.add(call2("buildChangeOutput", pkh, amt));
+        const else_id = try b.add(.{ .kind = .load_const_str, .text = "" });
+        change = try b.emit(seq, .{ .kind = .@"if", .refs = refs1(non_zero), .nrefs = 1, .then_id = then_id, .else_id = else_id });
+    }
 
     var acc: Ref = undefined;
     if (state_out.len > 0) {
@@ -132,7 +155,7 @@ fn continuation(b: *Builder, seq: *std.ArrayListUnmanaged(usize), needs_change: 
         acc = try b.emit(seq, .{ .kind = .call, .text = "computeStateOutput", .refs = .{ p, script, na }, .nrefs = 3 });
     }
     for (data_out) |o| acc = try b.emit(seq, call2("cat", acc, .{ .outside = o.name }));
-    acc = try b.emit(seq, call2("cat", acc, change));
+    if (change) |c| acc = try b.emit(seq, call2("cat", acc, c));
     const hash = try b.emit(seq, call1("hash256", acc));
     const p = try b.emit(seq, param("txPreimage"));
     const out_hash = try b.emit(seq, call1("extractOutputHash", p));
@@ -335,12 +358,13 @@ pub fn check(alloc: std.mem.Allocator, properties: []const types.ANFProperty, me
         try walkEffects(alloc, methods, m.body, &fx, &visited);
         const needs_change = fx.mutates or fx.state or fx.data;
         const needs_new_amount = (fx.mutates or fx.data) and !fx.state;
+        const includes_change = includesChange(needs_change, m.sighash_type);
 
         // (1) the parameters, contiguous and once each.
         var req_names: [4][]const u8 = undefined;
         var req_types: [4][]const u8 = undefined;
         var nreq: usize = 0;
-        if (needs_change) {
+        if (includes_change) {
             req_names[0] = "_changePKH";
             req_types[0] = "Ripemd160";
             req_names[1] = "_changeAmount";
@@ -416,7 +440,7 @@ pub fn check(alloc: std.mem.Allocator, properties: []const types.ANFProperty, me
                 else => {},
             }
         }
-        try continuation(&builder, &tail, needs_change, state_out.items, data_out.items);
+        try continuation(&builder, &tail, needs_change, includes_change, state_out.items, data_out.items);
 
         const names = try alloc.alloc(?[]const u8, builder.arena.items.len);
         defer alloc.free(names);

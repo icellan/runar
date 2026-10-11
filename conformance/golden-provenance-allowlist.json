@@ -2911,6 +2911,33 @@
       "reviewer": "siggi",
       "review-status": "reviewed",
       "date": "2026-10-06"
+    },
+    {
+      "path": "conformance/sdk-call/sighash-single-stateful.json",
+      "sha256": "2ed341189728e623e7df8df7b4f2360fd990d85d5926ff09c136ff4528f926c5",
+      "verified-against": "second-implementation",
+      "reason": "N-038 (R64 + R68, user decision 2026-10-11): new golden family conformance/sdk-call/, stamped by conformance/sdk-call/generate.ts from the TS reference for conformance/sdk-call/SingleCounter.runar.ts, a stateful @sighash SINGLE|FORKID method whose continuation now hashes only its own output (no _changePKH/_changeAmount). This is the cross-SDK call vector: artifact, contract + funding UTXO, key, and the expected input-0 unlocking script, output 0 and output count for a SINGLE call carrying a change output. Verified against: (1) @bsv/sdk Spend.validate, an interpreter independent of every Runar SDK: conformance/sdk-call/sdk-call.test.ts replays the recorded call tx and the contract input is ACCEPTED, while a tampered output[0] (state byte, or satoshis -1) is REJECTED; (2) second implementations: all 7 SDKs (TS, Go, Rust, Python, Zig, Ruby, Java) independently build the same call through their own SDK and reproduce input0UnlockingHex, output0 and outputCount byte for byte (per-tier n038 vector tests), and the Go tier's go-sdk interpreter also accepts input 0 and rejects the tampered output[0]; generate.ts --check re-derives the file without drift.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-11"
+    },
+    {
+      "path": "conformance/sdk-call/expected-script.hex",
+      "sha256": "622a468fe91c7a1430caa622cbb6f7d54404be1ef3bf27b1eea408d201f7446b",
+      "verified-against": "second-implementation",
+      "reason": "N-038 (R64 + R68, user decision 2026-10-11): new golden family conformance/sdk-call/, stamped by conformance/sdk-call/generate.ts from the TS reference for conformance/sdk-call/SingleCounter.runar.ts, a stateful @sighash SINGLE|FORKID method whose continuation now hashes only its own output (no _changePKH/_changeAmount). Fold-OFF compiled script pin (fold ON is byte-identical for this contract). Verified against: (1) second implementations: all 7 compilers (TS, Go, Rust, Python, Zig, Ruby, Java) compile the source to exactly these bytes in their own N-038 compiler tests; (2) @bsv/sdk Spend.validate: the same script is the locking script of the sdk-call vector, whose SINGLE call with a change output is accepted and whose tampered output[0] is rejected; it equals vector.artifact.script (sdk-call.test.ts).",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-11"
+    },
+    {
+      "path": "conformance/sdk-call/expected-ir.json",
+      "sha256": "4aeea707ef9fdc88247a1c13009111fecd27b79dc7121a7ae52e05924974715d",
+      "verified-against": "second-implementation",
+      "reason": "N-038 (R64 + R68, user decision 2026-10-11): new golden family conformance/sdk-call/, stamped by conformance/sdk-call/generate.ts from the TS reference for conformance/sdk-call/SingleCounter.runar.ts, a stateful @sighash SINGLE|FORKID method whose continuation now hashes only its own output (no _changePKH/_changeAmount). Fold-OFF canonical ANF IR pin (sorted keys, no sourceLoc). Verified against: second implementations: the Go, Rust, Python and Ruby compilers emit this IR exactly in their N-038 compiler tests (Zig and Java --emit-ir were compared against it by CLI during N-038); the Ruby, Python and Java --ir paths and the TS --ir stateful-scaffold check compile it to expected-script.hex (per-tier N-038 tests, n038-sighash-single-continuation.test.ts). It shows the SINGLE method bump with params [txPreimage] and no change segment, and reset (ALL|FORKID) unchanged.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-11"
     }
   ]
 }

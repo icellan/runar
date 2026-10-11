@@ -97,16 +97,25 @@ class SighashCodegenTest {
         String dflt = PipelineTestSupport.hex(counterOut(""), "Counter.runar.ts");
         String single = PipelineTestSupport.hex(
             counterOut("/** @sighash SINGLE|FORKID */"), "Counter.runar.ts");
-        assertEquals(dflt.length(), single.length());
+        // N-038 (R64): the SINGLE continuation also drops the change segment and
+        // the _changePKH / _changeAmount params (BIP-143 SINGLE commits
+        // hash256(output[0]) only), which shrinks the script and shifts stack
+        // depths from byte 486 on. The pure flag swap is therefore checked over
+        // the prologue before that (one byte: the binding flag at 394), and the
+        // preimage-type assert const (`01<mode>9d`, flag at 521) in place.
+        assertTrue(single.length() < dflt.length(), "SINGLE drops the change segment");
         java.util.List<Integer> diffBytes = new java.util.ArrayList<>();
-        for (int i = 0; i < dflt.length(); i += 2) {
+        for (int i = 0; i < 2 * 486; i += 2) {
             if (!dflt.regionMatches(i, single, i, 2)) {
                 diffBytes.add(i / 2);
                 assertEquals("41", dflt.substring(i, i + 2));
                 assertEquals("43", single.substring(i, i + 2));
             }
         }
-        assertEquals(java.util.List.of(394, 521), diffBytes,
-            "SINGLE must change exactly the binding flag byte + the preimage-type assert const");
+        assertEquals(java.util.List.of(394), diffBytes,
+            "SINGLE must change exactly the binding flag byte in the prologue");
+        assertEquals("01419d", dflt.substring(2 * 520, 2 * 523));
+        assertEquals("01439d", single.substring(2 * 520, 2 * 523),
+            "the preimage-type assert const carries the declared mode");
     }
 }

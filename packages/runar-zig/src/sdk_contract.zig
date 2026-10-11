@@ -643,6 +643,9 @@ pub const RunarContract = struct {
         // builders AND terminal var-length-state readers — issue #100). Older
         // artifacts lack it; fall back to the legacy rule (codePart iff change).
         const method_uses_code_part = abi_method.uses_code_part orelse needs_change;
+        // N-038: "has a continuation" for the state auto-compute below. A
+        // SIGHASH_SINGLE method continues without a _changePKH param.
+        const has_continuation = abi_method.hasContinuation();
 
         // Drop auto-injected continuation params AND intent-intrinsic
         // witness params (`_prevOutScript_<i>`, `_serialisedOutputs`) from
@@ -865,7 +868,7 @@ pub const RunarContract = struct {
             //   - no explicit state: auto-compute both from ANF.
             const has_explicit_state = if (options) |o| o.new_state != null else false;
             if (has_multi_output) {
-                if (needs_change and self.artifact.anf_json != null) {
+                if (has_continuation and self.artifact.anf_json != null) {
                     anf_data_outputs = try self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs);
                 }
                 const code_part = try self.getCodePartHex();
@@ -899,7 +902,7 @@ pub const RunarContract = struct {
                 // Skip new_locking_script — multi_outputs_hex feeds the
                 // tx builder via stateful_contract_outputs below.
             } else if (has_explicit_state) {
-                if (needs_change and self.artifact.anf_json != null) {
+                if (has_continuation and self.artifact.anf_json != null) {
                     anf_data_outputs = try self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs);
                 }
                 const ns = options.?.new_state.?;
@@ -911,7 +914,7 @@ pub const RunarContract = struct {
                 }
                 self.state = vals;
                 new_locking_script = try self.getLockingScript();
-            } else if (needs_change and self.artifact.anf_json != null) {
+            } else if (has_continuation and self.artifact.anf_json != null) {
                 // Auto-compute new state + data outputs from ANF IR
                 anf_data_outputs = try self.autoComputeState(method_name, user_params, resolved_args, &anf_ordered_outputs, .{
                     .input_amount = contract_utxo.satoshis,

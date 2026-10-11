@@ -874,6 +874,17 @@ digit or `_` (for example `@sighashType`) is prose, not a marker.
 signed, which is what lets one party fix their own output and leave the rest of
 the transaction open for a counterparty to complete.
 
+On a `StatefulSmartContract` method, `SINGLE` changes the auto-injected
+continuation too: it hashes only the method's own output, the one SINGLE
+commits, so the method takes no `_changePKH` / `_changeAmount` parameters. A
+caller may still add a change output after the continuation. The covenant does
+not cover it; the funding input's own signature does. Because SINGLE does not
+pin the continuation's value, such a method must emit exactly one explicit
+`addOutput` / `addRawOutput` carrying the full protected amount (for example
+`extractAmount(this.txPreimage)`); a mutate-only SINGLE method is a compile
+error. See
+[`conformance/sdk-call/SingleCounter.runar.ts`](../conformance/sdk-call/SingleCounter.runar.ts).
+
 Worked example, with both directives and their falsifications:
 [`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/).
 

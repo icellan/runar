@@ -206,7 +206,12 @@ def _is_terminal_method(method: AbiMethod, is_stateful: bool) -> bool:
     # Check for explicit is_terminal attribute
     if hasattr(method, 'is_terminal') and method.is_terminal is not None:  # type: ignore[attr-defined]
         return method.is_terminal  # type: ignore[attr-defined]
-    # Fallback: terminal if no _changePKH param
+    # Fallback: terminal if no _changePKH param. N-038: a SIGHASH_SINGLE
+    # method continues without _changePKH (BIP-143 SINGLE does not commit the
+    # change output); the compiler omits isTerminal for it.
+    sig_hash_type = getattr(method, 'sig_hash_type', None)
+    if sig_hash_type is not None and (sig_hash_type & 0x1F) == 0x03:
+        return False
     return not any(p.name == '_changePKH' for p in method.params)
 
 

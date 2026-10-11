@@ -92,6 +92,11 @@ export function emitStatefulPrologue<C extends ScaffoldContext<C>>(
  *   2. data outputs        (from this.addDataOutput, tracked via
  *                           addDataOutputRef) — NEW
  *   3. change output       (P2PKH to _changePKH, value = _changeAmount)
+ *                          — omitted entirely under a SIGHASH_SINGLE base
+ *                          (`shape.includesChange` false, N-038): BIP-143
+ *                          SINGLE commits hashOutputs to hash256 of the
+ *                          same-index output only, so the hash covers the
+ *                          method's own output(s) and nothing else
  *
  * For the "single-output" fast path (no addOutput used, but state is
  * mutated), the state output is computed on the fly from
@@ -136,22 +141,32 @@ export function emitStatefulContinuation<C extends ScaffoldContext<C>>(
   // (cat with empty is a no-op) when zero, reproducing the omission. For
   // any change > 0 the hashed bytes are unchanged; only the emitted
   // script gains the guard.
-  const changePKHRef = ctx.emit({ kind: 'load_param', name: '_changePKH' });
-  const changeAmountRef = ctx.emit({ kind: 'load_param', name: '_changeAmount' });
-  const zeroRef = ctx.emit({ kind: 'load_const', value: 0n });
-  const changeNonZeroRef = ctx.emit({ kind: 'bin_op', op: '!==', left: changeAmountRef, right: zeroRef });
-  const changeThenCtx = ctx.subContext();
-  changeThenCtx.emit({ kind: 'call', func: 'buildChangeOutput', args: [changePKHRef, changeAmountRef] });
-  ctx.syncCounter(changeThenCtx);
-  const changeElseCtx = ctx.subContext();
-  changeElseCtx.emit({ kind: 'load_const', value: '' });
-  ctx.syncCounter(changeElseCtx);
-  const changeOutputRef = ctx.emit({
-    kind: 'if',
-    cond: changeNonZeroRef,
-    then: changeThenCtx.bindings,
-    else: changeElseCtx.bindings,
-  });
+  //
+  // N-038: under a SIGHASH_SINGLE base (`shape.includesChange` false) the
+  // change output is not committed — hashOutputs = hash256(output[inputIndex])
+  // — so no change segment is built and the hash covers the method's own
+  // output(s) only.
+  let changeOutputRef: string | undefined;
+  if (shape.includesChange) {
+    const changePKHRef = ctx.emit({ kind: 'load_param', name: '_changePKH' });
+    const changeAmountRef = ctx.emit({ kind: 'load_param', name: '_changeAmount' });
+    const zeroRef = ctx.emit({ kind: 'load_const', value: 0n });
+    const changeNonZeroRef = ctx.emit({ kind: 'bin_op', op: '!==', left: changeAmountRef, right: zeroRef });
+    const changeThenCtx = ctx.subContext();
+    changeThenCtx.emit({ kind: 'call', func: 'buildChangeOutput', args: [changePKHRef, changeAmountRef] });
+    ctx.syncCounter(changeThenCtx);
+    const changeElseCtx = ctx.subContext();
+    changeElseCtx.emit({ kind: 'load_const', value: '' });
+    ctx.syncCounter(changeElseCtx);
+    changeOutputRef = ctx.emit({
+      kind: 'if',
+      cond: changeNonZeroRef,
+      then: changeThenCtx.bindings,
+      else: changeElseCtx.bindings,
+    });
+  }
+  const catChange = (acc: string): string =>
+    changeOutputRef === undefined ? acc : ctx.emit({ kind: 'call', func: 'cat', args: [acc, changeOutputRef] });
 
   if (addOutputRefs.length > 0) {
     // Multi-output continuation: concat all state outputs, then all
@@ -163,7 +178,7 @@ export function emitStatefulContinuation<C extends ScaffoldContext<C>>(
     for (const dataRef of addDataOutputRefs) {
       accumulated = ctx.emit({ kind: 'call', func: 'cat', args: [accumulated, dataRef] });
     }
-    accumulated = ctx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
+    accumulated = catChange(accumulated);
     const hashRef = ctx.emit({ kind: 'call', func: 'hash256', args: [accumulated] });
     const preimageRef2 = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
     const outputHashRef = ctx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef2] });
@@ -180,7 +195,7 @@ export function emitStatefulContinuation<C extends ScaffoldContext<C>>(
     for (const dataRef of addDataOutputRefs) {
       accumulated = ctx.emit({ kind: 'call', func: 'cat', args: [accumulated, dataRef] });
     }
-    const allOutputs = ctx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
+    const allOutputs = catChange(accumulated);
     const hashRef = ctx.emit({ kind: 'call', func: 'hash256', args: [allOutputs] });
     const preimageRef4 = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
     const outputHashRef = ctx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
@@ -254,7 +269,7 @@ function irMethodShape(program: ANFProgram, method: ANFMethod): ContinuationShap
     }
   };
   walk(method.body);
-  return continuationShape(effects);
+  return continuationShape(effects, method.sigHashType);
 }
 
 function describe(v: ANFValue): string {
@@ -369,7 +384,7 @@ export function assertIrStatefulScaffolding(program: ANFProgram): void {
 
     // (1) the parameters, contiguous and once each.
     const required: Array<[string, string]> = [];
-    if (shape.needsChange) required.push(['_changePKH', 'Ripemd160'], ['_changeAmount', 'bigint']);
+    if (shape.includesChange) required.push(['_changePKH', 'Ripemd160'], ['_changeAmount', 'bigint']);
     if (shape.needsNewAmount) required.push(['_newAmount', 'bigint']);
     required.push(['txPreimage', 'SigHashPreimage']);
     const params = method.params;

@@ -794,6 +794,13 @@ func (c *RunarContract) PrepareCall(
 			methodNeedsNewAmount = true
 		}
 	}
+	// N-038: a SIGHASH_SINGLE stateful method continues the contract but takes
+	// no _changePKH (BIP-143 SINGLE does not commit the change output), so
+	// "has a continuation" is read from the ABI's sighash base + isTerminal,
+	// not from the change param alone.
+	methodHasContinuation := methodNeedsChange ||
+		(method.SigHashType != nil && (*method.SigHashType&0x1f) == 0x03 &&
+			(method.IsTerminal == nil || !*method.IsTerminal))
 	// Whether the unlocking script is prefixed with _codePart. New artifacts
 	// carry the authoritative UsesCodePart flag (true for continuation builders
 	// AND terminal var-length-state readers — issue #100). Older artifacts lack
@@ -1086,7 +1093,7 @@ func (c *RunarContract) PrepareCall(
 			for k, v := range options.NewState {
 				c.state[k] = v
 			}
-		} else if methodNeedsChange && autoComputedState != nil {
+		} else if methodHasContinuation && autoComputedState != nil {
 			for k, v := range autoComputedState {
 				c.state[k] = v
 			}

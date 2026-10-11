@@ -381,11 +381,16 @@ module RunarCompiler
           # Methods that use addOutput / addDataOutput or mutate state need hashOutputs
           # verification.
           has_data_output = _method_has_add_data_output(method, contract)
-          needs_change_output = (
+          needs_continuation = (
             _method_mutates_state(method, contract) ||
             _method_has_add_output(method, contract) ||
             has_data_output
           )
+          # N-038: under a SIGHASH_SINGLE base BIP-143 commits hashOutputs to the
+          # same-index output only, so the change output is not committed and the
+          # method takes no _changePKH / _changeAmount.
+          needs_change_output = needs_continuation &&
+                                ((method_sighash.nil? ? SIGHASH_DEFAULT : method_sighash) & 0x1F) != 0x03
 
           # Register implicit parameters
           if needs_change_output
@@ -503,25 +508,35 @@ module RunarCompiler
             # (cat with empty is a no-op) when zero, reproducing the omission.
             # For any change > 0 the hashed bytes are unchanged; only the emitted
             # script gains the guard.
-            change_pkh_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changePKH" })
-            change_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changeAmount" })
-            zero_ref = method_ctx.emit(_make_load_const_int(0))
-            change_nonzero_ref = method_ctx.emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
-              v.op = "!=="
-              v.left = change_amount_ref
-              v.right = zero_ref
-            end)
-            change_then_ctx = method_ctx.sub_context
-            change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
-            method_ctx.sync_counter(change_then_ctx)
-            change_else_ctx = method_ctx.sub_context
-            change_else_ctx.emit(_make_load_const_string(""))
-            method_ctx.sync_counter(change_else_ctx)
-            change_output_ref = method_ctx.emit(IR::ANFValue.new(kind: "if").tap do |v|
-              v.cond = change_nonzero_ref
-              v.then = change_then_ctx.bindings
-              v.else_ = change_else_ctx.bindings
-            end)
+            # N-038: under a SIGHASH_SINGLE base no change segment exists
+            # (hashOutputs = hash256(output[inputIndex])).
+            change_output_ref = nil
+            if needs_change_output
+              change_pkh_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changePKH" })
+              change_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changeAmount" })
+              zero_ref = method_ctx.emit(_make_load_const_int(0))
+              change_nonzero_ref = method_ctx.emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+                v.op = "!=="
+                v.left = change_amount_ref
+                v.right = zero_ref
+              end)
+              change_then_ctx = method_ctx.sub_context
+              change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
+              method_ctx.sync_counter(change_then_ctx)
+              change_else_ctx = method_ctx.sub_context
+              change_else_ctx.emit(_make_load_const_string(""))
+              method_ctx.sync_counter(change_else_ctx)
+              change_output_ref = method_ctx.emit(IR::ANFValue.new(kind: "if").tap do |v|
+                v.cond = change_nonzero_ref
+                v.then = change_then_ctx.bindings
+                v.else_ = change_else_ctx.bindings
+              end)
+            end
+            cat_change = lambda do |acc|
+              next acc if change_output_ref.nil?
+
+              method_ctx.emit(_make_call("cat", [acc, change_output_ref]))
+            end
 
             if add_output_refs.any?
               # Multi-output continuation: concat all state outputs, then all
@@ -533,7 +548,7 @@ module RunarCompiler
               add_data_output_refs.each do |data_ref|
                 accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
               end
-              accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+              accumulated = cat_change.call(accumulated)
               hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
               preimage_ref2 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref2]))
@@ -556,7 +571,7 @@ module RunarCompiler
               add_data_output_refs.each do |data_ref|
                 accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
               end
-              all_outputs = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+              all_outputs = cat_change.call(accumulated)
               hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
               preimage_ref4 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))

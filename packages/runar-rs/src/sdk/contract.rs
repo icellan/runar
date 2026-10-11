@@ -795,6 +795,13 @@ impl RunarContract {
         // _changePKH and _changeAmount). The SDK auto-computes these.
         let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
         let method_needs_new_amount = method.params.iter().any(|p| p.name == "_newAmount");
+        // N-038: a SIGHASH_SINGLE stateful method continues the contract but
+        // takes no `_changePKH` (BIP-143 SINGLE does not commit the change
+        // output), so "has a continuation" is read from the ABI's sighash base
+        // + isTerminal, not from the change param alone.
+        let method_has_continuation = method_needs_change
+            || (method.sig_hash_type.map_or(false, |t| (t & 0x1f) == 0x03)
+                && method.is_terminal != Some(true));
         // Whether the unlocking script is prefixed with `_codePart`. New
         // artifacts carry the authoritative `uses_code_part` flag (true for
         // continuation builders AND terminal var-length-state readers — issue
@@ -1132,7 +1139,7 @@ impl RunarContract {
                 for (k, v) in new_state {
                     self.state.insert(k.clone(), v.clone());
                 }
-            } else if method_needs_change {
+            } else if method_has_continuation {
                 if let Some(computed) = auto_computed_state.take() {
                     for (k, v) in computed {
                         self.state.insert(k, v);
@@ -1468,7 +1475,7 @@ impl RunarContract {
         // Issue #123: build the OP_PUSH_TX preimage under the method's declared
         // @sighash mode (default 0x41 = ALL|FORKID).
         let sig_hash_type = self.get_sig_hash_type(method_index);
-        let code_part_for_prefix = if method_needs_change && self.has_code_separator() {
+        let code_part_for_prefix = if method_has_continuation && self.has_code_separator() {
             Some(self.get_code_part_hex())
         } else {
             None

@@ -176,6 +176,12 @@ func isTerminalMethod(method ABIMethod, isStateful bool) bool {
 	if !isStateful {
 		return true
 	}
+	// N-038: a SIGHASH_SINGLE method continues the contract without a
+	// _changePKH param (the change output is not committed), so for it the
+	// ABI's isTerminal flag decides.
+	if method.SigHashType != nil && (*method.SigHashType&0x1f) == 0x03 {
+		return method.IsTerminal != nil && *method.IsTerminal
+	}
 	// Fallback: check for absence of _changePKH param
 	for _, p := range method.Params {
 		if p.Name == "_changePKH" {

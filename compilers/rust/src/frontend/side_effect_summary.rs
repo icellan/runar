@@ -64,19 +64,38 @@ pub type SideEffectSummary = HashMap<String, MethodEffects>;
 
 /// Continuation-shape decision derived from MethodEffects.
 ///
-/// `needs_change` controls injection of `_changePKH` and
-/// `_changeAmount`. `needs_new_amount` controls injection of
-/// `_newAmount`. The pair maps directly to ANF auto-param insertion;
-/// both sites must agree for a deployed contract to be spendable.
+/// `needs_change` is true when the method produces a continuation.
+/// `includes_change` controls injection of `_changePKH` and
+/// `_changeAmount` and the change segment of the continuation hash: it
+/// equals `needs_change` except under a SIGHASH_SINGLE base, where BIP-143
+/// commits hashOutputs to the same-index output ONLY, so the change output
+/// is not committed and the method takes no change params (N-038).
+/// `needs_new_amount` controls injection of `_newAmount`. These map
+/// directly to ANF auto-param insertion; both sites must agree for a
+/// deployed contract to be spendable.
 #[derive(Debug, Clone, Copy)]
 pub struct ContinuationShape {
     pub needs_change: bool,
+    pub includes_change: bool,
     pub needs_new_amount: bool,
     pub is_terminal: bool,
 }
 
+/// Whether a method with a continuation under `sighash_type` commits (and
+/// takes params for) the change output: false only under a SIGHASH_SINGLE
+/// base (N-038).
+pub fn includes_change_output(needs_change: bool, sighash_type: i64) -> bool {
+    needs_change && (sighash_type & 0x1f) != 0x03
+}
+
 impl ContinuationShape {
+    /// Shape under the default ALL|FORKID sighash mode.
     pub fn for_effects(eff: &MethodEffects) -> Self {
+        Self::for_effects_sighash(eff, super::sighash_directive::SIGHASH_DEFAULT)
+    }
+
+    /// Shape under the method's declared sighash type (N-038).
+    pub fn for_effects_sighash(eff: &MethodEffects, sighash_type: i64) -> Self {
         let needs_change = eff.mutates_state || eff.has_state_output || eff.has_data_output;
         // addOutput / addRawOutput already specify per-output amounts,
         // so when those are present the single-output _newAmount is
@@ -86,6 +105,7 @@ impl ContinuationShape {
             (eff.mutates_state || eff.has_data_output) && !eff.has_state_output;
         ContinuationShape {
             needs_change,
+            includes_change: includes_change_output(needs_change, sighash_type),
             needs_new_amount,
             is_terminal: !needs_change,
         }

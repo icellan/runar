@@ -992,6 +992,13 @@ export class RunarContract {
         : isStateful;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
+    // N-038: a SIGHASH_SINGLE stateful method continues the contract but takes
+    // no `_changePKH` (BIP-143 SINGLE does not commit the change output), so
+    // "has a continuation" is read from the ABI's sighash base + isTerminal,
+    // not from the change param alone.
+    const methodHasContinuation =
+      methodNeedsChange ||
+      (((method.sigHashType ?? 0x41) & 0x1f) === 0x03 && method.isTerminal !== true);
     // Whether the unlocking script is prefixed with `_codePart`. New artifacts
     // carry the authoritative `usesCodePart` flag (true for continuation
     // builders AND terminal var-length-state readers — issue #100). Older
@@ -1451,7 +1458,7 @@ export class RunarContract {
       if (options?.newState) {
         // Explicit newState takes priority (backward compat)
         this._state = { ...this._state, ...options.newState };
-      } else if (methodNeedsChange && autoComputedState && autoFlatState) {
+      } else if (methodHasContinuation && autoComputedState && autoFlatState) {
         const merged = { ...autoFlatState, ...autoComputedState };
         const regrouped = regroupFixedArrayState(merged, this.artifact.stateFields);
         this._state = { ...this._state, ...regrouped };

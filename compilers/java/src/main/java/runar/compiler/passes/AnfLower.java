@@ -410,7 +410,12 @@ public final class AnfLower {
                 boolean hasDataOutput = methodHasAddDataOutput(method, contract);
                 boolean hasAddOutput = methodHasAddOutput(method, contract);
                 boolean mutates = methodMutatesState(method, contract);
-                boolean needsChange = mutates || hasAddOutput || hasDataOutput;
+                // N-038: under a SIGHASH_SINGLE base the change output is not
+                // committed (hashOutputs = hash256(output[inputIndex])), so the
+                // method takes no _changePKH / _changeAmount and the
+                // continuation hash has no change segment.
+                boolean needsChange = StatefulScaffold.includesChange(
+                    mutates || hasAddOutput || hasDataOutput, method.sighashType());
                 boolean needsNewAmount = (mutates || hasDataOutput) && !hasAddOutput;
 
                 if (needsChange) {
@@ -501,18 +506,21 @@ public final class AnfLower {
                     // with empty is a no-op) when zero, reproducing the omission.
                     // For any change > 0 the hashed bytes are unchanged; only the
                     // emitted script gains the guard.
-                    String changePkhRef = ctx.emit(new LoadParam("_changePKH"));
-                    String changeAmountRef = ctx.emit(new LoadParam("_changeAmount"));
-                    String zeroRef = ctx.emit(makeLoadConstInt(BigInteger.ZERO));
-                    String changeNonZeroRef = ctx.emit(new BinOp("!==", changeAmountRef, zeroRef, null));
-                    LowerCtx changeThenCtx = ctx.subContext();
-                    changeThenCtx.emit(new Call("buildChangeOutput", List.of(changePkhRef, changeAmountRef)));
-                    ctx.syncCounter(changeThenCtx);
-                    LowerCtx changeElseCtx = ctx.subContext();
-                    changeElseCtx.emit(makeLoadConstString(""));
-                    ctx.syncCounter(changeElseCtx);
-                    String changeOutputRef = ctx.emit(new If(
-                        changeNonZeroRef, changeThenCtx.bindings, changeElseCtx.bindings));
+                    String changeOutputRef = null;
+                    if (needsChange) {
+                        String changePkhRef = ctx.emit(new LoadParam("_changePKH"));
+                        String changeAmountRef = ctx.emit(new LoadParam("_changeAmount"));
+                        String zeroRef = ctx.emit(makeLoadConstInt(BigInteger.ZERO));
+                        String changeNonZeroRef = ctx.emit(new BinOp("!==", changeAmountRef, zeroRef, null));
+                        LowerCtx changeThenCtx = ctx.subContext();
+                        changeThenCtx.emit(new Call("buildChangeOutput", List.of(changePkhRef, changeAmountRef)));
+                        ctx.syncCounter(changeThenCtx);
+                        LowerCtx changeElseCtx = ctx.subContext();
+                        changeElseCtx.emit(makeLoadConstString(""));
+                        ctx.syncCounter(changeElseCtx);
+                        changeOutputRef = ctx.emit(new If(
+                            changeNonZeroRef, changeThenCtx.bindings, changeElseCtx.bindings));
+                    }
 
                     if (!addOutputRefs.isEmpty()) {
                         String accumulated = addOutputRefs.get(0);
@@ -522,7 +530,9 @@ public final class AnfLower {
                         for (String dref : addDataOutputRefs) {
                             accumulated = ctx.emit(new Call("cat", List.of(accumulated, dref)));
                         }
-                        accumulated = ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
+                        if (changeOutputRef != null) {
+                            accumulated = ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
+                        }
                         String hashRef = ctx.emit(new Call("hash256", List.of(accumulated)));
                         String preimageRef2 = ctx.emit(new LoadParam("txPreimage"));
                         String outputHashRef = ctx.emit(new Call("extractOutputHash", List.of(preimageRef2)));
@@ -537,7 +547,9 @@ public final class AnfLower {
                         for (String dref : addDataOutputRefs) {
                             accumulated = ctx.emit(new Call("cat", List.of(accumulated, dref)));
                         }
-                        String allOutputs = ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
+                        String allOutputs = changeOutputRef == null
+                            ? accumulated
+                            : ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
                         String hashRef = ctx.emit(new Call("hash256", List.of(allOutputs)));
                         String preimageRef4 = ctx.emit(new LoadParam("txPreimage"));
                         String outputHashRef = ctx.emit(new Call("extractOutputHash", List.of(preimageRef4)));

@@ -38,6 +38,7 @@ test {
     _ = @import("tests/f203_py_bytes_escape.zig");
     _ = @import("tests/f026_int_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");
+    _ = @import("tests/n038_sighash_single_stateful.zig");
     _ = @import("tests/n016_property_shadow_scoping.zig");
     _ = @import("passes/parse_java.zig");
     _ = @import("passes/validate.zig");

@@ -23,6 +23,7 @@
  * validator (`02-validate.ts`), so the call-graph walk terminates.
  */
 import type { ContractNode, MethodNode, Statement, Expression } from '../ir/index.js';
+import { BASE_SINGLE, BASE_TYPE_MASK, SIGHASH_DEFAULT } from './sighash-directive.js';
 
 /**
  * Effects a method has on the contract's continuation. Each flag is
@@ -248,8 +249,13 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
 /**
  * Classify a method's continuation requirements based on its effects.
  *
- * `needsChange` controls injection of `_changePKH` and `_changeAmount`.
- * `needsNewAmount` controls injection of `_newAmount`. The pair maps
+ * `needsChange` is true when the method produces a continuation.
+ * `includesChange` controls injection of `_changePKH` and `_changeAmount`
+ * and the change segment of the continuation hash: it equals `needsChange`
+ * except under a SIGHASH_SINGLE base, where BIP-143 commits hashOutputs to
+ * the same-index output ONLY, so the change output is not part of the
+ * committed set and the method takes no change params (N-038).
+ * `needsNewAmount` controls injection of `_newAmount`. These map
  * directly to ANF auto-param insertion and ABI param declaration; both
  * sites must agree for a deployed contract to be spendable.
  *
@@ -258,13 +264,18 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
  */
 export interface ContinuationShape {
   needsChange: boolean;
+  includesChange: boolean;
   needsNewAmount: boolean;
   isTerminal: boolean;
 }
 
-export function continuationShape(effects: MethodEffects): ContinuationShape {
+export function continuationShape(
+  effects: MethodEffects,
+  sighashType: number = SIGHASH_DEFAULT,
+): ContinuationShape {
   const needsChange =
     effects.mutatesState || effects.hasStateOutput || effects.hasDataOutput;
+  const includesChange = needsChange && (sighashType & BASE_TYPE_MASK) !== BASE_SINGLE;
   // `addOutput`/`addRawOutput` already specify per-output amounts, so
   // when those are present the single-output `_newAmount` is redundant.
   // Otherwise (mutating-only or data-only methods) the single-output
@@ -273,6 +284,7 @@ export function continuationShape(effects: MethodEffects): ContinuationShape {
     (effects.mutatesState || effects.hasDataOutput) && !effects.hasStateOutput;
   return {
     needsChange,
+    includesChange,
     needsNewAmount,
     isTerminal: !needsChange,
   };

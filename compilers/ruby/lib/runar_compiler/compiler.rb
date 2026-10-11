@@ -980,11 +980,13 @@ module RunarCompiler
 
       params = method.params.map { |p| ABIParam.new(name: p.name, type: p.type) }
 
-      # For stateful contracts, mark public methods without _changePKH as terminal
+      # For stateful contracts, mark public methods without a continuation as
+      # terminal. N-038: a SIGHASH_SINGLE method continues without _changePKH,
+      # so its continuation is read off the IR (the --ir scaffolding shape).
       is_terminal = nil
       if is_stateful && method.is_public
         has_change = method.params.any? { |p| p.name == "_changePKH" }
-        is_terminal = true unless has_change
+        is_terminal = true unless has_change || IR::StatefulScaffold.shape(program, method)[0]
       end
 
       # Propagate the authoritative _codePart decision from stack-lowering into

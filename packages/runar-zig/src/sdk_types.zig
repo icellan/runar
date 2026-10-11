@@ -491,6 +491,18 @@ pub const ABIMethod = struct {
     /// default ALL|FORKID (0x41).
     sig_hash_type: ?i64 = null,
 
+    /// Whether a stateful method builds a state continuation. A `_changePKH`
+    /// param implies one; N-038: a SIGHASH_SINGLE method continues the
+    /// contract WITHOUT change params (BIP-143 SINGLE does not commit the
+    /// change output), so for it the ABI's `isTerminal` decides.
+    pub fn hasContinuation(self: ABIMethod) bool {
+        for (self.params) |p| {
+            if (std.mem.eql(u8, p.name, "_changePKH")) return true;
+        }
+        const st = self.sig_hash_type orelse 0x41;
+        return (st & 0x1f) == 0x03 and !(self.is_terminal orelse false);
+    }
+
     pub fn deinit(self: *ABIMethod, allocator: std.mem.Allocator) void {
         if (self.name.len > 0) allocator.free(self.name);
         for (self.params) |*p| p.deinit(allocator);

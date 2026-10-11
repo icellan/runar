@@ -52,7 +52,7 @@ import runar.compiler.ir.anf.UpdateProp;
  * or (4) a scaffolding binding, or an output the continuation commits to, is
  * bound more than once or shares a property or parameter name.
  */
-final class StatefulScaffold {
+public final class StatefulScaffold {
 
     private static final int SIGHASH_DEFAULT = 0x41;
 
@@ -96,7 +96,27 @@ final class StatefulScaffold {
         }
     }
 
-    private static void continuation(Emitter e, boolean needsChange, List<String> stateRefs, List<String> dataRefs) {
+    /**
+     * N-038: whether a method's continuation commits (and its ABI takes) the
+     * change output. Under a SIGHASH_SINGLE base BIP-143 commits hashOutputs to
+     * hash256(output[inputIndex]) only, so the change output is not committed
+     * and the method takes no {@code _changePKH} / {@code _changeAmount}.
+     */
+    public static boolean includesChange(boolean needsChange, Integer sighashType) {
+        int mode = sighashType == null ? SIGHASH_DEFAULT : sighashType;
+        return needsChange && (mode & 0x1f) != 0x03;
+    }
+
+    /**
+     * Whether a public stateful method produces a continuation (mutates state
+     * or declares outputs, at any depth and through private method calls). The
+     * artifact's {@code isTerminal} is its negation.
+     */
+    public static boolean hasContinuation(List<AnfMethod> methods, AnfMethod method) {
+        return shape(methods, method)[0];
+    }
+
+    private static void continuation(Emitter e, boolean needsChange, boolean includesChange, List<String> stateRefs, List<String> dataRefs) {
         if (!needsChange) return;
         if (stateRefs.isEmpty()) {
             String p = e.emit(new LoadParam("txPreimage"));
@@ -104,15 +124,19 @@ final class StatefulScaffold {
             String na = e.emit(new LoadParam("_newAmount"));
             e.emit(new Assert(e.emit(new BinOp(">=", na, amount, null))));
         }
-        String pkh = e.emit(new LoadParam("_changePKH"));
-        String amt = e.emit(new LoadParam("_changeAmount"));
-        String zero = e.emit(new LoadConst(new BigIntConst(BigInteger.ZERO)));
-        String nonZero = e.emit(new BinOp("!==", amt, zero, null));
-        Emitter thenE = e.sub();
-        thenE.emit(new Call("buildChangeOutput", List.of(pkh, amt)));
-        Emitter elseE = e.sub();
-        elseE.emit(new LoadConst(new BytesConst("")));
-        String change = e.emit(new If(nonZero, thenE.out, elseE.out));
+        // N-038: no change segment under a SIGHASH_SINGLE base.
+        String change = null;
+        if (includesChange) {
+            String pkh = e.emit(new LoadParam("_changePKH"));
+            String amt = e.emit(new LoadParam("_changeAmount"));
+            String zero = e.emit(new LoadConst(new BigIntConst(BigInteger.ZERO)));
+            String nonZero = e.emit(new BinOp("!==", amt, zero, null));
+            Emitter thenE = e.sub();
+            thenE.emit(new Call("buildChangeOutput", List.of(pkh, amt)));
+            Emitter elseE = e.sub();
+            elseE.emit(new LoadConst(new BytesConst("")));
+            change = e.emit(new If(nonZero, thenE.out, elseE.out));
+        }
         String acc;
         if (!stateRefs.isEmpty()) {
             acc = stateRefs.get(0);
@@ -124,7 +148,7 @@ final class StatefulScaffold {
             acc = e.emit(new Call("computeStateOutput", List.of(p, script, na)));
         }
         for (String r : dataRefs) acc = e.emit(new Call("cat", List.of(acc, r)));
-        acc = e.emit(new Call("cat", List.of(acc, change)));
+        if (change != null) acc = e.emit(new Call("cat", List.of(acc, change)));
         String hash = e.emit(new Call("hash256", List.of(acc)));
         String p = e.emit(new LoadParam("txPreimage"));
         String outHash = e.emit(new Call("extractOutputHash", List.of(p)));
@@ -297,10 +321,11 @@ final class StatefulScaffold {
             boolean[] shape = shape(methods, m);
             boolean needsChange = shape[0];
             boolean needsNewAmount = shape[1];
+            boolean includesChange = includesChange(needsChange, m.sighashType());
 
             // (1) the parameters, contiguous and once each.
             List<String[]> required = new ArrayList<>();
-            if (needsChange) {
+            if (includesChange) {
                 required.add(new String[] {"_changePKH", "Ripemd160"});
                 required.add(new String[] {"_changeAmount", "bigint"});
             }
@@ -365,7 +390,7 @@ final class StatefulScaffold {
             List<String> dataRefs = new ArrayList<>();
             for (AnfBinding b : dataOut) dataRefs.add(b.name());
             Emitter tail = new Emitter(counts.keySet(), counter);
-            continuation(tail, needsChange, stateRefs, dataRefs);
+            continuation(tail, needsChange, includesChange, stateRefs, dataRefs);
             int offset = rest.size() - tail.out.size();
             for (int i = 0; i < tail.out.size(); i++) {
                 if (offset + i < 0 || !match.binding(tail.out.get(i), rest.get(offset + i))) {

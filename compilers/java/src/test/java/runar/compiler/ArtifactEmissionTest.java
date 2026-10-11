@@ -276,9 +276,9 @@ class ArtifactEmissionTest {
         Path dir = Files.createTempDirectory("runar-f079");
         Path source = dir.resolve("Pair.runar.ts");
         Files.writeString(source, src);
+        // N-038 (R64): the SINGLE method takes no _changePKH / _changeAmount
+        // (BIP-143 SINGLE does not commit the change output).
         String bump = "{\"name\": \"bump\", \"params\": [{\"name\": \"amount\", \"type\": \"bigint\"}, "
-            + "{\"name\": \"_changePKH\", \"type\": \"Ripemd160\"}, "
-            + "{\"name\": \"_changeAmount\", \"type\": \"bigint\"}, "
             + "{\"name\": \"txPreimage\", \"type\": \"SigHashPreimage\"}], "
             + "\"isPublic\": true, \"usesCodePart\": true, \"sigHashType\": 67}";
         String plain = "{\"name\": \"plain\", \"params\": [{\"name\": \"_changePKH\", \"type\": \"Ripemd160\"}, "
@@ -306,6 +306,50 @@ class ArtifactEmissionTest {
             Files.deleteIfExists(source);
             Files.deleteIfExists(dir);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 6. N-038: a SINGLE stateful continuation commits only its own output
+    // ------------------------------------------------------------------
+
+    /**
+     * N-038 (R64). BIP-143 SINGLE commits hashOutputs to hash256(output[i])
+     * only, so a stateful {@code @sighash SINGLE|FORKID} method's continuation
+     * hashes its own output with no change segment, and the method takes no
+     * {@code _changePKH} / {@code _changeAmount}. Before N-038 the change output
+     * was hashed too and every SINGLE call with change was unspendable.
+     *
+     * <p>Proves: this tier compiles the N-038 contract
+     * ({@code conformance/sdk-call/SingleCounter.runar.ts}, fold OFF) to the TS-stamped sdk-call script pin, the golden IR passes this
+     * tier's {@code --ir} stateful-scaffold check and compiles to the same
+     * script, and the ABI gives SINGLE {@code bump} only {@code txPreimage}
+     * (non-terminal) while ALL {@code reset} keeps the change params. Does NOT
+     * prove spendability (the sdk-call vector Spend replay does).
+     */
+    @Test
+    void singleStatefulContinuationOmitsTheChangeOutput() throws IOException {
+        Path repoRoot = locateRepoRoot();
+        Path source = repoRoot.resolve("conformance/sdk-call/SingleCounter.runar.ts");
+        Path fixture = repoRoot.resolve("conformance/sdk-call");
+        String goldenHex = Files.readString(fixture.resolve("expected-script.hex")).trim();
+
+        Result hex = runCli("--source", source.toString(), "--hex", "--disable-constant-folding");
+        assertEquals(0, hex.exit, "--hex failed: " + hex.stderr);
+        assertEquals(goldenHex, hex.stdout.trim(), "source -> script must equal the golden");
+
+        Result fromIr = runCli("--ir", fixture.resolve("expected-ir.json").toString(), "--hex", "--disable-constant-folding");
+        assertEquals(0, fromIr.exit, "--ir of the golden IR failed: " + fromIr.stderr);
+        assertEquals(goldenHex, fromIr.stdout.trim(), "golden IR -> script must equal the golden");
+
+        String artifact = compileArtifact(source);
+        assertTrue(artifact.contains("{\"name\": \"bump\", \"params\": [{\"name\": \"txPreimage\", \"type\": \"SigHashPreimage\"}], "
+                + "\"isPublic\": true, \"usesCodePart\": true, \"sigHashType\": 67}"),
+            "SINGLE bump must take only txPreimage and stay non-terminal; got:\n"
+                + artifact.substring(artifact.indexOf("\"abi\""), artifact.indexOf("\"script\"")));
+        assertTrue(artifact.contains("{\"name\": \"reset\", \"params\": [{\"name\": \"_changePKH\", \"type\": \"Ripemd160\"}, "
+                + "{\"name\": \"_changeAmount\", \"type\": \"bigint\"}, {\"name\": \"_newAmount\", \"type\": \"bigint\"}, "
+                + "{\"name\": \"txPreimage\", \"type\": \"SigHashPreimage\"}], \"isPublic\": true, \"usesCodePart\": true}"),
+            "ALL reset keeps the change params");
     }
 
     // ------------------------------------------------------------------

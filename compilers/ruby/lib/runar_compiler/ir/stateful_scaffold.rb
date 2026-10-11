@@ -96,7 +96,7 @@ module RunarCompiler
         e.emit(value("deserialize_state", preimage: p3))
       end
 
-      def self.continuation(e, needs_change, state_refs, data_refs)
+      def self.continuation(e, needs_change, includes_change, state_refs, data_refs)
         return unless needs_change
 
         if state_refs.empty?
@@ -105,15 +105,19 @@ module RunarCompiler
           new_amount = e.emit(param("_newAmount"))
           e.emit(assert_of(e.emit(bin(">=", new_amount, amount))))
         end
-        pkh = e.emit(param("_changePKH"))
-        amt = e.emit(param("_changeAmount"))
-        zero = e.emit(value("load_const", const_big_int: 0))
-        non_zero = e.emit(bin("!==", amt, zero))
-        then_e = e.sub
-        then_e.emit(call("buildChangeOutput", pkh, amt))
-        else_e = e.sub
-        else_e.emit(value("load_const", const_string: ""))
-        change = e.emit(value("if", cond: non_zero, then: then_e.out, else_: else_e.out))
+        # N-038: under a SIGHASH_SINGLE base no change segment exists.
+        change = nil
+        if includes_change
+          pkh = e.emit(param("_changePKH"))
+          amt = e.emit(param("_changeAmount"))
+          zero = e.emit(value("load_const", const_big_int: 0))
+          non_zero = e.emit(bin("!==", amt, zero))
+          then_e = e.sub
+          then_e.emit(call("buildChangeOutput", pkh, amt))
+          else_e = e.sub
+          else_e.emit(value("load_const", const_string: ""))
+          change = e.emit(value("if", cond: non_zero, then: then_e.out, else_: else_e.out))
+        end
         if state_refs.empty?
           script = e.emit(value("get_state_script"))
           p = e.emit(param("txPreimage"))
@@ -124,7 +128,7 @@ module RunarCompiler
           state_refs[1..].each { |r| acc = e.emit(call("cat", acc, r)) }
         end
         data_refs.each { |r| acc = e.emit(call("cat", acc, r)) }
-        acc = e.emit(call("cat", acc, change))
+        acc = e.emit(call("cat", acc, change)) unless change.nil?
         digest = e.emit(call("hash256", acc))
         p = e.emit(param("txPreimage"))
         out_hash = e.emit(call("extractOutputHash", p))
@@ -168,7 +172,11 @@ module RunarCompiler
           end
         end
         walk.call(method.body)
-        [mutates || state || data, (mutates || data) && !state]
+        needs_change = mutates || state || data
+        # N-038: a SIGHASH_SINGLE base commits no change output.
+        mode = method.sighash_type.nil? ? SIGHASH_DEFAULT : method.sighash_type
+        includes_change = needs_change && (mode & 0x1F) != 0x03
+        [needs_change, includes_change, (mutates || data) && !state]
       end
 
       def self.describe(v)
@@ -269,11 +277,11 @@ module RunarCompiler
         program.methods.each do |m|
           next if !m.is_public || m.name == "constructor"
 
-          needs_change, needs_new_amount = shape(program, m)
+          needs_change, includes_change, needs_new_amount = shape(program, m)
 
           # (1) the parameters, contiguous and once each.
           required = []
-          required += [%w[_changePKH Ripemd160], %w[_changeAmount bigint]] if needs_change
+          required += [%w[_changePKH Ripemd160], %w[_changeAmount bigint]] if includes_change
           required << %w[_newAmount bigint] if needs_new_amount
           required << %w[txPreimage SigHashPreimage]
           names = m.params.map(&:name)
@@ -322,7 +330,7 @@ module RunarCompiler
             end
           end
           tail = Emitter.new(taken, counter)
-          continuation(tail, needs_change, state_out.map(&:name), data_out.map(&:name))
+          continuation(tail, needs_change, includes_change, state_out.map(&:name), data_out.map(&:name))
           offset = rest.length - tail.out.length
           tail.out.each_with_index do |e, j|
             if offset + j < 0 || !match.binding(e, rest[offset + j])

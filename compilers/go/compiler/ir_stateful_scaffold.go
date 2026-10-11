@@ -85,7 +85,7 @@ func scaffoldPrologue(e *scaffoldEmitter, sighashMode int, hasMutableState bool)
 	}
 }
 
-func scaffoldContinuation(e *scaffoldEmitter, needsChange bool, stateRefs, dataRefs []string) {
+func scaffoldContinuation(e *scaffoldEmitter, needsChange, includesChange bool, stateRefs, dataRefs []string) {
 	if !needsChange {
 		return
 	}
@@ -95,15 +95,19 @@ func scaffoldContinuation(e *scaffoldEmitter, needsChange bool, stateRefs, dataR
 		na := e.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
 		e.emit(ir.ANFValue{Kind: "assert", ValueRef: e.emit(ir.ANFValue{Kind: "bin_op", Op: ">=", Left: na, Right: in})})
 	}
-	pkh := e.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
-	amt := e.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
-	zero := e.emit(scaffoldConstInt(0))
-	nonZero := e.emit(ir.ANFValue{Kind: "bin_op", Op: "!==", Left: amt, Right: zero})
-	thenE := e.sub()
-	thenE.emit(scaffoldCall("buildChangeOutput", pkh, amt))
-	elseE := e.sub()
-	elseE.emit(scaffoldConstString(""))
-	change := e.emit(ir.ANFValue{Kind: "if", Cond: nonZero, Then: thenE.out, Else: elseE.out})
+	// N-038: no change segment under a SIGHASH_SINGLE base.
+	change := ""
+	if includesChange {
+		pkh := e.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
+		amt := e.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
+		zero := e.emit(scaffoldConstInt(0))
+		nonZero := e.emit(ir.ANFValue{Kind: "bin_op", Op: "!==", Left: amt, Right: zero})
+		thenE := e.sub()
+		thenE.emit(scaffoldCall("buildChangeOutput", pkh, amt))
+		elseE := e.sub()
+		elseE.emit(scaffoldConstString(""))
+		change = e.emit(ir.ANFValue{Kind: "if", Cond: nonZero, Then: thenE.out, Else: elseE.out})
+	}
 
 	var acc string
 	if len(stateRefs) > 0 {
@@ -120,7 +124,9 @@ func scaffoldContinuation(e *scaffoldEmitter, needsChange bool, stateRefs, dataR
 	for _, r := range dataRefs {
 		acc = e.emit(scaffoldCall("cat", acc, r))
 	}
-	acc = e.emit(scaffoldCall("cat", acc, change))
+	if change != "" {
+		acc = e.emit(scaffoldCall("cat", acc, change))
+	}
 	hash := e.emit(scaffoldCall("hash256", acc))
 	p := e.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 	outHash := e.emit(scaffoldCall("extractOutputHash", p))
@@ -152,7 +158,7 @@ var scaffoldDataOutputKinds = map[string]bool{"add_data_output": true}
 // The frontend's side-effect summary, read off the IR (update_prop is a state
 // mutation, add_output / add_raw_output a state output, add_data_output a data
 // output) at any depth and through method_calls to private methods.
-func scaffoldShape(program *ir.ANFProgram, m *ir.ANFMethod) (needsChange, needsNewAmount bool) {
+func scaffoldShape(program *ir.ANFProgram, m *ir.ANFMethod) (needsChange, includesChange, needsNewAmount bool) {
 	privates := map[string]*ir.ANFMethod{}
 	for i := range program.Methods {
 		if !program.Methods[i].IsPublic && program.Methods[i].Name != "constructor" {
@@ -184,7 +190,12 @@ func scaffoldShape(program *ir.ANFProgram, m *ir.ANFMethod) (needsChange, needsN
 		}
 	}
 	walk(m.Body)
-	return mutates || stateOut || dataOut, (mutates || dataOut) && !stateOut
+	needsChange = mutates || stateOut || dataOut
+	sighashMode := frontend.SighashDefault
+	if m.SigHashType != nil {
+		sighashMode = *m.SigHashType
+	}
+	return needsChange, frontend.IncludesChangeOutput(needsChange, sighashMode), (mutates || dataOut) && !stateOut
 }
 
 func scaffoldDescribe(v *ir.ANFValue) string {
@@ -336,11 +347,11 @@ func checkIRStatefulScaffolding(program *ir.ANFProgram) error {
 		if !m.IsPublic || m.Name == "constructor" {
 			continue
 		}
-		needsChange, needsNewAmount := scaffoldShape(program, m)
+		needsChange, includesChange, needsNewAmount := scaffoldShape(program, m)
 
 		// (1) the parameters, contiguous and once each.
 		var required [][2]string
-		if needsChange {
+		if includesChange {
 			required = append(required, [2]string{"_changePKH", "Ripemd160"}, [2]string{"_changeAmount", "bigint"})
 		}
 		if needsNewAmount {
@@ -431,7 +442,7 @@ func checkIRStatefulScaffolding(program *ir.ANFProgram) error {
 			return out
 		}
 		tail := &scaffoldEmitter{taken: taken, next: &next}
-		scaffoldContinuation(tail, needsChange, names(stateOut), names(dataOut))
+		scaffoldContinuation(tail, needsChange, includesChange, names(stateOut), names(dataOut))
 		offset := len(rest) - len(tail.out)
 		for i := range tail.out {
 			if offset+i < 0 || !match.binding(&tail.out[i], &rest[offset+i]) {

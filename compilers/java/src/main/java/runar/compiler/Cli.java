@@ -27,6 +27,7 @@ import runar.compiler.passes.SighashDirective;
 import runar.compiler.passes.Peephole;
 import runar.compiler.passes.PassLocation;
 import runar.compiler.passes.StackLower;
+import runar.compiler.passes.StatefulScaffold;
 import runar.compiler.passes.Typecheck;
 import runar.compiler.passes.Validate;
 
@@ -479,8 +480,13 @@ public final class Cli {
                 }
                 mb.append("], \"isPublic\": ").append(m.isPublic());
                 // Stateful public methods without a _changePKH param are terminal
-                // (they do not build a state continuation output).
-                if (isStateful && m.isPublic() && !hasParam(m, "_changePKH")) {
+                // (they do not build a state continuation output) — except under
+                // a SIGHASH_SINGLE base, where a continuing method takes no
+                // change params either (N-038), so the continuation is read off
+                // the body.
+                if (isStateful && m.isPublic() && !hasParam(m, "_changePKH")
+                    && (StatefulScaffold.includesChange(true, m.sighashType())
+                        || !StatefulScaffold.hasContinuation(anf.methods(), m))) {
                     mb.append(", \"isTerminal\": true");
                 }
                 // Issue #100: authoritative _codePart decision from stack lowering.

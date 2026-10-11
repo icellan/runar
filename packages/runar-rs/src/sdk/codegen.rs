@@ -119,6 +119,12 @@ fn is_terminal_method(method: &AbiMethod, is_stateful: bool) -> bool {
     if let Some(terminal) = method.is_terminal {
         return terminal;
     }
+    // N-038: a SIGHASH_SINGLE method continues the contract without a
+    // `_changePKH` param (the change output is not committed), and the
+    // compiler marks it terminal explicitly when it is.
+    if method.sig_hash_type.map_or(false, |t| (t & 0x1f) == 0x03) {
+        return false;
+    }
     // Fallback for older artifacts without is_terminal:
     // check for the absence of _changePKH in params
     !method.params.iter().any(|p| p.name == "_changePKH")
@@ -923,6 +929,26 @@ mod tests {
     // -----------------------------------------------------------------------
     // Name conversion
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn n038_single_continuation_method_is_not_terminal() {
+        // N-038: a SIGHASH_SINGLE continuation method has no `_changePKH`
+        // (BIP-143 SINGLE does not commit the change output) and no explicit
+        // isTerminal; the typed wrapper must still treat it as a continuation.
+        let m = |sig: Option<i64>, term: Option<bool>, params: Vec<AbiParam>| AbiMethod {
+            name: "bump".to_string(),
+            params,
+            is_public: true,
+            is_terminal: term,
+            uses_code_part: None,
+            sig_hash_type: sig,
+        };
+        let pre = || vec![AbiParam { name: "txPreimage".to_string(), param_type: "SigHashPreimage".to_string(), fixed_array: None }];
+        assert!(!is_terminal_method(&m(Some(0x43), None, pre()), true));
+        assert!(!is_terminal_method(&m(Some(0xc3), None, pre()), true));
+        assert!(is_terminal_method(&m(Some(0x43), Some(true), pre()), true));
+        assert!(is_terminal_method(&m(None, None, pre()), true));
+    }
 
     #[test]
     fn test_to_snake_case() {

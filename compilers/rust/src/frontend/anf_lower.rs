@@ -419,12 +419,19 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 .get(&method.name)
                 .copied()
                 .unwrap_or_default();
-            let shape = ContinuationShape::for_effects(&eff);
+            // N-038: under a SINGLE base the change output is not committed,
+            // so the method takes no `_changePKH` / `_changeAmount` and the
+            // continuation hash carries no change segment.
+            let shape = ContinuationShape::for_effects_sighash(
+                &eff,
+                method.sighash_type.unwrap_or(SIGHASH_DEFAULT),
+            );
             let needs_change_output = shape.needs_change;
+            let includes_change = shape.includes_change;
             let needs_new_amount = shape.needs_new_amount;
 
             // Register implicit parameters
-            if needs_change_output {
+            if includes_change {
                 method_ctx.add_param("_changePKH");
                 method_ctx.register_param_type("_changePKH", "Ripemd160");
                 method_ctx.add_param("_changeAmount");
@@ -581,38 +588,47 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 // with empty is a no-op) when zero, reproducing the omission.
                 // For any change > 0 the hashed bytes are unchanged; only the
                 // emitted script gains the guard.
-                let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
-                    name: "_changePKH".to_string(),
-                });
-                let change_amount_ref = method_ctx.emit(ANFValue::LoadParam {
-                    name: "_changeAmount".to_string(),
-                });
-                let zero_ref = method_ctx.emit(ANFValue::LoadConst {
-                    value: bigint_to_json(&BigInt::from(0)),
-                });
-                let change_nonzero_ref = method_ctx.emit(ANFValue::BinOp {
-                    op: "!==".to_string(),
-                    left: change_amount_ref.clone(),
-                    right: zero_ref,
-                    result_type: None,
-                });
-                let mut change_then_ctx = method_ctx.sub_context();
-                change_then_ctx.emit(ANFValue::Call {
-                    func: "buildChangeOutput".to_string(),
-                    args: vec![change_pkh_ref, change_amount_ref],
-                });
-                method_ctx.sync_counter(&change_then_ctx);
-                let mut change_else_ctx = method_ctx.sub_context();
-                change_else_ctx.emit(ANFValue::LoadConst {
-                    value: serde_json::Value::String(String::new()),
-                });
-                method_ctx.sync_counter(&change_else_ctx);
-                let change_output_ref = method_ctx.emit(ANFValue::If {
-                    cond: change_nonzero_ref,
-                    then: change_then_ctx.bindings,
-                    else_branch: change_else_ctx.bindings,
-                    results: Vec::new(),
-                });
+                //
+                // N-038: under a SIGHASH_SINGLE base (`includes_change` false)
+                // the change output is not committed — hashOutputs =
+                // hash256(output[inputIndex]) — so no change segment is built and
+                // the hash covers the method's own output(s) only.
+                let change_output_ref: Option<String> = if includes_change {
+                    let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_changePKH".to_string(),
+                    });
+                    let change_amount_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_changeAmount".to_string(),
+                    });
+                    let zero_ref = method_ctx.emit(ANFValue::LoadConst {
+                        value: bigint_to_json(&BigInt::from(0)),
+                    });
+                    let change_nonzero_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: "!==".to_string(),
+                        left: change_amount_ref.clone(),
+                        right: zero_ref,
+                        result_type: None,
+                    });
+                    let mut change_then_ctx = method_ctx.sub_context();
+                    change_then_ctx.emit(ANFValue::Call {
+                        func: "buildChangeOutput".to_string(),
+                        args: vec![change_pkh_ref, change_amount_ref],
+                    });
+                    method_ctx.sync_counter(&change_then_ctx);
+                    let mut change_else_ctx = method_ctx.sub_context();
+                    change_else_ctx.emit(ANFValue::LoadConst {
+                        value: serde_json::Value::String(String::new()),
+                    });
+                    method_ctx.sync_counter(&change_else_ctx);
+                    Some(method_ctx.emit(ANFValue::If {
+                        cond: change_nonzero_ref,
+                        then: change_then_ctx.bindings,
+                        else_branch: change_else_ctx.bindings,
+                        results: Vec::new(),
+                    }))
+                } else {
+                    None
+                };
 
                 if !add_output_refs.is_empty() {
                     // Multi-output continuation: concat all state outputs, then
@@ -630,10 +646,12 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                             args: vec![accumulated, data_ref.clone()],
                         });
                     }
-                    accumulated = method_ctx.emit(ANFValue::Call {
-                        func: "cat".to_string(),
-                        args: vec![accumulated, change_output_ref],
-                    });
+                    if let Some(change) = change_output_ref {
+                        accumulated = method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, change],
+                        });
+                    }
                     let hash_ref = method_ctx.emit(ANFValue::Call {
                         func: "hash256".to_string(),
                         args: vec![accumulated],
@@ -674,10 +692,13 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                             args: vec![accumulated, data_ref.clone()],
                         });
                     }
-                    let all_outputs = method_ctx.emit(ANFValue::Call {
-                        func: "cat".to_string(),
-                        args: vec![accumulated, change_output_ref],
-                    });
+                    let all_outputs = match change_output_ref {
+                        Some(change) => method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, change],
+                        }),
+                        None => accumulated,
+                    };
                     let hash_ref = method_ctx.emit(ANFValue::Call {
                         func: "hash256".to_string(),
                         args: vec![all_outputs],
@@ -701,7 +722,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
 
             // Build augmented params list for ABI
             let mut augmented_params = lower_params(&method.params);
-            if needs_change_output {
+            if includes_change {
                 augmented_params.push(ANFParam {
                     name: "_changePKH".to_string(),
                     param_type: "Ripemd160".to_string(),

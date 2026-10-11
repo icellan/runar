@@ -328,8 +328,10 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // must therefore inject the same continuation params as if the
       // public body did so directly.
       const effects = sideEffects.get(method.name) ?? { mutatesState: false, hasStateOutput: false, hasDataOutput: false, usesPreimage: false, callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false };
-      const shape = continuationShape(effects);
-      const needsChangeOutput = shape.needsChange;
+      // N-038: under a SINGLE base the change output is not committed, so
+      // the method takes no `_changePKH` / `_changeAmount`.
+      const shape = continuationShape(effects, method.sighashType);
+      const needsChangeOutput = shape.includesChange;
 
       // Register implicit parameters (with types, so the method-scoped
       // type table — issue #34 — knows them for byte-type analysis).

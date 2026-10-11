@@ -427,6 +427,12 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 					break
 				}
 			}
+			// N-038: a SIGHASH_SINGLE method continues the contract without
+			// declaring _changePKH (the change output is not committed), so
+			// its continuation is read from the method body instead.
+			if !hasChange && method.SigHashType != nil && (*method.SigHashType&0x1f) == 0x03 {
+				hasChange, _, _ = scaffoldShape(program, &method)
+			}
 			if !hasChange {
 				t := true
 				m.IsTerminal = &t

@@ -263,7 +263,9 @@ public final class ContractSimulator {
                 // which off-chain is continuationAmount().
                 outs.add(new SimulatedSpend.Out(Builtins.continuationAmount().longValueExact(),
                     SimulatedSpend.continuationScript(artifact, lockingScript, currentState())));
-            } else if (hasParam("_changePKH")) {
+            } else if (abi.hasContinuation()) {
+                // `_changePKH`, or (N-038) a SIGHASH_SINGLE continuation, which
+                // takes no change params.
                 List<String> names = SimulatedSpend.stateFieldNamesInOrder(artifact);
                 for (Output o : produced) {
                     if (o.isData()) continue;

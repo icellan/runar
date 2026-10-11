@@ -537,6 +537,7 @@ Goldens are **self-produced** by the very implementation under test — `pnpm ru
 - `conformance/analyzer/**/expected-analyzer-report.json`
 - `conformance/source-map/**/expected-source-map.json`
 - `conformance/anf-interpreter/expected-strict/*.json` (strict-mode ANF-interpreter execution goldens, registered F-164 round 2)
+- `conformance/sdk-call/*.{json,hex}` (cross-SDK call vectors and the compiler pins they are derived from, registered N-038; the `.runar.ts` contract source beside them is input and not guarded)
 - `conformance/script-size-baseline.json`
 - `packages/decompiler/coverage-baseline.json`
 

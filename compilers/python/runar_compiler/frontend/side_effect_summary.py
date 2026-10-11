@@ -91,14 +91,21 @@ class ContinuationShape:
     """Continuation requirements derived from MethodEffects."""
 
     needs_change: bool
+    # N-038: ``_changePKH`` / ``_changeAmount`` injection and the change
+    # segment of the continuation hash. Equal to ``needs_change`` except under
+    # a SIGHASH_SINGLE base, where BIP-143 commits hashOutputs to the
+    # same-index output only, so the change output is not committed.
+    includes_change: bool
     needs_new_amount: bool
     is_terminal: bool
 
 
-def continuation_shape_for(eff: MethodEffects) -> ContinuationShape:
+def continuation_shape_for(eff: MethodEffects, sighash_type: int | None = None) -> ContinuationShape:
     needs_change = (
         eff.mutates_state or eff.has_state_output or eff.has_data_output
     )
+    mode = 0x41 if sighash_type is None else sighash_type
+    includes_change = needs_change and (mode & 0x1F) != 0x03
     # addOutput / addRawOutput already specify per-output amounts, so
     # when those are present the single-output _newAmount is redundant.
     # Otherwise the single-output continuation path needs _newAmount to
@@ -108,6 +115,7 @@ def continuation_shape_for(eff: MethodEffects) -> ContinuationShape:
     )
     return ContinuationShape(
         needs_change=needs_change,
+        includes_change=includes_change,
         needs_new_amount=needs_new_amount,
         is_terminal=not needs_change,
     )

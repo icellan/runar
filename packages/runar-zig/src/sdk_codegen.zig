@@ -77,10 +77,8 @@ fn classifyParam(p: types.ABIParam, is_stateful: bool) ParamRole {
 fn isTerminal(m: types.ABIMethod, is_stateful: bool) bool {
     if (!is_stateful) return true;
     if (m.is_terminal) |t| return t;
-    for (m.params) |p| {
-        if (std.mem.eql(u8, p.name, "_changePKH")) return false;
-    }
-    return true;
+    // N-038: a SIGHASH_SINGLE method continues without declaring `_changePKH`.
+    return !m.hasContinuation();
 }
 
 fn methodHasSig(m: types.ABIMethod) bool {
@@ -592,6 +590,25 @@ test "generateZig emits prepare/finalize for Sig-bearing P2PKH unlock" {
     try std.testing.expect(std.mem.indexOf(u8, src, "StatefulCallOptions") == null);
     // Stateless terminal ⇒ TerminalOutput record emitted
     try std.testing.expect(std.mem.indexOf(u8, src, "pub const TerminalOutput = struct") != null);
+}
+
+// N-038: a stateful SIGHASH_SINGLE method declares no `_changePKH` and the
+// compiler writes `isTerminal` only when true, so the fallback must not read
+// the missing change param as "terminal". Explicit isTerminal still wins and
+// the default-mode fallback is unchanged.
+test "isTerminal: N-038 SINGLE method without change params is a continuation" {
+    var preimage_only = [_]types.ABIParam{.{ .name = "txPreimage", .type_name = "SigHashPreimage" }};
+    var with_change = [_]types.ABIParam{
+        .{ .name = "_changePKH", .type_name = "Ripemd160" },
+        .{ .name = "_changeAmount", .type_name = "bigint" },
+        .{ .name = "txPreimage", .type_name = "SigHashPreimage" },
+    };
+    for ([_]i64{ 0x43, 0xc3 }) |st| {
+        try std.testing.expect(!isTerminal(.{ .name = "bump", .params = &preimage_only, .is_public = true, .sig_hash_type = st }, true));
+        try std.testing.expect(isTerminal(.{ .name = "bump", .params = &preimage_only, .is_public = true, .is_terminal = true, .sig_hash_type = st }, true));
+    }
+    try std.testing.expect(isTerminal(.{ .name = "close", .params = &preimage_only, .is_public = true }, true));
+    try std.testing.expect(!isTerminal(.{ .name = "bump", .params = &with_change, .is_public = true }, true));
 }
 
 // F-245: the intent-intrinsic witness params (`_prevOutScript_<i>`,

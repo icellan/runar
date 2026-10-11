@@ -250,18 +250,37 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 
 // ContinuationShape classifies a method's continuation requirements.
 //
-// NeedsChange controls injection of _changePKH and _changeAmount.
-// NeedsNewAmount controls injection of _newAmount. The pair maps
-// directly to ANF auto-param insertion; both sites must agree for a
+// NeedsChange is true when the method produces a continuation.
+// IncludesChange controls injection of _changePKH and _changeAmount and the
+// change segment of the continuation hash: it equals NeedsChange except under
+// a SIGHASH_SINGLE base, where BIP-143 commits hashOutputs to the same-index
+// output ONLY, so the change output is not committed and the method takes no
+// change params (N-038). NeedsNewAmount controls injection of _newAmount.
+// These map directly to ANF auto-param insertion; both sites must agree for a
 // deployed contract to be spendable.
 type ContinuationShape struct {
 	NeedsChange    bool
+	IncludesChange bool
 	NeedsNewAmount bool
 	IsTerminal     bool
 }
 
-// ContinuationShapeFor derives ContinuationShape from MethodEffects.
+// ContinuationShapeFor derives ContinuationShape from MethodEffects under the
+// default ALL|FORKID sighash mode.
 func ContinuationShapeFor(eff MethodEffects) ContinuationShape {
+	return ContinuationShapeForSighash(eff, SighashDefault)
+}
+
+// IncludesChangeOutput reports whether a method with a continuation under
+// sighash type `sighashType` commits (and takes params for) the change output:
+// false only under a SIGHASH_SINGLE base (N-038).
+func IncludesChangeOutput(needsChange bool, sighashType int) bool {
+	return needsChange && (sighashType&0x1f) != 0x03
+}
+
+// ContinuationShapeForSighash derives ContinuationShape from MethodEffects and
+// the method's declared sighash type (N-038).
+func ContinuationShapeForSighash(eff MethodEffects, sighashType int) ContinuationShape {
 	needsChange := eff.MutatesState || eff.HasStateOutput || eff.HasDataOutput
 	// addOutput / addRawOutput already specify per-output amounts, so
 	// when those are present the single-output _newAmount is redundant.
@@ -270,6 +289,7 @@ func ContinuationShapeFor(eff MethodEffects) ContinuationShape {
 	needsNewAmount := (eff.MutatesState || eff.HasDataOutput) && !eff.HasStateOutput
 	return ContinuationShape{
 		NeedsChange:    needsChange,
+		IncludesChange: IncludesChangeOutput(needsChange, sighashType),
 		NeedsNewAmount: needsNewAmount,
 		IsTerminal:     !needsChange,
 	}

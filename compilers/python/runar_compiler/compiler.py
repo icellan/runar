@@ -456,6 +456,16 @@ def _collect_load_prop_refs(bindings: list[Any], out: set[str]) -> None:
             _collect_load_prop_refs(v.body or [], out)
 
 
+def _ir_continues(program: ANFProgram, method: Any) -> bool:
+    """N-038: whether a public stateful method produces a continuation, read
+    off its IR (the same shape the --ir scaffolding check derives). Only
+    consulted for a method that lacks ``_changePKH`` -- a SIGHASH_SINGLE
+    continuation takes no change params."""
+    from runar_compiler.ir.stateful_scaffold import _shape
+
+    return _shape(program, method)[0]
+
+
 def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -> None:
     """Issue #109: emit a warning for each un-annotated, unreferenced readonly
     field that DCE eliminated (no initializer, no method reference). The
@@ -909,11 +919,13 @@ def _assemble_artifact(
         if method.name == "constructor":
             continue
         params = [ABIParam(name=p.name, type=p.type) for p in method.params]
-        # For stateful contracts, mark public methods without _changePKH as terminal
+        # For stateful contracts, mark public methods without a continuation as
+        # terminal. N-038: a SIGHASH_SINGLE method continues without
+        # _changePKH, so its continuation is read off the IR instead.
         is_terminal: bool | None = None
         if is_stateful and method.is_public:
             has_change = any(p.name == "_changePKH" for p in method.params)
-            if not has_change:
+            if not has_change and not _ir_continues(program, method):
                 is_terminal = True
         # Propagate the authoritative _codePart decision from stack-lowering
         # into the ABI so the SDK supplies _codePart for terminal var-length

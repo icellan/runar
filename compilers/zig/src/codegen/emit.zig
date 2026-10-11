@@ -13,6 +13,7 @@ const types = @import("../ir/types.zig");
 const opcodes = @import("opcodes.zig");
 const stack_lower = @import("../passes/stack_lower.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const stateful_scaffold = @import("../ir/stateful_scaffold.zig");
 const Opcode = opcodes.Opcode;
 
 // ============================================================================
@@ -797,7 +798,9 @@ pub fn emitArtifact(
             try w.writeAll("],\"isPublic\":");
             try w.writeAll(if (method.is_public) "true" else "false");
             // Stateful public methods without a _changePKH param are terminal
-            // (they build no state continuation output).
+            // (they build no state continuation output) — except under a
+            // SIGHASH_SINGLE base, where a continuing method takes no change
+            // params either (N-038), so the continuation is read off the body.
             if (is_stateful and method.is_public) {
                 var has_change = false;
                 for (method.params) |param| {
@@ -805,6 +808,9 @@ pub fn emitArtifact(
                         has_change = true;
                         break;
                     }
+                }
+                if (!has_change and !stateful_scaffold.includesChange(true, method.sighash_type)) {
+                    has_change = stateful_scaffold.hasContinuation(allocator, anf_program.methods, stack_lower.methodBindings(method)) catch return error.OutOfMemory;
                 }
                 if (!has_change) try w.writeAll(",\"isTerminal\":true");
             }

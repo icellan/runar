@@ -671,6 +671,14 @@ class RunarContract:
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
         method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
+        # N-038: a SIGHASH_SINGLE stateful method continues the contract but
+        # takes no _changePKH (BIP-143 SINGLE does not commit the change
+        # output), so "has a continuation" is read from the ABI's sighash base
+        # + isTerminal, not from the change param alone.
+        method_has_continuation = method_needs_change or (
+            ((method.sig_hash_type if method.sig_hash_type is not None else 0x41) & 0x1F) == 0x03
+            and method.is_terminal is not True
+        )
         # Whether the unlocking script is prefixed with _codePart. New artifacts
         # carry the authoritative uses_code_part flag (true for continuation
         # builders AND terminal var-length-state readers — issue #100). Older
@@ -989,7 +997,7 @@ class RunarContract:
             if opts.new_state:
                 for k, v in opts.new_state.items():
                     self._state[k] = v
-            elif method_needs_change and anf_computed_state is not None:
+            elif method_has_continuation and anf_computed_state is not None:
                 self._state = {**self._state, **anf_computed_state}
             new_locking_script = self.get_locking_script()
             # DoS-bound: also reject pathological continuation scripts BEFORE broadcast.

@@ -103,7 +103,10 @@ export function getSdkArgParams(method: ABIMethod, isStateful: boolean): Classif
 export function isTerminalMethod(method: ABIMethod, isStateful: boolean): boolean {
   if (!isStateful) return true; // stateless contracts are always terminal
   if (method.isTerminal !== undefined) return method.isTerminal;
-  // Fallback for older artifacts without isTerminal
+  // Fallback for older artifacts without isTerminal. N-038: a SIGHASH_SINGLE
+  // method continues the contract without declaring `_changePKH`, and the
+  // compiler writes `isTerminal` only when true, so absent means continuation.
+  if (((method.sigHashType ?? 0x41) & 0x1f) === 0x03) return false;
   return !method.params.some((p) => p.name === '_changePKH');
 }
 

@@ -429,12 +429,20 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// output must therefore inject the same continuation params
 			// as if the public body did so directly.
 			eff := sideEffects[method.Name]
-			shape := ContinuationShapeFor(eff)
+			// N-038: under a SINGLE base the change output is not committed,
+			// so the method takes no _changePKH / _changeAmount and the
+			// continuation hash carries no change segment.
+			sighashMode := SighashDefault
+			if method.SighashType != nil {
+				sighashMode = *method.SighashType
+			}
+			shape := ContinuationShapeForSighash(eff, sighashMode)
 			needsChangeOutput := shape.NeedsChange
+			includesChange := shape.IncludesChange
 			needsNewAmount := shape.NeedsNewAmount
 
 			// Register implicit parameters
-			if needsChangeOutput {
+			if includesChange {
 				methodCtx.addParam("_changePKH", "Ripemd160")
 				methodCtx.addParam("_changeAmount", "bigint")
 			}
@@ -446,11 +454,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// Issue #123: the declared per-method sighash mode (default
 			// ALL|FORKID). Drives BOTH the OP_PUSH_TX binding flag (so the
 			// derived sig re-computes the tx sighash under this mode) AND the
-			// runtime preimage-type assert.
-			sighashMode := SighashDefault
-			if method.SighashType != nil {
-				sighashMode = *method.SighashType
-			}
+			// runtime preimage-type assert. (sighashMode resolved above.)
 			isDefaultSighash := sighashMode == SighashDefault
 
 			// Inject checkPreimage(txPreimage) at the start.
@@ -554,22 +558,36 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 				// no-op) when zero, reproducing the omission. For any change > 0
 				// the hashed bytes are unchanged; only the emitted script gains
 				// the guard.
-				changePKHRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
-				changeAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
-				zeroRef := methodCtx.emit(makeLoadConstInt(big.NewInt(0)))
-				changeNonZeroRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "!==", Left: changeAmountRef, Right: zeroRef})
-				changeThenCtx := methodCtx.subContext()
-				changeThenCtx.emit(makeCall("buildChangeOutput", []string{changePKHRef, changeAmountRef}))
-				methodCtx.syncCounter(changeThenCtx)
-				changeElseCtx := methodCtx.subContext()
-				changeElseCtx.emit(makeLoadConstString(""))
-				methodCtx.syncCounter(changeElseCtx)
-				changeOutputRef := methodCtx.emit(ir.ANFValue{
-					Kind: "if",
-					Cond: changeNonZeroRef,
-					Then: changeThenCtx.bindings,
-					Else: changeElseCtx.bindings,
-				})
+				//
+				// N-038: under a SIGHASH_SINGLE base (includesChange false) the
+				// change output is not committed — hashOutputs =
+				// hash256(output[inputIndex]) — so no change segment is built and
+				// the hash covers the method's own output(s) only.
+				changeOutputRef := ""
+				if includesChange {
+					changePKHRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
+					changeAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
+					zeroRef := methodCtx.emit(makeLoadConstInt(big.NewInt(0)))
+					changeNonZeroRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "!==", Left: changeAmountRef, Right: zeroRef})
+					changeThenCtx := methodCtx.subContext()
+					changeThenCtx.emit(makeCall("buildChangeOutput", []string{changePKHRef, changeAmountRef}))
+					methodCtx.syncCounter(changeThenCtx)
+					changeElseCtx := methodCtx.subContext()
+					changeElseCtx.emit(makeLoadConstString(""))
+					methodCtx.syncCounter(changeElseCtx)
+					changeOutputRef = methodCtx.emit(ir.ANFValue{
+						Kind: "if",
+						Cond: changeNonZeroRef,
+						Then: changeThenCtx.bindings,
+						Else: changeElseCtx.bindings,
+					})
+				}
+				catChange := func(acc string) string {
+					if changeOutputRef == "" {
+						return acc
+					}
+					return methodCtx.emit(makeCall("cat", []string{acc, changeOutputRef}))
+				}
 
 				if len(addOutputRefs) > 0 {
 					// Multi-output continuation: concat all state outputs, then
@@ -581,7 +599,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					for _, dataRef := range addDataOutputRefs {
 						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, dataRef}))
 					}
-					accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, changeOutputRef}))
+					accumulated = catChange(accumulated)
 					hashRef := methodCtx.emit(makeCall("hash256", []string{accumulated}))
 					preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef2}))
@@ -599,7 +617,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					for _, dataRef := range addDataOutputRefs {
 						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, dataRef}))
 					}
-					allOutputs := methodCtx.emit(makeCall("cat", []string{accumulated, changeOutputRef}))
+					allOutputs := catChange(accumulated)
 					hashRef := methodCtx.emit(makeCall("hash256", []string{allOutputs}))
 					preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef4}))
@@ -610,7 +628,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 
 			// Build augmented params list for ABI
 			augmentedParams := lowerParams(method.Params)
-			if needsChangeOutput {
+			if includesChange {
 				augmentedParams = append(augmentedParams,
 					ir.ANFParam{Name: "_changePKH", Type: "Ripemd160"},
 					ir.ANFParam{Name: "_changeAmount", Type: "bigint"},

@@ -309,6 +309,19 @@ public record RunarArtifact(
             params = params == null ? List.of() : Collections.unmodifiableList(params);
         }
 
+        /**
+         * Whether a stateful method builds a state continuation. A
+         * {@code _changePKH} param implies one; N-038: a SIGHASH_SINGLE method
+         * continues the contract WITHOUT change params (BIP-143 SINGLE does not
+         * commit the change output), so for it the ABI's {@code isTerminal}
+         * decides.
+         */
+        public boolean hasContinuation() {
+            for (ABIParam p : params) if ("_changePKH".equals(p.name())) return true;
+            int st = sigHashType == null ? 0x41 : sigHashType;
+            return (st & 0x1f) == 0x03 && !Boolean.TRUE.equals(isTerminal);
+        }
+
         /** Backwards-compatible constructor: default sighash (ALL|FORKID, 0x41). */
         public ABIMethod(String name, List<ABIParam> params, boolean isPublic, Boolean isTerminal,
                          Boolean usesCodePart) {

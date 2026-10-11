@@ -457,8 +457,11 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # state or emits an output must therefore inject the same
             # continuation params as if the public body did so directly.
             eff = side_effects.get(method.name, MethodEffects())
-            shape = continuation_shape_for(eff)
-            needs_change_output = shape.needs_change
+            # N-038: under a SINGLE base the change output is not committed,
+            # so the method takes no _changePKH / _changeAmount.
+            shape = continuation_shape_for(eff, method.sighash_type)
+            needs_continuation = shape.needs_change
+            needs_change_output = shape.includes_change
             needs_new_amount = shape.needs_new_amount
 
             # Register implicit parameters
@@ -541,7 +544,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # for param injection. Both must agree or the deployed
             # locking script will not match the auto-injected parameter
             # list.
-            if needs_change_output:
+            if needs_continuation:
                 # F-024 (R14): the default single-output continuation carries
                 # the spender-chosen ``_newAmount`` into the new state UTXO.
                 # Without this check a spender sets ``_newAmount = 1`` and pays
@@ -572,25 +575,34 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                 # with empty is a no-op) when zero, reproducing the omission.
                 # For any change > 0 the hashed bytes are unchanged; only the
                 # emitted script gains the guard.
-                change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
-                change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
-                zero_ref = method_ctx.emit(_make_load_const_int(0))
-                change_non_zero_ref = method_ctx.emit(ANFValue(
-                    kind="bin_op", op="!==",
-                    left=change_amount_ref, right=zero_ref,
-                ))
-                change_then_ctx = method_ctx.sub_context()
-                change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
-                method_ctx.sync_counter(change_then_ctx)
-                change_else_ctx = method_ctx.sub_context()
-                change_else_ctx.emit(_make_load_const_string(""))
-                method_ctx.sync_counter(change_else_ctx)
-                change_output_ref = method_ctx.emit(ANFValue(
-                    kind="if",
-                    cond=change_non_zero_ref,
-                    then=change_then_ctx.bindings,
-                    else_=change_else_ctx.bindings,
-                ))
+                # N-038: under a SIGHASH_SINGLE base no change segment exists
+                # (hashOutputs = hash256(output[inputIndex])).
+                change_output_ref = None
+                if needs_change_output:
+                    change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
+                    change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
+                    zero_ref = method_ctx.emit(_make_load_const_int(0))
+                    change_non_zero_ref = method_ctx.emit(ANFValue(
+                        kind="bin_op", op="!==",
+                        left=change_amount_ref, right=zero_ref,
+                    ))
+                    change_then_ctx = method_ctx.sub_context()
+                    change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
+                    method_ctx.sync_counter(change_then_ctx)
+                    change_else_ctx = method_ctx.sub_context()
+                    change_else_ctx.emit(_make_load_const_string(""))
+                    method_ctx.sync_counter(change_else_ctx)
+                    change_output_ref = method_ctx.emit(ANFValue(
+                        kind="if",
+                        cond=change_non_zero_ref,
+                        then=change_then_ctx.bindings,
+                        else_=change_else_ctx.bindings,
+                    ))
+
+                def cat_change(acc):
+                    if change_output_ref is None:
+                        return acc
+                    return method_ctx.emit(_make_call("cat", [acc, change_output_ref]))
 
                 if add_output_refs:
                     # Multi-output continuation: concat all state outputs, then
@@ -600,7 +612,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, add_output_refs[i]]))
                     for data_ref in add_data_output_refs:
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
-                    accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+                    accumulated = cat_change(accumulated)
                     hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
                     preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref2]))
@@ -621,7 +633,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                     accumulated = contract_output_ref
                     for data_ref in add_data_output_refs:
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
-                    all_outputs = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+                    all_outputs = cat_change(accumulated)
                     hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
                     preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))

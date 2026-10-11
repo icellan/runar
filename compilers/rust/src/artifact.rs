@@ -225,7 +225,13 @@ pub fn assemble_artifact(
         .map(|m| {
             // For stateful contracts, mark public methods without _changePKH as terminal
             let is_terminal = if is_stateful && m.is_public {
-                let has_change = m.params.iter().any(|p| p.name == "_changePKH");
+                let mut has_change = m.params.iter().any(|p| p.name == "_changePKH");
+                // N-038: a SIGHASH_SINGLE method continues the contract without
+                // declaring `_changePKH` (the change output is not committed),
+                // so its continuation is read from the method body instead.
+                if !has_change && m.sighash_type.map_or(false, |t| (t & 0x1f) == 0x03) {
+                    has_change = crate::stateful_scaffold::shape(program, m).0;
+                }
                 if !has_change { Some(true) } else { None }
             } else {
                 None
