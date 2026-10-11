@@ -71,6 +71,27 @@ go build -o runar-compiler-go .
 - Go 1.26+
 - cgo support (for tree-sitter TypeScript parser, bundled via go-tree-sitter)
 
+### Supported build path: `go.work`, not standalone `go get`
+
+This module imports `github.com/icellan/runar/packages/runar-go` (for
+`debug.go`'s `ScriptVM` wrapper and `compiler/groth16_wa.go`'s
+`bn254witness` helpers), and `packages/runar-go` imports back from this
+module (`codegen`, `frontend`) — the two are a cross-module cycle resolved
+today only by the root `go.work` file's `use ./compilers/go` and
+`use ./packages/runar-go` directives, which make both modules resolve to
+this local checkout regardless of version pins. Building or testing from
+within this checkout (`cd compilers/go && go build ./...`, no `GOWORK`
+override) is the supported and CI-exercised path.
+
+A standalone build (`GOWORK=off go build ./...`) or `go get` of this module
+from outside this repository is **not** currently supported: this module has
+no `require` for `packages/runar-go` at all, and even adding one would
+resolve against `packages/runar-go`'s latest published tag, which predates
+`packages/runar-go/bn254witness` — a package this module's non-test source
+(`compiler/groth16_wa.go`) already imports — and also predates
+`packages/runar-go/sp1fri`, imported only by this module's own test files.
+Publishing tags that close the cycle is tracked separately as N-204.
+
 ---
 
 ## Running

@@ -45,6 +45,8 @@ import runar "github.com/icellan/runar/packages/runar-go"
 
 Requires Go 1.26+. The SDK depends on `github.com/bsv-blockchain/go-sdk` for ECDSA, BIP-143 sighash, and transaction primitives, on `golang.org/x/crypto/ripemd160` for hash160, and on `github.com/icellan/runar/compilers/go` for the frontend wrapper used by `CompileCheck`. The exact dependency list is in [go.mod](go.mod).
 
+> **Supported build path: `go.work`, not standalone `go get`.** `go.mod`'s `require` on `github.com/icellan/runar/compilers/go` and that module's own imports back into this package form a cross-module cycle that, today, is resolved only inside this monorepo's checkout, by the root `go.work` file's `use` directives for both modules. The `go get` command above — and any standalone (`GOWORK=off`) build — is **not** currently supported: the pinned `compilers/go` version is not a published tag, and this module's latest published tag predates `bn254witness` (imported by `compilers/go`'s non-test source, `compiler/groth16_wa.go`) and `sp1fri` (imported only by `compilers/go`'s own test files). If you're working inside this repo, build and test via `go.work` (the default when you `cd` into any workspace member); publishing tags that close the cycle for out-of-tree consumers is tracked separately as N-204.
+
 > Note on terminology used throughout this README: the canonical concepts (Artifact, Contract, Provider, Signer, Wallet, Call, PreparedCall, State, UTXO, Inscription) are defined once in [Section 3](#3-core-concepts) and referred to thereafter.
 
 ---
