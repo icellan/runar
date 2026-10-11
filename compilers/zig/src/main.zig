@@ -268,7 +268,19 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     defer arena.deinit();
     const work_allocator = arena.allocator();
 
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(10 * 1024 * 1024));
+    // N-105: this used to read with `.limited(10 MiB)`, so any IR file
+    // between 10 MiB and json_parser.MAX_IR_BYTES (16 MiB) failed with a bare
+    // `error: StreamTooLong` before parseANFProgram's own size guard ever saw
+    // it, while TS (and every other tier reading the same input) accepted it.
+    // Reading up to MAX_IR_BYTES+1 lets files at or under the cap reach the
+    // loader; a file actually too large for std.json's own read limit still
+    // surfaces as the typed `IRSizeExceeded` diagnostic rather than a raw
+    // StreamTooLong, matching the diagnostic parseANFProgram gives for an
+    // in-memory oversized payload (ir/json_size_guard_test.zig).
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(json_parser.MAX_IR_BYTES + 1)) catch |err| switch (err) {
+        error.StreamTooLong => return error.IRSizeExceeded,
+        else => return err,
+    };
 
     const program = try json_parser.parseANFProgram(work_allocator, source);
 

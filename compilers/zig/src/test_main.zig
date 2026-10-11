@@ -16,6 +16,7 @@ test {
     _ = @import("ir/n115_ir_float_narrowing_test.zig");
     _ = @import("ir/n133_loop_start_test.zig");
     _ = @import("tests/n119_ir_cli_clean_stderr.zig");
+    _ = @import("tests/n105_ir_read_cap.zig");
     _ = @import("ir/sp1_fri_ir_guard_test.zig");
     _ = @import("frontend/input_limits.zig");
     _ = @import("frontend/input_limits_test.zig");
