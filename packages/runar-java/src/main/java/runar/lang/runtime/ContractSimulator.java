@@ -24,6 +24,7 @@ import runar.lang.types.Bigint;
 import runar.lang.types.ByteString;
 import runar.lang.types.RabinPubKey;
 import runar.lang.types.RabinSig;
+import runar.lang.types.SigHashPreimage;
 
 /**
  * Off-chain simulator harness for exercising a Rúnar contract from
@@ -62,11 +63,34 @@ public final class ContractSimulator {
         this.artifact = artifact;
     }
 
+    /**
+     * Stateless simulator without a compiled artifact. {@link #call} works for
+     * methods that never call {@code checkPreimage}; one that does throws,
+     * because there is no spending transaction to check the preimage against.
+     */
     public static ContractSimulator stateless(SmartContract contract) {
         if (contract instanceof StatefulSmartContract) {
             throw new IllegalArgumentException("use ContractSimulator.stateful for stateful contracts");
         }
         return new ContractSimulator(contract, false, null);
+    }
+
+    /** Stateless simulator whose {@link #callWithSpend} checks preimages against {@code artifact}. */
+    public static ContractSimulator stateless(SmartContract contract, RunarArtifact artifact) {
+        if (contract instanceof StatefulSmartContract) {
+            throw new IllegalArgumentException("use ContractSimulator.stateful for stateful contracts");
+        }
+        if (artifact == null) throw new IllegalArgumentException("artifact is null");
+        return new ContractSimulator(contract, false, artifact);
+    }
+
+    /** As {@link #stateless(SmartContract, RunarArtifact)}, compiling {@code source} first. */
+    public static ContractSimulator stateless(SmartContract contract, Path source) {
+        try {
+            return stateless(contract, SimulatedSpend.compile(source));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     /**
@@ -193,6 +217,45 @@ public final class ContractSimulator {
     }
 
     /**
+     * N-099: call a stateless method that calls {@code checkPreimage}, inside
+     * the spending transaction the caller describes. Input 0 spends the
+     * contract's compiled locking script at {@code template}'s outpoint /
+     * amount / nSequence, under its version / nLockTime / sighash type;
+     * {@code outputs} are the transaction's outputs, in order. Inside the call
+     * {@code checkPreimage(p)} holds only when {@code p} is that transaction's
+     * BIP-143 preimage ({@link #spendPreimage} builds it), and the preimage
+     * extractors read that preimage.
+     */
+    public Object callWithSpend(String methodName, Preimage template, List<SimulatedSpend.Out> outputs,
+                                Object... args) {
+        Preimage honest = statelessSpendPreimage(methodName, template, outputs);
+        SimulatorContext.setCurrentPreimage(honest);
+        try {
+            return call(methodName, args);
+        } finally {
+            SimulatorContext.clearCurrentPreimage();
+        }
+    }
+
+    /** The BIP-143 preimage of the spending transaction {@link #callWithSpend} describes. */
+    public SigHashPreimage spendPreimage(String methodName, Preimage template, List<SimulatedSpend.Out> outputs) {
+        return new SigHashPreimage(statelessSpendPreimage(methodName, template, outputs).toBytes());
+    }
+
+    private Preimage statelessSpendPreimage(String methodName, Preimage template, List<SimulatedSpend.Out> outputs) {
+        if (stateful) throw new IllegalStateException("contract is stateful: use callStateful");
+        if (template == null) throw new IllegalArgumentException("preimage template is null");
+        if (outputs == null) throw new IllegalArgumentException("outputs is null");
+        if (artifact == null) {
+            throw new IllegalStateException(
+                "callWithSpend checks the preimage against the spending transaction, which needs the "
+                    + "contract's compiled artifact: use ContractSimulator.stateless(contract, artifact) "
+                    + "or ContractSimulator.stateless(contract, sourcePath)");
+        }
+        return spendFor(methodName).honest(template, List.copyOf(outputs));
+    }
+
+    /**
      * Expect the given method call to fail with an {@link AssertionError}.
      * Returns normally if the contract's internal assert failed; throws
      * otherwise.
@@ -219,6 +282,11 @@ public final class ContractSimulator {
                     + "contract's compiled artifact: use ContractSimulator.stateful(contract, artifact) "
                     + "or ContractSimulator.stateful(contract, sourcePath)");
         }
+        return spendFor(methodName);
+    }
+
+    /** The spend of the contract's current locking script through public method {@code methodName}. */
+    private Spend spendFor(String methodName) {
         RunarArtifact.ABIMethod abi = null;
         for (RunarArtifact.ABIMethod m : artifact.abi().methods()) {
             if (m.isPublic() && m.name().equals(methodName)) { abi = m; break; }
@@ -314,7 +382,8 @@ public final class ContractSimulator {
         }
     }
 
-    private static void requireMatches(Preimage expected, Preimage supplied) {
+    /** Throws {@link AssertionError} naming the differing fields, unless the two preimages are identical. */
+    static void requireMatches(Preimage expected, Preimage supplied) {
         if (Arrays.equals(expected.toBytes(), supplied.toBytes())) return;
         List<String> diff = new ArrayList<>();
         if (expected.version() != supplied.version()) diff.add("version");

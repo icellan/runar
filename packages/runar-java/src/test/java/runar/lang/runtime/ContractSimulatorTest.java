@@ -9,13 +9,21 @@ import runar.lang.StatefulSmartContract;
 import runar.lang.annotations.Public;
 import runar.lang.annotations.Readonly;
 import runar.lang.types.Addr;
+import runar.lang.types.Bigint;
+import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
 import runar.lang.types.Sig;
+import runar.lang.types.SigHashPreimage;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static runar.lang.Builtins.assertThat;
+import static runar.lang.Builtins.cat;
+import static runar.lang.Builtins.checkPreimage;
 import static runar.lang.Builtins.checkSig;
+import static runar.lang.Builtins.extractOutputHash;
 import static runar.lang.Builtins.hash160;
+import static runar.lang.Builtins.hash256;
+import static runar.lang.Builtins.num2bin;
 
 class ContractSimulatorTest {
 
@@ -284,5 +292,168 @@ class ContractSimulatorTest {
         ContractSimulator sim = ContractSimulator.stateful(new Counter(BigInteger.ZERO));
         assertThrows(IllegalStateException.class,
             () -> sim.callStateful("increment", Preimage.builder().build()));
+    }
+
+    // --- N-099: a stateless method's explicit checkPreimage -----------------
+    //
+    // Proves: a stateless call whose method calls checkPreimage(SigHashPreimage)
+    // is checked against the BIP-143 preimage of the spending transaction the
+    // caller describes (input 0 spends the contract's compiled locking script;
+    // the outputs are the caller's). A 32-byte fake and a well-formed preimage
+    // committing to other outputs are rejected; the honest preimage passes;
+    // with no spend described, checkPreimage throws instead of passing. Does
+    // NOT prove on-chain acceptance: the honest preimage comes from the SDK's
+    // own sighash code (OpPushTx), not an independent script VM.
+
+    /** Stateless covenant: the preimage must sign a tx paying 1000 sats to `pkh` (P2PKH), and nothing else. */
+    public static class PayTo extends SmartContract {
+        @Readonly public Addr pkh;
+
+        public PayTo(Addr pkh) {
+            super(pkh);
+            this.pkh = pkh;
+        }
+
+        @Public
+        public void spend(SigHashPreimage txPreimage) {
+            assertThat(checkPreimage(txPreimage));
+            ByteString out = cat(cat(cat(num2bin(Bigint.of(1000), Bigint.of(8)), ByteString.fromHex("1976a914")),
+                this.pkh), ByteString.fromHex("88ac"));
+            assertThat(hash256(out).equals(extractOutputHash(txPreimage)));
+        }
+    }
+
+    private static final Addr PAYEE = Addr.fromHex("0102030405060708090a0b0c0d0e0f1011121314");
+
+    /** The 34-byte output PayTo requires: 8-byte LE 1000, varint 25, P2PKH to PAYEE. */
+    private static ByteString payeeOutput() {
+        return ByteString.fromHex("e803000000000000" + "1976a914" + PAYEE.toHex() + "88ac");
+    }
+
+    /**
+     * The 32-byte fake the old tests used: hash256(required output), which the
+     * stub checkPreimage accepted and the old extractOutputHash echoed back.
+     */
+    private static SigHashPreimage fake32() {
+        return new SigHashPreimage(MockCrypto.hash256(payeeOutput()).toByteArray());
+    }
+
+    /** The item's attack at its simplest: 32 bytes posing as a preimage, and no spend to check it against. */
+    @Test
+    void statelessCheckPreimageWithoutASpendThrows() {
+        ContractSimulator sim = ContractSimulator.stateless(new PayTo(PAYEE));
+        SigHashPreimage fake = fake32();
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> sim.call("spend", fake));
+        assertTrue(e.getMessage().contains("checkPreimage"), e.getMessage());
+    }
+
+    /** Rúnar source for {@link PayTo}. */
+    private static final String PAY_TO_SRC = """
+        import runar.lang.SmartContract;
+        import runar.lang.annotations.Public;
+        import runar.lang.annotations.Readonly;
+        import runar.lang.types.Addr;
+        import runar.lang.types.Bigint;
+        import runar.lang.types.ByteString;
+        import runar.lang.types.SigHashPreimage;
+
+        import static runar.lang.Builtins.assertThat;
+        import static runar.lang.Builtins.cat;
+        import static runar.lang.Builtins.checkPreimage;
+        import static runar.lang.Builtins.extractOutputHash;
+        import static runar.lang.Builtins.hash256;
+        import static runar.lang.Builtins.num2bin;
+
+        class PayTo extends SmartContract {
+            @Readonly Addr pkh;
+
+            PayTo(Addr pkh) {
+                super(pkh);
+                this.pkh = pkh;
+            }
+
+            @Public
+            void spend(SigHashPreimage txPreimage) {
+                assertThat(checkPreimage(txPreimage));
+                ByteString out = cat(cat(cat(num2bin(Bigint.of(1000), Bigint.of(8)), ByteString.fromHex("1976a914")),
+                    this.pkh), ByteString.fromHex("88ac"));
+                assertThat(hash256(out).equals(extractOutputHash(txPreimage)));
+            }
+        }
+        """;
+
+    private static runar.lang.sdk.RunarArtifact payToArtifact;
+
+    private static runar.lang.sdk.RunarArtifact payToArtifact() {
+        if (payToArtifact == null) {
+            try {
+                payToArtifact = runar.lang.sdk.SimulatedSpend.compile(PAY_TO_SRC, "PayTo.runar.java");
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+        return payToArtifact;
+    }
+
+    private static java.util.List<runar.lang.sdk.SimulatedSpend.Out> payeeOutputs() {
+        return java.util.List.of(new runar.lang.sdk.SimulatedSpend.Out(1000, "76a914" + PAYEE.toHex() + "88ac"));
+    }
+
+    @Test
+    void callWithSpendAcceptsTheSpendingTransactionsPreimage() {
+        ContractSimulator sim = ContractSimulator.stateless(new PayTo(PAYEE), payToArtifact());
+        Preimage template = Preimage.builder().amount(BigInteger.valueOf(5000)).build();
+        SigHashPreimage honest = sim.spendPreimage("spend", template, payeeOutputs());
+        Preimage parsed = Preimage.parse(honest.toByteArray());
+        // hashOutputs commits to the one output, serialized independently here.
+        assertArrayEquals(MockCrypto.hash256(payeeOutput()).toByteArray(), parsed.hashOutputs());
+        // scriptCode is PayTo's locking script with PAYEE spliced in.
+        assertTrue(parsed.scriptCode().toHex().contains(PAYEE.toHex()));
+        assertEquals(BigInteger.valueOf(5000), parsed.amount());
+        assertDoesNotThrow(() -> sim.callWithSpend("spend", template, payeeOutputs(), honest));
+        assertNull(SimulatorContext.currentPreimage(), "the spend does not leak past the call");
+    }
+
+    /** With the spend described, the 32-byte fake the old tests used is still rejected by checkPreimage. */
+    @Test
+    void callWithSpendRejectsA32ByteFake() {
+        ContractSimulator sim = ContractSimulator.stateless(new PayTo(PAYEE), payToArtifact());
+        AssertionError e = assertThrows(AssertionError.class,
+            () -> sim.callWithSpend("spend", Preimage.builder().build(), payeeOutputs(), fake32()));
+        assertTrue(e.getMessage().contains("not a BIP-143 preimage"), e.getMessage());
+    }
+
+    /**
+     * A well-formed preimage of a transaction paying the 1000 sats elsewhere: it
+     * satisfies the covenant's own output rule when built for that other tx, but
+     * it is not the preimage of the transaction being spent.
+     */
+    @Test
+    void callWithSpendRejectsThePreimageOfADifferentTransaction() {
+        ContractSimulator sim = ContractSimulator.stateless(new PayTo(PAYEE), payToArtifact());
+        Preimage template = Preimage.builder().build();
+        java.util.List<runar.lang.sdk.SimulatedSpend.Out> theft = java.util.List.of(
+            new runar.lang.sdk.SimulatedSpend.Out(1000, "76a914" + "cc".repeat(20) + "88ac"));
+        SigHashPreimage forTheft = sim.spendPreimage("spend", template, theft);
+        AssertionError e = assertThrows(AssertionError.class,
+            () -> sim.callWithSpend("spend", template, payeeOutputs(), forTheft));
+        assertTrue(e.getMessage().contains("hashOutputs"), e.getMessage());
+
+        // And the theft tx's own honest preimage gets past checkPreimage but
+        // fails the covenant's output rule.
+        AssertionError rule = assertThrows(AssertionError.class,
+            () -> sim.callWithSpend("spend", template, theft, forTheft));
+        assertFalse(rule.getMessage() != null && rule.getMessage().contains("checkPreimage"), rule.getMessage());
+    }
+
+    /** The structured Preimage overload is no stub either: it needs a spend too. */
+    @Test
+    void structuredCheckPreimageHasNoStub() {
+        SimulatorContext.enter();
+        try {
+            assertThrows(IllegalStateException.class, () -> runar.lang.Builtins.checkPreimage(Preimage.zero()));
+        } finally {
+            SimulatorContext.exit();
+        }
     }
 }

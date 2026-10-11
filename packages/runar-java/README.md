@@ -1058,11 +1058,15 @@ API surface:
 
 ```java
 public static ContractSimulator stateless(SmartContract contract);
+public static ContractSimulator stateless(SmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateless(SmartContract contract, Path source);
 public static ContractSimulator stateful(StatefulSmartContract contract);
 public static ContractSimulator stateful(StatefulSmartContract contract, RunarArtifact artifact);
 public static ContractSimulator stateful(StatefulSmartContract contract, Path source);
 
 public Object call(String methodName, Object... args);
+public Object callWithSpend(String methodName, Preimage template, List<SimulatedSpend.Out> outputs, Object... args);
+public SigHashPreimage spendPreimage(String methodName, Preimage template, List<SimulatedSpend.Out> outputs);
 public Object callStateful(String methodName, Preimage preimage, Object... args);
 public Preimage preimageFor(String methodName, Preimage template, Object... args);
 public AssertionError expectFailure(String methodName, Object... args);
@@ -1096,6 +1100,22 @@ Preimage template = Preimage.builder()
     .build();
 Preimage preimage = sim.preimageFor("methodThatReadsPreimage", template, arg0, arg1);
 sim.callStateful("methodThatReadsPreimage", preimage, arg0, arg1);
+```
+
+A stateless method that calls `checkPreimage(SigHashPreimage)` itself has
+no outputs of its own to commit to, so the test describes the spending
+transaction: `callWithSpend` takes the spender-side fields (a `Preimage`
+template) and the transaction's outputs, and inside the call
+`checkPreimage` holds only for that transaction's BIP-143 preimage, which
+`spendPreimage` builds. Called through plain `call`, with no transaction
+described, `checkPreimage` throws `IllegalStateException`; it never
+passes by default.
+
+```java
+ContractSimulator sim = ContractSimulator.stateless(vault, Path.of("CovenantVault.runar.java"));
+List<SimulatedSpend.Out> outputs = List.of(new SimulatedSpend.Out(1000, "76a914" + pkh + "88ac"));
+SigHashPreimage preimage = sim.spendPreimage("spend", template, outputs);
+sim.callWithSpend("spend", template, outputs, sig, preimage);
 ```
 
 #### `AnfInterpreter` — ANF-IR-based execution
@@ -1493,11 +1513,15 @@ Off-chain harness for `SmartContract` / `StatefulSmartContract`.
 
 ```java
 public static ContractSimulator stateless(SmartContract contract);
+public static ContractSimulator stateless(SmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateless(SmartContract contract, Path source);
 public static ContractSimulator stateful(StatefulSmartContract contract);
 public static ContractSimulator stateful(StatefulSmartContract contract, RunarArtifact artifact);
 public static ContractSimulator stateful(StatefulSmartContract contract, Path source);
 
 public Object call(String methodName, Object... args);
+public Object callWithSpend(String methodName, Preimage template, List<SimulatedSpend.Out> outputs, Object... args);
+public SigHashPreimage spendPreimage(String methodName, Preimage template, List<SimulatedSpend.Out> outputs);
 public Object callStateful(String methodName, Preimage preimage, Object... args);
 public Preimage preimageFor(String methodName, Preimage template, Object... args);
 public AssertionError expectFailure(String methodName, Object... args);

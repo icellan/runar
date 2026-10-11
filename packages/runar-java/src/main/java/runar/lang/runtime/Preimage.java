@@ -12,7 +12,9 @@ import runar.lang.types.ByteString;
  * preimage is constructed by the transaction signer and pushed onto the
  * stack as a ByteString; the contract then calls {@code checkPreimage}
  * and extracts fields via the opcode-backed extractors. Under the
- * simulator, {@code checkPreimage} always succeeds, extractors return
+ * simulator, {@code checkPreimage} holds only for the preimage of the
+ * spending transaction the {@link ContractSimulator} call describes (and
+ * throws when the call describes none), extractors return
  * sensible defaults (version = 1, sequence = 0xfffffffe, sighash =
  * SIGHASH_ALL | FORKID, etc.), and {@code extractOutputHash} echoes the
  * first 32 bytes of whatever preimage blob the test built.
@@ -157,7 +159,39 @@ public final class Preimage {
     // Mock extractors — mirror runtime/preimage.ts defaults.
     // -----------------------------------------------------------------
 
-    public static boolean checkPreimage(Preimage p) { return true; }
+    /**
+     * The off-chain {@code checkPreimage}: true only when {@code p} is the
+     * BIP-143 preimage of the spending transaction the active
+     * {@link ContractSimulator} call describes ({@code callWithSpend} for a
+     * stateless contract, {@code callStateful} for a stateful one). N-099: it
+     * never passes without that transaction; it throws.
+     */
+    public static boolean checkPreimage(Preimage p) {
+        return checkPreimage(p == null ? null : p.toBytes());
+    }
+
+    /** As {@link #checkPreimage(Preimage)}, for the raw bytes a contract holds as a {@code SigHashPreimage}. */
+    public static boolean checkPreimage(byte[] supplied) {
+        Preimage expected = SimulatorContext.currentPreimage();
+        if (expected == null) {
+            throw new IllegalStateException("checkPreimage has no spending transaction to check the preimage "
+                + "against: call a stateless method through ContractSimulator.callWithSpend (simulator built "
+                + "with an artifact), or a stateful one through callStateful");
+        }
+        if (supplied == null) throw new AssertionError("checkPreimage failed: the preimage is null");
+        if (Arrays.equals(expected.toBytes(), supplied)) return true;
+        Preimage parsed;
+        try {
+            parsed = parse(supplied);
+        } catch (RuntimeException e) {
+            throw new AssertionError("checkPreimage failed: " + supplied.length
+                + " bytes are not a BIP-143 preimage");
+        }
+        ContractSimulator.requireMatches(expected, parsed);
+        // Every field matched, so the supplied bytes carry trailing data.
+        throw new AssertionError("checkPreimage failed: " + supplied.length
+            + " bytes are a BIP-143 preimage followed by trailing bytes");
+    }
 
     public static BigInteger extractVersion(Preimage p) {
         return p == null ? BigInteger.ONE : BigInteger.valueOf(p.version);

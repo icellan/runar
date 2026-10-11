@@ -30,7 +30,9 @@ class PreimageTest {
         assertEquals(BigInteger.valueOf(0x41), Preimage.extractSigHashType(p));
         assertEquals(BigInteger.ZERO, Preimage.extractLocktime(p));
         assertEquals(BigInteger.ZERO, Preimage.extractInputIndex(p));
-        assertTrue(Preimage.checkPreimage(p));
+        // N-099: checkPreimage is no stub. With no simulator spend to check
+        // against it throws; it used to return true for any preimage.
+        assertThrows(IllegalStateException.class, () -> Preimage.checkPreimage(p));
     }
 
     @Test

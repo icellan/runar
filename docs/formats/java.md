@@ -411,7 +411,7 @@ class P2PKHTest {
 }
 ```
 
-Mock crypto functions (`checkSig`, `checkPreimage`, `verifyWOTS`, etc.) always return `true` for business-logic testing. Hash functions (`hash160`, `hash256`, `sha256`, `ripemd160`) use real implementations.
+Mock crypto functions (`checkSig`, `verifyWOTS`, etc.) always return `true` for business-logic testing. `checkPreimage` does not: under `ContractSimulator` it holds only for the BIP-143 preimage of the spending transaction the call describes (`callStateful`, or `callWithSpend` for a stateless contract) and throws when the call describes none. Hash functions (`hash160`, `hash256`, `sha256`, `ripemd160`) use real implementations.
 
 A `runar.lang.CompileCheck` helper that runs the contract source through parse → validate → typecheck ships with **milestone 11 — the off-chain simulator** of the Java tier plan. Until then, tests instantiate the contract and verify business logic as native Java; the Rúnar compile pipeline is exercised via `./gradlew :compiler:test` rather than per-test hooks.
 
