@@ -11,10 +11,12 @@
 //!
 //! Eight builtins that `docs/formats/rust.md` documents as callable — `len`,
 //! `split`, `left`, `right`, `int2str`, `int_2_str`, `reverse_bytes`,
-//! `to_byte_string` — had NO mock in `packages/runar-rs`. Seven of the 84
-//! `.runar.rs` example contracts call one, and every one of the seven was
-//! therefore uncompilable as Rust. Six of them are wired up now. One is not,
-//! and this file pins which one.
+//! `to_byte_string` — had NO mock in `packages/runar-rs`. Ten of the 84
+//! `.runar.rs` example contracts call one (see `the_universe_is_not_empty`),
+//! and all ten are wired up now. EXCLUDED is empty, and this file still
+//! pins it: the SET being empty is a fact that can regress, not a
+//! tautology, and `excluded_contracts_are_exactly_the_justified_set` is what
+//! would catch a future contract silently falling out of native compilation.
 //!
 //! # Why a set and not a count
 //!
@@ -48,25 +50,24 @@ use std::path::{Path, PathBuf};
 /// The `.runar.rs` contracts that call one of the eight byte builtins and
 /// still cannot be compiled as native Rust. Paths are relative to
 /// `examples/rust`. Each is justified at the top of the named file; see
-/// `every_exclusion_carries_a_written_reason`.
+/// `every_exclusion_carries_a_written_reason`. Empty today — see below.
 ///
-/// The one remaining blocker is NOT a missing mock and no longer a ByteString
-/// literal either: `self.add_output(...)` is a method the `#[runar::contract]`
-/// proc macro in `packages/runar-rs-macros` does not generate. The output
-/// intrinsics (`add_output`, `add_data_output`, `add_raw_output`) need an
-/// output-recording surface on the mock contract rather than a mock function;
-/// that blocks nine `.runar.rs` contracts in total and is orthogonal to the
-/// byte builtins.
+/// `branched-readonly-len/BranchedReadonlyLen.runar.rs` was the last holdout,
+/// excluded because `self.add_output(...)` was a method the
+/// `#[runar::contract]` proc macro in `packages/runar-rs-macros` did not
+/// generate at all. F-057 gave the macro a real, recording `add_output`, and
+/// N-122 wired the contract into a `[[test]]` target with a `#[path]` module
+/// include and removed it from this list. A future contract silently falling
+/// BACK out of native compilation — the direction that matters — is what
+/// `excluded_contracts_are_exactly_the_justified_set` still catches.
 ///
 /// The ByteString-literal blocker that used to hold `r1-k1-wallet` here is
-/// gone. `spec/grammar.md` section 11 makes `toByteString '(' StringLiteral
+/// gone too. `spec/grammar.md` section 11 makes `toByteString '(' StringLiteral
 /// ')'` the ByteStringLiteral production, and all seven tiers now fold it to a
 /// literal in ANF lowering, so `to_byte_string("41000000")` — the only
 /// spelling that is both valid Rust and valid Rúnar — reaches the IR
 /// indistinguishable from the bare literal the other eight surfaces carry.
-const EXCLUDED: &[&str] = &[
-    "branched-readonly-len/BranchedReadonlyLen.runar.rs",
-];
+const EXCLUDED: &[&str] = &[];
 
 /// The header every excluded contract must carry. A fixed marker, rather than
 /// "some comment", is what stops a future exclusion from being justified by

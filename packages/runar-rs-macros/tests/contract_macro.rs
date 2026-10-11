@@ -104,6 +104,39 @@ fn add_output_records_satoshis_and_mutable_fields() {
     assert!(RecordsOutputs::take_outputs().is_empty(), "take_outputs drains the log");
 }
 
+// N-122: `add_raw_output` / `add_data_output` used to discard their arguments
+// entirely — the generated methods existed (so `#[path]` tests compiled) but
+// a test could assert nothing about what a contract actually emitted. This
+// pins that they now RECORD, the same way F-057 made `add_output` record:
+// one typed struct + thread-local log + `take_*` drain per intrinsic. Does
+// not prove anything about emitted Bitcoin Script.
+#[test]
+fn add_raw_output_and_add_data_output_record_their_arguments() {
+    let mut c = RecordsOutputs { owner: vec![1], count: 0 };
+    c.bump();
+    c.bump();
+
+    let raw = RecordsOutputs::take_raw_outputs();
+    assert_eq!(
+        raw,
+        vec![
+            RecordsOutputsRawOutput { satoshis: 1000, script: vec![0x51] },
+            RecordsOutputsRawOutput { satoshis: 1000, script: vec![0x51] },
+        ]
+    );
+    assert!(RecordsOutputs::take_raw_outputs().is_empty(), "take_raw_outputs drains the log");
+
+    let data = RecordsOutputs::take_data_outputs();
+    assert_eq!(
+        data,
+        vec![
+            RecordsOutputsDataOutput { satoshis: 0, data: vec![1, 2, 3] },
+            RecordsOutputsDataOutput { satoshis: 0, data: vec![1, 2, 3] },
+        ]
+    );
+    assert!(RecordsOutputs::take_data_outputs().is_empty(), "take_data_outputs drains the log");
+}
+
 // The compiler injects `tx_preimage` for checkPreimage. Native Rust still
 // declares it on the struct, but it is not a mutable state slot — parsers
 // omit it, and `add_output` must too, or token-ft's

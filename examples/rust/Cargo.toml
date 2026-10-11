@@ -153,6 +153,10 @@ name = "bitwise_ops"
 path = "bitwise-ops/BitwiseOps_test.rs"
 
 [[test]]
+name = "branched_readonly_len"
+path = "branched-readonly-len/BranchedReadonlyLen_test.rs"
+
+[[test]]
 name = "ec_unit"
 path = "ec-unit/ECUnit_test.rs"
 

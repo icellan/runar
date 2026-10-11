@@ -72,6 +72,10 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
     let vis = s.vis.clone();
     let output_ident = quote::format_ident!("{}Output", ident);
     let log_ident = quote::format_ident!("__RUNAR_{}_OUTPUTS", ident);
+    let raw_output_ident = quote::format_ident!("{}RawOutput", ident);
+    let raw_log_ident = quote::format_ident!("__RUNAR_{}_RAW_OUTPUTS", ident);
+    let data_output_ident = quote::format_ident!("{}DataOutput", ident);
+    let data_log_ident = quote::format_ident!("__RUNAR_{}_DATA_OUTPUTS", ident);
 
     // A second impl block is visible to the contract's own `impl` in the
     // same module (`#[path]` tests). Extra args match mutable properties
@@ -85,6 +89,12 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
     // why token-ft / token-nft tested a hand-copied struct instead of the real
     // contract. The log is per thread, and libtest runs each `#[test]` on its
     // own thread, so every test starts with an empty log.
+    //
+    // N-122: `add_raw_output` and `add_data_output` RECORD the same way, each
+    // on its own thread-local log drained by its own `take_*_outputs()`. They
+    // used to discard their arguments silently — the generated methods existed
+    // (so `#[path]` tests compiled) but nothing could be asserted about what a
+    // contract calling them actually emitted.
     quote! {
         #s
 
@@ -97,9 +107,33 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
             #(#output_fields),*
         }
 
+        /// One output recorded by the native `add_raw_output` mock: the
+        /// satoshis and the raw script bytes, verbatim.
+        #[allow(dead_code)]
+        #[derive(Debug, Clone, PartialEq)]
+        #vis struct #raw_output_ident {
+            pub satoshis: i64,
+            pub script: ::std::vec::Vec<u8>,
+        }
+
+        /// One output recorded by the native `add_data_output` mock: the
+        /// satoshis and the data bytes, verbatim.
+        #[allow(dead_code)]
+        #[derive(Debug, Clone, PartialEq)]
+        #vis struct #data_output_ident {
+            pub satoshis: i64,
+            pub data: ::std::vec::Vec<u8>,
+        }
+
         ::std::thread_local! {
             #[allow(non_upper_case_globals)]
             static #log_ident: ::std::cell::RefCell<::std::vec::Vec<#output_ident>> =
+                ::std::cell::RefCell::new(::std::vec::Vec::new());
+            #[allow(non_upper_case_globals)]
+            static #raw_log_ident: ::std::cell::RefCell<::std::vec::Vec<#raw_output_ident>> =
+                ::std::cell::RefCell::new(::std::vec::Vec::new());
+            #[allow(non_upper_case_globals)]
+            static #data_log_ident: ::std::cell::RefCell<::std::vec::Vec<#data_output_ident>> =
                 ::std::cell::RefCell::new(::std::vec::Vec::new());
         }
 
@@ -117,18 +151,28 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
                 #log_ident.with(|log| ::std::mem::take(&mut *log.borrow_mut()))
             }
             #[allow(dead_code)]
-            fn add_raw_output<S, B: ::core::convert::AsRef<[u8]>>(
-                &mut self,
-                _satoshis: S,
-                _script: B,
-            ) {
+            fn add_raw_output(&mut self, satoshis: i64, script: impl ::core::convert::AsRef<[u8]>) {
+                #raw_log_ident.with(|log| {
+                    log.borrow_mut().push(#raw_output_ident { satoshis, script: script.as_ref().to_vec() })
+                });
+            }
+            /// Drain the outputs this thread's `add_raw_output` calls recorded,
+            /// in call order.
+            #[allow(dead_code)]
+            pub fn take_raw_outputs() -> ::std::vec::Vec<#raw_output_ident> {
+                #raw_log_ident.with(|log| ::std::mem::take(&mut *log.borrow_mut()))
             }
             #[allow(dead_code)]
-            fn add_data_output<S, B: ::core::convert::AsRef<[u8]>>(
-                &mut self,
-                _satoshis: S,
-                _data: B,
-            ) {
+            fn add_data_output(&mut self, satoshis: i64, data: impl ::core::convert::AsRef<[u8]>) {
+                #data_log_ident.with(|log| {
+                    log.borrow_mut().push(#data_output_ident { satoshis, data: data.as_ref().to_vec() })
+                });
+            }
+            /// Drain the outputs this thread's `add_data_output` calls
+            /// recorded, in call order.
+            #[allow(dead_code)]
+            pub fn take_data_outputs() -> ::std::vec::Vec<#data_output_ident> {
+                #data_log_ident.with(|log| ::std::mem::take(&mut *log.borrow_mut()))
             }
         }
     }
