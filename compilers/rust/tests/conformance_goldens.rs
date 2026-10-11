@@ -100,8 +100,23 @@ enum FixtureOutcome {
     MissingSource,
     OptedOut,
     CompileError(String),
+    // F-285: a missing/unreadable `expected-ir.json` or `expected-script.hex`
+    // is a failure, not a silent pass. See `compare_goldens` below.
+    MissingGoldenIr,
+    MissingGoldenHex,
     IrMismatch { expected: String, actual: String },
     ScriptMismatch { expected: String, actual: String },
+}
+
+/// F-285: true for every `FixtureOutcome` that must fail the sweep.
+///
+/// Before this fix, `MissingSource` was routed into a separate `missing`
+/// bucket that the final `assert!` never consulted, so a fixture whose
+/// source resolution failed (e.g. every `.runar.rs` entry in `source.json`
+/// repointed at a nonexistent file) reported `0 fail` instead of failing.
+/// `Pass` and `OptedOut` are the only outcomes that do not fail the sweep.
+fn is_fixture_failure(outcome: &FixtureOutcome) -> bool {
+    !matches!(outcome, FixtureOutcome::Pass | FixtureOutcome::OptedOut)
 }
 
 /// Honor the per-fixture compiler allowlist in `source.json`. If `compilers`
@@ -173,40 +188,63 @@ fn run_one_fixture(test_dir: &Path) -> FixtureOutcome {
     let actual_script: String = actual_script.chars().filter(|c| !c.is_whitespace()).collect();
 
     // Step 3: compare against goldens
-    let expected_ir_path = test_dir.join("expected-ir.json");
-    if expected_ir_path.exists() {
-        let raw = match fs::read_to_string(&expected_ir_path) {
-            Ok(s) => s,
-            Err(e) => return FixtureOutcome::CompileError(format!("read golden IR: {}", e)),
-        };
-        let expected_canonical = match canonicalize_json_str(&raw) {
-            Ok(s) => s,
-            Err(e) => return FixtureOutcome::CompileError(format!("canonicalize golden IR: {}", e)),
-        };
-        if actual_ir_canonical != expected_canonical {
-            return FixtureOutcome::IrMismatch {
-                expected: expected_canonical,
-                actual: actual_ir_canonical,
-            };
-        }
-    }
-
-    let expected_script_path = test_dir.join("expected-script.hex");
-    if expected_script_path.exists() {
-        let raw = match fs::read_to_string(&expected_script_path) {
-            Ok(s) => s,
-            Err(e) => return FixtureOutcome::CompileError(format!("read golden script: {}", e)),
-        };
-        let expected_script: String = raw.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
-        if actual_script != expected_script {
-            return FixtureOutcome::ScriptMismatch {
-                expected: expected_script,
-                actual: actual_script,
-            };
-        }
+    if let Some(outcome) = compare_goldens(test_dir, &actual_ir_canonical, &actual_script) {
+        return outcome;
     }
 
     FixtureOutcome::Pass
+}
+
+/// Compare a fixture's actual (already-canonicalized) ANF IR / script hex
+/// against its checked-in `expected-ir.json` / `expected-script.hex`.
+///
+/// F-285: this used to be inline, gated behind `if expected_ir_path.exists()`
+/// / `if expected_script_path.exists()` -- a fixture whose golden file was
+/// missing (deleted, renamed, ...) skipped the comparison entirely and fell
+/// through to `Pass`, with zero bytes actually checked. A missing or
+/// unreadable golden is now a failure (`MissingGoldenIr` / `MissingGoldenHex`),
+/// mirroring the Go (`compareGoldens`, F-280) and Python (`_compare_goldens`,
+/// F-323) harnesses' fix for the identical pattern.
+///
+/// Returns `None` when both goldens are present, readable, and byte-identical
+/// to the actual output; otherwise `Some(failure outcome)`.
+fn compare_goldens(test_dir: &Path, actual_ir_canonical: &str, actual_script: &str) -> Option<FixtureOutcome> {
+    let expected_ir_path = test_dir.join("expected-ir.json");
+    if !expected_ir_path.exists() {
+        return Some(FixtureOutcome::MissingGoldenIr);
+    }
+    let raw = match fs::read_to_string(&expected_ir_path) {
+        Ok(s) => s,
+        Err(e) => return Some(FixtureOutcome::CompileError(format!("read golden IR: {}", e))),
+    };
+    let expected_canonical = match canonicalize_json_str(&raw) {
+        Ok(s) => s,
+        Err(e) => return Some(FixtureOutcome::CompileError(format!("canonicalize golden IR: {}", e))),
+    };
+    if actual_ir_canonical != expected_canonical {
+        return Some(FixtureOutcome::IrMismatch {
+            expected: expected_canonical,
+            actual: actual_ir_canonical.to_string(),
+        });
+    }
+
+    let expected_script_path = test_dir.join("expected-script.hex");
+    if !expected_script_path.exists() {
+        return Some(FixtureOutcome::MissingGoldenHex);
+    }
+    let raw = match fs::read_to_string(&expected_script_path) {
+        Ok(s) => s,
+        Err(e) => return Some(FixtureOutcome::CompileError(format!("read golden script: {}", e))),
+    };
+    let expected_script: String = raw.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if actual_script != expected_script {
+        return Some(FixtureOutcome::ScriptMismatch {
+            expected: expected_script,
+            actual: actual_script.to_string(),
+        });
+    }
+
+    None
 }
 
 /// Produce a compact unified-diff summary of two strings (first 40 differing lines).
@@ -243,10 +281,15 @@ fn test_conformance_goldens_rust() {
         tests_dir.display()
     );
 
+    // F-285: a `DirEntry` read error or a failed `file_type()` call used to
+    // be dropped silently (`filter_map(|e| e.ok())`, `.unwrap_or(false)`),
+    // which would quietly shrink `dirs` below the real fixture count with
+    // no failure anywhere in the sweep -- lost fixture coverage. Both now
+    // panic (failing the test) instead of disappearing a fixture.
     let mut dirs: Vec<PathBuf> = fs::read_dir(&tests_dir)
         .expect("readdir conformance/tests")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.expect("readdir entry"))
+        .filter(|e| e.file_type().expect("file_type").is_dir())
         .map(|e| e.path())
         .collect();
     dirs.sort();
@@ -263,11 +306,27 @@ fn test_conformance_goldens_rust() {
             continue;
         }
         let outcome = run_one_fixture(dir);
-        match &outcome {
-            FixtureOutcome::Pass => pass.push(name),
-            FixtureOutcome::MissingSource => missing.push(name),
-            FixtureOutcome::OptedOut => opted_out.push(name),
-            _ => failures.push((name, outcome)),
+        // F-285: `MissingSource` used to go only into `missing`, a bucket
+        // the final `assert!` never consulted -- the summary line prints
+        // the count, but nothing failed the test. `missing` is kept for
+        // the diagnostic listing below; `is_fixture_failure` is what the
+        // assert at the end of this test actually consults now.
+        if let FixtureOutcome::MissingSource = &outcome {
+            missing.push(name.clone());
+        }
+        if matches!(outcome, FixtureOutcome::Pass) {
+            pass.push(name);
+        } else if is_fixture_failure(&outcome) {
+            failures.push((name, outcome));
+        } else {
+            // is_fixture_failure excludes exactly Pass | OptedOut; Pass is
+            // handled above, so only OptedOut reaches here. run_one_fixture
+            // never actually returns it today (the allowlist check above
+            // short-circuits first), but every outcome must land in some
+            // bucket -- a fixture silently landing in none of pass/missing/
+            // opted_out/failures is the exact "vanishes from the sweep"
+            // shape F-285 closes elsewhere.
+            opted_out.push(name);
         }
     }
 
@@ -294,6 +353,15 @@ fn test_conformance_goldens_rust() {
         match outcome {
             FixtureOutcome::CompileError(msg) => {
                 println!("  compile error: {}", msg);
+            }
+            FixtureOutcome::MissingSource => {
+                println!("  missing source: no .runar.rs file found for fixture '{}'", name);
+            }
+            FixtureOutcome::MissingGoldenIr => {
+                println!("  missing golden: expected-ir.json not found for fixture '{}'", name);
+            }
+            FixtureOutcome::MissingGoldenHex => {
+                println!("  missing golden: expected-script.hex not found for fixture '{}'", name);
             }
             FixtureOutcome::IrMismatch { expected, actual } => {
                 println!("  IR mismatch (expected {} chars, actual {} chars):", expected.len(), actual.len());
@@ -340,4 +408,155 @@ fn test_conformance_goldens_rust() {
         failures.len(),
         total
     );
+}
+
+// ----------------------------------------------------------------------
+// F-285: `conformance_goldens.rs` had two ways to report a green sweep
+// without actually checking a fixture:
+//   (1) a missing `expected-ir.json` / `expected-script.hex` skipped the
+//       comparison entirely (guarded by `if path.exists()`) and fell
+//       through to `Pass`;
+//   (2) a fixture whose source could not be resolved (`MissingSource`)
+//       was counted only in the unasserted `missing` bucket, never in
+//       `failures` -- "all source.json .runar.rs entries repointed at a
+//       nonexistent file" reported 0 fail.
+// Both are reproduced below against synthetic, throwaway fixture
+// directories under the OS temp dir (never against the real conformance
+// corpus) and proven fixed.
+// ----------------------------------------------------------------------
+
+/// Create (and clear) a throwaway scratch directory for one of the tests
+/// below. Not a conformance fixture; never under `conformance/tests`.
+fn f285_scratch_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("runar-f285-{}-{}", label, std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+/// What this proves: `compare_goldens` treats a missing `expected-ir.json`
+/// as a failure (`MissingGoldenIr`), not as "nothing to compare against,
+/// mark it passed" -- the behavior the old `if expected_ir_path.exists()`
+/// guard produced.
+///
+/// What this does not prove: that the real conformance corpus contains a
+/// fixture missing this golden today -- it does not; every fixture ships
+/// both goldens. This is a synthetic, throwaway directory under the OS
+/// temp dir, removed at the end of the test.
+#[test]
+fn test_compare_goldens_missing_golden_ir_is_failure() {
+    let dir = f285_scratch_dir("missing-ir");
+    fs::write(dir.join("expected-script.hex"), "deadbeef").expect("write expected-script.hex");
+    // expected-ir.json deliberately absent.
+
+    let outcome = compare_goldens(&dir, r#"{"anything":true}"#, "deadbeef");
+
+    match outcome {
+        Some(FixtureOutcome::MissingGoldenIr) => {}
+        other => panic!(
+            "compare_goldens did not report MissingGoldenIr for an absent expected-ir.json: {:?}",
+            other
+        ),
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// What this proves: `compare_goldens` treats a missing
+/// `expected-script.hex` as a failure (`MissingGoldenHex`), isolated from
+/// the IR-missing case above by giving it a matching IR golden so the IR
+/// comparison passes first and the hex path is what's actually exercised.
+///
+/// What this does not prove: the hex comparison logic itself when the
+/// golden IS present (covered by the real-corpus run in
+/// `test_conformance_goldens_rust`).
+#[test]
+fn test_compare_goldens_missing_golden_hex_is_failure() {
+    let dir = f285_scratch_dir("missing-hex");
+    let ir_json = r#"{"anything":true}"#;
+    fs::write(dir.join("expected-ir.json"), ir_json).expect("write expected-ir.json");
+    let actual_ir = canonicalize_json_str(ir_json).expect("canonicalize synthetic IR");
+    // expected-script.hex deliberately absent.
+
+    let outcome = compare_goldens(&dir, &actual_ir, "deadbeef");
+
+    match outcome {
+        Some(FixtureOutcome::MissingGoldenHex) => {}
+        other => panic!(
+            "compare_goldens did not report MissingGoldenHex for an absent expected-script.hex: {:?}",
+            other
+        ),
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// What this proves: `is_fixture_failure` classifies `MissingSource` as a
+/// failure. This is the regression guard for the "lost fixture coverage"
+/// half of F-285: before the fix, `MissingSource` outcomes were routed
+/// only into the `missing` bucket in `test_conformance_goldens_rust`,
+/// which the final `assert!(failures.is_empty(), ...)` never consulted --
+/// repointing every fixture's `.runar.rs` entry at a nonexistent file
+/// reported "0 fail" instead of failing. `Pass` and `OptedOut` are the
+/// only outcomes that must NOT fail the sweep.
+///
+/// What this does not prove: that `test_conformance_goldens_rust` itself
+/// wires `is_fixture_failure` in correctly end-to-end for every outcome
+/// variant -- that is covered by the real-corpus run passing (today, with
+/// no missing sources or goldens) and by the two `compare_goldens` tests
+/// above.
+#[test]
+fn test_is_fixture_failure_classifies_missing_source_as_failure() {
+    assert!(
+        is_fixture_failure(&FixtureOutcome::MissingSource),
+        "MissingSource must be a failure (lost fixture coverage), not a silently-unasserted bucket"
+    );
+    assert!(
+        is_fixture_failure(&FixtureOutcome::MissingGoldenIr),
+        "MissingGoldenIr must be a failure"
+    );
+    assert!(
+        is_fixture_failure(&FixtureOutcome::MissingGoldenHex),
+        "MissingGoldenHex must be a failure"
+    );
+    assert!(!is_fixture_failure(&FixtureOutcome::Pass), "Pass must not be a failure");
+    assert!(!is_fixture_failure(&FixtureOutcome::OptedOut), "OptedOut must not be a failure");
+}
+
+/// What this proves: `run_one_fixture` itself returns `MissingSource` (not
+/// a silent pass) for a fixture directory whose `source.json` points its
+/// `.runar.rs` entry at a nonexistent file and has no `*.runar.rs` glob
+/// fallback either -- this is CL-GAP-154's literal mutation scenario ("all
+/// source.json .runar.rs entries repointed at a nonexistent file"),
+/// exercising `find_rust_source`'s route (1) failing to canonicalize the
+/// dangling path, then falling through to the route (2) glob, which also
+/// finds nothing. The outcome is confirmed to be an outcome
+/// `is_fixture_failure` (and therefore `test_conformance_goldens_rust`'s
+/// assert) now catches.
+///
+/// What this does not prove: that the real conformance corpus has such a
+/// fixture today -- it does not; this is a synthetic, throwaway directory.
+/// It also does not prove CL-GAP-033's distinct "glob fallback can
+/// substitute a different contract" claim -- out of scope for this item
+/// (see notes for dispatcher).
+#[test]
+fn test_run_one_fixture_reports_missing_source_for_unresolvable_fixture() {
+    let dir = f285_scratch_dir("missing-source");
+    fs::write(
+        dir.join("source.json"),
+        r#"{"sources":{".runar.rs":"nonexistent-file.runar.rs"}}"#,
+    )
+    .expect("write source.json");
+    // No *.runar.rs file anywhere in the scratch dir, so the glob fallback
+    // in find_rust_source's route (2) also comes up empty.
+
+    let outcome = run_one_fixture(&dir);
+
+    match outcome {
+        FixtureOutcome::MissingSource => {}
+        other => panic!("run_one_fixture did not report MissingSource: {:?}", other),
+    }
+    assert!(is_fixture_failure(&outcome), "MissingSource must be a failure");
+
+    let _ = fs::remove_dir_all(&dir);
 }
