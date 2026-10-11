@@ -3397,8 +3397,14 @@ class LoweringContext {
         }
       }
 
+      // F-259: each body binding's ops carry that binding's own location (a
+      // binding without one keeps the loop's). The iteration-variable push
+      // above and the cleanup below stay on the loop's location.
+      const loopLoc = this.currentSourceLoc;
       for (let j = 0; j < body.length; j++) {
+        this.currentSourceLoc = body[j]!.sourceLoc ?? loopLoc;
         this.lowerBinding(body[j]!, j, lastUses);
+        this.currentSourceLoc = loopLoc;
       }
 
       // Clean up the iteration variable if it was not consumed by the body.

@@ -12,7 +12,7 @@
  *   - GREEN: the real TS and Python goldens (confirmed clean by direct
  *     inspection) pass with zero violations.
  *   - Inventory / regression gate: every committed `expected-source-map.json`
- *     across all 5 fixtures × 7 tiers is evaluated against
+ *     across all 6 fixtures × 7 tiers is evaluated against
  *     `anchor-known-issues.json`. Pairs with no entry must be fully clean;
  *     pairs with an entry must match its exact recorded signature. This is
  *     what makes the independent oracle "run in CI alongside the golden

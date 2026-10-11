@@ -3274,8 +3274,16 @@ impl LoweringContext {
                 }
             }
 
+            // F-259: each body binding's ops carry that binding's own location
+            // (a binding without one keeps the loop's). The iteration-variable
+            // push above and the cleanup below stay on the loop's location.
+            let loop_loc = self.current_source_loc.clone();
             for (j, binding) in body.iter().enumerate() {
+                if binding.source_loc.is_some() {
+                    self.current_source_loc = binding.source_loc.clone();
+                }
                 self.lower_binding(binding, j, &last_uses);
+                self.current_source_loc = loop_loc.clone();
             }
 
             // Clean up the iteration variable if it was not consumed by the body.

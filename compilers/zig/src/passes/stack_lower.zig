@@ -6187,8 +6187,14 @@ const LowerCtx = struct {
                 }
             }
 
+            // F-259: each body binding's ops carry that binding's own location
+            // (a binding without one keeps the loop's). The iteration-variable
+            // push above and the cleanup below stay on the loop's location.
+            const loop_loc = self.current_source_loc;
             for (fl.body_bindings, 0..) |binding, idx| {
                 self.current_idx = idx;
+                if (binding.source_loc) |loc| self.current_source_loc = loc;
+                defer self.current_source_loc = loop_loc;
                 try self.lowerBinding(binding);
             }
             self.last_uses.deinit(self.allocator);

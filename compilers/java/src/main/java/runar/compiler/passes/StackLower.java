@@ -3631,8 +3631,21 @@ public final class StackLower {
                     }
                 }
 
+                // F-259: each body binding's ops carry that binding's own
+                // location (a binding without one keeps the loop's). The
+                // iteration-variable push above and the cleanup below stay on
+                // the loop's location.
+                runar.compiler.ir.ast.SourceLocation loopLoc = currentSourceLoc;
                 for (int j = 0; j < body.size(); j++) {
-                    lowerBinding(body.get(j), j, lastUses);
+                    AnfBinding b = body.get(j);
+                    if (b.sourceLoc() != null) {
+                        currentSourceLoc = b.sourceLoc();
+                    }
+                    try {
+                        lowerBinding(b, j, lastUses);
+                    } finally {
+                        currentSourceLoc = loopLoc;
+                    }
                 }
                 // Clean up the iteration variable if it was not consumed by the body.
                 //

@@ -2785,8 +2785,15 @@ class _LoweringContext:
                 if (not is_final_iteration) or used_after_loop:
                     last_uses[ref_name] = len(body)
 
+            # F-259: each body binding's ops carry that binding's own location
+            # (a binding without one keeps the loop's). The iteration-variable
+            # push above and the cleanup below stay on the loop's location.
+            loop_loc = self.current_source_loc
             for j, binding in enumerate(body):
+                if binding.source_loc is not None:
+                    self.current_source_loc = binding.source_loc
                 self._lower_binding(binding, j, last_uses)
+                self.current_source_loc = loop_loc
 
             # Clean up the iteration variable if it was not consumed
             #

@@ -119,6 +119,7 @@ test {
     _ = @import("tests/n105_output_shape.zig");
     _ = @import("tests/n099_ternary_branch_types.zig");
     _ = @import("tests/n100_empty_else_arm.zig");
+    _ = @import("tests/f259_loop_body_source_loc.zig");
     _ = @import("tests/n109_unknown_property_type.zig");
     _ = @import("tests/n114_read_dispatch_property_target.zig");
     _ = @import("tests/branch_lift_then_arm.zig");

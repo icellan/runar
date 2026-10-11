@@ -3174,8 +3174,16 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 			}
 		}
 
+		// F-259: each body binding's ops carry that binding's own location (a
+		// binding without one keeps the loop's). The iteration-variable push
+		// above and the cleanup below stay on the loop's location.
+		loopLoc := ctx.currentSourceLoc
 		for j, binding := range body {
+			if binding.SourceLoc != nil {
+				ctx.currentSourceLoc = binding.SourceLoc
+			}
 			ctx.lowerBinding(&binding, j, lastUses)
+			ctx.currentSourceLoc = loopLoc
 		}
 
 		// Clean up the iteration variable if it was not consumed by the body.

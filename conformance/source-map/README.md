@@ -17,7 +17,7 @@ conformance/source-map/
 └── .gitignore                   # ignores .tmp/ scratch dirs
 ```
 
-## Fixtures (5)
+## Fixtures (6)
 
 - `basic-p2pkh`
 - `stateful-counter`
@@ -28,6 +28,9 @@ conformance/source-map/
   repo is not OK. `arithmetic` is structurally similar (computation-dense,
   multi-method) and stays sub-kilobyte per tier.
 - `if-else`
+- `bounded-loop` — the one looping fixture (F-259): each unrolled body
+  op maps to the body statement's line, and only the per-iteration
+  iteration-variable pushes map to the loop header's line.
 
 ## Tiers (7)
 
@@ -169,10 +172,9 @@ file via `evaluateAgainstKnownIssues`:
   statement-boundary derivation (re-parsing each of the 7 surface syntaxes
   outside the Rúnar frontend), which is out of scope here.
 - It does not check that mapped positions are monotonically non-decreasing
-  in `opcodeIndex` order — true of every current fixture (none use `for`
-  loops, whose unrolled bodies would legitimately revisit earlier lines),
-  but not asserted as a general invariant to avoid a false positive once a
-  looping fixture is added.
+  in `opcodeIndex` order — `bounded-loop`'s unrolled body legitimately
+  revisits earlier lines (loop header, body, loop header, …), so this is
+  deliberately not asserted as a general invariant.
 - Comment detection is a simple same-line scanner (tracks quote state, not
   a full lexer) — sufficient for the small hand-written contract fixtures
   here, not general-purpose.

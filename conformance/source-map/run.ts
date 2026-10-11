@@ -1,7 +1,7 @@
 /**
  * GAP-002 conformance runner — per-tier source-map byte-identity + structural invariants.
  *
- * Re-runs each tier's `--emit-source-map` flag against the 5 selected
+ * Re-runs each tier's `--emit-source-map` flag against the 6 selected
  * fixtures and verifies that:
  *
  *  1. The output matches the committed golden at
@@ -66,7 +66,9 @@ const REPO_ROOT = resolve(__dirname, '..', '..');
 // goldens (315 MB) into the repo is not OK. `arithmetic` is a
 // structurally similar (computation-dense, multi-method) substitute
 // whose goldens stay sub-kilobyte. See _review/GAP-002-audit.md.
-const FIXTURES = ['basic-p2pkh', 'stateful-counter', 'escrow', 'arithmetic', 'if-else'] as const;
+// F-259: `bounded-loop` pins per-binding locations inside an unrolled loop
+// body (body ops -> body line; iteration-variable pushes -> loop line).
+const FIXTURES = ['basic-p2pkh', 'stateful-counter', 'escrow', 'arithmetic', 'if-else', 'bounded-loop'] as const;
 type Fixture = (typeof FIXTURES)[number];
 
 interface Tier {

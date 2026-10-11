@@ -3099,8 +3099,14 @@ module RunarCompiler::Codegen
           lu[ref_name] = body.length if !is_final_iteration || used_after_loop
         end
 
+        # F-259: each body binding's ops carry that binding's own location (a
+        # binding without one keeps the loop's). The iteration-variable push
+        # above and the cleanup below stay on the loop's location.
+        loop_loc = @current_source_loc
         body.each_with_index do |b, j|
+          @current_source_loc = b.source_loc unless b.source_loc.nil?
           lower_binding(b, j, lu)
+          @current_source_loc = loop_loc
         end
 
         # Clean up the iteration variable if it was not consumed
