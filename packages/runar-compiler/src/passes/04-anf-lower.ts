@@ -635,6 +635,15 @@ class LoweringContext {
   nested = false;
 
   /**
+   * N-202: the product of the counts of every `for` loop enclosing the block
+   * this context lowers (1 at method top level). Copied unchanged into if /
+   * ternary arms; a loop body gets `enclosingLoopCount * count`. The per-loop
+   * MAX_LOOP_COUNT check bounds one loop; this bounds the unrolled work along a
+   * nesting path, the same rule the --ir loaders apply (F-283).
+   */
+  enclosingLoopCount = 1;
+
+  /**
    * R-072. `requireOutputP2PKH` emits its
    * `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)` commitment
    * at most once per CONTROL-FLOW PATH — deliberately NOT on `methodScope`.
@@ -1027,6 +1036,7 @@ class LoweringContext {
     // sibling arm cannot inherit a commitment that never runs on its path.
     sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
     sub.nested = true;
+    sub.enclosingLoopCount = this.enclosingLoopCount;
     return sub;
   }
 
@@ -1776,6 +1786,18 @@ function lowerForStatement(
   // iteration count. Rúnar requires bounded loops, so all three must be
   // statically determinable (issue #121).
   const { start, step, count } = extractLoopShape(stmt);
+  // N-202: bound the PRODUCT along the nesting path, not just this loop.
+  // extractLoopShape already capped `count` at MAX_LOOP_COUNT, and the
+  // enclosing product was capped the same way one level up, so this
+  // multiplication stays far inside Number's safe-integer range.
+  const totalLoopCount = ctx.enclosingLoopCount * count;
+  if (totalLoopCount > MAX_LOOP_COUNT) {
+    throw new Error(
+      `For loop unrolls to ${count} iterations nested inside an enclosing loop of total count ` +
+        `${ctx.enclosingLoopCount}, producing ${totalLoopCount} total iterations, exceeding the ` +
+        `maximum loop count of ${MAX_LOOP_COUNT}.`,
+    );
+  }
 
   // Lower body into sub-context. The body repeats, so every read anywhere in
   // it is a read that happens after any given statement inside it.
@@ -1783,6 +1805,7 @@ function lowerForStatement(
   for (const s of stmt.body) collectStatementReads(s, bodyReads);
 
   const bodyCtx = ctx.subContext();
+  bodyCtx.enclosingLoopCount = totalLoopCount;
   if (ctx.isProperty(stmt.init.name)) bodyCtx.addShadowingLoopVar(stmt.init.name);
   // N-046: a loop variable reusing an enclosing binding's name is
   // alpha-renamed in the body's scope (see `declareLocal`).

@@ -127,6 +127,7 @@ test {
     _ = @import("tests/readonly_property_assignment.zig");
     _ = @import("tests/property_initializer_literal.zig");
     _ = @import("tests/loop_bound_narrowing.zig");
+    _ = @import("tests/n202_nested_loop_product.zig");
     _ = @import("tests/f025_loop_bound_surfaces.zig");
     _ = @import("tests/n008_zig_while_non_adjacent_init.zig");
     _ = @import("tests/f024_continuation_amount.zig");

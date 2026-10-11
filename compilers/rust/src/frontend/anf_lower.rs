@@ -976,6 +976,12 @@ struct LoweringContext<'a> {
     /// own commitment constrains nothing about the transaction's real outputs,
     /// and the bond it claims to enforce can be satisfied with invented bytes.
     did_emit_hash_outputs_check: bool,
+    /// N-202: the product of the counts of every for-loop enclosing the block
+    /// this context lowers (1 at method top level). Copied unchanged into if /
+    /// ternary arms; a loop body gets `enclosing * count`. The per-loop
+    /// MAX_LOOP_COUNT check bounds one loop; this bounds the unrolled work
+    /// along a nesting path, the rule the --ir loader applies (F-283).
+    enclosing_loop_count: usize,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -1006,6 +1012,7 @@ impl<'a> LoweringContext<'a> {
             sighash_flag: None,
             nested: false,
             did_emit_hash_outputs_check: false,
+            enclosing_loop_count: 1,
         }
     }
 
@@ -1305,6 +1312,8 @@ impl<'a> LoweringContext<'a> {
         // top level. `lower_if_statement` needs the same distinction before it
         // defers to that pass.
         sub.nested = true;
+        // N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = self.enclosing_loop_count;
         // Note: add_output_refs is NOT propagated to sub-contexts
         // because addOutput calls in sub-blocks should flow up to
         // the parent context via explicit tracking.
@@ -2124,6 +2133,19 @@ fn lower_for_statement(
     // statically determinable (issue #121).
     let (start, step, count) = extract_loop_shape(init, condition, update);
 
+    // N-202: bound the PRODUCT along the nesting path, not just this loop.
+    // extract_loop_shape already capped `count` at MAX_LOOP_COUNT, and the
+    // enclosing product was capped the same way one level up, so this cannot
+    // overflow.
+    let max_loop_count = crate::ir::loader::MAX_LOOP_COUNT as usize;
+    let total_loop_count = ctx.enclosing_loop_count * count;
+    if total_loop_count > max_loop_count {
+        panic!(
+            "For loop unrolls to {} iterations nested inside an enclosing loop of total count {}, producing {} total iterations, exceeding the maximum loop count of {}.",
+            count, ctx.enclosing_loop_count, total_loop_count, max_loop_count
+        );
+    }
+
     // Extract the iterator variable name
     let iter_var = if let Statement::VariableDecl { name, .. } = init {
         name.clone()
@@ -2139,6 +2161,7 @@ fn lower_for_statement(
     }
 
     let mut body_ctx = ctx.sub_context();
+    body_ctx.enclosing_loop_count = total_loop_count;
     if ctx.is_property(&iter_var) {
         body_ctx.shadowing_loop_vars.insert(iter_var.clone());
     }

@@ -748,6 +748,16 @@ public final class AnfLower {
          */
         boolean didEmitHashOutputsCheck = false;
 
+        /**
+         * N-202: the product of the counts of every for-loop enclosing the
+         * block this context lowers (1 at method top level). Copied unchanged
+         * into if / ternary arms; a loop body gets {@code enclosing * count}.
+         * The per-loop {@code MAX_LOOP_COUNT} check bounds one loop; this
+         * bounds the unrolled work along a nesting path, the rule the
+         * {@code --ir} loader applies (F-283).
+         */
+        long enclosingLoopCount = 1;
+
         LowerCtx(ContractNode contract) {
             this.contract = contract;
         }
@@ -1096,6 +1106,8 @@ public final class AnfLower {
             // block, but one emitted inside it must not flow back out to a
             // sibling arm.
             sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
+            // N-202: if / ternary arms inherit the enclosing loop product.
+            sub.enclosingLoopCount = this.enclosingLoopCount;
             // GAP-002: inherit the outer statement's source location so
             // bindings emitted inside an if/else / loop branch are still
             // mapped back to the originating AST statement.
@@ -1754,6 +1766,18 @@ public final class AnfLower {
             // all three must be statically determinable (issue #121).
             LoopShape shape = extractLoopShape(stmt);
 
+            // N-202: bound the PRODUCT along the nesting path, not just this
+            // loop. Both operands are already <= MAX_LOOP_COUNT, so the long
+            // product cannot overflow.
+            long totalLoopCount = enclosingLoopCount * shape.count();
+            if (totalLoopCount > Loop.MAX_LOOP_COUNT) {
+                throw new IllegalStateException(
+                    "For loop unrolls to " + shape.count() + " iterations nested inside an "
+                        + "enclosing loop of total count " + enclosingLoopCount + ", producing "
+                        + totalLoopCount + " total iterations, exceeding the maximum loop count of "
+                        + Loop.MAX_LOOP_COUNT + ".");
+            }
+
             // The body repeats, so every read anywhere in it is a read that
             // happens after any given statement inside it.
             Set<String> bodyReads = new HashSet<>(readsAfter);
@@ -1762,6 +1786,7 @@ public final class AnfLower {
             }
 
             LowerCtx bodyCtx = subContext();
+            bodyCtx.enclosingLoopCount = totalLoopCount;
             if (stmt.init() != null && isProperty(stmt.init().name())) {
                 bodyCtx.shadowingLoopVars.add(stmt.init().name());
             }

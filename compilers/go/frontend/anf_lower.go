@@ -806,6 +806,14 @@ type lowerCtx struct {
 	// commitment constrains nothing about the transaction's real outputs, and
 	// the bond it claims to enforce can be satisfied with invented bytes.
 	didEmitHashOutputsCheck bool
+
+	// enclosingLoopCount — N-202. The product of the counts of every for-loop
+	// enclosing the block this context lowers (1 at method top level). Copied
+	// unchanged into if / ternary arms; a loop body gets enclosing * count.
+	// The per-loop ir.MaxLoopCount check bounds one loop; this bounds the
+	// unrolled work along a nesting path, the rule the --ir loader applies
+	// (F-283).
+	enclosingLoopCount int
 }
 
 // methodScopeT holds per-method bookkeeping shared by parent and
@@ -855,6 +863,8 @@ func newLowerCtxWithEffects(contract *ContractNode, summary SideEffectSummary) *
 		paramAliasStack:  make(map[string][]string),
 		sideEffects:      summary,
 		methodScope:      newMethodScope(),
+		// N-202: no loop encloses a method's top level.
+		enclosingLoopCount: 1,
 	}
 }
 
@@ -1252,6 +1262,7 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		// but one emitted inside it must not flow back out to a sibling arm.
 		didEmitHashOutputsCheck: ctx.didEmitHashOutputsCheck,
 		nested:                  true,
+		enclosingLoopCount:      ctx.enclosingLoopCount, // N-202
 	}
 	// Share local name set
 	for k := range ctx.localNames {
@@ -1984,6 +1995,19 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	// statically determinable (issue #121).
 	start, step, count := extractLoopShape(stmt)
 
+	// N-202: bound the PRODUCT along the nesting path, not just this loop.
+	// extractLoopShape already capped count at ir.MaxLoopCount, and the
+	// enclosing product was capped the same way one level up, so this cannot
+	// overflow.
+	totalLoopCount := ctx.enclosingLoopCount * count
+	if totalLoopCount > ir.MaxLoopCount {
+		panic(fmt.Sprintf(
+			"For loop unrolls to %d iterations nested inside an enclosing loop of total count %d, "+
+				"producing %d total iterations, exceeding the maximum loop count of %d.",
+			count, ctx.enclosingLoopCount, totalLoopCount, ir.MaxLoopCount,
+		))
+	}
+
 	// Lower body into sub-context. The body repeats, so every read anywhere in
 	// it is a read that happens after any given statement inside it.
 	bodyReads := make(map[string]bool, len(readsAfter))
@@ -1995,6 +2019,7 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	}
 
 	bodyCtx := ctx.subContext()
+	bodyCtx.enclosingLoopCount = totalLoopCount
 	if ctx.isProperty(stmt.Init.Name) {
 		bodyCtx.addShadowingLoopVar(stmt.Init.Name)
 	}

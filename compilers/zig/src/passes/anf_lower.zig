@@ -1156,6 +1156,12 @@ const LowerCtx = struct {
     /// own commitment constrains nothing about the transaction's real outputs,
     /// and the bond it claims to enforce can be satisfied with invented bytes.
     did_emit_hash_outputs_check: bool = false,
+    /// N-202: the product of the counts of every for-loop enclosing the block
+    /// this context lowers (1 at method top level). Copied unchanged into if /
+    /// ternary arms; a loop body gets `enclosing * count`. The per-loop
+    /// MAX_LOOP_COUNT check bounds one loop; this bounds the unrolled work along
+    /// a nesting path, the rule the --ir loader applies (F-283).
+    enclosing_loop_count: u64 = 1,
     /// Optional sink for the detail behind a refusal (see `LowerDiagnostic`).
     /// Null when the caller used `lowerToANF`. Propagated into sub-contexts so
     /// a refusal raised inside an if/for body still reaches the caller.
@@ -1425,6 +1431,8 @@ const LowerCtx = struct {
         // by VALUE. A parent commitment dominates this block, but one emitted
         // inside it must not flow back out to a sibling arm.
         sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check;
+        // N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = self.enclosing_loop_count;
         // Copy local names
         var local_it = self.local_names.iterator();
         while (local_it.next()) |entry| {
@@ -2179,6 +2187,18 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     }
     const count: u32 = if (raw > 0) @intCast(raw) else 0;
 
+    // N-202: bound the PRODUCT along the nesting path, not just this loop. Both
+    // operands are already <= MAX_LOOP_COUNT, so the u64 product cannot overflow.
+    const total_loop_count: u64 = ctx.enclosing_loop_count * @as(u64, count);
+    if (total_loop_count > types.MAX_LOOP_COUNT) {
+        ctx.setDiagnostic(
+            "For loop unrolls to {d} iterations nested inside an enclosing loop of total count {d}, " ++
+                "producing {d} total iterations, exceeding the maximum loop count of {d}.",
+            .{ count, ctx.enclosing_loop_count, total_loop_count, types.MAX_LOOP_COUNT },
+        );
+        return LowerError.LoopCountTooLarge;
+    }
+
     // Lower body. The body repeats, so every read anywhere in it is a read that
     // happens after any given statement inside it.
     var body_reads = NameSet{};
@@ -2191,6 +2211,7 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     }
 
     var body_ctx = try ctx.subContext();
+    body_ctx.enclosing_loop_count = total_loop_count;
     if (ctx.isProperty(for_s.var_name)) {
         try body_ctx.shadowing_loop_vars.put(ctx.allocator, for_s.var_name, {});
     }

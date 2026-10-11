@@ -825,6 +825,13 @@ class _LowerCtx:
         # arm, a loop body, or an inlined helper's block -- and False only in
         # the context a method's own body is lowered into.
         self.nested: bool = False
+        # N-202: the product of the counts of every for-loop enclosing the
+        # block this context lowers (1 at method top level). Copied unchanged
+        # into if / ternary arms; a loop body gets ``enclosing * count``. The
+        # per-loop MAX_LOOP_COUNT check bounds one loop; this bounds the
+        # unrolled work along a nesting path, the rule the --ir loader applies
+        # (F-283).
+        self.enclosing_loop_count: int = 1
         # Method-scoped parameter type table. Populated once per
         # method/constructor (and for auto-injected continuation params)
         # before its body is lowered. Mirrors the TS reference's
@@ -1133,6 +1140,8 @@ class _LowerCtx:
         # too, but a commitment emitted INSIDE this block must not be visible
         # to the parent or to a sibling arm.
         sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check
+        # N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = self.enclosing_loop_count
         # Share the method-scoped param-type table by reference so if/else
         # sub-contexts resolve parameter types against the same method.
         sub._param_types = self._param_types
@@ -1495,6 +1504,17 @@ class _LowerCtx:
         # be statically determinable (issue #121).
         start, step, count = _extract_loop_shape(stmt)
 
+        # N-202: bound the PRODUCT along the nesting path, not just this loop.
+        total_loop_count = self.enclosing_loop_count * count
+        if total_loop_count > MAX_LOOP_COUNT:
+            raise ValueError(
+                f"{_at(stmt.source_location)}"
+                f"For loop unrolls to {count} iterations nested inside an "
+                f"enclosing loop of total count {self.enclosing_loop_count}, "
+                f"producing {total_loop_count} total iterations, exceeding the "
+                f"maximum loop count of {MAX_LOOP_COUNT}."
+            )
+
         # Lower body into sub-context. The body repeats, so every read anywhere
         # in it is a read that happens after any given statement inside it.
         body_reads = set(reads_after)
@@ -1502,6 +1522,7 @@ class _LowerCtx:
             _collect_statement_reads(s, body_reads)
 
         body_ctx = self.sub_context()
+        body_ctx.enclosing_loop_count = total_loop_count
         if stmt.init and self.is_property(stmt.init.name):
             body_ctx._shadowing_loop_vars.add(stmt.init.name)
         # N-046: a loop variable reusing an enclosing binding's name is

@@ -789,6 +789,8 @@ module RunarCompiler
         @nested = false
         # R-072: see the +did_emit_hash_outputs_check+ accessor below.
         @did_emit_hash_outputs_check = false
+        # N-202: see the +enclosing_loop_count+ accessor below.
+        @enclosing_loop_count = 1
       end
 
       # @return [MethodScope] shared per-method bookkeeping for intent intrinsics
@@ -819,6 +821,13 @@ module RunarCompiler
       # own commitment constrains nothing about the transaction's real outputs,
       # and the bond it claims to enforce can be satisfied with invented bytes.
       attr_accessor :did_emit_hash_outputs_check
+
+      # N-202: the product of the counts of every for-loop enclosing the block
+      # this context lowers (1 at method top level). Copied unchanged into if /
+      # ternary arms; a loop body gets +enclosing * count+. The per-loop
+      # MAX_LOOP_COUNT check bounds one loop; this bounds the unrolled work
+      # along a nesting path, the rule the --ir loader applies (F-283).
+      attr_accessor :enclosing_loop_count
 
       # Push an alias for a parameter name, used while inlining the body of
       # a private method into this context: identifier references to that
@@ -1216,6 +1225,8 @@ module RunarCompiler
         # Propagate the method's declared @sighash flag (issue #123) so a manual
         # checkPreimage inside an if/else branch binds under the same mode.
         sub.sighash_flag = @sighash_flag
+        # N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = @enclosing_loop_count
         # _lift_branch_update_props walks method.body and does NOT recurse, so
         # an +if+ its recogniser accepts is only actually REWRITTEN at method
         # top level. lower_if_statement needs the same distinction before it
@@ -1700,12 +1711,22 @@ module RunarCompiler
         # supported (#121) — on iteration i the iterator holds start + i*step.
         shape = Frontend._extract_loop_shape(stmt)
 
+        # N-202: bound the PRODUCT along the nesting path, not just this loop.
+        max_count = ::RunarCompiler::IR::MAX_LOOP_COUNT
+        total_loop_count = @enclosing_loop_count * shape[:count]
+        if total_loop_count > max_count
+          raise "For loop unrolls to #{shape[:count]} iterations nested inside an " \
+                "enclosing loop of total count #{@enclosing_loop_count}, producing " \
+                "#{total_loop_count} total iterations, exceeding the maximum loop count of #{max_count}."
+        end
+
         # Lower body into sub-context. The body repeats, so every read anywhere
         # in it is a read that happens after any given statement inside it.
         body_reads = reads_after.dup
         stmt.body.each { |s| Frontend._collect_statement_reads(s, body_reads) }
 
         body_ctx = sub_context
+        body_ctx.enclosing_loop_count = total_loop_count
         body_ctx.add_shadowing_loop_var(stmt.init.name) if stmt.init && property?(stmt.init.name)
         # N-046: a loop variable reusing an enclosing binding's name is
         # alpha-renamed in the body's scope (see declare_local).
