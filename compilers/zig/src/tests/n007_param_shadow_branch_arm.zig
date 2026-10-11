@@ -158,6 +158,8 @@ fn compileScriptHex(
         disable_constant_folding,
     );
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 

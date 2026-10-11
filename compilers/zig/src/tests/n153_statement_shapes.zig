@@ -128,6 +128,10 @@ fn expectHex(comptime stmt: []const u8, want: []const u8) !void {
         const r = try compiler_api.compileSourceWithOptions(std.testing.allocator, GO_HEAD ++ stmt ++ GO_TAIL, "Disc.runar.go", fold_off);
         defer std.testing.allocator.free(r.script_hex);
         defer if (r.artifact_json) |j| std.testing.allocator.free(j);
+        defer {
+            for (r.warnings) |line| std.testing.allocator.free(line);
+            std.testing.allocator.free(r.warnings);
+        }
         std.testing.expectEqualStrings(want, r.script_hex) catch |e| {
             std.debug.print("go `{s}` (fold-off={}) diverged from the TS bytes\n", .{ stmt, fold_off });
             return e;

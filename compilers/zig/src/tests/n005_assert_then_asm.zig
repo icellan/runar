@@ -52,6 +52,8 @@ const ASM_THEN_ASSERT =
 fn hexOf(allocator: std.mem.Allocator, source: []const u8, disable_fold: bool) ![]const u8 {
     const result = try compiler_api.compileSourceWithOptions(allocator, source, "AssertThenAsm.runar.ts", disable_fold);
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 

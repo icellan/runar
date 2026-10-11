@@ -189,6 +189,8 @@ fn hexOf(allocator: std.mem.Allocator, template: []const u8, name: []const u8, d
     defer allocator.free(source);
     const result = try compiler_api.compileSourceWithOptions(allocator, source, "Shadow.runar.ts", disable_fold);
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 

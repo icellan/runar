@@ -198,5 +198,9 @@ test "N-002: FixedArray index writes still validate and compile" {
     const r = try compiler_api.compileSource(a, FIXED_ARRAY_WRITES, "Board.runar.ts");
     defer a.free(r.script_hex);
     defer if (r.artifact_json) |j| a.free(j);
+    defer {
+        for (r.warnings) |line| a.free(line);
+        a.free(r.warnings);
+    }
     try std.testing.expect(r.script_hex.len > 0);
 }

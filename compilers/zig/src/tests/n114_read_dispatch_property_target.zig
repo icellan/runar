@@ -284,6 +284,10 @@ fn checkCases(cases: []const Case) !void {
             );
             defer allocator.free(result.script_hex);
             defer if (result.artifact_json) |a| allocator.free(a);
+            defer {
+                for (result.warnings) |line| allocator.free(line);
+                allocator.free(result.warnings);
+            }
             std.testing.expectEqualStrings(tc.want, result.script_hex) catch |err| {
                 std.debug.print(
                     "{s} (disable_constant_folding={}): zig hex ({d} chars) diverged from the six-tier hex ({d} chars)\n",

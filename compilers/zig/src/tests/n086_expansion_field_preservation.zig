@@ -202,6 +202,8 @@ const SINGLE_FORKID: i32 = 0x43;
 fn hexOf(a: std.mem.Allocator, source: []const u8, file_name: []const u8) ![]const u8 {
     const r = try compiler_api.compileSource(a, source, file_name);
     if (r.artifact_json) |j| a.free(j);
+    for (r.warnings) |line| a.free(line);
+    a.free(r.warnings);
     return r.script_hex;
 }
 

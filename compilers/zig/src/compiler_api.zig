@@ -53,9 +53,22 @@ pub const CompileResult = struct {
     script_hex: []const u8,
     artifact_json: ?[]const u8,
 
+    /// F-231 (CX-BUG-129): the warning-severity diagnostics `runPipeline`
+    /// collected along the way — validator warnings (e.g. the V26 "no mutable
+    /// properties" notice) and the issue-#109 readonly-DCE warnings. The CLI
+    /// prints these to stderr via `printDiagnostics`; before this field, a
+    /// library caller of `compileSource`/`compileSourceWithOptions` had no way
+    /// to recover them at all. Additive: existing callers that only read
+    /// `script_hex` / `artifact_json` are unaffected. Empty, never null — the
+    /// success path this struct is returned from never fails the compile, but
+    /// it can still carry zero warnings.
+    warnings: []const []const u8,
+
     pub fn deinit(self: CompileResult, allocator: std.mem.Allocator) void {
         allocator.free(self.script_hex);
         if (self.artifact_json) |json| allocator.free(json);
+        for (self.warnings) |line| allocator.free(line);
+        allocator.free(self.warnings);
     }
 };
 
@@ -456,10 +469,27 @@ pub fn compileSourceWithOptions(
     const script_hex = allocator.dupe(u8, script_hex_work) catch return error.OutOfMemory;
     errdefer allocator.free(script_hex);
     const artifact_json = allocator.dupe(u8, artifact_json_work) catch return error.OutOfMemory;
+    errdefer allocator.free(artifact_json);
+
+    // F-231: hand the collected warnings back on the caller's allocator too —
+    // `diag.warnings.items` lives in the compile arena this function tears
+    // down on return, so each line (and the backing slice) must be copied,
+    // the same way `script_hex` and `artifact_json` already are.
+    const warnings = allocator.alloc([]const u8, diag.warnings.items.len) catch return error.OutOfMemory;
+    var copied: usize = 0;
+    errdefer {
+        for (warnings[0..copied]) |line| allocator.free(line);
+        allocator.free(warnings);
+    }
+    for (diag.warnings.items, 0..) |line, i| {
+        warnings[i] = allocator.dupe(u8, line) catch return error.OutOfMemory;
+        copied = i + 1;
+    }
 
     return .{
         .script_hex = script_hex,
         .artifact_json = artifact_json,
+        .warnings = warnings,
     };
 }
 
@@ -471,6 +501,8 @@ pub fn compileSourceToHex(
 ) CompileError![]const u8 {
     const result = try compileSource(allocator, source, file_name);
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 

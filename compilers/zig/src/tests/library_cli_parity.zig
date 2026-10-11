@@ -242,3 +242,105 @@ test "R-027: FixedArray contract — library script_hex matches CLI --hex (fold 
 test "R-027: FixedArray contract — library script_hex matches CLI --hex (fold OFF)" {
     try expectHexMatchesCli(FIXED_ARRAY_SOURCE, "HasArray.runar.ts", true);
 }
+
+// ---------------------------------------------------------------------------
+// F-231 (CX-BUG-129): the library's `CompileResult` carried no diagnostics
+// field, so a caller of `compileSourceWithOptions` had no way to recover the
+// warnings the CLI prints to stderr — not the V26 "no mutable properties"
+// validation warning, and not the issue-#109 readonly-DCE warning. This
+// contract triggers both at once: its only property is readonly, carries no
+// `@embedAlways` annotation or initializer, and is never read in a method
+// body, so (a) the stateful contract has no mutable property (V26) and (b)
+// the property is dead-code-eliminated (issue #109).
+// ---------------------------------------------------------------------------
+
+const WARNING_SOURCE =
+    \\import { StatefulSmartContract, assert, checkSig } from 'runar-lang';
+    \\class MetaOnly extends StatefulSmartContract {
+    \\  readonly metadataId: bigint;
+    \\  constructor(metadataId: bigint) {
+    \\    super(metadataId);
+    \\    this.metadataId = metadataId;
+    \\  }
+    \\  public unlock(sig: Sig, pubKey: PubKey): void {
+    \\    assert(checkSig(sig, pubKey));
+    \\  }
+    \\}
+;
+
+/// Run the built CLI binary over `source` and return its stderr (where
+/// `printDiagnostics` writes warnings and errors), caller frees.
+fn cliStderr(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    source: []const u8,
+    file_name: []const u8,
+) ![]u8 {
+    const dir_path = "zig-out/parity-tmp";
+    std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, file_name });
+    defer allocator.free(path);
+    {
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        var buf: [4096]u8 = undefined;
+        var w = file.writer(io, &buf);
+        try w.interface.writeAll(source);
+        try w.interface.flush();
+    }
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, resolveZigBinary());
+    try argv.append(allocator, "--source");
+    try argv.append(allocator, path);
+    try argv.append(allocator, "--hex");
+
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(10 * 1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    switch (result.term) {
+        .exited => |code| if (code != 0) {
+            defer allocator.free(result.stderr);
+            std.debug.print("  runar-zig exit {d}: {s}\n", .{ code, result.stderr });
+            return error.CompilerExitNonZero;
+        },
+        else => {
+            defer allocator.free(result.stderr);
+            return error.CompilerAbnormalExit;
+        },
+    }
+    return result.stderr;
+}
+
+test "F-231: library CompileResult.warnings matches the CLI's printed warnings" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const stderr = try cliStderr(allocator, io, WARNING_SOURCE, "MetaOnly.runar.ts");
+    defer allocator.free(stderr);
+
+    // The CLI must actually have printed both warnings this fixture targets —
+    // otherwise this test would pass trivially by comparing two empty sets.
+    try std.testing.expect(std.mem.indexOf(u8, stderr, "StatefulSmartContract has no mutable properties") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stderr, "eliminated by DCE") != null);
+
+    const lib = try compiler_api.compileSourceWithOptions(
+        allocator,
+        WARNING_SOURCE,
+        "MetaOnly.runar.ts",
+        false,
+    );
+    defer lib.deinit(allocator);
+
+    // Every line the CLI printed to stderr must be recoverable from the
+    // library's `CompileResult`, in the same formatted shape (the
+    // "  warning: " prefix `Diagnostics.addWarning` applies).
+    for (lib.warnings) |line| {
+        try std.testing.expect(std.mem.indexOf(u8, stderr, line) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), lib.warnings.len);
+}

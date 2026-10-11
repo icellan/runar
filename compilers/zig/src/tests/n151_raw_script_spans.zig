@@ -19,6 +19,8 @@ const compiler_api = @import("../compiler_api.zig");
 fn artifactOf(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
     const result = try compiler_api.compileSource(allocator, source, "WithAsm.runar.ts");
     allocator.free(result.script_hex);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.artifact_json.?;
 }
 

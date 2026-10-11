@@ -197,6 +197,10 @@ test "N-109 control: the bigint twin still compiles" {
     const result = try compiler_api.compileSource(a, CONTROL, "Control.runar.ts");
     defer a.free(result.script_hex);
     defer if (result.artifact_json) |j| a.free(j);
+    defer {
+        for (result.warnings) |line| a.free(line);
+        a.free(result.warnings);
+    }
     try std.testing.expect(result.script_hex.len > 0);
 }
 
@@ -216,5 +220,9 @@ test "N-109 control: every legitimate property type still validates and compiles
     const result = try compiler_api.compileSource(a, ALL_LEGAL_TYPES, "AllTypes.runar.ts");
     defer a.free(result.script_hex);
     defer if (result.artifact_json) |j| a.free(j);
+    defer {
+        for (result.warnings) |line| a.free(line);
+        a.free(result.warnings);
+    }
     try std.testing.expect(result.script_hex.len > 0);
 }

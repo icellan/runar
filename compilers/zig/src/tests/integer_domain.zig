@@ -67,6 +67,10 @@ fn expectHexFoldOff(comptime source: []const u8, expected: []const u8) !void {
     );
     if (result.artifact_json) |json| std.testing.allocator.free(json);
     defer std.testing.allocator.free(result.script_hex);
+    defer {
+        for (result.warnings) |line| std.testing.allocator.free(line);
+        std.testing.allocator.free(result.warnings);
+    }
     try std.testing.expectEqualStrings(expected, result.script_hex);
 }
 
