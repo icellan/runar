@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from runar_compiler.compiler import compile_from_source_str_with_result
 
+from conftest import iter_opcodes
+
 
 PY_SOURCE = """
 from runar import SmartContract, Bigint, ByteString, public, assert_, int_to_str, len_
@@ -67,8 +69,13 @@ class TestInt2Str:
     def test_python_int_to_str_compiles(self) -> None:
         """Python ``int_to_str`` (snake_case) must compile without errors."""
         hex_out = _compile(PY_SOURCE, "Encoder.runar.py")
-        assert "54" in hex_out  # push of 4 (OP_4 = 0x54) for the byteLen arg
-        assert "80" in hex_out  # OP_NUM2BIN = 0x80
+        # Opcode-aligned checks (F-362): a bare substring check also matches
+        # "54"/"80" inside push-data payload bytes; checking membership in
+        # the walked opcode list only matches a byte actually executed as
+        # that opcode. See test_f362_opcode_aligned_assertions.py.
+        opcodes = iter_opcodes(hex_out)
+        assert "54" in opcodes  # push of 4 (OP_4 = 0x54) for the byteLen arg
+        assert "80" in opcodes  # OP_NUM2BIN = 0x80
 
     def test_python_matches_typescript(self) -> None:
         """Python ``int_to_str`` lowers to identical script bytes as TS ``int2str``."""

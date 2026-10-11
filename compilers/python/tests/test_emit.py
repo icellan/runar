@@ -21,6 +21,8 @@ from runar_compiler.codegen.stack import lower_to_stack, StackOp, StackMethod, P
 from runar_compiler.codegen.emit import emit, emit_method, EmitResult, ConstructorSlot, encode_script_number, encode_push_data
 from runar_compiler.codegen.optimizer import optimize_stack_ops
 
+from conftest import iter_opcodes
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -519,7 +521,9 @@ class TestEmitGaps:
             ],
         )
         result = emit_method(method)
-        assert "76" in result.script_hex, (
+        # Opcode-aligned check (not a bare substring check, F-362): "76" must
+        # appear as an executed opcode byte, not merely somewhere in the hex.
+        assert "76" in iter_opcodes(result.script_hex), (
             f"expected OP_DUP (0x76) in hex output, got: {result.script_hex}"
         )
 
@@ -531,7 +535,8 @@ class TestEmitGaps:
             ops=[StackOp(op="opcode", code="OP_SWAP")],
         )
         result = emit_method(method)
-        assert "7c" in result.script_hex, (
+        # Opcode-aligned check (F-362): see test_m21_op_dup_encodes_76 above.
+        assert "7c" in iter_opcodes(result.script_hex), (
             f"expected OP_SWAP (0x7c) in hex output, got: {result.script_hex}"
         )
 
@@ -624,14 +629,16 @@ class TestEmitOpcodeEncodings:
         # pick depth:2 → push 2 (0x52) then OP_PICK (0x79)
         method = StackMethod(name="t", ops=[StackOp(op="pick", depth=2)])
         result = emit_method(method)
-        assert "79" in result.script_hex, f"expected 79 (OP_PICK) in hex, got {result.script_hex}"
+        # Opcode-aligned check (F-362): see test_m21_op_dup_encodes_76 above.
+        assert "79" in iter_opcodes(result.script_hex), f"expected 79 (OP_PICK) in hex, got {result.script_hex}"
 
     def test_m_roll_encodes_7a(self):
         """OP_ROLL → hex contains '7a' (row 224)."""
         # roll depth:3 → push 3 (0x53) then OP_ROLL (0x7a)
         method = StackMethod(name="t", ops=[StackOp(op="roll", depth=3)])
         result = emit_method(method)
-        assert "7a" in result.script_hex, f"expected 7a (OP_ROLL) in hex, got {result.script_hex}"
+        # Opcode-aligned check (F-362): see test_m21_op_dup_encodes_76 above.
+        assert "7a" in iter_opcodes(result.script_hex), f"expected 7a (OP_ROLL) in hex, got {result.script_hex}"
 
     def test_m_rot_encodes_7b(self):
         """OP_ROT → hex '7b' (row 225)."""
@@ -711,7 +718,8 @@ class TestEmitMultiMethodDispatchFull:
         methods = lower_to_stack(program)
         result = emit(methods)
         # OP_NUMEQUALVERIFY = 0x9d
-        assert "9d" in result.script_hex, (
+        # Opcode-aligned check (F-362): see test_m21_op_dup_encodes_76 above.
+        assert "9d" in iter_opcodes(result.script_hex), (
             f"expected OP_NUMEQUALVERIFY (9d) in 3-method dispatch, got {result.script_hex[:40]}"
         )
 
@@ -751,7 +759,8 @@ class TestEmitSHA256ASM:
             f"expected OP_SHA256 in ASM, got: {result.script_asm[:100]}"
         )
         # OP_SHA256 = 0xa8
-        assert "a8" in result.script_hex, (
+        # Opcode-aligned check (F-362): see test_m21_op_dup_encodes_76 above.
+        assert "a8" in iter_opcodes(result.script_hex), (
             f"expected a8 (OP_SHA256) in hex, got: {result.script_hex[:40]}"
         )
 
