@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -898,6 +900,59 @@ func TestFindLastOpReturn_NoOpReturn(t *testing.T) {
 	pos := FindLastOpReturn("5193885187")
 	if pos != -1 {
 		t.Errorf("expected -1, got %d", pos)
+	}
+}
+
+// N-167 (sibling of F-367): FindLastOpReturn's doc comment must describe the
+// first-match walk it actually performs, not a "last OP_RETURN" search, and
+// the function must not keep a dead `lastPos` accumulator implying it tracks
+// a later match it never reassigns.
+//
+// Proves: the doc comment above func FindLastOpReturn in sdk_state.go no
+// longer claims to find the LAST OP_RETURN, and the dead lastPos variable is
+// gone. All seven SDKs implement the same "stop at the first opcode-boundary
+// 0x6a" walk, which is correct here (the on-chain interpreter stops at the
+// first OP_RETURN it executes, and the compiler emits exactly one
+// separator), so "first" and "last" coincide for every script this function
+// will ever see.
+// Does not prove: runtime behaviour — that is already pinned by
+// TestFindLastOpReturn_Simple / _SkipsPushData / _NoOpReturn above,
+// unchanged by this fix.
+func TestFindLastOpReturn_DocAndDeadCode(t *testing.T) {
+	src, err := os.ReadFile("sdk_state.go")
+	if err != nil {
+		t.Fatalf("read sdk_state.go: %v", err)
+	}
+	source := string(src)
+
+	fnIndex := strings.Index(source, "func FindLastOpReturn")
+	if fnIndex == -1 {
+		t.Fatal("func FindLastOpReturn not found in sdk_state.go")
+	}
+
+	commentStart := strings.LastIndex(source[:fnIndex], "// FindLastOpReturn")
+	if commentStart == -1 {
+		t.Fatal("doc comment above FindLastOpReturn not found")
+	}
+	doc := source[commentStart:fnIndex]
+
+	// Anchor: fails loudly (empty/short doc) if the slicing above ever
+	// points at the wrong comment instead of silently passing.
+	if !strings.Contains(doc, "OP_RETURN") {
+		t.Fatalf("doc slice does not mention OP_RETURN, wrong slice captured: %q", doc)
+	}
+
+	if matched, _ := regexp.MatchString(`(?i)last\s+OP_RETURN`, doc); matched {
+		t.Errorf("doc comment still claims to find the 'last' OP_RETURN:\n%s", doc)
+	}
+
+	body := source[fnIndex:]
+	bodyEnd := strings.Index(body, "\nfunc ")
+	if bodyEnd != -1 {
+		body = body[:bodyEnd]
+	}
+	if strings.Contains(body, "lastPos") {
+		t.Error("dead lastPos accumulator is still present in FindLastOpReturn")
 	}
 }
 

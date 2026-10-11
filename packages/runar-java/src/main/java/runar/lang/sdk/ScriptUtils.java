@@ -290,9 +290,16 @@ public final class ScriptUtils {
     }
 
     /**
-     * Walks a hex-encoded script and returns the offset of the last
-     * OP_RETURN (0x6a) at an opcode boundary, or -1. Skips push data
-     * so inner 0x6a bytes are not matched.
+     * Walks a hex-encoded script and returns the offset of the first
+     * OP_RETURN (0x6a) found at an opcode boundary, or -1. Skips push
+     * data so inner 0x6a bytes are not matched. Stops immediately on the
+     * first match rather than continuing to look for a later one — that
+     * is correct here, not a shortcut: the on-chain interpreter itself
+     * stops at the first OP_RETURN it executes, and the compiler emits
+     * exactly one separator (codePart + OP_RETURN + stateBytes), so
+     * "first" and "last" coincide for every script this method will
+     * ever see. The name is kept for parity with the other six SDKs,
+     * which all implement the same first-match walk.
      */
     public static int findLastOpReturn(String scriptHex) {
         int offset = 0;

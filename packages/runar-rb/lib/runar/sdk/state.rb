@@ -124,17 +124,21 @@ module Runar
         encode_push_data(data_hex)
       end
 
-      # Find the hex-char offset of the last OP_RETURN (0x6a) at a real opcode
-      # boundary.
+      # Find the hex-char offset of the first OP_RETURN (0x6a) at a real
+      # opcode boundary, and stop.
       #
       # Walks opcodes correctly so that 0x6a bytes embedded inside push data are
-      # not mistaken for OP_RETURN.  In practice a Runar stateful contract has
-      # exactly one OP_RETURN; the walk stops immediately when it finds it.
+      # not mistaken for OP_RETURN. The name is kept for parity with the other
+      # six SDKs, which all implement this same first-match walk: stopping at
+      # the first opcode-boundary 0x6a is correct, not a shortcut, because the
+      # on-chain interpreter itself stops at the first OP_RETURN it executes,
+      # and the compiler emits exactly one separator (codePart + OP_RETURN +
+      # stateBytes), so "first" and "last" coincide for every script this
+      # method will ever see.
       #
       # @param script_hex [String] full locking script as a hex string
       # @return [Integer] hex-char offset of OP_RETURN, or -1 if not found
       def find_last_op_return(script_hex)
-        last_pos = -1
         offset   = 0
         length   = script_hex.length
 
@@ -169,7 +173,7 @@ module Runar
           end
         end
 
-        last_pos
+        -1
       end
 
       # Encode a list of state field values into a raw hex string.

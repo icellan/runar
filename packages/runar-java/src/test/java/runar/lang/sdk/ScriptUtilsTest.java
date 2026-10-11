@@ -133,4 +133,44 @@ class ScriptUtilsTest {
         assertEquals("fdfd00", ScriptUtils.encodeVarInt(0xfd));
         assertEquals("fdffff", ScriptUtils.encodeVarInt(0xffff));
     }
+
+    // N-167 (sibling of F-367): findLastOpReturn's Javadoc must describe the
+    // first-match walk it actually performs, not a "last OP_RETURN" search.
+    //
+    // Proves: the Javadoc immediately above
+    // ScriptUtils.findLastOpReturn in ScriptUtils.java no longer claims to
+    // find the LAST OP_RETURN. All seven SDKs implement the same "stop at
+    // the first opcode-boundary 0x6a" walk, which is correct here (the
+    // on-chain interpreter stops at the first OP_RETURN it executes, and the
+    // compiler emits exactly one separator), so "first" and "last" coincide
+    // for every script this method will ever see.
+    // Does not prove: runtime behaviour — that is already pinned by
+    // findLastOpReturnSkipsPushData above, unchanged by this fix.
+    @Test
+    void findLastOpReturnJavadocDoesNotClaimLast() throws Exception {
+        java.nio.file.Path p = java.nio.file.Paths.get(
+            System.getProperty("user.dir"), "src", "main", "java", "runar", "lang", "sdk", "ScriptUtils.java");
+        String source = java.nio.file.Files.readString(p);
+
+        String fnMarker = "public static int findLastOpReturn";
+        int fnIndex = source.indexOf(fnMarker);
+        assertTrue(fnIndex >= 0, "public static int findLastOpReturn not found in ScriptUtils.java");
+
+        int docEnd = source.lastIndexOf("*/", fnIndex);
+        int docStart = source.lastIndexOf("/**", docEnd);
+        assertTrue(docStart >= 0 && docEnd > docStart, "no Javadoc block found above findLastOpReturn");
+        String doc = source.substring(docStart, docEnd + 2);
+
+        // Anchor: fails loudly (empty/short doc) if the slicing above ever
+        // points at the wrong comment instead of silently passing.
+        assertTrue(doc.contains("OP_RETURN"), "doc slice does not mention OP_RETURN, wrong slice captured: " + doc);
+
+        // Strip Javadoc line-leading `*` markers before collapsing
+        // whitespace, so a wrapped "the last\n     * OP_RETURN" is seen as
+        // the contiguous phrase it reads as, not split by a stray asterisk.
+        String stripped = doc.replaceAll("(?m)^\\s*\\*+/?", " ");
+        String collapsed = stripped.replaceAll("\\s+", " ").toLowerCase();
+        assertFalse(collapsed.contains("last op_return"),
+            "Javadoc still claims to find the 'last' OP_RETURN:\n" + doc);
+    }
 }

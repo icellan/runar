@@ -130,8 +130,15 @@ pub fn extractStateFromScript(
     return try deserializeState(allocator, artifact.state_fields, state_hex);
 }
 
-/// FindLastOpReturn walks the script hex as Bitcoin Script opcodes to find the
-/// last OP_RETURN (0x6a) at a real opcode boundary.
+/// findLastOpReturn walks the script hex as Bitcoin Script opcodes and
+/// returns the first OP_RETURN (0x6a) found at a real opcode boundary. The
+/// walk stops immediately on the first match rather than continuing to
+/// look for a later one — that is correct here, not a shortcut: the
+/// on-chain interpreter itself stops at the first OP_RETURN it executes,
+/// and the compiler emits exactly one separator (codePart + OP_RETURN +
+/// stateBytes), so "first" and "last" coincide for every script this
+/// function will ever see. The name is kept for parity with the other six
+/// SDKs, which all implement the same first-match walk.
 pub fn findLastOpReturn(script_hex: []const u8) ?usize {
     var offset: usize = 0;
     const length = script_hex.len;
@@ -1186,6 +1193,64 @@ test "findLastOpReturn finds OP_RETURN at opcode boundary" {
     try std.testing.expectEqual(@as(?usize, 6), findLastOpReturn("00016a6a"));
     // No OP_RETURN
     try std.testing.expectEqual(@as(?usize, null), findLastOpReturn("5151"));
+}
+
+// N-167 (sibling of F-367): findLastOpReturn's doc comment must describe the
+// first-match walk it actually performs, not a "last OP_RETURN" search.
+//
+// Proves: the doc comment above `pub fn findLastOpReturn` in this file no
+// longer claims to find the LAST OP_RETURN. All seven SDKs implement the
+// same "stop at the first opcode-boundary 0x6a" walk, which is correct here
+// (the on-chain interpreter stops at the first OP_RETURN it executes, and
+// the compiler emits exactly one separator), so "first" and "last" coincide
+// for every script this function will ever see.
+// Does not prove: runtime behaviour — that is already pinned by
+// "findLastOpReturn finds OP_RETURN at opcode boundary" above, unchanged by
+// this fix.
+test "findLastOpReturn doc comment does not claim 'last' (N-167)" {
+    // Self-embed: the slice below stops BEFORE this test's own source (the
+    // function definition precedes all tests in the file), so this literal
+    // never shadows the assertion below.
+    const source = @embedFile("sdk_state.zig");
+    const fn_marker = "pub fn findLastOpReturn";
+    const fn_index = std.mem.indexOf(u8, source, fn_marker) orelse
+        return error.FnMarkerNotFound;
+    const doc_block = source[0..fn_index];
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(std.testing.allocator);
+
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer collected.deinit(std.testing.allocator);
+
+    var lines = std.mem.splitBackwardsScalar(u8, doc_block, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "///")) {
+            try collected.append(std.testing.allocator, line);
+        } else if (trimmed.len == 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    var i: usize = collected.items.len;
+    while (i > 0) {
+        i -= 1;
+        try doc.appendSlice(std.testing.allocator, collected.items[i]);
+        try doc.append(std.testing.allocator, '\n');
+    }
+
+    // Anchor: fails loudly (empty/short doc) if the slicing above ever
+    // points at the wrong comment instead of silently passing.
+    try std.testing.expect(std.mem.indexOf(u8, doc.items, "OP_RETURN") != null);
+
+    const lower = try std.testing.allocator.alloc(u8, doc.items.len);
+    defer std.testing.allocator.free(lower);
+    for (doc.items, 0..) |c, idx| lower[idx] = std.ascii.toLower(c);
+
+    try std.testing.expect(std.mem.indexOf(u8, lower, "last op_return") == null);
 }
 
 test "flattenStateValue walks nested arrays depth-first" {

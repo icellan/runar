@@ -400,11 +400,18 @@ pub fn extract_state_from_script(
     deserialize_state(state_fields, state_hex).map(Some)
 }
 
-/// Walk the script hex as Bitcoin Script opcodes to find the last OP_RETURN
-/// (0x6a) at a real opcode boundary. Unlike `rfind("6a")`, this properly
-/// skips push data so it won't match 0x6a bytes inside data payloads.
+/// Walk the script hex as Bitcoin Script opcodes and return the first
+/// OP_RETURN (0x6a) found at a real opcode boundary. Unlike `find("6a")`,
+/// this properly skips push data so it won't match 0x6a bytes inside data
+/// payloads. The walk stops immediately on the first match rather than
+/// continuing to look for a later one — that is correct here, not a
+/// shortcut: the on-chain interpreter itself stops at the first OP_RETURN
+/// it executes, and the compiler emits exactly one separator (codePart +
+/// OP_RETURN + stateBytes), so "first" and "last" coincide for every script
+/// this function will ever see. The name is kept for parity with the other
+/// six SDKs, which all implement the same first-match walk.
 ///
-/// Returns the hex-char offset of the last OP_RETURN, or None.
+/// Returns the hex-char offset of the OP_RETURN, or None.
 pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
     let mut offset = 0;
     let len = script_hex.len();
@@ -1437,6 +1444,63 @@ mod tests {
     #[test]
     fn find_op_return_returns_none() {
         assert_eq!(find_last_op_return("5193885187"), None);
+    }
+
+    // N-167 (sibling of F-367): find_last_op_return's doc comment must
+    // describe the first-match walk it actually performs, not a "last
+    // OP_RETURN" search.
+    //
+    // Proves: the doc comment above `pub fn find_last_op_return` in this
+    // file no longer claims to find the LAST OP_RETURN. All seven SDKs
+    // implement the same "stop at the first opcode-boundary 0x6a" walk,
+    // which is correct here (the on-chain interpreter stops at the first
+    // OP_RETURN it executes, and the compiler emits exactly one separator),
+    // so "first" and "last" coincide for every script this function will
+    // ever see.
+    // Does not prove: runtime behaviour — that is already pinned by
+    // find_op_return_simple / _skips_push_data / _returns_none above,
+    // unchanged by this fix.
+    #[test]
+    fn find_last_op_return_doc_does_not_claim_last() {
+        // Self-embed: slicing stops BEFORE this function's own source (the
+        // function definition precedes these test functions in the file),
+        // so this literal never shadows the assertion below.
+        let source = include_str!("state.rs");
+
+        let fn_marker = "pub fn find_last_op_return";
+        let fn_index = source
+            .find(fn_marker)
+            .expect("pub fn find_last_op_return not found in state.rs");
+        let doc_block = &source[..fn_index];
+
+        // Walk backward over contiguous `///` lines directly above the fn
+        // to collect just its doc comment, not unrelated earlier code.
+        let mut doc_lines: Vec<&str> = Vec::new();
+        for line in doc_block.lines().rev() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("///") {
+                doc_lines.push(line);
+            } else if trimmed.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+        doc_lines.reverse();
+        let doc = doc_lines.join("\n");
+
+        // Anchor: fails loudly (empty/short doc) if the slicing above ever
+        // points at the wrong comment instead of silently passing.
+        assert!(
+            doc.contains("OP_RETURN"),
+            "doc slice does not mention OP_RETURN, wrong slice captured: {doc:?}"
+        );
+
+        let lower = doc.to_lowercase();
+        assert!(
+            !lower.contains("last op_return"),
+            "doc comment still claims to find the 'last' OP_RETURN:\n{doc}"
+        );
     }
 
     // -------------------------------------------------------------------

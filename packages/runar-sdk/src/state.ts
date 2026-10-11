@@ -250,11 +250,19 @@ export function extractStateFromScript(
 }
 
 /**
- * Walk the script hex as Bitcoin Script opcodes to find the last OP_RETURN
- * (0x6a) at a real opcode boundary. Unlike `lastIndexOf('6a')`, this
- * properly skips push data so it won't match 0x6a bytes inside data payloads.
+ * Walk the script hex as Bitcoin Script opcodes and return the first
+ * OP_RETURN (0x6a) found at a real opcode boundary. Unlike
+ * `indexOf('6a')`, this properly skips push data so it won't match 0x6a
+ * bytes inside data payloads. The walk stops immediately on the first
+ * match rather than continuing to look for a later one — that is correct
+ * here, not a shortcut: the on-chain interpreter itself stops at the
+ * first OP_RETURN it executes, and the compiler emits exactly one
+ * separator (`codePart + OP_RETURN + stateBytes`), so "first" and "last"
+ * coincide for every script this function will ever see. The name is
+ * kept for parity with the other six SDKs, which all implement the same
+ * first-match walk.
  *
- * Returns the hex-char offset of the last OP_RETURN, or -1 if not found.
+ * Returns the hex-char offset of the OP_RETURN, or -1 if not found.
  */
 export function findLastOpReturn(scriptHex: string): number {
   let offset = 0;
