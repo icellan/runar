@@ -9,7 +9,7 @@
     "test": "turbo run test",
     "test:root": "npx vitest run tests/",
     "test:all": "pnpm run test && pnpm run test:root && pnpm run conformance:all && pnpm run examples:all && pnpm run e2e:all && pnpm run wallet-client:all",
-    "test:ci": "pnpm run lint:silent-skips && pnpm run typecheck && pnpm run test:all && RUNAR_INTEGRATION_STRICT=1 pnpm run integration:all && pnpm run lean:verify",
+    "test:ci": "pnpm run lint:silent-skips && pnpm run typecheck && pnpm run test:all && RUNAR_INTEGRATION_STRICT=1 pnpm run integration:all && RUNAR_LEAN_STRICT=1 pnpm run lean:verify",
     "lint": "turbo run lint",
     "lint:silent-skips": "bash scripts/lint-no-silent-skips.sh",
     "lean:verify": "bash scripts/lean-verify.sh",
