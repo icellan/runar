@@ -481,8 +481,8 @@ class TestParserRubyEdges < Minitest::Test
   def test_garbage_input_does_not_crash
     begin
       result = parse('@@@ not ruby at all $$$', 'garbage.runar.rb')
-      assert(result.contract.nil? || !result.errors.empty?,
-             'expected diagnostics for garbage input')
+      # F-376: require an actual diagnostic, not a silent nil-contract pass.
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed on garbage input: #{e.class}: #{e.message}"
     end
@@ -505,8 +505,8 @@ class TestParserRubyEdges < Minitest::Test
     # Missing type after `prop :x,` should produce a diagnostic without crashing.
     begin
       result = parse(source)
-      bad = result.contract.nil? || !result.errors.empty?
-      assert bad, 'expected diagnostics for prop without type'
+      # F-376: require an actual diagnostic, not a silent nil-contract pass.
+      refute_empty result.errors, 'expected diagnostics for prop without type'
     rescue StandardError => e
       flunk "parser crashed on missing prop type: #{e.class}: #{e.message}"
     end

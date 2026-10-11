@@ -128,8 +128,8 @@ class TestParserSol < Minitest::Test
     SOL
 
     result = parse(source, 'bad.runar.sol')
-    invalid = result.contract.nil? || !result.errors.empty?
-    assert invalid, 'expected errors for invalid Solidity-like syntax'
+    # F-376: require a diagnostic, not a silent nil-contract/empty-errors pass.
+    refute_empty result.errors, 'expected errors for invalid Solidity-like syntax'
   end
 
   # ---------------------------------------------------------------------------

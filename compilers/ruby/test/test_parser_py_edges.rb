@@ -318,8 +318,8 @@ class TestParserPyEdges < Minitest::Test
   def test_garbage_input_does_not_crash
     begin
       result = parse('@@@ not python at all !!!', 'garbage.runar.py')
-      assert(result.contract.nil? || !result.errors.empty?,
-             'expected diagnostics for garbage input')
+      # F-376: require an actual diagnostic, not a silent nil-contract pass.
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed on garbage input: #{e.class}: #{e.message}"
     end
@@ -335,8 +335,8 @@ class TestParserPyEdges < Minitest::Test
 
     begin
       result = parse(source, 'bad.runar.py')
-      bad = result.contract.nil? || !result.errors.empty?
-      assert bad, 'expected diagnostics for missing colon'
+      # F-376: require an actual diagnostic, not a silent nil-contract pass.
+      refute_empty result.errors, 'expected diagnostics for missing colon'
     rescue StandardError => e
       flunk "parser crashed on missing colon: #{e.class}: #{e.message}"
     end
