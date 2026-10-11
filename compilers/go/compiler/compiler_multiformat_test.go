@@ -423,8 +423,14 @@ func TestGoContract_CompileExamples(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGoContract_CompileConformance(t *testing.T) {
-	// "stateful" excluded: Go compiler's stateful preimage injection needs deeper work
-	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method"}
+	// F-372: "stateful" was previously excluded behind a comment claiming the Go
+	// compiler's stateful preimage injection "needs deeper work". TestConformanceGoldens
+	// (conformance_goldens_test.go) already compiles every conformance/tests/*
+	// directory's .runar.go source — including "stateful" — with constant folding
+	// disabled and byte-matches it against the shared golden, so that premise is
+	// stale. Included here too, proving .runar.go compiles via this call path
+	// (default options, i.e. constant folding ON) to the same fold-OFF golden.
+	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method", "stateful"}
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
@@ -466,9 +472,14 @@ func TestGoContract_CompileConformance(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRubyContract_CompileConformance(t *testing.T) {
-	// "stateful" and "stateful-counter" excluded: stateful preimage injection
-	// requires deeper work in the Go compiler.
-	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method"}
+	// F-372: "stateful" and "stateful-counter" were previously excluded behind a
+	// comment claiming stateful preimage injection "requires deeper work in the
+	// Go compiler". TestConformanceGoldens (conformance_goldens_test.go) already
+	// compiles both via their .runar.go source and byte-matches the shared
+	// golden, so that premise is stale for the compiler itself. Included here to
+	// additionally prove the .runar.rb surface, parsed by the same Go compiler,
+	// reaches the identical golden.
+	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method", "stateful", "stateful-counter"}
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
