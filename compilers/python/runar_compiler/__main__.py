@@ -23,6 +23,7 @@ from runar_compiler.compiler import (
     compile_from_ir,
     compile_from_source_collecting_warnings,
     compile_source_to_ir,
+    compile_source_to_ir_collecting_warnings,
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
 
@@ -205,7 +206,7 @@ def main() -> None:
             print("--emit-ir requires --source", file=sys.stderr)
             sys.exit(1)
         try:
-            program = compile_source_to_ir(
+            program, ir_warnings = compile_source_to_ir_collecting_warnings(
                 args.source,
                 disable_constant_folding=args.disable_constant_folding,
             )
@@ -223,6 +224,12 @@ def main() -> None:
         ir_json = json.dumps(_anf_to_camel_dict(program), indent=2, default=str)
         print(ir_json)
         if not args.emit_source_map:
+            # F-220: this early return skips the full compile, which is where
+            # warnings are otherwise printed, so print them here. When
+            # --emit-source-map is set we fall through and the full compile
+            # prints them; printing here too would print each one twice.
+            for w in ir_warnings:
+                print(f"warning: {w}", file=sys.stderr)
             return
         emit_ir_handled = True
 

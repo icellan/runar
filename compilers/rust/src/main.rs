@@ -178,8 +178,8 @@ fn main() {
                 process::exit(1);
             }
         };
-        match runar_compiler_rust::compile_source_to_ir_with_options(source_path, &opts) {
-            Ok(program) => {
+        match runar_compiler_rust::compile_source_to_ir_collecting_warnings(source_path, &opts) {
+            Ok((program, warnings)) => {
                 match serde_json::to_string_pretty(&program) {
                     Ok(json) => println!("{}", json),
                     Err(e) => {
@@ -188,6 +188,14 @@ fn main() {
                     }
                 }
                 if args.emit_source_map.is_none() {
+                    // F-220: this early return skips the full compile, which is
+                    // where warnings are otherwise printed, so print them here.
+                    // When --emit-source-map is set we fall through and the
+                    // full compile prints them; printing here too would print
+                    // each one twice.
+                    for w in &warnings {
+                        eprintln!("warning: {}", w);
+                    }
                     return;
                 }
                 emit_ir_handled = true;

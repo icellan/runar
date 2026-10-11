@@ -645,40 +645,57 @@ func diagStrings(diags []frontend.Diagnostic) []string {
 }
 
 // CompileSourceToIR runs passes 1-4 on a .runar.ts source file and returns the ANF program.
+//
+// Warning-severity diagnostics are discarded; CompileSourceToIRCollectingWarnings
+// returns them.
 func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgram, error) {
+	program, _, err := CompileSourceToIRCollectingWarnings(sourcePath, opts...)
+	return program, err
+}
+
+// CompileSourceToIRCollectingWarnings is CompileSourceToIR plus the warnings
+// CompileFromSourceCollectingWarnings reports: the validator's warnings and
+// the issue-#109 embedAlways DCE notice, computed from the same
+// (expanded contract, freshly lowered program) pair.
+//
+// F-220: `--emit-ir` used CompileSourceToIR, so every warning (the H2
+// locktime-bypass advisory among them) was dropped on that path.
+func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptions) (*ir.ANFProgram, []frontend.Diagnostic, error) {
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading source file: %w", err)
+		return nil, nil, fmt.Errorf("reading source file: %w", err)
 	}
 
 	parseResult := frontend.ParseSource(source, sourcePath)
 	if len(parseResult.Errors) > 0 {
-		return nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
 	}
 	if parseResult.Contract == nil {
-		return nil, fmt.Errorf("no contract found in %s", sourcePath)
+		return nil, nil, fmt.Errorf("no contract found in %s", sourcePath)
 	}
 
 	validResult := frontend.Validate(parseResult.Contract)
 	if len(validResult.Errors) > 0 {
-		return nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
 	}
+	warnings := validResult.Warnings
 
 	tcResult := frontend.TypeCheck(parseResult.Contract)
 	if len(tcResult.Errors) > 0 {
-		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
 	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
 	if len(expandResult.Errors) > 0 {
-		return nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
+		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
 
 	// Pass 4: ANF lowering (recover from panics)
 	program, err := lowerToANFRecovering(expandResult.Contract)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	warnings = append(warnings, frontend.CollectEmbedAlwaysDCEWarnings(expandResult.Contract, program)...)
 
 	o := mergeOptions(opts)
 	// Pass 4.25: Constant folding (on by default)
@@ -689,7 +706,7 @@ func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgra
 	if !o.DisableEcOptimizer {
 		program = frontend.OptimizeEC(program)
 	}
-	return program, nil
+	return program, warnings, nil
 }
 
 // ---------------------------------------------------------------------------

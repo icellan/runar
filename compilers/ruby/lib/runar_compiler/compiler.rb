@@ -679,6 +679,25 @@ module RunarCompiler
   # @param constructor_args [Hash, nil] constructor argument overrides
   # @return [IR::ANFProgram]
   def self.compile_source_to_ir(source_path, disable_constant_folding: false, constructor_args: nil)
+    program, = compile_source_to_ir_collecting_warnings(
+      source_path,
+      disable_constant_folding: disable_constant_folding,
+      constructor_args: constructor_args
+    )
+    program
+  end
+
+  # .compile_source_to_ir plus the warnings it would discard: the same set
+  # .compile_from_source_collecting_warnings reports (validator warnings and
+  # the issue-#109 DCE notice, from the same expanded contract and lowered
+  # program).
+  #
+  # F-220: cli.rb's --emit-ir used .compile_source_to_ir, so every warning
+  # (the H2 locktime-bypass advisory among them) was dropped on that path.
+  #
+  # @return [Array(IR::ANFProgram, Array<String>)]
+  def self.compile_source_to_ir_collecting_warnings(source_path, disable_constant_folding: false,
+                                                    constructor_args: nil)
     source = _read_file(source_path)
 
     parse_result = _parse_source(source, source_path)
@@ -693,6 +712,7 @@ module RunarCompiler
     if valid_result.errors.any?
       raise CompilationError, "validation errors:\n  #{valid_result.error_strings.join("\n  ")}"
     end
+    warnings = valid_result.warning_strings
 
     tc_result = _type_check(parse_result.contract)
     if tc_result.errors.any?
@@ -711,6 +731,8 @@ module RunarCompiler
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
 
+    warnings += Frontend::EmbedAlwaysDCE.collect_warnings(expanded_contract, program)
+
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
@@ -718,7 +740,7 @@ module RunarCompiler
     # for dead-binding cleanup).
     program = _optimize_ec(program)
 
-    program
+    [program, warnings]
   end
 
   # -------------------------------------------------------------------------

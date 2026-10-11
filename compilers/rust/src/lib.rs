@@ -520,13 +520,26 @@ pub fn compile_source_to_ir(path: &Path) -> Result<ir::ANFProgram, String> {
 
 /// Compile from a `.runar.ts` source file to ANF IR only (passes 1-4), with options.
 pub fn compile_source_to_ir_with_options(path: &Path, opts: &CompileOptions) -> Result<ir::ANFProgram, String> {
+    compile_source_to_ir_collecting_warnings(path, opts).map(|(program, _)| program)
+}
+
+/// `compile_source_to_ir_with_options`, plus the warning-severity diagnostics
+/// that function has to discard: the validator's warnings and the issue-#109
+/// DCE notice, the same set `compile_from_source_with_result` reports.
+///
+/// F-220: the CLI's `--emit-ir` used the plain function, so every warning
+/// (the H2 locktime-bypass advisory among them) was dropped on that path.
+pub fn compile_source_to_ir_collecting_warnings(
+    path: &Path,
+    opts: &CompileOptions,
+) -> Result<(ir::ANFProgram, Vec<frontend::diagnostic::Diagnostic>), String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("reading source file: {}", e))?;
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "contract.ts".to_string());
-    compile_source_str_to_ir_with_options(&source, Some(&file_name), opts)
+    compile_source_str_to_ir_collecting_warnings(&source, Some(&file_name), opts)
 }
 
 /// Compile from a `.runar.ts` source string to ANF IR only (passes 1-4).
@@ -543,6 +556,15 @@ pub fn compile_source_str_to_ir_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<ir::ANFProgram, String> {
+    compile_source_str_to_ir_collecting_warnings(source, file_name, opts).map(|(program, _)| program)
+}
+
+/// String form of `compile_source_to_ir_collecting_warnings` (F-220).
+pub fn compile_source_str_to_ir_collecting_warnings(
+    source: &str,
+    file_name: Option<&str>,
+    opts: &CompileOptions,
+) -> Result<(ir::ANFProgram, Vec<frontend::diagnostic::Diagnostic>), String> {
     reject_unsupported_stop_after_pass_options(opts)?;
 
     let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
@@ -590,10 +612,10 @@ pub fn compile_source_str_to_ir_with_options(
             error_msgs.join("\n  ")
         ));
     }
-    let contract = expand_result.contract;
+    let expanded_contract = expand_result.contract;
 
     // Pass 4: ANF Lower (catch panics)
-    let mut anf_program = frontend::anf_lower::try_lower_to_anf(&contract)?;
+    let mut anf_program = frontend::anf_lower::try_lower_to_anf(&expanded_contract)?;
 
     // Bake constructor args into ANF properties (validated first).
     let arg_errors = apply_constructor_args(&mut anf_program, &opts.constructor_args);
@@ -612,8 +634,15 @@ pub fn compile_source_str_to_ir_with_options(
         .map_err(|e| e.message)?;
     }
 
-    guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program))
-        .map_err(|e| e.message)
+    let anf_program =
+        guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program))
+            .map_err(|e| e.message)?;
+
+    // Same warning set, from the same (pre-expansion AST, post-EC-opt ANF)
+    // pair, as compile_from_source_str_with_result.
+    let mut warnings = validation.warnings;
+    warnings.extend(embed_always_dce_warnings(&contract, &anf_program));
+    Ok((anf_program, warnings))
 }
 
 /// Run only the parse + validate passes on a source string.
@@ -850,6 +879,43 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
 // CompileResult API — collect all diagnostics, return partial results
 // ---------------------------------------------------------------------------
 
+/// Issue #109: warn when DCE strips an un-annotated readonly field. Such a
+/// field carries no compile-time value (no initializer) and is referenced by
+/// no method, so it is eliminated from the locking script entirely —
+/// silently dropping deploy-time metadata an author may intend to recover
+/// from the on-chain script later. `@embedAlways` fields were forced back in
+/// during ANF lowering, so they are "referenced" here and never warn.
+///
+/// `contract` is the pre-expansion AST; `anf_program` is the ANF after
+/// constant folding and EC optimization.
+fn embed_always_dce_warnings(
+    contract: &frontend::ast::ContractNode,
+    anf_program: &ir::ANFProgram,
+) -> Vec<frontend::diagnostic::Diagnostic> {
+    let referenced = collect_referenced_props(anf_program);
+    contract
+        .properties
+        .iter()
+        .filter(|prop| {
+            prop.readonly
+                && !prop.embed_always
+                && prop.initializer.is_none()
+                && !referenced.contains(&prop.name)
+        })
+        .map(|prop| {
+            frontend::diagnostic::Diagnostic::warning(
+                format!(
+                    "readonly field '{}' is not referenced in any method body and was \
+                     eliminated by DCE; annotate it /** @embedAlways */ to preserve it in \
+                     the on-chain script",
+                    prop.name
+                ),
+                Some(prop.source_location.clone()),
+            )
+        })
+        .collect()
+}
+
 /// Compile from a source string, collecting ALL diagnostics from ALL passes
 /// and returning partial results as they become available.
 ///
@@ -998,33 +1064,10 @@ pub fn compile_from_source_str_with_result(
         };
     result.anf = Some(anf_program.clone());
 
-    // Issue #109: warn when DCE strips an un-annotated readonly field. Such a
-    // field carries no compile-time value (no initializer) and is referenced by
-    // no method, so it is eliminated from the locking script entirely —
-    // silently dropping deploy-time metadata an author may intend to recover
-    // from the on-chain script later. `@embedAlways` fields were forced back in
-    // during ANF lowering, so they are "referenced" here and never warn.
-    {
-        let referenced = collect_referenced_props(&anf_program);
-        if let Some(contract_ast) = result.contract.as_ref() {
-            for prop in &contract_ast.properties {
-                if prop.readonly
-                    && !prop.embed_always
-                    && prop.initializer.is_none()
-                    && !referenced.contains(&prop.name)
-                {
-                    result.diagnostics.push(Diagnostic::warning(
-                        format!(
-                            "readonly field '{}' is not referenced in any method body and was \
-                             eliminated by DCE; annotate it /** @embedAlways */ to preserve it in \
-                             the on-chain script",
-                            prop.name
-                        ),
-                        Some(prop.source_location.clone()),
-                    ));
-                }
-            }
-        }
+    if let Some(contract_ast) = result.contract.as_ref() {
+        result
+            .diagnostics
+            .extend(embed_always_dce_warnings(contract_ast, &anf_program));
     }
 
     // Pass 5: Stack lowering (catch panics)

@@ -192,13 +192,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--emit-ir requires --source")
 			os.Exit(1)
 		}
-		irJSON, err := sourceToIRJSON(*sourceFile, opts)
+		irJSON, irWarnings, err := sourceToIRJSON(*sourceFile, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(string(irJSON))
 		if *emitSourceMap == "" {
+			// F-220: this early return skips the full compile, which is where
+			// warnings are otherwise printed, so print them here. When
+			// --emit-source-map is set we fall through and the full compile
+			// prints them; printing here too would print each one twice.
+			for _, w := range irWarnings {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w.FormatMessage())
+			}
 			return
 		}
 		emitIRHandled = true
@@ -214,7 +221,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--emit-ir-to requires --source")
 			os.Exit(1)
 		}
-		irJSON, err := sourceToIRJSON(*sourceFile, opts)
+		// Warnings are discarded here: the full compile below prints them.
+		irJSON, _, err := sourceToIRJSON(*sourceFile, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
@@ -410,17 +418,20 @@ func runGroth16WA() error {
 // (stdout) and `--emit-ir-to` (file) so the two modes are byte-identical by
 // construction — the conformance runner compares one against the other's
 // goldens.
-func sourceToIRJSON(sourcePath string, opts compiler.CompileOptions) ([]byte, error) {
-	program, err := compiler.CompileSourceToIR(sourcePath, opts)
+//
+// It also returns the warnings CompileSourceToIRCollectingWarnings collected
+// (F-220): `--emit-ir` prints them when it skips the full compile.
+func sourceToIRJSON(sourcePath string, opts compiler.CompileOptions) ([]byte, []frontend.Diagnostic, error) {
+	program, warnings, err := compiler.CompileSourceToIRCollectingWarnings(sourcePath, opts)
 	if err != nil {
-		return nil, fmt.Errorf("Compilation error: %v", err)
+		return nil, nil, fmt.Errorf("Compilation error: %v", err)
 	}
 	// Serialize to generic map and ensure "if" values always have an
 	// "else" field (even if empty) to match TS compiler IR format.
 	// Go's omitempty drops empty slices, but TS always emits else: [].
 	fullJSON, err := json.Marshal(program)
 	if err != nil {
-		return nil, fmt.Errorf("JSON error: %v", err)
+		return nil, nil, fmt.Errorf("JSON error: %v", err)
 	}
 	var raw map[string]interface{}
 	// UseNumber() keeps every JSON number as its verbatim source text.
@@ -433,14 +444,14 @@ func sourceToIRJSON(sourcePath string, opts compiler.CompileOptions) ([]byte, er
 	dec := json.NewDecoder(bytes.NewReader(fullJSON))
 	dec.UseNumber()
 	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("JSON error: %v", err)
+		return nil, nil, fmt.Errorf("JSON error: %v", err)
 	}
 	ensureIRFields(raw)
 	irJSON, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("JSON error: %v", err)
+		return nil, nil, fmt.Errorf("JSON error: %v", err)
 	}
-	return irJSON, nil
+	return irJSON, warnings, nil
 }
 
 // ensureIRFields walks a generic JSON map and patches up fields that Go's

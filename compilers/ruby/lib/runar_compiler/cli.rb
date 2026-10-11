@@ -195,7 +195,7 @@ module RunarCompiler
         end
 
         begin
-          program = RunarCompiler.compile_source_to_ir(
+          program, ir_warnings = RunarCompiler.compile_source_to_ir_collecting_warnings(
             options[:source],
             disable_constant_folding: disable_cf
           )
@@ -208,6 +208,11 @@ module RunarCompiler
         ir_json = JSON.pretty_generate(_anf_to_camel_dict(program))
         puts ir_json
         unless options[:emit_source_map]
+          # F-220: this early return skips the full compile, which is where
+          # warnings are otherwise printed, so print them here. When
+          # --emit-source-map is set we fall through and the full compile
+          # prints them; printing here too would print each one twice.
+          ir_warnings.each { |w| $stderr.puts "warning: #{w}" }
           return
         end
         emit_ir_handled = true

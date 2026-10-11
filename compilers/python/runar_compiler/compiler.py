@@ -674,6 +674,29 @@ def compile_source_to_ir(
     constructor_args: dict[str, object] | None = None,
 ) -> ANFProgram:
     """Run passes 1-4 on a source file and return the ANF program."""
+    program, _ = compile_source_to_ir_collecting_warnings(
+        source_path,
+        disable_constant_folding=disable_constant_folding,
+        constructor_args=constructor_args,
+    )
+    return program
+
+
+def compile_source_to_ir_collecting_warnings(
+    source_path: str,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> tuple[ANFProgram, list[str]]:
+    """``compile_source_to_ir`` plus the warnings it would discard.
+
+    The same set ``compile_from_source_collecting_warnings`` reports: the
+    validator's warnings and the issue-#109 DCE notice, computed from the
+    same (expanded contract, lowered program) pair.
+
+    F-220: ``__main__``'s ``--emit-ir`` used ``compile_source_to_ir``, so
+    every warning (the H2 locktime-bypass advisory among them) was dropped
+    on that path.
+    """
     source = _read_file(source_path)
 
     parse_result = _parse_source(source, source_path)
@@ -685,6 +708,7 @@ def compile_source_to_ir(
     valid_result = _validate(parse_result.contract)
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
+    warnings = valid_result.warning_strings()
 
     tc_result = _type_check(parse_result.contract)
     if tc_result.errors:
@@ -700,6 +724,7 @@ def compile_source_to_ir(
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
+    lowered = program
 
     # Pass 4.25: Constant folding (on by default)
     if not disable_constant_folding:
@@ -708,7 +733,11 @@ def compile_source_to_ir(
     # Pass 4.5: EC optimization (delegates internally to frontend/dce.py).
     program = _optimize_ec(program)
 
-    return program
+    # compile_from_source_collecting_warnings passes the lowered program
+    # object (after its folding/EC passes ran) to the DCE check; so does this.
+    warnings = list(warnings) + _dropped_readonly_field_warnings(expanded_contract, lowered)
+
+    return program, warnings
 
 
 # ---------------------------------------------------------------------------
