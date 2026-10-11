@@ -363,7 +363,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Handle --update-golden mode
+  // Handle --update-golden mode.
+  //
+  // N-088: this used to catch a fixture's failure or F-051 allowlist
+  // refusal, print `Failed: <dir>: <message>`, and continue to the next
+  // fixture. Nothing recorded that a fixture was skipped, so `main()` fell
+  // through to `return` with no `process.exit` call at all — a scripted
+  // regeneration could not tell "every golden was refreshed" from "N were
+  // silently skipped" without scraping stdout for the word "Failed". Now
+  // every failure/refusal is collected and the run exits 1 (not the
+  // harness-fault 2 — the harness worked fine, a fixture just refused).
   if (opts.updateGolden) {
     console.log('Updating golden files from TypeScript compiler output...');
     const entries = readdirSync(opts.testsDir, { withFileTypes: true });
@@ -371,15 +380,24 @@ async function main(): Promise<void> {
       .filter((e) => e.isDirectory())
       .map((e) => join(opts.testsDir, e.name));
 
+    const failedDirs: string[] = [];
     for (const testDir of testDirs) {
       try {
         await updateGoldenFiles(testDir);
         console.log(`  Updated: ${testDir}`);
       } catch (err) {
         console.error(`  Failed: ${testDir}: ${err instanceof Error ? err.message : err}`);
+        failedDirs.push(testDir);
       }
     }
     await shutdownJavaDaemon();
+    if (failedDirs.length > 0) {
+      console.error(
+        `\n${failedDirs.length} of ${testDirs.length} fixture(s) could not be updated:\n` +
+        failedDirs.map((d) => `  - ${d}`).join('\n'),
+      );
+      process.exit(1);
+    }
     return;
   }
 

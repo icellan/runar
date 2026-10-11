@@ -52,7 +52,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkSourceAnchors, evaluateAgainstKnownIssues, loadKnownIssues } from './independent-oracle.js';
@@ -400,6 +400,36 @@ interface Outcome {
   notes?: string;
 }
 
+/**
+ * Whether `--update` should write the regenerated golden for one
+ * (fixture, tier) pair, given its structural and source-anchor check
+ * results. Exported so the decision can be unit-tested without spawning the
+ * real compilers.
+ *
+ * N-088: `--update` used to write the golden unconditionally, so a compile
+ * that produced a structurally invalid source map, or one whose mappings
+ * failed the independent source-anchor oracle, still got stamped as the new
+ * golden. A broken output must not become the golden just because it was
+ * produced while regenerating.
+ */
+export function decideGoldenWrite(structuralOk: boolean, anchorOk: boolean): boolean {
+  return structuralOk && anchorOk;
+}
+
+/**
+ * The process exit code for the whole run, given how many (fixture, tier)
+ * pairs failed. Exported so the decision can be unit-tested without
+ * spawning the real compilers.
+ *
+ * N-088: the exit code used to be `failed > 0 && !update`, so any failure
+ * found while regenerating goldens (including one `decideGoldenWrite` above
+ * now refuses to stamp) was masked by the mere fact of running `--update`.
+ * A failure is a failure whether or not it happened during a regeneration.
+ */
+export function decideExitCode(failed: number, _update: boolean): number {
+  return failed > 0 ? 1 : 0;
+}
+
 function main() {
   const args = process.argv.slice(2);
   const update = args.includes('--update');
@@ -453,8 +483,12 @@ function main() {
       // Golden comparison (byte-identical) or update.
       let byteIdentical: boolean | undefined;
       if (update) {
-        writeFileSync(goldenPath, emitted);
-        byteIdentical = true;
+        if (decideGoldenWrite(structural.ok, anchorEval.ok)) {
+          writeFileSync(goldenPath, emitted);
+          byteIdentical = true;
+        } else {
+          byteIdentical = false;
+        }
       } else {
         const golden = readGolden(goldenPath);
         if (golden == null) {
@@ -475,6 +509,7 @@ function main() {
         fixture, tier: tier.name, byteIdentical,
         structural: structural.ok ? 'ok' : 'fail', structuralReasons: structural.reasons,
         anchor: anchorEval.ok ? 'ok' : 'fail', anchorReason: anchorEval.reason,
+        notes: update && !byteIdentical ? 'refused to write golden: fails its own structural/anchor checks' : undefined,
       });
     }
   }
@@ -493,7 +528,12 @@ function main() {
   }
   console.log('');
   console.log(`Total: ${outcomes.length}, failed: ${failed}`);
-  if (failed > 0 && !update) process.exit(1);
+  const code = decideExitCode(failed, update);
+  if (code !== 0) process.exit(code);
 }
 
-main();
+// Importable for tests (the decision helpers above): only run the driver
+// when this file IS the entry point, mirroring conformance/analyzer/run.ts.
+const thisFile = realpathSync(fileURLToPath(import.meta.url));
+const entry = process.argv[1] ? realpathSync(process.argv[1]) : '';
+if (entry === thisFile) main();
