@@ -149,6 +149,15 @@ module RunarCompiler
         exit 1
       end
 
+      # F-335: --source and --ir are mutually exclusive input modes. The old
+      # code picked --source silently whenever both were set (no
+      # diagnostic); refuse the combination instead, matching the Go tier's
+      # F-183 fix (compilers/go/main.go).
+      if options[:source] && options[:ir]
+        $stderr.puts "Error: --source and --ir are mutually exclusive; pass exactly one"
+        exit 1
+      end
+
       disable_cf = options[:disable_constant_folding] || false
 
       # Handle --parse-only: read source, run parse + validate, print
