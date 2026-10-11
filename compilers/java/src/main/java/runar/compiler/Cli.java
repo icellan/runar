@@ -420,9 +420,12 @@ public final class Cli {
      *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
      *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
      *       which therefore stays silent for Java-built artifacts.</li>
-     *   <li>{@code fixedArray} regrouping — Java's {@code AnfProperty} carries
-     *       no synthetic-array chain, so expanded FixedArray siblings appear as
-     *       individual ABI params / state fields rather than one logical entry.</li>
+     *   <li>{@code fixedArray} regrouping on {@code abi.constructor.params} —
+     *       a readonly FixedArray property still publishes its expanded
+     *       siblings as individual constructor params rather than one logical
+     *       entry. (N-086 fixed this for {@code stateFields}, via
+     *       {@link StateFieldRegroup}; the constructor ABI is a sibling gap,
+     *       not yet ported.)</li>
      * </ul>
      *
      * <p>Returns 0 on success, non-zero on failure.
@@ -443,19 +446,32 @@ public final class Cli {
             // State fields: the mutable properties. `index` is the property's
             // position in declaration order (matching constructor arg order),
             // NOT a sequential mutable counter — the SDK relies on that.
+            // N-086: a FixedArray property's expanded scalar leaves (pass 3b)
+            // are regrouped back into one `fixedArray`-tagged entry here, the
+            // way every other tier's assembler does — see StateFieldRegroup.
             List<String> stateFieldJson = new ArrayList<>();
-            for (int i = 0; i < anf.properties().size(); i++) {
-                AnfProperty p = anf.properties().get(i);
-                if (p.readonly()) continue;
-                StringBuilder sf = new StringBuilder();
-                sf.append("{\"name\": ").append(jsonString(p.name()))
-                    .append(", \"type\": ").append(jsonString(p.type()))
-                    .append(", \"index\": ").append(i);
-                if (p.initialValue() != null) {
-                    sf.append(", \"initialValue\": ").append(Jcs.stringify(p.initialValue()));
+            for (StateFieldRegroup.Grouped sf : StateFieldRegroup.run(anf.properties())) {
+                StringBuilder sb = new StringBuilder();
+                sb.append("{\"name\": ").append(jsonString(sf.name()))
+                    .append(", \"type\": ").append(jsonString(sf.type()))
+                    .append(", \"index\": ").append(sf.index());
+                if (sf.initialValue() != null) {
+                    sb.append(", \"initialValue\": ").append(Jcs.stringify(sf.initialValue()));
                 }
-                sf.append('}');
-                stateFieldJson.add(sf.toString());
+                if (sf.fixedArray() != null) {
+                    sb.append(", \"fixedArray\": {\"elementType\": ")
+                        .append(jsonString(sf.fixedArray().elementType()))
+                        .append(", \"length\": ").append(sf.fixedArray().length())
+                        .append(", \"syntheticNames\": [");
+                    List<String> names = sf.fixedArray().syntheticNames();
+                    for (int k = 0; k < names.size(); k++) {
+                        if (k > 0) sb.append(", ");
+                        sb.append(jsonString(names.get(k)));
+                    }
+                    sb.append("]}");
+                }
+                sb.append('}');
+                stateFieldJson.add(sb.toString());
             }
             boolean hasStateFields = !stateFieldJson.isEmpty();
             // N-139: statefulness follows parentClass (the TS reference rule for
