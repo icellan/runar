@@ -74,6 +74,7 @@ import {
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { reduceAnfProgram, type AnfProgram as ReducibleAnfProgram } from './reduce.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -871,6 +872,18 @@ interface Finding {
   programJson: string;
   outputs: Partial<Record<CompilerName, string>>;
   reason: string;
+  /** Delta-debugged reproducer (F-173); absent if shrinking failed. */
+  reduced?: {
+    programJson: string;
+    outputs: Partial<Record<CompilerName, string>>;
+    reason: string;
+    originalBindings: number;
+    reducedBindings: number;
+  };
+}
+
+function countBindings(program: AnfProgram): number {
+  return program.methods.reduce((n, m) => n + m.body.length, 0);
 }
 
 function saveFinding(dir: string, f: Finding): string {
@@ -881,16 +894,45 @@ function saveFinding(dir: string, f: Finding): string {
   for (const [tier, hex] of Object.entries(f.outputs)) {
     if (hex !== undefined) writeFileSync(join(out, `hex-${tier}.txt`), hex + '\n', 'utf-8');
   }
+  writeFindingJson(out, f);
+  return out;
+}
+
+/**
+ * Add the shrunk reproducer to an already-saved finding dir. Called AFTER
+ * `saveFinding` so the original is on disk before a (possibly long) shrink
+ * starts and survives the job being killed mid-reduction.
+ */
+function saveReduced(out: string, f: Finding): void {
+  if (!f.reduced) return;
+  writeFileSync(join(out, 'program-reduced.json'), f.reduced.programJson, 'utf-8');
+  for (const [tier, hex] of Object.entries(f.reduced.outputs)) {
+    if (hex !== undefined) writeFileSync(join(out, `hex-${tier}-reduced.txt`), hex + '\n', 'utf-8');
+  }
+  writeFindingJson(out, f);
+}
+
+function writeFindingJson(out: string, f: Finding): void {
   writeFileSync(
     join(out, 'finding.json'),
     JSON.stringify(
-      { seed: f.seed, programIndex: f.programIndex, reason: f.reason },
+      {
+        seed: f.seed,
+        programIndex: f.programIndex,
+        reason: f.reason,
+        ...(f.reduced
+          ? {
+              reducedReason: f.reduced.reason,
+              originalBindings: f.reduced.originalBindings,
+              reducedBindings: f.reduced.reducedBindings,
+            }
+          : {}),
+      },
       null,
       2,
     ) + '\n',
     'utf-8',
   );
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1031,19 @@ export interface AnfDifferentialOptions {
   verbose?: boolean;
   /** Generator knobs. */
   genOpts?: Partial<GenOpts>;
+  /**
+   * Test seam: compile one program in one tier, returning lowercase hex or
+   * `null` (rejected). When set it replaces EVERY tier's real compiler
+   * (including the in-process TS one), every requested tier counts as
+   * available, and no binary discovery runs. Lets a hermetic test inject a
+   * known divergence; production callers leave it unset.
+   */
+  compileTier?: (
+    tier: CompilerName,
+    program: AnfProgram,
+    irFile: string,
+    disableConstantFolding: boolean,
+  ) => string | null;
 }
 
 export interface AnfDifferentialReport {
@@ -1032,16 +1087,25 @@ export async function runAnfDifferential(
   if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
 
   const canon = await loadCanonical();
-  const ctx = await initTierContext();
-  const perTierAvailable: Partial<Record<CompilerName, boolean>> = {
-    ts: !!ctx.tsCompile,
-    go: !!ctx.goBin,
-    rust: !!ctx.rustBin,
-    python: ctx.pythonAvail,
-    zig: !!ctx.zigBin,
-    ruby: !!ctx.rubyBin,
-    java: !!ctx.javaJar,
-  };
+  let compileTier: NonNullable<AnfDifferentialOptions['compileTier']>;
+  let perTierAvailable: Partial<Record<CompilerName, boolean>>;
+  if (opts.compileTier) {
+    compileTier = opts.compileTier;
+    perTierAvailable = Object.fromEntries(tiers.map((t) => [t, true]));
+  } else {
+    const ctx = await initTierContext();
+    compileTier = (tier, program, irFile, fold) =>
+      tier === 'ts' ? runTsInProcess(program, ctx, fold) : runIrFile(tier, irFile, ctx, fold);
+    perTierAvailable = {
+      ts: !!ctx.tsCompile,
+      go: !!ctx.goBin,
+      rust: !!ctx.rustBin,
+      python: ctx.pythonAvail,
+      zig: !!ctx.zigBin,
+      ruby: !!ctx.rubyBin,
+      java: !!ctx.javaJar,
+    };
+  }
 
   const genOpts: GenOpts = { ...DEFAULT_GEN_OPTS, ...opts.genOpts };
 
@@ -1055,6 +1119,67 @@ export async function runAnfDifferential(
   const start = Date.now();
   let mismatchCount = 0;
   const findings: string[] = [];
+
+  // Compile one program in every requested tier and classify the results.
+  // Shared by the main loop and the finding shrinker, so a reduced program is
+  // judged by exactly the oracle check that flagged the original.
+  const evaluate = (prog: AnfProgram, canonicalBytes: string, irFile: string) => {
+    writeFileSync(irFile, canonicalBytes, 'utf-8');
+    const outputs: Partial<Record<CompilerName, string>> = {};
+    const failed: CompilerName[] = [];
+    for (const tier of tiers) {
+      const hex = compileTier(tier, prog, irFile, disableConstantFolding);
+      if (hex === null) {
+        // Distinguish "no binary" from "binary present, rejected" (always a
+        // failure). perTierAvailable tells us the difference.
+        if (classifyUnavailableTier(perTierAvailable[tier], opts.skipMissingTiers) !== 'skipped') {
+          failed.push(tier);
+        }
+      } else {
+        outputs[tier] = hex;
+      }
+    }
+    return { outputs, classification: classifyTierResults(outputs, failed) };
+  };
+
+  // Shrink a mismatching program with `reduceAnfProgram` (F-173). A candidate
+  // counts as a reproduction only if it fails with the byte-identical reason
+  // string (same divergent / rejecting tiers). Past the run's time budget every
+  // candidate is refused, which stops the shrink at the last reproducing
+  // program instead of overrunning. The result is re-evaluated once more and
+  // dropped if it no longer reproduces, so a written reduced program always
+  // fails the original check.
+  const shrink = (
+    program: AnfProgram,
+    reason: string,
+    irFile: string,
+  ): Finding['reduced'] => {
+    const deadline = opts.timeBudgetMs !== undefined ? start + opts.timeBudgetMs : undefined;
+    const reproduces = (p: AnfProgram): { outputs: Partial<Record<CompilerName, string>> } | null => {
+      const r = evaluate(p, canon(p), irFile);
+      return r.classification.status === 'mismatch' && r.classification.reason === reason ? r : null;
+    };
+    try {
+      const reducedProgram = reduceAnfProgram(
+        program as ReducibleAnfProgram,
+        (cand) =>
+          (deadline === undefined || Date.now() <= deadline) &&
+          reproduces(cand as unknown as AnfProgram) !== null,
+      ) as unknown as AnfProgram;
+      const confirmed = reproduces(reducedProgram);
+      if (!confirmed) return undefined;
+      return {
+        programJson: canon(reducedProgram),
+        outputs: confirmed.outputs,
+        reason,
+        originalBindings: countBindings(program),
+        reducedBindings: countBindings(reducedProgram),
+      };
+    } catch (e) {
+      if (opts.verbose) console.log(`  shrink failed: ${(e as Error).message}`);
+      return undefined;
+    }
+  };
   let programsRun = 0;
   let earlyStop = false;
 
@@ -1090,46 +1215,22 @@ export async function runAnfDifferential(
     // can be replayed via `--ir <findings/.../program.json>` against any
     // tier offline.
     const irFile = join(tmpDir, `program-${process.pid}-${i}.json`);
-    writeFileSync(irFile, canonical, 'utf-8');
 
-    // 2) collect per-tier hex
-    const outputs: Partial<Record<CompilerName, string>> = {};
-    const skipped: CompilerName[] = [];
-    const failed: CompilerName[] = [];
-
-    for (const tier of tiers) {
-      let hex: string | null;
-      if (tier === 'ts') {
-        hex = runTsInProcess(program, ctx, disableConstantFolding);
-      } else {
-        hex = runIrFile(tier, irFile, ctx, disableConstantFolding);
-      }
-
-      if (hex === null) {
-        // Distinguish "no binary" from "binary present, rejected" (always a
-        // failure). perTierAvailable tells us the difference.
-        if (classifyUnavailableTier(perTierAvailable[tier], opts.skipMissingTiers) === 'skipped') {
-          skipped.push(tier);
-        } else {
-          failed.push(tier);
-        }
-      } else {
-        outputs[tier] = hex;
-      }
-    }
-
-    // 3) compare
+    // 2) collect per-tier hex, 3) compare
+    const { outputs, classification } = evaluate(program, canonical, irFile);
     const tierKeys = Object.keys(outputs) as CompilerName[];
-    const classification = classifyTierResults(outputs, failed);
     if (classification.status === 'mismatch') {
       mismatchCount += 1;
-      const dir = saveFinding(findingsDir, {
+      const finding: Finding = {
         seed: opts.seed,
         programIndex: i,
         programJson: canonical,
         outputs,
         reason: classification.reason,
-      });
+      };
+      const dir = saveFinding(findingsDir, finding);
+      finding.reduced = shrink(program, classification.reason, irFile);
+      saveReduced(dir, finding);
       findings.push(dir);
       if (opts.verbose) {
         console.log(`  [${i}] MISMATCH: ${classification.reason} -> ${dir}`);

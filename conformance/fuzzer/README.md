@@ -15,7 +15,7 @@ design principle P8).
 
 | Mode | Oracle | Kind | Proves |
 |---|---|---|---|
-| `--anf` | tier vs tier | **horizontal (parity only)** | All 7 tiers emit byte-identical hex for the same ANF |
+| `--anf` | tier vs tier | **horizontal (parity only)** | All 7 tiers emit byte-identical hex for the same ANF; a finding is delta-debugged (`reduce.ts`) into `program-reduced.json`, which fails with the same reason string as the original `program.json` |
 | `--ir` | tier vs tier | **horizontal (parity only)** | All 7 tiers agree at contract level, incl. native frontends |
 | `--canonical` | tier vs tier | **horizontal (parity only)** | All 7 SDKs' `canonicalJson` agree byte-for-byte (no module banner: `canonical-json-differential.ts` carries a literal NUL byte in its JCS vectors, so git treats it as binary and any edit becomes unreviewable — this table is its scope note) |
 | `--execute` | ANF interpreter vs `ScriptVM` | absolute, **stateless fragments** | Compiled script and source semantics agree on accept/reject |
