@@ -503,12 +503,16 @@ describe('Pass 2: Validate', () => {
           public m() { assert(true); }
         }
       `;
-      // The parse should succeed but validate should catch void property
+      // The parse should succeed but validate should catch void property.
+      // F-226: the contract is asserted unconditionally — the old
+      // `if (parseResult.contract)` guard let a parser that dropped the
+      // contract pass this test having asserted nothing. Proves validate
+      // rejects a void property on a parsed contract; does not prove which
+      // pass would catch it if the parser itself started rejecting `void`.
       const parseResult = parse(source);
-      if (parseResult.contract) {
-        const result = validate(parseResult.contract);
-        expect(hasError(result, "void")).toBe(true);
-      }
+      expect(parseResult.contract).not.toBeNull();
+      const result = validate(parseResult.contract!);
+      expect(hasError(result, "void")).toBe(true);
     });
 
     it('reports error when SmartContract has a non-readonly property', () => {

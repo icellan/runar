@@ -938,9 +938,18 @@ describe('Pass 1: Parse', () => {
       expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
       const method = result.contract!.methods[0]!;
       const assignStmt = method.body[0]!;
-      if (assignStmt.kind === 'assignment') {
-        expect(assignStmt.target).toEqual(assignStmt.value.kind === 'binary_expr' ? assignStmt.value.left : null);
-      }
+      // F-226: every structural expectation is unconditional. The old body
+      // asserted only inside `if (assignStmt.kind === 'assignment')` and never
+      // checked the operator, so a parser that dropped the statement's kind or
+      // lowered `-=` to `+` kept this test green. Proves `this.count -= 1n`
+      // parses to `this.count = this.count - 1n` with the target reused as the
+      // left operand; does not prove anything about the other compound ops.
+      expect(assignStmt.kind).toBe('assignment');
+      if (assignStmt.kind !== 'assignment') return;
+      expect(assignStmt.value.kind).toBe('binary_expr');
+      if (assignStmt.value.kind !== 'binary_expr') return;
+      expect(assignStmt.value.op).toBe('-');
+      expect(assignStmt.target).toEqual(assignStmt.value.left);
     });
   });
 

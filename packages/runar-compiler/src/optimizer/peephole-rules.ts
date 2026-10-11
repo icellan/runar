@@ -26,11 +26,13 @@
  *                   encoding edge cases bite).
  *  - `fold-chain` — `push a, OP, push b, OP` ≡ `push (a+b), OP` over one base
  *                   input; sweep `a`,`b`, and the base.
- *  - `skip`       — the rule's operands require signature / tx-sighash context
- *                   the numeric ScriptVM cannot supply; the fusion equivalence
- *                   is instead covered by the go-sdk real-crypto
- *                   `script_execution_test.go` path (never silently skipped —
- *                   the sweep logs a SKIP line naming the rule + reason).
+ *  - `checksig`   — X;VERIFY fusion of OP_CHECKSIG: operands are a real DER
+ *                   signature + pubkey over the spending tx sighash; the sweep
+ *                   signs real witnesses (valid, wrong-key, empty) and runs
+ *                   them on the @bsv/sdk `Spend` engine.
+ *  - `checkmultisig` — same for OP_CHECKMULTISIG over a 2-of-2 layout
+ *                   (dummy/sigs/m/keys/n), incl. wrong order and a non-null
+ *                   dummy.
  */
 
 import type { StackOp } from '../ir/index.js';
@@ -43,7 +45,8 @@ export type PeepholeSweep =
   | { kind: 'bytes'; inputs: number }
   | { kind: 'fold-bin'; op: 'OP_ADD' | 'OP_SUB' | 'OP_MUL' }
   | { kind: 'fold-chain'; op: 'OP_ADD' | 'OP_SUB' }
-  | { kind: 'skip'; reason: string };
+  | { kind: 'checksig' }
+  | { kind: 'checkmultisig' };
 
 export interface PeepholeRuleSpec {
   /** Human-readable rule name (matches the comment in peephole.ts). */
@@ -141,11 +144,7 @@ export const PEEPHOLE_RULES: PeepholeRuleSpec[] = [
     pattern: [opc('OP_CHECKSIG'), opc('OP_VERIFY')],
     replacement: [opc('OP_CHECKSIGVERIFY')],
     stackInputs: 2,
-    sweep: {
-      kind: 'skip',
-      reason:
-        'OP_CHECKSIG needs a real sig+pubkey over the spending tx sighash, which the numeric edge domain cannot produce, so accept/reject cannot be exercised here. The X;VERIFY≡XVERIFY fusion is covered by the real-crypto paths (go-sdk script_execution_test.go, and the TS checkmultisig/real-crypto oracles on @bsv/sdk Spend).',
-    },
+    sweep: { kind: 'checksig' },
   },
   // OP_NUMEQUAL, OP_VERIFY → OP_NUMEQUALVERIFY
   {
@@ -161,11 +160,7 @@ export const PEEPHOLE_RULES: PeepholeRuleSpec[] = [
     pattern: [opc('OP_CHECKMULTISIG'), opc('OP_VERIFY')],
     replacement: [opc('OP_CHECKMULTISIGVERIFY')],
     stackInputs: 0,
-    sweep: {
-      kind: 'skip',
-      reason:
-        'OP_CHECKMULTISIG needs real crypto plus a multi-element multisig stack layout (dummy/sigs/m/keys/n); not expressible over a numeric edge domain. Fusion equivalence is covered by the go-sdk real-crypto script_execution_test.go path.',
-    },
+    sweep: { kind: 'checkmultisig' },
   },
   // OP_DUP, OP_DROP → []  (opcode form of dup-drop)
   {

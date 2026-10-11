@@ -9,9 +9,10 @@
  *
  * This is the empirical bridge for Lean Phase 3b: only 6 of ~28 peephole rules
  * carry Lean idempotence skeletons; this sweep gives operational evidence for
- * all of them (or a clearly-logged, justified skip for the ones whose operands
- * need real crypto / tx-sighash context that the numeric ScriptVM cannot
- * supply).
+ * all of them. The two signature-verification fusions, whose operands need
+ * real crypto / tx-sighash context the numeric edge domain cannot supply, are
+ * swept with real signed witnesses on the @bsv/sdk `Spend` engine (F-226; they
+ * used to be a `SKIP` whose body was `expect(true).toBe(true)`).
  *
  * Stack-effect observable: `VMResult` exposes the full final `stack`
  * (Uint8Array[]), so we compare the entire stack — strictly stronger than the
@@ -20,7 +21,15 @@
 
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error vitest resolves this via alias (runar-testing is not a tsc dep of runar-compiler)
-import { ScriptVM, bytesToHex } from 'runar-testing';
+import { ScriptVM, bytesToHex, testKey } from 'runar-testing';
+import {
+  Hash,
+  LockingScript,
+  PrivateKey,
+  Spend,
+  TransactionSignature,
+  UnlockingScript,
+} from '@bsv/sdk';
 import type { StackOp } from '../ir/index.js';
 import { emitMethod } from '../passes/06-emit.js';
 import { PEEPHOLE_RULES, type PeepholeRuleSpec } from '../optimizer/peephole-rules.js';
@@ -116,28 +125,145 @@ function assertEquivalent(
 }
 
 // ---------------------------------------------------------------------------
+// Real-crypto witnesses for the signature-verification fusions (F-226)
+// ---------------------------------------------------------------------------
+
+/** One spend context, used both to SIGN and to VERIFY, so the two cannot
+ *  drift. Version 1: the version every SDK-built transaction carries. */
+const SIG_CTX = {
+  sourceTXID: '00'.repeat(32),
+  sourceOutputIndex: 0,
+  sourceSatoshis: 100_000,
+  transactionVersion: 1,
+  inputIndex: 0,
+  inputSequence: 0xffffffff,
+  lockTime: 0,
+} as const;
+
+const hexBytes = (h: string): Uint8Array => Uint8Array.from(Buffer.from(h, 'hex'));
+const pushBytes = (b: Uint8Array): StackOp => ({ op: 'push', value: b });
+const pubKeyOf = (name: string): Uint8Array => hexBytes(testKey(name).pubKey);
+
+/** Real DER+sighash-byte signature by `keyName` over the BIP-143 digest of a
+ *  spend of `lockingHex` (the subscript; the fragments carry no
+ *  OP_CODESEPARATOR). */
+function signFor(keyName: string, lockingHex: string): Uint8Array {
+  const scope = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
+  const preimage = TransactionSignature.formatBytes({
+    ...SIG_CTX,
+    otherInputs: [],
+    outputs: [],
+    subscript: LockingScript.fromHex(lockingHex),
+    scope,
+  });
+  // OP_CHECKSIG hashes twice; `sign()` does one sha256 internally.
+  const digest = Hash.sha256(Array.from(preimage));
+  const sig = PrivateKey.fromHex(testKey(keyName).privKey).sign(digest);
+  return new Uint8Array(new TransactionSignature(sig.r, sig.s, scope).toChecksigFormat());
+}
+
+/** A witness slot: a real signature by a named key over THIS arm's locking
+ *  script, or fixed bytes (empty sig, non-null dummy). */
+type SigSlot = { signWith: string } | Uint8Array;
+
+/** Run `unlocking` against `locking` on the real @bsv/sdk engine. A failed
+ *  script's residual stack has no consensus meaning, so it is reported empty;
+ *  on success the full final stack is reported. */
+function runSigSpend(slots: SigSlot[], locking: StackOp[], isRelaxed: boolean): Effect {
+  const lockingHex = emitOps(locking);
+  const unlocking = slots.map((s) => pushBytes(s instanceof Uint8Array ? s : signFor(s.signWith, lockingHex)));
+  const spend = new Spend({
+    ...SIG_CTX,
+    lockingScript: LockingScript.fromHex(lockingHex),
+    unlockingScript: UnlockingScript.fromHex(emitOps(unlocking)),
+    otherInputs: [],
+    outputs: [],
+    isRelaxed,
+  });
+  let success = false;
+  try {
+    success = spend.validate();
+  } catch {
+    success = false;
+  }
+  return { success, stack: success ? spend.stack.map((b) => bytesToHex(Uint8Array.from(b))) : [] };
+}
+
+interface SigCase {
+  label: string;
+  slots: SigSlot[];
+  /** Expected verdict of the UNOPTIMISED pattern under strict consensus rules —
+   *  pins that each witness really exercises accept or reject. */
+  strictAccept: boolean;
+}
+
+const EMPTY = new Uint8Array(0);
+
+/** Witness set + locking-script framing per signature fusion kind. The
+ *  trailing `push 1` makes the VERIFY form's success observable and keeps the
+ *  clean-stack rule satisfied; a fused op that leaves a residue fails it. */
+const SIG_SWEEPS: Record<'checksig' | 'checkmultisig', { frame: (ops: StackOp[]) => StackOp[]; cases: SigCase[] }> = {
+  checksig: {
+    frame: (ops) => [pushBytes(pubKeyOf('alice')), ...ops, push(1n)],
+    cases: [
+      { label: 'valid sig by the key', slots: [{ signWith: 'alice' }], strictAccept: true },
+      { label: 'well-formed sig by the wrong key', slots: [{ signWith: 'bob' }], strictAccept: false },
+      { label: 'empty sig', slots: [EMPTY], strictAccept: false },
+    ],
+  },
+  checkmultisig: {
+    frame: (ops) => [
+      push(2n), pushBytes(pubKeyOf('alice')), pushBytes(pubKeyOf('bob')), push(2n),
+      ...ops,
+      push(1n),
+    ],
+    cases: [
+      { label: '2-of-2 valid', slots: [EMPTY, { signWith: 'alice' }, { signWith: 'bob' }], strictAccept: true },
+      { label: 'sigs in the wrong order', slots: [EMPTY, { signWith: 'bob' }, { signWith: 'alice' }], strictAccept: false },
+      { label: 'one sig by a third key', slots: [EMPTY, { signWith: 'alice' }, { signWith: 'charlie' }], strictAccept: false },
+      { label: 'empty sigs', slots: [EMPTY, EMPTY, EMPTY], strictAccept: false },
+      { label: 'non-null dummy', slots: [Uint8Array.from([0x01]), { signWith: 'alice' }, { signWith: 'bob' }], strictAccept: false },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
 // The sweep
 // ---------------------------------------------------------------------------
 
 describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)', () => {
   const covered: string[] = [];
-  const skipped: string[] = [];
 
   for (const rule of PEEPHOLE_RULES) {
     const sweep = rule.sweep;
 
-    if (sweep.kind === 'skip') {
-      skipped.push(rule.name);
-      it(`${rule.name}: SKIP (${sweep.reason.split(';')[0]})`, () => {
-        // Non-silent skip: name the rule + reason so it is visible in output.
-        // eslint-disable-next-line no-console
-        console.log(`SKIP peephole sweep: ${rule.name} — ${sweep.reason}`);
-        expect(true).toBe(true);
+    covered.push(rule.name);
+
+    if (sweep.kind === 'checksig' || sweep.kind === 'checkmultisig') {
+      // F-226. Proves: for each witness (valid, and each well-formed way of
+      // being invalid), the fused form — BOTH the documented replacement and
+      // what `optimizeStackIR` actually emits for the window — has the same
+      // verdict as the unfused pattern on the real @bsv/sdk engine, in strict
+      // and relaxed mode, and the same final stack on success; and the
+      // unfused pattern accepts exactly the valid witness under strict rules.
+      // Does NOT prove: equivalence for sighash types other than ALL|FORKID,
+      // for m-of-n shapes other than 1-of-1 / 2-of-2, or inside a script that
+      // carries OP_CODESEPARATOR.
+      const { frame, cases } = SIG_SWEEPS[sweep.kind];
+      it(`${rule.name}: pattern ≡ replacement on real signed witnesses`, () => {
+        const optimised = optimizeStackIR(rule.pattern);
+        for (const c of cases) {
+          for (const isRelaxed of [false, true]) {
+            const mode = isRelaxed ? 'relaxed' : 'strict';
+            const before = runSigSpend(c.slots, frame(rule.pattern), isRelaxed);
+            if (!isRelaxed) expect(before.success, `${rule.name} pattern on ${c.label} (strict)`).toBe(c.strictAccept);
+            expect(runSigSpend(c.slots, frame(rule.replacement), isRelaxed), `${rule.name} replacement on ${c.label} (${mode})`).toEqual(before);
+            expect(runSigSpend(c.slots, frame(optimised), isRelaxed), `${rule.name} optimizeStackIR on ${c.label} (${mode})`).toEqual(before);
+          }
+        }
       });
       continue;
     }
-
-    covered.push(rule.name);
 
     it(`${rule.name}: pattern ≡ replacement over edge domain`, () => {
       if (sweep.kind === 'stack') {
@@ -185,13 +311,10 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
     });
   }
 
-  it('covers every peephole rule (sweep or documented skip)', () => {
-    expect(covered.length + skipped.length).toBe(PEEPHOLE_RULES.length);
+  it('covers every peephole rule', () => {
+    expect(covered.length).toBe(PEEPHOLE_RULES.length);
     // eslint-disable-next-line no-console
-    console.log(
-      `peephole bounded-exhaustive: swept ${covered.length}/${PEEPHOLE_RULES.length} rules; ` +
-        `skipped ${skipped.length} (${skipped.join(', ') || 'none'})`,
-    );
+    console.log(`peephole bounded-exhaustive: swept ${covered.length}/${PEEPHOLE_RULES.length} rules`);
   });
 });
 
