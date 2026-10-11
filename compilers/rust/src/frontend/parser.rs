@@ -230,7 +230,7 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
     let class = &class_decl.class;
 
     // Extract properties
-    let properties = parse_properties(class, file, &mut errors, &comments);
+    let properties = parse_properties(class, file, &mut errors, &comments, &cm);
 
     // Extract constructor
     let constructor_node = parse_constructor(class, file, &mut errors, &cm);
@@ -283,6 +283,15 @@ fn default_loc(file: &str) -> SourceLocation {
     loc(file, 1, 0)
 }
 
+/// F-341: the real (line, column) of a byte position via SWC's source map,
+/// in the same convention F-337 established for statements — 1-based line,
+/// 1-based column in the parser's internal AST (`codegen/emit.rs` converts
+/// to the source map's 0-based column at emission time).
+fn real_loc(cm: &SourceMap, file: &str, lo: BytePos) -> SourceLocation {
+    let at = cm.lookup_char_pos(lo);
+    loc(file, at.line, at.col.0 + 1)
+}
+
 // ---------------------------------------------------------------------------
 // Properties
 // ---------------------------------------------------------------------------
@@ -292,6 +301,7 @@ fn parse_properties(
     file: &str,
     errors: &mut Vec<Diagnostic>,
     comments: &SingleThreadedComments,
+    cm: &SourceMap,
 ) -> Vec<PropertyNode> {
     let mut result = Vec::new();
 
@@ -332,7 +342,7 @@ fn parse_properties(
                 readonly,
                 initializer,
                 embed_always,
-                source_location: default_loc(file),
+                source_location: real_loc(cm, file, prop.span().lo),
                 synthetic_array_chain: None,
             });
         }
@@ -366,7 +376,7 @@ fn parse_constructor(
                 body,
                 visibility: Visibility::Public,
                 sighash_type: None,
-                source_location: default_loc(file),
+                source_location: real_loc(cm, file, ctor.span().lo),
             };
         }
     }
@@ -448,7 +458,10 @@ fn parse_methods(
             // N-050: a static method is not a contract method; `public static`
             // used to get a dispatch selector (an unsigned spend path).
             if method.is_static {
-                errors.push(Diagnostic::error(static_method_message(&name), Some(default_loc(file))));
+                errors.push(Diagnostic::error(
+                    static_method_message(&name),
+                    Some(real_loc(cm, file, method.span().lo)),
+                ));
             }
 
             let params = parse_method_params(&method.function.params, file, errors);
@@ -467,7 +480,7 @@ fn parse_methods(
 
             // Issue #123: `/** @sighash <FLAGS> */` directive → per-method type.
             let sighash_type =
-                parse_sighash_on_method(comments, method.span().lo, &name, &visibility, file, errors);
+                parse_sighash_on_method(comments, method.span().lo, &name, &visibility, file, errors, cm);
 
             result.push(MethodNode {
                 name,
@@ -475,7 +488,7 @@ fn parse_methods(
                 body,
                 visibility,
                 sighash_type,
-                source_location: default_loc(file),
+                source_location: real_loc(cm, file, method.span().lo),
             });
         }
     }
@@ -567,6 +580,7 @@ fn parse_sighash_on_method(
     visibility: &Visibility,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Option<i64> {
     let text = leading_comment_text(comments, pos)?;
     if !directive_present(&text, "@sighash") {
@@ -579,7 +593,7 @@ fn parse_sighash_on_method(
                 "@sighash directive on non-public method '{}' has no effect — only public methods are spending entry points",
                 name
             ),
-            Some(default_loc(file)),
+            Some(real_loc(cm, file, pos)),
         ));
         return None;
     }
@@ -596,14 +610,14 @@ fn parse_sighash_on_method(
                     name,
                     super::sighash_directive::SIGHASH_MALFORMED_ERROR
                 ),
-                Some(default_loc(file)),
+                Some(real_loc(cm, file, pos)),
             ));
             None
         }
         Some(Err(msg)) => {
             errors.push(Diagnostic::error(
                 format!("Method '{}': {}", name, msg),
-                Some(default_loc(file)),
+                Some(real_loc(cm, file, pos)),
             ));
             None
         }
