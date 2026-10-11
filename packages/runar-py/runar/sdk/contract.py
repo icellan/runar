@@ -932,8 +932,14 @@ class RunarContract:
                     code_part_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else code_part_hex
                 )
                 intent = _IntentCtx()
+                # `_encode_varint` returns a HEX STRING (see
+                # runar/sdk/deployment.py), not bytes -- it must be decoded
+                # before concatenating with the `bytes.fromhex(...)` body,
+                # or this raises `TypeError: can only concatenate str (not
+                # "bytes") to str` (N-171-FU regression).
                 intent.mock_preimage_bytes['scriptCode'] = (
-                    _encode_varint(len(script_code_body) // 2) + bytes.fromhex(script_code_body)
+                    bytes.fromhex(_encode_varint(len(script_code_body) // 2))
+                    + bytes.fromhex(script_code_body)
                 )
                 computed, data_outs, _raw_outs = compute_new_state_and_data_outputs(
                     self.artifact.anf, method_name, flat_state, interp_args,

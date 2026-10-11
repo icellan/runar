@@ -175,3 +175,75 @@ def test_default_call_path_still_works():
 
     assert int(contract._state["count"]) == 6, "count should have incremented to 6"
     assert len(provider.get_broadcasted_txs()) == 2, "expected deploy + call broadcasts"
+
+
+def test_script_code_intent_is_bytes_varint_plus_body(monkeypatch):
+    """N-171-FU regression (sibling of N-171/R67): ``RunarContract.prepare_call``'s
+    stateful-continuation path builds
+    ``intent.mock_preimage_bytes['scriptCode']`` as
+    ``_encode_varint(len(body) // 2) + bytes.fromhex(body)``.
+    ``_encode_varint`` (``runar/sdk/deployment.py``) returns a HEX STRING, not
+    bytes, so ``str + bytes`` raised
+    ``TypeError: can only concatenate str (not "bytes") to str`` on every
+    stateful call -- this is what previously made
+    ``test_prepared_call_sighash_is_bip143_hash256`` and its siblings in this
+    file fail (wrapped in a ``RuntimeError`` by the fail-closed handler).
+
+    This test pins the value directly, rather than only observing that the
+    end-to-end call stopped raising: it captures the ``intent`` object passed
+    to the ANF interpreter and asserts ``scriptCode`` is of type ``bytes`` and
+    equals ``varint(len(body)) || body`` -- the same CompactSize-prefixed
+    encoding the BIP-143 preimage carries -- independently re-derived from
+    the contract's own code part / codesep index using the same
+    ``_encode_varint`` helper production uses.
+
+    What this test does NOT prove: that ``_encode_varint`` or
+    ``_get_code_part_hex``/``_get_code_sep_index`` are themselves correct (a
+    shared bug in those would not be caught here, since the expected value
+    reuses them); that the ANF interpreter's ``extractScriptCode`` consumer
+    uses this value correctly (covered instead by
+    ``test_default_call_path_still_works`` and the N-171 vector-replay
+    tests); that this mock value matches the REAL on-chain scriptCode byte
+    for byte when the contract carries non-empty state (checked manually
+    while writing this test and found to differ -- see dispatcher notes,
+    tracked as a separate finding, not this item); or cross-tier byte parity
+    with the other six SDKs' scriptCode construction (each builds it from
+    its own codePart logic -- out of scope here, see the N-171-FU brief's
+    cross-tier check).
+    """
+    import runar.sdk.contract as contract_mod
+    from runar.sdk.deployment import _encode_varint
+
+    contract, provider, signer = _deploy()
+
+    captured: dict = {}
+    original = contract_mod.compute_new_state_and_data_outputs
+
+    def _spy(*args, **kwargs):
+        captured["intent"] = kwargs.get("intent")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(contract_mod, "compute_new_state_and_data_outputs", _spy)
+
+    contract.call("inc", [None], provider, signer)
+
+    intent = captured.get("intent")
+    assert intent is not None, "prepare_call must pass an intent to the ANF interpreter"
+    script_code = intent.mock_preimage_bytes["scriptCode"]
+    assert isinstance(script_code, bytes), (
+        f"scriptCode must be bytes (TypeError-causing bug reintroduced), got {type(script_code)}"
+    )
+
+    code_part_hex = contract._get_code_part_hex()
+    method_index = contract._find_method_index("inc")
+    code_sep_idx = contract._get_code_sep_index(method_index)
+    body_hex = (
+        code_part_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else code_part_hex
+    )
+    body = bytes.fromhex(body_hex)
+    expected = bytes.fromhex(_encode_varint(len(body))) + body
+
+    assert script_code == expected, (
+        "scriptCode must be varint(len(body)) || body, matching the BIP-143 "
+        "preimage's CompactSize-prefixed scriptCode encoding"
+    )
