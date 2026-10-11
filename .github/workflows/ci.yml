@@ -620,8 +620,14 @@ jobs:
           cache-dependency-path: compilers/go/go.sum
       - name: Build the Go peer compiler
         run: cd compilers/go && go build -o runar-go .
-      - run: pip install pytest
-      - run: cd compilers/python && python -m pytest tests/ -v
+      # `bsv-sdk` and `packages/runar-py` on `PYTHONPATH` are what
+      # `tests/test_cli_debug.py` (F-324) and
+      # `tests/test_f092_poseidon2_merkle_root_binds_every_limb.py` need to
+      # run their real path instead of silently skipping via
+      # `pytest.importorskip("bsv"/"runar.sdk.script_vm")` — see
+      # docs/test-skips.md.
+      - run: pip install pytest bsv-sdk
+      - run: cd compilers/python && PYTHONPATH=../../packages/runar-py python -m pytest tests/ -v
 
   zig-compiler:
     name: Zig Compiler
