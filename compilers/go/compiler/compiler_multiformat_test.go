@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,40 +29,63 @@ var multiFormats = []string{
 	".runar.rs", ".runar.py", ".runar.zig", ".runar.rb",
 }
 
-func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
-	t.Helper()
+// resolveConformanceFormat is the pure resolution logic behind
+// readConformanceFormat below: given a fixture name and a format extension,
+// it returns the resolved source bytes and path, or a descriptive error when
+// the fixture cannot be resolved. It takes no *testing.T and never calls
+// Fatal/Skip itself, so the fail-vs-skip decision (F-312) is unit-testable
+// directly on the returned error, without relying on subtest pass/fail
+// propagation to observe which T method a wrapper called — a subtest that
+// genuinely fails always marks its parent as failed too (see Go's testing.T
+// semantics), which would make any such observation report red forever.
+func resolveConformanceFormat(testName, ext string) ([]byte, string, error) {
 	// First try the legacy in-tree layout (conformance/tests/<name>/<name><ext>);
 	// fall back to source.json indirection used by post-migration fixtures.
 	fileName := filepath.Join(conformanceDir(), testName, testName+ext)
 	if _, err := os.Stat(fileName); err == nil {
 		source, err := os.ReadFile(fileName)
 		if err != nil {
-			t.Fatalf("failed to read %s: %v", fileName, err)
+			return nil, "", fmt.Errorf("failed to read %s: %w", fileName, err)
 		}
-		return source, fileName
+		return source, fileName, nil
 	}
 
 	sourceJSON := filepath.Join(conformanceDir(), testName, "source.json")
 	data, err := os.ReadFile(sourceJSON)
 	if err != nil {
-		t.Skipf("source file not found: neither %s nor %s exists", fileName, sourceJSON)
+		// FAILS rather than skips: every fixture carries all nine formats by
+		// the frontend-parity invariant (CLAUDE.md), so a fixture this helper
+		// cannot resolve is broken, not a reason to report a pass. See
+		// conformanceSourcePathExt below, which this mirrors (F-312).
+		return nil, "", fmt.Errorf("%s: neither %s nor %s exists — the fixture cannot be resolved",
+			testName, fileName, sourceJSON)
 	}
 	var manifest struct {
 		Sources map[string]string `json:"sources"`
 	}
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("failed to parse %s: %v", sourceJSON, err)
+		return nil, "", fmt.Errorf("failed to parse %s: %w", sourceJSON, err)
 	}
 	ref, ok := manifest.Sources[ext]
 	if !ok {
-		t.Skipf("source.json for %s has no %s entry", testName, ext)
+		return nil, "", fmt.Errorf("%s: source.json declares no %s source; every fixture must carry all "+
+			"nine formats (frontend-parity invariant)", testName, ext)
 	}
 	resolved := filepath.Join(conformanceDir(), testName, ref)
 	source, err := os.ReadFile(resolved)
 	if err != nil {
-		t.Fatalf("failed to read %s: %v", resolved, err)
+		return nil, "", fmt.Errorf("failed to read %s: %w", resolved, err)
 	}
-	return source, resolved
+	return source, resolved, nil
+}
+
+func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
+	t.Helper()
+	source, path, err := resolveConformanceFormat(testName, ext)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return source, path
 }
 
 // conformanceSourcePathExt resolves a conformance fixture's source path for one
@@ -610,4 +634,60 @@ func TestParseSource_DispatchesPythonFormat(t *testing.T) {
 	}
 
 	t.Logf(".runar.py dispatch: contract=%s", result.Contract.Name)
+}
+
+// ---------------------------------------------------------------------------
+// Test: resolveConformanceFormat/readConformanceFormat must fail, not skip,
+// on a missing manifest entry (F-312)
+//
+// readConformanceFormat historically called t.Skipf when a fixture's
+// source.json existed but declared no entry for the requested extension. Its
+// hardened twin conformanceSourcePathExt (above) was fixed to t.Fatalf for the
+// identical condition, citing the frontend-parity invariant (CLAUDE.md): every
+// conformance fixture must carry all nine formats, so a missing manifest entry
+// means a broken fixture, not something to silently skip and report green.
+// readConformanceFormat backs TestMultiFormat_PropertyConsistency,
+// TestMultiFormat_MethodParamConsistency, and several TestParse* subtests
+// above, so leaving it on t.Skipf left that whole dispatch suite one deleted
+// manifest key (or renamed extension) away from quietly skipping instead of
+// catching a real regression.
+//
+// This test builds a throwaway fixture directory under conformanceDir()
+// (removed via t.Cleanup) whose source.json deliberately omits a
+// ".runar.sol" entry — the same shape as the brief's verification recipe
+// (delete the .runar.sol key from conformance/tests/arithmetic/source.json)
+// — but on a disposable fixture so no real conformance fixture is touched.
+// It calls resolveConformanceFormat directly (the pure function
+// readConformanceFormat now wraps) rather than readConformanceFormat itself,
+// because a t.Fatalf from inside a nested subtest always marks its parent
+// test as failed too, which would make the fixed (correct) behavior
+// permanently report red in this very test. Testing the pure resolver's
+// returned error is the correct way to pin "this is now an error, not a
+// silent skip" without that propagation getting in the way.
+func TestResolveConformanceFormat_MissingManifestEntryIsError(t *testing.T) {
+	fixtureName := "f312-synthetic-missing-ext"
+	fixtureDir := filepath.Join(conformanceDir(), fixtureName)
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("failed to create synthetic fixture dir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(fixtureDir); err != nil {
+			t.Errorf("failed to clean up synthetic fixture dir: %v", err)
+		}
+	})
+
+	manifest := `{"sources": {".runar.ts": "does-not-matter.runar.ts"}}`
+	if err := os.WriteFile(filepath.Join(fixtureDir, "source.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("failed to write synthetic source.json: %v", err)
+	}
+
+	source, path, err := resolveConformanceFormat(fixtureName, ".runar.sol")
+	if err == nil {
+		t.Fatalf("resolveConformanceFormat must return an error when source.json declares no "+
+			".runar.sol entry, not a silent pass — got source=%q path=%q err=nil (F-312)",
+			source, path)
+	}
+	if !strings.Contains(err.Error(), "every fixture must carry all nine formats") {
+		t.Fatalf("resolveConformanceFormat failed, but not for the expected reason: %v", err)
+	}
 }
