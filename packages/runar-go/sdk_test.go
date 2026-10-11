@@ -1766,6 +1766,37 @@ func TestFromTxId_OutOfRange(t *testing.T) {
 	}
 }
 
+// F-273: a negative output index must be rejected with a clear error, not
+// panic on an out-of-bounds slice access. Go slices do not support
+// negative indexing the way Python/Ruby arrays do (tx.Outputs[-1] does not
+// silently return the last element) — but without an explicit `< 0` guard
+// the lookup panics instead of returning a usable error.
+//
+// Proves: outputIndex=-1 returns a plain error containing "out of range"
+// instead of panicking on the slice access. Does not prove: behaviour for
+// other negative indices, or for Providers other than MockProvider.
+func TestFromTxId_NegativeOutputIndex(t *testing.T) {
+	fakeTxid := strings.Repeat("aa", 32)
+	provider := NewMockProvider("testnet")
+	provider.AddTransaction(makeTx(fakeTxid, []TxOutput{
+		{Satoshis: 5000, Script: "51"},
+		{Satoshis: 9999, Script: "76a9140000000000000000000000000000000000000088ac"},
+	}))
+
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods:     nil,
+	})
+
+	_, err := FromTxId(artifact, fakeTxid, -1, provider)
+	if err == nil {
+		t.Fatal("expected error for negative output index")
+	}
+	if !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestFromTxId_UnknownTxid(t *testing.T) {
 	provider := NewMockProvider("testnet")
 

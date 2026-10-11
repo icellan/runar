@@ -1969,7 +1969,7 @@ func FromTxId(
 		return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
 	}
 
-	if outputIndex >= len(tx.Outputs) {
+	if outputIndex < 0 || outputIndex >= len(tx.Outputs) {
 		return nil, fmt.Errorf(
 			"RunarContract.FromTxId: output index %d out of range (tx has %d outputs)",
 			outputIndex, len(tx.Outputs),

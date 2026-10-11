@@ -1623,7 +1623,7 @@ class RunarContract:
     ) -> RunarContract:
         """Reconnect to an existing deployed contract."""
         tx = provider.get_transaction(txid)
-        if output_index >= len(tx.outputs):
+        if output_index < 0 or output_index >= len(tx.outputs):
             raise ValueError(
                 f"RunarContract.from_txid: output index {output_index} out of range "
                 f"(tx has {len(tx.outputs)} outputs)"

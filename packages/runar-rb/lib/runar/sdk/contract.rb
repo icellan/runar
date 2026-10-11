@@ -909,7 +909,7 @@ module Runar
       # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
       def self.from_txid(artifact, txid, output_index, provider)
         tx = provider.get_transaction(txid)
-        if output_index >= tx.outputs.length
+        if output_index.negative? || output_index >= tx.outputs.length
           raise ArgumentError,
                 "RunarContract.from_txid: output index #{output_index} out of range " \
                 "(tx has #{tx.outputs.length} outputs)"

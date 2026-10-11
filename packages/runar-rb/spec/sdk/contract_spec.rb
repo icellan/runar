@@ -594,6 +594,20 @@ RSpec.describe Runar::SDK::RunarContract do
         .to raise_error(ArgumentError, /out of range/)
     end
 
+    # F-273: Ruby Array supports negative indexing (arr[-1] == arr.last), so
+    # without an explicit `< 0` guard a negative output_index silently binds
+    # to the LAST output of the tx (typically change) instead of raising.
+    #
+    # Proves: output_index=-1 raises ArgumentError instead of resolving via
+    # Ruby's negative-array-index semantics. Does not prove: behaviour for
+    # output indices below -1, or for a tx with more than one output (this
+    # fixture's tx has exactly one output, so -1 and 0 denote the same
+    # element here — the guard change still fires regardless of tx shape).
+    it 'raises ArgumentError for a negative output index instead of silently binding to the last output' do
+      expect { described_class.from_txid(artifact, tx.txid, -1, provider) }
+        .to raise_error(ArgumentError, /out of range/)
+    end
+
     # #119: from_txid must recover the REAL constructor args baked into the
     # deployed script, not 0 placeholders.
     it 'restores the real constructor args from the deployed script (#119)' do

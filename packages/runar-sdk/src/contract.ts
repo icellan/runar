@@ -2625,7 +2625,7 @@ export class RunarContract {
   ): Promise<RunarContract> {
     const tx = await provider.getTransaction(txid);
 
-    if (outputIndex >= tx.outputs.length) {
+    if (outputIndex < 0 || outputIndex >= tx.outputs.length) {
       throw new Error(
         `RunarContract.fromTxId: output index ${outputIndex} out of range (tx has ${tx.outputs.length} outputs)`,
       );
