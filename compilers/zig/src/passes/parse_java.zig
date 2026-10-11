@@ -2435,8 +2435,25 @@ fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
         .caret_eq => .bitxor,
         .lshift_eq => .lshift,
         .rshift_eq => .rshift,
-        else => .add,
+        else => unreachable, // N-057: guarded by isCompoundAssignOp above; no fallback to add
     };
+}
+
+test "N-057: binOpFromCompoundAssign has no silent fallback to add (Java)" {
+    // Proves: this file's source for binOpFromCompoundAssign's switch no longer
+    // contains a default arm that maps every otherwise-unmapped compound
+    // assignment token to the add operator. The needle is built by
+    // concatenation so this assertion's own text cannot satisfy itself.
+    // Does not prove runtime behavior of the removed default arm: every call
+    // site already narrows to compound-assignment tokens via
+    // isCompoundAssignOp (over the identical set the switch maps) before
+    // calling binOpFromCompoundAssign, so that arm was unreachable before this
+    // change and is `unreachable` now (a checked panic under Debug/ReleaseSafe,
+    // undefined behavior under ReleaseFast/ReleaseSmall) — this test cannot and
+    // does not exercise that code path directly.
+    const bad_arm = "else " ++ "=> ." ++ "add";
+    const src = @embedFile("parse_java.zig");
+    try std.testing.expect(std.mem.indexOf(u8, src, bad_arm) == null);
 }
 
 const CompareToPair = struct { receiver: Expression, arg: Expression };
