@@ -238,6 +238,17 @@ export function loadCorpus(entriesDir: string = ENTRIES_DIR): LoadedEntry[] {
     requireField(entry.expect, id, 'expect');
     requireField(entry.expect?.interpreterAccepted, id, 'expect.interpreterAccepted');
     requireField(entry.expect?.vmAccepted, id, 'expect.vmAccepted');
+    // `entry.oracle` is only a compile-time union (`'execute' | 'tri-modal'`);
+    // the cast above does not check it at runtime. Reject anything else here —
+    // a missing, misspelt, or future value must never silently fall through
+    // `replayEntry`'s dispatch into the weaker `execute`/bare-ScriptVM path.
+    if (entry.oracle !== 'execute' && entry.oracle !== 'tri-modal') {
+      throw new Error(
+        `corpus entry ${id}: "oracle" must be "execute" or "tri-modal", got ` +
+          `${JSON.stringify(entry.oracle)} — an unrecognised value would silently fall ` +
+          `through to the weaker execute/ScriptVM-only oracle`,
+      );
+    }
     if (!Array.isArray(entry.requiredOpcodes) || entry.requiredOpcodes.length === 0) {
       throw new Error(
         `corpus entry ${id}: requiredOpcodes must be a non-empty array — an entry that ` +
