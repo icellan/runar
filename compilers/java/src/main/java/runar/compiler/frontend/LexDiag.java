@@ -55,6 +55,26 @@ final class LexDiag {
     }
 
     /**
+     * N-004: a .runar.rb class-body token that is not {@code prop},
+     * {@code runar_public}, {@code params}, {@code def} or a bare
+     * {@code private} / {@code public} marker (the TS reference's
+     * unexpectedClassBodyTokenMessage). It used to be skipped, so an indented
+     * {@code =begin} (lexed as {@code =}, {@code begin}) let a
+     * "commented-out" method become the only spend path.
+     */
+    static String unexpectedClassBodyToken(String token) {
+        return "Unexpected token in class body: '" + token + "'";
+    }
+
+    /**
+     * N-004: the first token after a .runar.rb class's {@code end} (the TS
+     * reference's unexpectedTokenAfterClassMessage).
+     */
+    static String unexpectedTokenAfterClass(String token) {
+        return "Unexpected token after class end: '" + token + "'";
+    }
+
+    /**
      * N-050: a static or class-level method (the TS reference's
      * staticMethodMessage): {@code static} on .runar.ts / .runar.java,
      * {@code @staticmethod} / {@code @classmethod} on .runar.py,

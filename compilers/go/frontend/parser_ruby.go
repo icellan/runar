@@ -36,6 +36,11 @@ func parseRubySurface(source []byte, fileName string) *ParseResult {
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
 	}
+	// N-004: nothing may follow the class's `end`.
+	p.skipNewlines()
+	if trailing := p.peek(); trailing.kind != rbTokEOF {
+		p.errors = append(p.errors, lexDiag(UnexpectedTokenAfterClassMsg(trailing.value), p.fileName, trailing.line, trailing.col))
+	}
 	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
@@ -888,8 +893,16 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 			continue
 		}
 
-		// Skip unknown tokens
-		p.advance()
+		// Ruby's bare visibility markers are no-ops here (visibility comes
+		// from `runar_public`); examples/ruby uses them.
+		if p.checkIdent("private") || p.checkIdent("public") {
+			p.advance()
+			continue
+		}
+
+		// N-004: refuse anything else (an indented `=begin` lexes as `=`).
+		stray := p.advance()
+		p.errors = append(p.errors, lexDiag(UnexpectedClassBodyTokenMsg(stray.value), p.fileName, stray.line, stray.col))
 	}
 
 	p.match(rbTokEnd) // end of class

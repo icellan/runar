@@ -942,6 +942,11 @@ const Parser = struct {
 
         const contract = self.parseContract();
         if (contract != null) {
+            // N-004: nothing may follow the class's `end`.
+            self.skipNewlines();
+            if (!self.check(.eof)) {
+                self.addErrorFmt(lex_diag.UNEXPECTED_TOKEN_AFTER_CLASS_FMT, .{self.peek().text});
+            }
             if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
         }
         return .{ .contract = contract, .errors = self.errors.items };
@@ -1041,7 +1046,15 @@ const Parser = struct {
                 continue;
             }
 
-            // Skip unknown tokens
+            // Ruby's bare visibility markers are no-ops here (visibility
+            // comes from `runar_public`); examples/ruby uses them.
+            if (self.checkIdent("private") or self.checkIdent("public")) {
+                _ = self.bump();
+                continue;
+            }
+
+            // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+            self.addErrorFmt(lex_diag.UNEXPECTED_CLASS_BODY_TOKEN_FMT, .{self.peek().text});
             _ = self.bump();
         }
 

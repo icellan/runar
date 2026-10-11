@@ -75,6 +75,21 @@ func UnsupportedStatementMsg(token string) string {
 	return fmt.Sprintf("Unsupported statement starting with '%s'", token)
 }
 
+// UnexpectedClassBodyTokenMsg and UnexpectedTokenAfterClassMsg are N-004's
+// refusals of a .runar.rb class-body token that is not `prop`, `runar_public`,
+// `params`, `def` or a bare `private` / `public` marker, and of the first
+// token after the class's `end` (the TS reference's
+// unexpectedClassBodyTokenMessage / unexpectedTokenAfterClassMessage). Both
+// used to be skipped, so an indented `=begin` (lexed as `=`, `begin`) let a
+// "commented-out" method become the only spend path.
+func UnexpectedClassBodyTokenMsg(token string) string {
+	return fmt.Sprintf("Unexpected token in class body: '%s'", token)
+}
+
+func UnexpectedTokenAfterClassMsg(token string) string {
+	return fmt.Sprintf("Unexpected token after class end: '%s'", token)
+}
+
 // StaticMethodMsg is N-050's refusal of a static or class-level method (the
 // TS reference's staticMethodMessage): `static` on .runar.ts / .runar.java,
 // `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on .runar.rb,

@@ -69,6 +69,21 @@ def unsupported_statement_message(token: str) -> str:
     return f"Unsupported statement starting with '{token}'"
 
 
+def unexpected_class_body_token_message(token: str) -> str:
+    """N-004's refusal of a .runar.rb class-body token that is not ``prop``,
+    ``runar_public``, ``params``, ``def`` or a bare ``private`` / ``public``
+    marker (the TS reference's unexpectedClassBodyTokenMessage). It used to be
+    skipped, so an indented ``=begin`` (lexed as ``=``, ``begin``) let a
+    "commented-out" method become the only spend path."""
+    return f"Unexpected token in class body: '{token}'"
+
+
+def unexpected_token_after_class_message(token: str) -> str:
+    """N-004's refusal of the first token after a .runar.rb class's ``end``
+    (the TS reference's unexpectedTokenAfterClassMessage)."""
+    return f"Unexpected token after class end: '{token}'"
+
+
 def static_method_message(name: str) -> str:
     """N-050's refusal of a static or class-level method (the TS reference's
     staticMethodMessage): ``static`` on .runar.ts / .runar.java,

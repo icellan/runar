@@ -3,6 +3,7 @@ package runar.compiler.frontend;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -161,16 +162,26 @@ class N021RubyBlockCommentTest {
     }
 
     // Boundary controls: only a column-0 whole-word `=begin` opens a comment,
-    // so the lines after these are still lexed as code (`drain` is parsed).
+    // so the lines after these are still lexed as code. Since N-004 this
+    // tier's parser refuses the stray `=` that code starts with (it used to
+    // skip it and parse `drain`), so the control is that refusal, at the
+    // marker's line: a comment would have left a clean P2PKH.
     @Test
-    void indentedBeginIsNotAComment() throws Exception {
+    void indentedBeginIsNotAComment() {
         String src = ATTACK.replace("\n=begin\n", "\n  =begin\n").replace("\n=end\n", "\n  =end\n");
-        assertTrue(methods(src).contains("drain"));
+        assertLexedAsCode(src);
     }
 
     @Test
-    void beginxIsNotAComment() throws Exception {
-        assertTrue(methods(ATTACK.replace("\n=begin\n", "\n=beginx\n")).contains("drain"));
+    void beginxIsNotAComment() {
+        assertLexedAsCode(ATTACK.replace("\n=begin\n", "\n=beginx\n"));
+    }
+
+    private static void assertLexedAsCode(String src) {
+        Exception e = assertThrows(Exception.class, () -> methods(src));
+        String first = e.getMessage().split("\n")[0];
+        assertTrue(first.startsWith(FILE + ":11:")
+            && first.endsWith("Unexpected token in class body: '='"), first);
     }
 
     private static String[] run(String... args) {

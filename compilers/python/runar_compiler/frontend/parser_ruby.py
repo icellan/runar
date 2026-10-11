@@ -37,6 +37,8 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     static_method_message,
+    unexpected_class_body_token_message,
+    unexpected_token_after_class_message,
     unsupported_statement_message,
     with_lex_errors,
 )
@@ -797,6 +799,12 @@ class _RbParser:
             self._skip_newlines()
 
         contract = self._parse_class()
+        if contract is not None:
+            # N-004: nothing may follow the class's ``end``.
+            self._skip_newlines()
+            trailing = self._peek()
+            if trailing.kind != TOK_EOF:
+                self._errors.append(unexpected_token_after_class_message(trailing.value))
         diagnostics = [Diagnostic(message=e, severity=Severity.ERROR) for e in self._errors]
         if contract is None:
             return ParseResult(errors=diagnostics)
@@ -894,8 +902,15 @@ class _RbParser:
                 self._skip_newlines()
                 continue
 
-            # Skip unknown tokens
-            self._advance()
+            # Ruby's bare visibility markers are no-ops here (visibility comes
+            # from ``runar_public``); examples/ruby uses them.
+            if self._check_ident("private") or self._check_ident("public"):
+                self._advance()
+                continue
+
+            # N-004: refuse anything else (an indented ``=begin`` lexes as ``=``).
+            stray = self._advance()
+            self._errors.append(unexpected_class_body_token_message(stray.value))
 
         self._match(TOK_END)  # end of class
 

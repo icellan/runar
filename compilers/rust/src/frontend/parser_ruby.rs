@@ -47,7 +47,9 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{
-    lex_error, static_method_message, unsupported_statement_message, UNTERMINATED_STRING_LITERAL,
+    lex_error, static_method_message, unexpected_class_body_token_message,
+    unexpected_token_after_class_message, unsupported_statement_message,
+    UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -91,6 +93,14 @@ fn parse_ruby_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResu
     // F-213 measure (A), then measure (B) on the finished tree.
     if parser.nest.exceeded() {
         return nesting_refusal(None);
+    }
+    // N-004: nothing may follow the class's `end`.
+    if contract.is_some() {
+        parser.skip_newlines();
+        if *parser.peek() != Token::Eof {
+            let trailing = rb_token_text(parser.peek());
+            parser.errors.push(unexpected_token_after_class_message(&trailing));
+        }
     }
     let collision = parser.idents.collision_diagnostic();
 
@@ -366,6 +376,8 @@ fn rb_token_text(tok: &Token) -> String {
         Token::Require => "require".into(),
         Token::Do => "do".into(),
         Token::Symbol(name) => name.clone(),
+        Token::Ident(name) => name.clone(),
+        Token::NumberLit(n) => n.to_string(),
         Token::Plus => "+".into(),
         Token::Star => "*".into(),
         Token::Slash => "/".into(),
@@ -1084,8 +1096,16 @@ impl<'a> RbParser<'a> {
                 continue;
             }
 
-            // Skip unknown tokens
-            self.advance();
+            // Ruby's bare visibility markers are no-ops here (visibility
+            // comes from `runar_public`); examples/ruby uses them.
+            if self.check_ident("private") || self.check_ident("public") {
+                self.advance();
+                continue;
+            }
+
+            // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+            let stray = self.advance();
+            self.errors.push(unexpected_class_body_token_message(&rb_token_text(&stray)));
         }
 
         self.match_tok(&Token::End); // end of class

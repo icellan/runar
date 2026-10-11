@@ -726,7 +726,17 @@ public final class RbParser {
                 parseRequireLine();
                 skipNewlines();
             }
-            return parseClass();
+            ContractNode contract = parseClass();
+            if (contract != null) {
+                // N-004: nothing may follow the class's `end`.
+                skipNewlines();
+                Token trailing = peek();
+                if (trailing.kind != TK.EOF) {
+                    errors.add(file + ":" + trailing.line + ":" + trailing.col + ": "
+                        + LexDiag.unexpectedTokenAfterClass(trailing.value));
+                }
+            }
+            return contract;
         }
 
         void parseRequireLine() {
@@ -815,8 +825,16 @@ public final class RbParser {
                     skipNewlines();
                     continue;
                 }
-                // Skip unknown tokens defensively.
-                advance();
+                // Ruby's bare visibility markers are no-ops here (visibility
+                // comes from `runar_public`); examples/ruby uses them.
+                if (checkIdent("private") || checkIdent("public")) {
+                    advance();
+                    continue;
+                }
+                // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+                Token stray = advance();
+                errors.add(file + ":" + stray.line + ":" + stray.col + ": "
+                    + LexDiag.unexpectedClassBodyToken(stray.value));
             }
             match(TK.END);
 

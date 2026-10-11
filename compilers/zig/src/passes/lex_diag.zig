@@ -42,6 +42,17 @@ pub const STATIC_METHOD_FMT = "static methods are not allowed in Rúnar contract
 /// unsupportedStatementMessage). The argument is the token's source text.
 pub const UNSUPPORTED_STATEMENT_FMT = "Unsupported statement starting with '{s}'";
 
+/// N-004: a .runar.rb class-body token that is not `prop`, `runar_public`,
+/// `params`, `def` or a bare `private` / `public` marker (the TS reference's
+/// unexpectedClassBodyTokenMessage). It used to be skipped, so an indented
+/// `=begin` (lexed as `=`, `begin`) let a "commented-out" method become the
+/// only spend path. The argument is the token's source text.
+pub const UNEXPECTED_CLASS_BODY_TOKEN_FMT = "Unexpected token in class body: '{s}'";
+
+/// N-004: the first token after a .runar.rb class's `end` (the TS reference's
+/// unexpectedTokenAfterClassMessage). The argument is the token's source text.
+pub const UNEXPECTED_TOKEN_AFTER_CLASS_FMT = "Unexpected token after class end: '{s}'";
+
 /// 1-based line / 1-based column of an opening quote.
 /// N-023's (R49) refusal, on the .runar.java surface, of an assignment (=,
 /// op=, ++, --) to a bare property name that no local or parameter shadows

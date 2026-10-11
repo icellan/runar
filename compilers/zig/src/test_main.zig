@@ -40,6 +40,7 @@ test {
     _ = @import("tests/f213_source_nesting_limit.zig");
     _ = @import("tests/f026_int_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");
+    _ = @import("tests/n004_ruby_stray_tokens.zig");
     _ = @import("tests/n038_sighash_single_stateful.zig");
     _ = @import("tests/n016_property_shadow_scoping.zig");
     _ = @import("passes/parse_java.zig");

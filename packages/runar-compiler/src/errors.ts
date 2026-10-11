@@ -96,6 +96,22 @@ export function unsupportedStatementMessage(token: string): string {
 }
 
 /**
+ * N-004: a .runar.rb class-body token that is not `prop`, `runar_public`,
+ * `params`, `def` or a bare `private` / `public` marker, and the first token
+ * after the class's `end`. The parser used to skip both silently, so an
+ * indented `=begin` (lexed as `=`, `begin`) let a "commented-out" method
+ * become the only spend path. Every tier refuses with these texts; `token`
+ * is the token's source text.
+ */
+export function unexpectedClassBodyTokenMessage(token: string): string {
+  return `Unexpected token in class body: '${token}'`;
+}
+
+export function unexpectedTokenAfterClassMessage(token: string): string {
+  return `Unexpected token after class end: '${token}'`;
+}
+
+/**
  * N-050: a static or class-level method is not a contract method, and must
  * never become a spending entry point. Every tier refuses each surface's
  * spelling of one (`static`, `@staticmethod` / `@classmethod`, `def self.m`,

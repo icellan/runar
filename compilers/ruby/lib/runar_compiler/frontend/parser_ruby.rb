@@ -792,6 +792,14 @@ module RunarCompiler
         end
 
         contract = parse_class
+        unless contract.nil?
+          # N-004: nothing may follow the class's +end+.
+          skip_newlines
+          trailing = peek
+          unless trailing.kind == TOK_EOF
+            @errors << "#{@file}:#{trailing.line}:#{trailing.col}: #{Frontend.unexpected_token_after_class_message(trailing.value)}"
+          end
+        end
         diagnostics = @errors.map { |e| Diagnostic.new(message: e, severity: Severity::ERROR) }
         if contract.nil?
           return ParseResult.new(errors: diagnostics)
@@ -902,8 +910,16 @@ module RunarCompiler
             next
           end
 
-          # Skip unknown tokens
-          advance
+          # Ruby's bare visibility markers are no-ops here (visibility comes
+          # from +runar_public+); examples/ruby uses them.
+          if check_ident("private") || check_ident("public")
+            advance
+            next
+          end
+
+          # N-004: refuse anything else (an indented +=begin+ lexes as +=+).
+          stray = advance
+          @errors << "#{@file}:#{stray.line}:#{stray.col}: #{Frontend.unexpected_class_body_token_message(stray.value)}"
         end
 
         match_tok(TOK_END) # end of class

@@ -31,7 +31,14 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import {
+  makeDiagnostic,
+  staticMethodMessage,
+  unexpectedClassBodyTokenMessage,
+  unexpectedTokenAfterClassMessage,
+  unsupportedStatementMessage,
+  UNTERMINATED_STRING_LITERAL,
+} from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -679,6 +686,17 @@ class RbParser {
       return { contract: null, errors: this.errors };
     }
 
+    // N-004: nothing may follow the class's `end`.
+    this.skipNewlines();
+    const trailing = this.peek();
+    if (trailing.type !== 'eof') {
+      this.errors.push(makeDiagnostic(
+        unexpectedTokenAfterClassMessage(trailing.value || trailing.type),
+        'error',
+        { file: this.file, line: trailing.line, column: trailing.column },
+      ));
+    }
+
     const collision = identifierCollisionMessage(this.declared);
     if (collision !== null) {
       this.errors.push(makeDiagnostic(collision, 'error'));
@@ -794,8 +812,20 @@ class RbParser {
         continue;
       }
 
-      // Skip unknown tokens
-      this.advance();
+      // Ruby's bare visibility markers are no-ops here (visibility comes from
+      // `runar_public`); examples/ruby uses them.
+      if (this.checkIdent('private') || this.checkIdent('public')) {
+        this.advance();
+        continue;
+      }
+
+      // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+      const stray = this.advance();
+      this.errors.push(makeDiagnostic(
+        unexpectedClassBodyTokenMessage(stray.value || stray.type),
+        'error',
+        { file: this.file, line: stray.line, column: stray.column },
+      ));
     }
 
     this.match('end'); // end of class
