@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -474,6 +475,58 @@ func conformanceSourcePath(testName string) (string, bool) {
 	return "", false
 }
 
+// goEligibleConformanceFixtures discovers every fixture under
+// conformance/tests/ that is NOT opted out of Go Stack-IR / hex parity via a
+// source.json "compilers" allowlist that omits "go". Mirrors
+// rust_eligible_conformance_fixtures in
+// compilers/rust/tests/compiler_tests.rs (F-336) / F-315. A fixture with no
+// source.json, or one whose source.json has no "compilers" key, is eligible
+// by default — the allowlist is opt-OUT, not opt-in.
+func goEligibleConformanceFixtures(t *testing.T) []string {
+	t.Helper()
+	dir := conformanceDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", dir, err)
+	}
+
+	var eligible, optedOut []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		configPath := filepath.Join(dir, name, "source.json")
+		allowed := true
+		if raw, err := os.ReadFile(configPath); err == nil {
+			var cfg struct {
+				Compilers []string `json:"compilers"`
+			}
+			if err := json.Unmarshal(raw, &cfg); err != nil {
+				t.Fatalf("parse %s: %v", configPath, err)
+			}
+			if cfg.Compilers != nil {
+				allowed = false
+				for _, c := range cfg.Compilers {
+					if c == "go" {
+						allowed = true
+						break
+					}
+				}
+			}
+		}
+		if allowed {
+			eligible = append(eligible, name)
+		} else {
+			optedOut = append(optedOut, name)
+		}
+	}
+	sort.Strings(eligible)
+	sort.Strings(optedOut)
+	t.Logf("goEligibleConformanceFixtures: %d eligible, %d opted out: %v", len(eligible), len(optedOut), optedOut)
+	return eligible
+}
+
 func mustLoadConformanceIR(t *testing.T, testName string) []byte {
 	t.Helper()
 	path := filepath.Join(conformanceDir(), testName, "expected-ir.json")
@@ -618,36 +671,20 @@ func TestCompile_Stateful(t *testing.T) {
 // Test: All conformance tests compile successfully
 // ---------------------------------------------------------------------------
 
+// PROVES: for every go-eligible conformance fixture (discovered from
+// conformance/tests/, not a hard-coded subset — F-315, mirroring F-336),
+// compiling the fixture's checked-in expected-ir.json through the Go --ir
+// path produces script hex byte-identical to expected-script.hex, and a
+// missing golden for an eligible fixture is a hard test failure, not a
+// silently skipped check.
+// DOES NOT PROVE: --source-path parity (that's
+// TestSourceCompile_AllConformanceFromSource / TestCompilerParity_AllConformance),
+// fold-ON parity, or that the golden hex itself is correct Bitcoin Script.
 func TestCompile_AllConformanceTests(t *testing.T) {
-	testDirs := []string{
-		"arithmetic",
-		"auction",
-		"basic-p2pkh",
-		"blake3",
-		"boolean-logic",
-		"bounded-loop",
-		"convergence-proof",
-		"covenant-vault",
-		"ec-demo",
-		"ec-primitives",
-		"escrow",
-		"function-patterns",
-		"if-else",
-		"if-without-else",
-		"math-demo",
-		"multi-method",
-		"oracle-price",
-		"post-quantum-slhdsa",
-		"post-quantum-wallet",
-		"post-quantum-wots",
-		"property-initializers",
-		"schnorr-zkp",
-		"sphincs-wallet",
-		"stateful",
-		"stateful-counter",
-		"token-ft",
-		"token-nft",
-	}
+	// Fixture list is discovered, not hard-coded (F-315, mirroring F-336):
+	// every fixture under conformance/tests/ whose source.json does not opt
+	// Go out via a "compilers" allowlist is exercised here.
+	testDirs := goEligibleConformanceFixtures(t)
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
@@ -668,14 +705,19 @@ func TestCompile_AllConformanceTests(t *testing.T) {
 				t.Errorf("expected non-empty contractName for %s", dir)
 			}
 
-			// Compare against golden expected-script.hex
+			// Compare against golden expected-script.hex. A missing golden
+			// for an eligible fixture is a hard failure, not a silently
+			// skipped check (F-315 — the old code gated this behind
+			// `if err == nil`, so a missing golden fell through to "pass"
+			// with nothing compared).
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 			goldenHex, err := os.ReadFile(goldenPath)
-			if err == nil {
-				expected := strings.TrimSpace(string(goldenHex))
-				if artifact.Script != expected {
-					t.Errorf("%s: IR-compiled script hex does not match golden file\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
-				}
+			if err != nil {
+				t.Fatalf("%s: missing golden expected-script.hex — the conformance gate must not silently skip an eligible fixture: %v", dir, err)
+			}
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				t.Errorf("%s: IR-compiled script hex does not match golden file\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
 			}
 
 			t.Logf("%s: hex=%d bytes, asm=%d chars", dir, len(artifact.Script)/2, len(artifact.ASM))
@@ -1047,36 +1089,19 @@ func TestSourceCompile_Stateful(t *testing.T) {
 	}
 }
 
+// PROVES: for every go-eligible conformance fixture (same discovered set as
+// TestCompile_AllConformanceTests — F-315, mirroring F-336), compiling the
+// fixture's .runar.ts source through the Go --source path produces script
+// hex byte-identical to expected-script.hex, and a missing golden for an
+// eligible fixture is a hard test failure, not a silently skipped check.
+// DOES NOT PROVE: .runar.go-source-path parity (that's
+// conformance_goldens_test.go's TestConformanceGoldens — F-280, untouched
+// here), fold-ON parity, or that the golden hex itself is correct Bitcoin
+// Script.
 func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
-	testDirs := []string{
-		"arithmetic",
-		"auction",
-		"basic-p2pkh",
-		"blake3",
-		"boolean-logic",
-		"bounded-loop",
-		"convergence-proof",
-		"covenant-vault",
-		"ec-demo",
-		"ec-primitives",
-		"escrow",
-		"function-patterns",
-		"if-else",
-		"if-without-else",
-		"math-demo",
-		"multi-method",
-		"oracle-price",
-		"post-quantum-slhdsa",
-		"post-quantum-wallet",
-		"post-quantum-wots",
-		"property-initializers",
-		"schnorr-zkp",
-		"sphincs-wallet",
-		"stateful",
-		"stateful-counter",
-		"token-ft",
-		"token-nft",
-	}
+	// Fixture list is discovered, not hard-coded (F-315, mirroring F-336) —
+	// same discovered set as TestCompile_AllConformanceTests.
+	testDirs := goEligibleConformanceFixtures(t)
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
 			source, ok := conformanceSourcePath(dir)
@@ -1098,14 +1123,19 @@ func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
 				t.Errorf("%s: empty contract name", dir)
 			}
 
-			// Compare against golden expected-script.hex
+			// Compare against golden expected-script.hex. A missing golden
+			// for an eligible fixture is a hard failure, not a silently
+			// skipped check (F-315 — the old code gated this behind
+			// `if err == nil`, so a missing golden fell through to "pass"
+			// with nothing compared).
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 			goldenHex, err := os.ReadFile(goldenPath)
-			if err == nil {
-				expected := strings.TrimSpace(string(goldenHex))
-				if artifact.Script != expected {
-					t.Errorf("%s: script hex mismatch\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
-				}
+			if err != nil {
+				t.Fatalf("%s: missing golden expected-script.hex — the conformance gate must not silently skip an eligible fixture: %v", dir, err)
+			}
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				t.Errorf("%s: script hex mismatch\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
 			}
 
 			t.Logf("%s: hex=%d bytes, asm=%d chars", dir, len(artifact.Script)/2, len(artifact.ASM))
@@ -1193,7 +1223,7 @@ func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: ALL 27 conformance tests compile and match golden hex
+// Test: all go-eligible conformance fixtures compile and match golden hex
 // ---------------------------------------------------------------------------
 
 // irRoundTripExceptions lists conformance fixtures whose --ir path is not
@@ -1204,46 +1234,22 @@ func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 // (F-181 brief: "If you find a real divergence, report it. Do not fix it.").
 var irRoundTripExceptions = map[string]string{}
 
-// TestCompilerParity_AllConformance proves that, for every one of the 27
-// listed conformance fixtures, (a) compiling from --source matches the
-// checked-in golden hex, and (b) compiling the same fixture's checked-in
-// expected-ir.json via --ir either errors or diverges only for fixtures
-// explicitly listed in irRoundTripExceptions (with a reason) — any other
-// --ir failure or divergence fails the test. It does NOT prove the --ir and
-// --source paths agree on fixtures outside this hardcoded list of 27, and it
-// does not prove the golden hex itself is correct Bitcoin Script — only that
-// both compilation paths reproduce it.
+// TestCompilerParity_AllConformance proves that, for every go-eligible
+// conformance fixture (discovered from conformance/tests/, not a
+// hard-coded subset — F-315, mirroring F-336), (a) compiling from --source
+// matches the checked-in golden hex, and (b) compiling the same fixture's
+// checked-in expected-ir.json via --ir either errors or diverges only for
+// fixtures explicitly listed in irRoundTripExceptions (with a reason) — any
+// other --ir failure or divergence fails the test. A missing golden
+// (expected-script.hex or expected-ir.json) for an eligible fixture is a
+// hard test failure, not a silently skipped check. It does NOT prove the
+// golden hex itself is correct Bitcoin Script — only that both compilation
+// paths reproduce it.
 func TestCompilerParity_AllConformance(t *testing.T) {
-	// All 27 conformance test directories
-	testDirs := []string{
-		"arithmetic",
-		"auction",
-		"basic-p2pkh",
-		"blake3",
-		"boolean-logic",
-		"bounded-loop",
-		"convergence-proof",
-		"covenant-vault",
-		"ec-demo",
-		"ec-primitives",
-		"escrow",
-		"function-patterns",
-		"if-else",
-		"if-without-else",
-		"math-demo",
-		"multi-method",
-		"oracle-price",
-		"post-quantum-slhdsa",
-		"post-quantum-wallet",
-		"post-quantum-wots",
-		"property-initializers",
-		"schnorr-zkp",
-		"sphincs-wallet",
-		"stateful",
-		"stateful-counter",
-		"token-ft",
-		"token-nft",
-	}
+	// Fixture list is discovered, not hard-coded (F-315, mirroring F-336):
+	// every fixture under conformance/tests/ whose source.json does not opt
+	// Go out via a "compilers" allowlist is exercised here.
+	testDirs := goEligibleConformanceFixtures(t)
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
@@ -1299,24 +1305,29 @@ func TestCompilerParity_AllConformance(t *testing.T) {
 			// A fixture that is NOT in irRoundTripExceptions must have its --ir
 			// path both succeed and byte-match the --source script; a total
 			// --ir regression (CompileFromIR erroring on every fixture) now
-			// fails this loop instead of being silently t.Logf'd.
+			// fails this loop instead of being silently t.Logf'd. A missing
+			// expected-ir.json for an eligible fixture is itself a hard
+			// failure (F-315 — the old `if _, err := os.Stat(irPath); err ==
+			// nil` gate silently skipped this entire check when the golden
+			// was absent, so the fixture fell through to "pass").
 			irPath := filepath.Join(conformanceDir(), dir, "expected-ir.json")
-			if _, err := os.Stat(irPath); err == nil {
-				irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
-				reason, excepted := irRoundTripExceptions[dir]
-				switch {
-				case excepted && err != nil:
-					t.Logf("%s: IR compilation failed as expected (%s): %v", dir, reason, err)
-				case excepted && irArtifact.Script != artifact.Script:
-					t.Logf("%s: IR script differs from source script as expected (%s)", dir, reason)
-				case excepted:
-					t.Logf("%s: IR path round-tripped despite being listed in irRoundTripExceptions (%s) — consider removing the entry", dir, reason)
-				case err != nil:
-					t.Errorf("%s: IR compilation failed: %v (if this fixture is genuinely not expected to round-trip, add it to irRoundTripExceptions with a reason)", dir, err)
-				case irArtifact.Script != artifact.Script:
-					t.Errorf("%s: IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
-						dir, truncate(irArtifact.Script, 200), truncate(artifact.Script, 200))
-				}
+			if _, err := os.Stat(irPath); err != nil {
+				t.Fatalf("%s: missing golden expected-ir.json — the IR round-trip gate must not silently skip an eligible fixture: %v", dir, err)
+			}
+			irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
+			reason, excepted := irRoundTripExceptions[dir]
+			switch {
+			case excepted && err != nil:
+				t.Logf("%s: IR compilation failed as expected (%s): %v", dir, reason, err)
+			case excepted && irArtifact.Script != artifact.Script:
+				t.Logf("%s: IR script differs from source script as expected (%s)", dir, reason)
+			case excepted:
+				t.Logf("%s: IR path round-tripped despite being listed in irRoundTripExceptions (%s) — consider removing the entry", dir, reason)
+			case err != nil:
+				t.Errorf("%s: IR compilation failed: %v (if this fixture is genuinely not expected to round-trip, add it to irRoundTripExceptions with a reason)", dir, err)
+			case irArtifact.Script != artifact.Script:
+				t.Errorf("%s: IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
+					dir, truncate(irArtifact.Script, 200), truncate(artifact.Script, 200))
 			}
 		})
 	}
