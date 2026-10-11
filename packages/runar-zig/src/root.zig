@@ -240,6 +240,7 @@ test "root exports compile helpers and fixtures" {
 test {
     _ = @import("base.zig");
     _ = @import("builtins.zig");
+    _ = @import("builtins_n111_ec_gates_test.zig");
     _ = @import("compile_check.zig");
     _ = @import("hex.zig");
     _ = @import("testing_helpers.zig");

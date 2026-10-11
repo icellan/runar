@@ -27,9 +27,14 @@ def _encode_point(x: int, y: int) -> bytes:
 
 
 def _modinv(a: int, m: int) -> int:
-    """Modular inverse using extended Euclidean algorithm."""
-    if a < 0:
-        a = a % m
+    """Modular inverse using extended Euclidean algorithm.
+
+    inv(0) = 0, as the compiled script's Fermat inverse gives (N-111): an
+    off-curve (x, 0) doubling is a value on-chain, not an abort.
+    """
+    a = a % m
+    if a == 0:
+        return 0
     g, x, _ = _extended_gcd(a, m)
     if g != 1:
         raise ValueError("Modular inverse does not exist")
@@ -120,9 +125,18 @@ def ec_on_curve(p: bytes) -> bool:
     return lhs == rhs
 
 
+def _require_canonical(fn: str, x: int, y: int) -> None:
+    """R-117 (N-111): the compiled ec_add / ec_negate OP_VERIFY x < p and
+    y < p before any field arithmetic, so a non-canonical coordinate aborts."""
+    if x >= EC_P or y >= EC_P:
+        raise ValueError(
+            f"{fn}: point coordinate is not a canonical field element (x and y must be < p)")
+
+
 def ec_negate(p: bytes) -> bytes:
     """Negate a point (reflect over x-axis)."""
     x, y = _decode_point(p)
+    _require_canonical('ec_negate', x, y)
     return _encode_point(x, (EC_P - y) % EC_P)
 
 
@@ -135,6 +149,8 @@ def ec_add(a: bytes, b: bytes) -> bytes:
     """Add two points."""
     x1, y1 = _decode_point(a)
     x2, y2 = _decode_point(b)
+    _require_canonical('ec_add', x1, y1)
+    _require_canonical('ec_add', x2, y2)
     rx, ry = _point_add(x1, y1, x2, y2)
     return _encode_point(rx, ry)
 
@@ -142,6 +158,10 @@ def ec_add(a: bytes, b: bytes) -> bytes:
 def ec_mul(p: bytes, k: int) -> bytes:
     """Scalar multiplication."""
     x, y = _decode_point(p)
+    # R-157 (N-111): the compiled ec_mul OP_VERIFYs `on_curve(P) or P == O`
+    # before its ladder, whose +3n trick is sound only for points of order n.
+    if not (x == 0 and y == 0) and not ec_on_curve(p):
+        raise ValueError("ec_mul: point is neither on secp256k1 nor the point at infinity")
     rx, ry = _point_mul(x, y, k)
     return _encode_point(rx, ry)
 

@@ -39,8 +39,12 @@ module Runar
         [g, y - (b / a) * x, x]
       end
 
+      # inv(0) = 0, as the compiled script's Fermat inverse gives (N-111): an
+      # off-curve (x, 0) doubling is a value on-chain, not an abort.
       def modinv(a, m)
-        a = a % m if a < 0
+        a %= m
+        return 0 if a.zero?
+
         g, x, = extended_gcd(a, m)
         raise ArgumentError, 'Modular inverse does not exist' unless g == 1
 
@@ -63,6 +67,14 @@ module Runar
         x3 = (lam * lam - x1 - x2) % EC_P
         y3 = (lam * (x1 - x3) - y1) % EC_P
         [x3, y3]
+      end
+
+      # R-117 (N-111): the compiled ec_add / ec_negate OP_VERIFY x < p and
+      # y < p before any field arithmetic, so a non-canonical coordinate aborts.
+      def require_canonical(fn, x, y)
+        return if x < EC_P && y < EC_P
+
+        raise ArgumentError, "#{fn}: point coordinate is not a canonical field element (x and y must be < p)"
       end
 
       def point_mul(x, y, k)
@@ -127,6 +139,7 @@ module Runar
       # Negate a point (reflect over x-axis).
       def ec_negate(p)
         x, y = decode_point(p)
+        require_canonical('ec_negate', x, y)
         encode_point(x, (EC_P - y) % EC_P)
       end
 
@@ -139,6 +152,8 @@ module Runar
       def ec_add(a, b)
         x1, y1 = decode_point(a)
         x2, y2 = decode_point(b)
+        require_canonical('ec_add', x1, y1)
+        require_canonical('ec_add', x2, y2)
         rx, ry = point_add(x1, y1, x2, y2)
         encode_point(rx, ry)
       end
@@ -146,6 +161,12 @@ module Runar
       # Scalar multiplication.
       def ec_mul(p, k)
         x, y = decode_point(p)
+        # R-157 (N-111): the compiled ec_mul OP_VERIFYs `on_curve(P) || P == O`
+        # before its ladder, whose +3n trick is sound only for points of order n.
+        unless (x.zero? && y.zero?) || ec_on_curve(p)
+          raise ArgumentError, 'ec_mul: point is neither on secp256k1 nor the point at infinity'
+        end
+
         rx, ry = point_mul(x, y, k)
         encode_point(rx, ry)
       end

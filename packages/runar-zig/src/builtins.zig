@@ -1214,24 +1214,78 @@ pub fn ecPointY(point: base.Point) base.Bigint {
     return @bitCast(std.mem.readInt(u64, point[56..64], .big));
 }
 
-pub fn ecAdd(left: base.Point, right: base.Point) base.Point {
-    // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
-    const lp = parsePoint(left) catch @panic("ecAdd: invalid point");
-    const rp = parsePoint(right) catch @panic("ecAdd: invalid point");
-    return serializePoint(lp.add(rp));
+// N-111: the compiled EC builtins gate their operands, and these mirror the
+// gates exactly (vectors: fixtures/n111-ec-operand-gates-onchain.json):
+//   - ecAdd / ecNegate: 64 bytes and x, y < p (R-117); off-curve operands and
+//     the all-zero identity O are ACCEPTED (R-053), so they use raw affine
+//     field arithmetic rather than bsvz, which decodes on-curve points only.
+//   - ecMul: on-curve OR O (R-157) -- exactly what `parsePoint` admits.
+//   - ecEncodeCompressed: width only; parity from y's last byte; O -> 02||0^32.
+// Each `*Checked` variant returns the abort as an error; the plain builtin
+// (called from contract bodies) panics on it, as the script aborts.
+
+pub const EcBuiltinError = error{
+    InvalidPointLength,
+    NonCanonicalCoordinate,
+    PointNotOnCurveOrIdentity,
+    InvalidScalar,
+};
+
+const Secp256k1Fe = std.crypto.ecc.Secp256k1.Fe;
+
+fn ecDecodeCanonical(point: []const u8) EcBuiltinError![2]Secp256k1Fe {
+    if (point.len != 64) return EcBuiltinError.InvalidPointLength;
+    const x = Secp256k1Fe.fromBytes(point[0..32].*, .big) catch return EcBuiltinError.NonCanonicalCoordinate;
+    const y = Secp256k1Fe.fromBytes(point[32..64].*, .big) catch return EcBuiltinError.NonCanonicalCoordinate;
+    return .{ x, y };
 }
 
-pub fn ecMul(point: base.Point, scalar: anytype) base.Point {
-    // CONTRACT-ABORT: in-contract EC builtin; invalid Point/scalar = script-abort.
-    const p = parsePoint(point) catch @panic("ecMul: invalid point");
+fn ecEncodeFe(x: Secp256k1Fe, y: Secp256k1Fe) base.Point {
+    var out: [64]u8 = undefined;
+    out[0..32].* = x.toBytes(.big);
+    out[32..64].* = y.toBytes(.big);
+    return dupeBytes(&out);
+}
+
+pub fn ecAddChecked(left: base.Point, right: base.Point) EcBuiltinError!base.Point {
+    const l = try ecDecodeCanonical(left);
+    const r = try ecDecodeCanonical(right);
+    if (l[0].isZero() and l[1].isZero()) return ecEncodeFe(r[0], r[1]);
+    if (r[0].isZero() and r[1].isZero()) return ecEncodeFe(l[0], l[1]);
+    const same_x = l[0].equivalent(r[0]);
+    if (same_x and !l[1].equivalent(r[1])) return dupeBytes(&([_]u8{0} ** 64));
+    const three = comptime Secp256k1Fe.fromInt(3) catch unreachable;
+    // Tangent or chord; invert(0) = 0, as the script's Fermat inverse gives.
+    const s = if (same_x)
+        l[0].sq().mul(three).mul(l[1].dbl().invert())
+    else
+        r[1].sub(l[1]).mul(r[0].sub(l[0]).invert());
+    const rx = s.sq().sub(l[0]).sub(r[0]);
+    const ry = s.mul(l[0].sub(rx)).sub(l[1]);
+    return ecEncodeFe(rx, ry);
+}
+
+pub fn ecAdd(left: base.Point, right: base.Point) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
+    return ecAddChecked(left, right) catch @panic("ecAdd: invalid point");
+}
+
+pub fn ecMulChecked(point: base.Point, scalar: anytype) EcBuiltinError!base.Point {
+    if (point.len != 64) return EcBuiltinError.InvalidPointLength;
+    const p = parsePoint(point) catch return EcBuiltinError.PointNotOnCurveOrIdentity;
     if (isIdentityPoint(point)) return dupeBytes(&([_]u8{0} ** 64));
 
     const reduced_scalar = reduceScalarForSecp256k1(scalar);
     if (reduced_scalar.is_zero) return dupeBytes(&([_]u8{0} ** 64));
 
-    var result = p.mul(reduced_scalar.bytes) catch @panic("ecMul: invalid scalar");
+    var result = p.mul(reduced_scalar.bytes) catch return EcBuiltinError.InvalidScalar;
     if (reduced_scalar.negative) result = result.negate();
     return serializePoint(result);
+}
+
+pub fn ecMul(point: base.Point, scalar: anytype) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point/scalar = script-abort.
+    return ecMulChecked(point, scalar) catch @panic("ecMul: invalid point");
 }
 
 pub fn ecMulGen(scalar: anytype) base.Point {
@@ -1244,10 +1298,14 @@ pub fn ecMulGen(scalar: anytype) base.Point {
     return serializePoint(result);
 }
 
+pub fn ecNegateChecked(point: base.Point) EcBuiltinError!base.Point {
+    const c = try ecDecodeCanonical(point);
+    return ecEncodeFe(c[0], c[1].neg());
+}
+
 pub fn ecNegate(point: base.Point) base.Point {
     // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
-    const p = parsePoint(point) catch @panic("ecNegate: invalid point");
-    return serializePoint(p.negate());
+    return ecNegateChecked(point) catch @panic("ecNegate: invalid point");
 }
 
 pub fn ecOnCurve(point: base.Point) bool {
@@ -1269,12 +1327,17 @@ pub fn ecModReduce(value: base.Bigint, modulus: base.Bigint) base.Bigint {
     return if (reduced < 0) reduced + modulus else reduced;
 }
 
+pub fn ecEncodeCompressedChecked(point: base.Point) EcBuiltinError!base.ByteString {
+    if (point.len != 64) return EcBuiltinError.InvalidPointLength;
+    var out: [33]u8 = undefined;
+    out[0] = if (point[63] & 1 == 0) 0x02 else 0x03;
+    @memcpy(out[1..33], point[0..32]);
+    return dupeBytes(&out);
+}
+
 pub fn ecEncodeCompressed(point: base.Point) base.ByteString {
     // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
-    const p = parsePoint(point) catch @panic("ecEncodeCompressed: invalid point");
-    if (isIdentityPoint(point)) return dupeBytes(&[_]u8{0x00});
-    const compressed = p.toCompressedSec1();
-    return dupeBytes(compressed.slice());
+    return ecEncodeCompressedChecked(point) catch @panic("ecEncodeCompressed: invalid point");
 }
 
 // -- Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921) --------

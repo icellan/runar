@@ -6,7 +6,7 @@
 // math uses native bigint; byte ops use hex string manipulation.
 // ---------------------------------------------------------------------------
 
-import { Hash, Point as BsvPoint, BigNumber, Signature, PublicKey } from '@bsv/sdk';
+import { Hash, Signature, PublicKey } from '@bsv/sdk';
 import type {
   ByteString,
   PubKey,
@@ -443,40 +443,112 @@ export function verifySLHDSA_SHA2_256f(_msg: ByteString, _sig: ByteString, _pubk
 // Elliptic curve operations (secp256k1 via @bsv/sdk)
 // ---------------------------------------------------------------------------
 
-function toBsvPoint(p: Point): BsvPoint {
-  const xHex = (p as string).slice(0, 64);
-  const yHex = (p as string).slice(64, 128);
-  return new BsvPoint(xHex, yHex);
-}
-
-function fromBsvPoint(p: BsvPoint): Point {
-  return (p.getX().toHex(32) + p.getY().toHex(32)) as unknown as Point;
-}
+// N-111: these mirror the COMPILED script (ec-codegen.ts), gates included,
+// rather than delegating to @bsv/sdk's Point, which has its own infinity
+// object and never sees the all-zero blob as the identity. Vectors:
+// packages/runar-zig/src/fixtures/n111-ec-operand-gates-onchain.json.
 
 const EC_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn;
+const EC_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const EC_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n;
+const EC_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
+
+function ecFieldMod(a: bigint, m: bigint): bigint {
+  return ((a % m) + m) % m;
+}
+
+/** Modular inverse; inv(0) = 0, as the script's Fermat inverse gives. */
+function ecFieldInv(a: bigint, m: bigint): bigint {
+  let [r0, r1] = [ecFieldMod(a, m), m];
+  let [s0, s1] = [1n, 0n];
+  while (r1 !== 0n) {
+    const q = r0 / r1;
+    [r0, r1] = [r1, r0 - q * r1];
+    [s0, s1] = [s1, s0 - q * s1];
+  }
+  return ecFieldMod(s0, m);
+}
+
+/** CL-BUG-095: a Point is exactly 64 bytes, or the script aborts. */
+function ecDecode(p: Point, fn: string): [bigint, bigint] {
+  const h = p as string;
+  if (h.length !== 128) {
+    throw new Error(`${fn}: EC point must be 64 bytes, got ${h.length / 2}`);
+  }
+  return [BigInt('0x' + h.slice(0, 64)), BigInt('0x' + h.slice(64, 128))];
+}
+
+function ecEncode(x: bigint, y: bigint): Point {
+  return (x.toString(16).padStart(64, '0') + y.toString(16).padStart(64, '0')) as unknown as Point;
+}
+
+/** R-117: ecAdd / ecNegate OP_VERIFY x < p and y < p. */
+function ecRequireCanonical(x: bigint, y: bigint, fn: string): void {
+  if (x >= EC_P || y >= EC_P) {
+    throw new Error(`${fn}: point coordinate is not a canonical field element (x and y must be < p)`);
+  }
+}
+
+/** The script's affineAdd: O selects, P + (-P) = O, tangent, chord. */
+function ecAffineAdd(x1: bigint, y1: bigint, x2: bigint, y2: bigint): [bigint, bigint] {
+  if (x1 === 0n && y1 === 0n) return [x2, y2];
+  if (x2 === 0n && y2 === 0n) return [x1, y1];
+  if (x1 === x2 && y1 !== y2) return [0n, 0n];
+  const s = x1 === x2
+    ? ecFieldMod(3n * x1 * x1 * ecFieldInv(2n * y1, EC_P), EC_P)
+    : ecFieldMod((y2 - y1) * ecFieldInv(x2 - x1, EC_P), EC_P);
+  const rx = ecFieldMod(s * s - x1 - x2, EC_P);
+  const ry = ecFieldMod(s * (x1 - rx) - y1, EC_P);
+  return [rx, ry];
+}
+
+function ecScalarMulCoords(x: bigint, y: bigint, k: bigint): [bigint, bigint] {
+  let kr = ecFieldMod(k, EC_N);
+  let rx = 0n;
+  let ry = 0n;
+  let ax = x;
+  let ay = y;
+  while (kr > 0n) {
+    if (kr & 1n) [rx, ry] = ecAffineAdd(rx, ry, ax, ay);
+    [ax, ay] = ecAffineAdd(ax, ay, ax, ay);
+    kr >>= 1n;
+  }
+  return [rx, ry];
+}
+
+function ecOnCurveCoords(x: bigint, y: bigint): boolean {
+  if (x >= EC_P || y >= EC_P) return false;
+  return ecFieldMod(y * y, EC_P) === ecFieldMod(x * x * x + 7n, EC_P);
+}
 
 export function ecAdd(a: Point, b: Point): Point {
-  return fromBsvPoint(toBsvPoint(a).add(toBsvPoint(b)));
+  const [ax, ay] = ecDecode(a, 'ecAdd');
+  const [bx, by] = ecDecode(b, 'ecAdd');
+  ecRequireCanonical(ax, ay, 'ecAdd');
+  ecRequireCanonical(bx, by, 'ecAdd');
+  const [rx, ry] = ecAffineAdd(ax, ay, bx, by);
+  return ecEncode(rx, ry);
 }
 
 export function ecMul(p: Point, k: bigint): Point {
-  return fromBsvPoint(toBsvPoint(p).mul(new BigNumber(k.toString())));
+  const [x, y] = ecDecode(p, 'ecMul');
+  // R-157: the script OP_VERIFYs `onCurve(P) OR P == O` before the ladder.
+  if (!(x === 0n && y === 0n) && !ecOnCurveCoords(x, y)) {
+    throw new Error('ecMul: point is neither on secp256k1 nor the point at infinity');
+  }
+  const [rx, ry] = ecScalarMulCoords(x, y, k);
+  return ecEncode(rx, ry);
 }
 
 export function ecMulGen(k: bigint): Point {
-  const G = new BsvPoint(
-    '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
-    '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8',
-  );
-  return fromBsvPoint(G.mul(new BigNumber(k.toString())));
+  const [rx, ry] = ecScalarMulCoords(EC_GX, EC_GY, k);
+  return ecEncode(rx, ry);
 }
 
 export function ecNegate(p: Point): Point {
-  const bsv = toBsvPoint(p);
-  const yBig = BigInt('0x' + bsv.getY().toHex(32));
-  const negY = EC_P - yBig;
-  const negYHex = negY.toString(16).padStart(64, '0');
-  return (bsv.getX().toHex(32) + negYHex) as unknown as Point;
+  const [x, y] = ecDecode(p, 'ecNegate');
+  ecRequireCanonical(x, y, 'ecNegate');
+  return ecEncode(x, ecFieldMod(EC_P - y, EC_P));
 }
 
 export function ecOnCurve(p: Point): boolean {
@@ -497,7 +569,7 @@ export function ecModReduce(value: bigint, mod: bigint): bigint {
 }
 
 export function ecEncodeCompressed(p: Point): ByteString {
-  const yBig = BigInt('0x' + (p as string).slice(64, 128));
+  const [, yBig] = ecDecode(p, 'ecEncodeCompressed');
   const prefix = yBig % 2n === 0n ? '02' : '03';
   return (prefix + (p as string).slice(0, 64)) as ByteString;
 }
@@ -509,11 +581,11 @@ export function ecMakePoint(x: bigint, y: bigint): Point {
 }
 
 export function ecPointX(p: Point): bigint {
-  return BigInt('0x' + (p as string).slice(0, 64));
+  return ecDecode(p, 'ecPointX')[0];
 }
 
 export function ecPointY(p: Point): bigint {
-  return BigInt('0x' + (p as string).slice(64, 128));
+  return ecDecode(p, 'ecPointY')[1];
 }
 
 // ---------------------------------------------------------------------------

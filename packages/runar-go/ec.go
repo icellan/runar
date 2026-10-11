@@ -51,10 +51,10 @@ func ecAddCoords(x1, y1, x2, y2 *big.Int) (*big.Int, *big.Int) {
 		return new(big.Int).Set(x1), new(big.Int).Set(y1)
 	}
 
-	// Check for point + (-point) = infinity
-	ySum := new(big.Int).Add(y1, y2)
-	ySum.Mod(ySum, ecP)
-	if x1.Cmp(x2) == 0 && ySum.Sign() == 0 {
+	// Same x, different y is O — the compiled affineAdd's `notinf` selector
+	// tests exactly this (N-111), not y1 + y2 == p, so an off-curve pair
+	// like (5, 7) + (5, 8) is O on-chain and a (x, 0) doubling is not.
+	if x1.Cmp(x2) == 0 && y1.Cmp(y2) != 0 {
 		return big.NewInt(0), big.NewInt(0)
 	}
 
@@ -124,10 +124,20 @@ func scalarMulCoords(bx, by *big.Int, k *big.Int) (*big.Int, *big.Int) {
 	return rx, ry
 }
 
+// requireCanonicalCoords panics unless x < p and y < p — the R-117 gate the
+// compiled EcAdd / EcNegate OP_VERIFY before any field arithmetic (N-111).
+func requireCanonicalCoords(fn string, x, y *big.Int) {
+	if x.Cmp(ecP) >= 0 || y.Cmp(ecP) >= 0 {
+		panic("runar: " + fn + ": point coordinate is not a canonical field element (x and y must be < p)")
+	}
+}
+
 // EcAdd performs point addition on secp256k1.
 func EcAdd(a, b Point) Point {
 	ax, ay := pointToCoords(a)
 	bx, by := pointToCoords(b)
+	requireCanonicalCoords("EcAdd", ax, ay)
+	requireCanonicalCoords("EcAdd", bx, by)
 	rx, ry := ecAddCoords(ax, ay, bx, by)
 	return coordsToPoint(rx, ry)
 }
@@ -135,6 +145,11 @@ func EcAdd(a, b Point) Point {
 // EcMul performs scalar multiplication: k * P.
 func EcMul(p Point, k Bigint) Point {
 	px, py := pointToCoords(p)
+	// R-157 (N-111): the compiled EcMul OP_VERIFYs `onCurve(P) OR P == O`
+	// before its ladder, whose +3n trick is sound only for points of order n.
+	if !(px.Sign() == 0 && py.Sign() == 0) && !EcOnCurve(p) {
+		panic("runar: EcMul: point is neither on secp256k1 nor the point at infinity")
+	}
 	rx, ry := scalarMulCoords(px, py, big.NewInt(k))
 	return coordsToPoint(rx, ry)
 }
@@ -148,6 +163,7 @@ func EcMulGen(k Bigint) Point {
 // EcNegate returns the negated point (x, p - y).
 func EcNegate(p Point) Point {
 	px, py := pointToCoords(p)
+	requireCanonicalCoords("EcNegate", px, py)
 	negY := new(big.Int).Sub(ecP, py)
 	negY.Mod(negY, ecP)
 	return coordsToPoint(px, negY)

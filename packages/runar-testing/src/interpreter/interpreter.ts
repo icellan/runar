@@ -2192,6 +2192,12 @@ function ecPointAddCoords(
   x1: bigint, y1: bigint, x2: bigint, y2: bigint,
 ): [bigint, bigint] {
   const p = EC_P;
+  // R-053: the all-zero point is the identity. The compiled `affineAdd`
+  // selects over it (pinf / qinf, both coordinates zero) before the chord
+  // and tangent paths; without this the interpreter took the chord for
+  // (G, O) where the script returns G.
+  if (x1 === 0n && y1 === 0n) return [x2, y2];
+  if (x2 === 0n && y2 === 0n) return [x1, y1];
   // P + (-P) = O. Affine x||y cannot encode O, so both this interpreter and
   // `affineAdd` in ec-codegen.ts represent it as the ALL-ZERO point — the same
   // encoding `ecMul(P, 0n)` already yields. The two MUST agree: the differential
@@ -2242,15 +2248,34 @@ function ecScalarMul(x: bigint, y: bigint, k: bigint): [bigint, bigint] {
   return [rx, ry];
 }
 
+/**
+ * N-111 / R-117: the compiled ecAdd and ecNegate OP_VERIFY that each
+ * coordinate is a canonical field element (x < p, y < p) before any field
+ * arithmetic. Abort the same way rather than reducing.
+ */
+function ecRequireCanonical(x: bigint, y: bigint, fn: string): void {
+  if (x >= EC_P || y >= EC_P) {
+    throw new Error(`${fn}: point coordinate is not a canonical field element (x and y must be < p)`);
+  }
+}
+
 function ecAddImpl(a: Uint8Array, b: Uint8Array): Uint8Array {
   const [ax, ay] = ecDecodePoint(a);
   const [bx, by] = ecDecodePoint(b);
+  ecRequireCanonical(ax, ay, 'ecAdd');
+  ecRequireCanonical(bx, by, 'ecAdd');
   const [rx, ry] = ecPointAddCoords(ax, ay, bx, by);
   return ecEncodePoint(rx, ry);
 }
 
 function ecMulImpl(pt: Uint8Array, k: bigint): Uint8Array {
   const [x, y] = ecDecodePoint(pt);
+  // N-111 / R-157: the compiled ecMul OP_VERIFYs `onCurve(P) OR P == O`
+  // before the ladder (its +3n trick is sound only for points of order n).
+  // On-curve already implies 64 bytes and canonical coordinates.
+  if (!(x === 0n && y === 0n) && !ecOnCurveImpl(pt)) {
+    throw new Error('ecMul: point is neither on secp256k1 nor the point at infinity');
+  }
   const [rx, ry] = ecScalarMul(x, y, k);
   return ecEncodePoint(rx, ry);
 }
@@ -2262,6 +2287,7 @@ function ecMulGenImpl(k: bigint): Uint8Array {
 
 function ecNegateImpl(pt: Uint8Array): Uint8Array {
   const [x, y] = ecDecodePoint(pt);
+  ecRequireCanonical(x, y, 'ecNegate');
   return ecEncodePoint(x, ecMod(EC_P - y, EC_P));
 }
 

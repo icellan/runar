@@ -858,9 +858,26 @@ public final class MockCrypto {
 
     public static final Point EC_G = new Point(GX, GY);
 
-    /** Modular inverse mod EC_P. */
+    /**
+     * Modular inverse mod EC_P; inv(0) = 0, as the compiled script's Fermat
+     * inverse gives (N-111): an off-curve (x, 0) doubling is a value on-chain.
+     */
     private static BigInteger modInvP(BigInteger a) {
-        return a.modInverse(EC_P);
+        BigInteger r = mod(a, EC_P);
+        return r.signum() == 0 ? BigInteger.ZERO : r.modInverse(EC_P);
+    }
+
+    /**
+     * R-117 (N-111): the compiled ecAdd / ecNegate OP_VERIFY x &lt; p and
+     * y &lt; p before any field arithmetic, so a non-canonical coordinate
+     * aborts. The identity O (all-zero) is canonical.
+     */
+    private static void requireCanonical(String fn, Point p) {
+        if (p.infinity) return;
+        if (p.x.compareTo(EC_P) >= 0 || p.y.compareTo(EC_P) >= 0) {
+            throw new IllegalArgumentException(
+                fn + ": point coordinate is not a canonical field element (x and y must be < p)");
+        }
     }
 
     private static BigInteger mod(BigInteger a, BigInteger m) {
@@ -868,8 +885,14 @@ public final class MockCrypto {
         return r.signum() < 0 ? r.add(m) : r;
     }
 
-    /** Add two secp256k1 points using affine formulas. */
+    /** Add two secp256k1 points using affine formulas, with the script's gates. */
     public static Point ecAdd(Point a, Point b) {
+        requireCanonical("ecAdd", a);
+        requireCanonical("ecAdd", b);
+        return addAffine(a, b);
+    }
+
+    private static Point addAffine(Point a, Point b) {
         if (a.infinity) return b;
         if (b.infinity) return a;
         if (a.x.equals(b.x)) {
@@ -892,12 +915,17 @@ public final class MockCrypto {
 
     /** Scalar multiplication via double-and-add. */
     public static Point ecMul(Point p, BigInteger k) {
+        // R-157 (N-111): the compiled ecMul OP_VERIFYs `onCurve(P) OR P == O`
+        // before its ladder, whose +3n trick is sound only for points of order n.
+        if (!p.infinity && !ecOnCurve(p)) {
+            throw new IllegalArgumentException("ecMul: point is neither on secp256k1 nor the point at infinity");
+        }
         BigInteger scalar = mod(k, EC_N);
         Point result = Point.INFINITY;
         Point addend = p;
         while (scalar.signum() > 0) {
-            if (scalar.testBit(0)) result = ecAdd(result, addend);
-            addend = ecAdd(addend, addend);
+            if (scalar.testBit(0)) result = addAffine(result, addend);
+            addend = addAffine(addend, addend);
             scalar = scalar.shiftRight(1);
         }
         return result;
@@ -908,8 +936,9 @@ public final class MockCrypto {
     }
 
     public static Point ecNegate(Point p) {
+        requireCanonical("ecNegate", p);
         if (p.infinity) return p;
-        return new Point(p.x, EC_P.subtract(p.y));
+        return new Point(p.x, mod(EC_P.subtract(p.y), EC_P));
     }
 
     public static boolean ecOnCurve(Point p) {
@@ -939,6 +968,12 @@ public final class MockCrypto {
     }
 
     public static ByteString ecEncodeCompressed(Point p) {
+        // N-111: the script checks the width only, so O encodes as 02||0^32.
+        if (p.infinity) {
+            byte[] o = new byte[33];
+            o[0] = 0x02;
+            return new ByteString(o);
+        }
         byte[] out = new byte[33];
         out[0] = (byte) (p.y.testBit(0) ? 0x03 : 0x02);
         System.arraycopy(to32(p.x), 0, out, 1, 32);
@@ -949,8 +984,9 @@ public final class MockCrypto {
         return new Point(x, y);
     }
 
-    public static BigInteger ecPointX(Point p) { return p.x; }
-    public static BigInteger ecPointY(Point p) { return p.y; }
+    // N-111: the script reads O's coordinates as 0, not as "no value".
+    public static BigInteger ecPointX(Point p) { return p.infinity ? BigInteger.ZERO : p.x; }
+    public static BigInteger ecPointY(Point p) { return p.infinity ? BigInteger.ZERO : p.y; }
 
     // =======================================================================
     // Field arithmetic — stubbed

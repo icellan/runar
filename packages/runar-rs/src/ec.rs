@@ -3,7 +3,7 @@
 //! Uses the `k256` crate for real EC arithmetic. Point encoding is
 //! 64 bytes: `x[32] || y[32]` (big-endian, no prefix byte).
 
-use k256::elliptic_curve::group::{Group, GroupEncoding};
+use k256::elliptic_curve::group::Group;
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 
@@ -49,11 +49,81 @@ fn i64_to_scalar(k: Bigint) -> Scalar {
     }
 }
 
-/// Point addition on secp256k1.
+// ---------------------------------------------------------------------------
+// N-111: raw affine arithmetic for the builtins whose compiled script accepts
+// operands k256 refuses. The script's ecAdd / ecNegate gate width and
+// coordinate canonicity (R-117) but NOT the curve equation, and its addition
+// law treats the all-zero blob as the identity (R-053) and x1 == x2 with
+// y1 != y2 as O; ecEncodeCompressed gates width only. k256 decodes only
+// on-curve points, so those operands panicked here while the script accepted
+// them. ec_mul keeps k256: its script gate is exactly on-curve-or-O.
+// Vectors: packages/runar-zig/src/fixtures/n111-ec-operand-gates-onchain.json.
+// ---------------------------------------------------------------------------
+
+fn field_p() -> BigintBig {
+    BigintBig::parse_bytes(
+        b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
+        16,
+    )
+    .expect("secp256k1 p")
+}
+
+fn fmod(a: &BigintBig, p: &BigintBig) -> BigintBig {
+    ((a % p) + p) % p
+}
+
+/// Fermat inverse, so inv(0) = 0 exactly as the script's fieldInv gives.
+fn finv(a: &BigintBig, p: &BigintBig) -> BigintBig {
+    fmod(a, p).modpow(&(p - BigintBig::from(2)), p)
+}
+
+/// Width (CL-BUG-095) and canonicity (R-117) gate; returns the coordinates.
+fn decode_canonical(pt: &[u8], fname: &str) -> (BigintBig, BigintBig) {
+    assert_eq!(pt.len(), 64, "Point must be exactly 64 bytes");
+    let x = BigintBig::from_bytes_be(num_bigint::Sign::Plus, &pt[0..32]);
+    let y = BigintBig::from_bytes_be(num_bigint::Sign::Plus, &pt[32..64]);
+    let p = field_p();
+    assert!(
+        x < p && y < p,
+        "runar: {fname}: point coordinate is not a canonical field element (x and y must be < p)"
+    );
+    (x, y)
+}
+
+fn encode_coords(x: &BigintBig, y: &BigintBig) -> Point {
+    let mut buf = vec![0u8; 64];
+    for (dst, v) in [(0usize, x), (32usize, y)] {
+        let (_, mag) = v.clone().into_parts();
+        let be = mag.to_bytes_be();
+        let be: &[u8] = if be == [0] { &[] } else { &be };
+        buf[dst + 32 - be.len()..dst + 32].copy_from_slice(be);
+    }
+    buf
+}
+
+/// Point addition on secp256k1, with the compiled script's gates and law.
 pub fn ec_add(a: &[u8], b: &[u8]) -> Point {
-    let pa = point_to_projective(a);
-    let pb = point_to_projective(b);
-    projective_to_point(&(pa + pb))
+    let (x1, y1) = decode_canonical(a, "ec_add");
+    let (x2, y2) = decode_canonical(b, "ec_add");
+    let zero = BigintBig::from(0);
+    if x1 == zero && y1 == zero {
+        return encode_coords(&x2, &y2);
+    }
+    if x2 == zero && y2 == zero {
+        return encode_coords(&x1, &y1);
+    }
+    if x1 == x2 && y1 != y2 {
+        return vec![0u8; 64];
+    }
+    let p = field_p();
+    let s = if x1 == x2 {
+        fmod(&(BigintBig::from(3) * &x1 * &x1 * finv(&(BigintBig::from(2) * &y1), &p)), &p)
+    } else {
+        fmod(&((&y2 - &y1) * finv(&(&x2 - &x1), &p)), &p)
+    };
+    let rx = fmod(&(&s * &s - &x1 - &x2), &p);
+    let ry = fmod(&(&s * (&x1 - &rx) - &y1), &p);
+    encode_coords(&rx, &ry)
 }
 
 /// Scalar multiplication: k * P.
@@ -71,8 +141,9 @@ pub fn ec_mul_gen(k: Bigint) -> Point {
 
 /// Point negation: returns (x, p - y).
 pub fn ec_negate(p: &[u8]) -> Point {
-    let pp = point_to_projective(p);
-    projective_to_point(&(-pp))
+    let (x, y) = decode_canonical(p, "ec_negate");
+    let fp = field_p();
+    encode_coords(&x, &fmod(&(&fp - &y), &fp))
 }
 
 /// Check if a point is on the secp256k1 curve.
@@ -102,9 +173,13 @@ pub fn ec_mod_reduce(value: Bigint, m: Bigint) -> Bigint {
 
 /// Encode a point as a 33-byte compressed public key.
 pub fn ec_encode_compressed(p: &[u8]) -> ByteString {
-    let pp = point_to_projective(p);
-    let affine = pp.to_affine();
-    affine.to_bytes().to_vec()
+    // N-111: the script checks the width only and reads the parity from
+    // y's last byte; no curve or canonicity check, and O encodes as 02||0^32.
+    assert_eq!(p.len(), 64, "Point must be exactly 64 bytes");
+    let mut out = Vec::with_capacity(33);
+    out.push(if p[63] & 1 == 0 { 0x02 } else { 0x03 });
+    out.extend_from_slice(&p[0..32]);
+    out
 }
 
 /// Construct a Point from two coordinate integers.
