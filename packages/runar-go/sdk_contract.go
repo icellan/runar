@@ -1018,8 +1018,25 @@ func (c *RunarContract) PrepareCall(
 		// satoshis (`continuationAmount()` = `_newAmount`) and the spent
 		// UTXO's (`extractAmount(txPreimage)`); both are known before the tx
 		// is built, and the state the script re-derives must match.
+		//
+		// R67: extractScriptCode(txPreimage) gets the contract's OWN real
+		// codePart (post-OP_CODESEPARATOR, CompactSize-prefixed exactly as
+		// the BIP-143 preimage carries it) instead of the historical empty
+		// dummy, so a method like FungibleToken.Merge that inspects its own
+		// scriptCode during off-chain state derivation sees realistic bytes
+		// rather than aborting substr on an empty value. getCodeSepIndex is
+		// the SAME call every other signing path uses to trim the codePart
+		// to the post-separator subscript.
+		codePartHex := c.getCodePartHex()
+		scriptCodeBody := codePartHex
+		if codeSepIdx := c.getCodeSepIndex(methodIndex); codeSepIdx >= 0 {
+			scriptCodeBody = codePartHex[(codeSepIdx+1)*2:]
+		}
+		mockPreimage := MockPreimageAmount{
+			ScriptCode: writeVarIntHex(len(scriptCodeBody)/2) + scriptCodeBody,
+		}
 		if c.currentUtxo != nil {
-			namedArgs["txPreimage"] = MockPreimageAmount{Amount: big.NewInt(c.currentUtxo.Satoshis)}
+			mockPreimage.Amount = big.NewInt(c.currentUtxo.Satoshis)
 			if methodNeedsNewAmount {
 				newSats := c.currentUtxo.Satoshis
 				if options != nil && options.Satoshis > 0 {
@@ -1028,6 +1045,7 @@ func (c *RunarContract) PrepareCall(
 				namedArgs["_newAmount"] = big.NewInt(newSats)
 			}
 		}
+		namedArgs["txPreimage"] = mockPreimage
 		state, dataOuts, _, ordered, err := ComputeNewStateAndDataOutputs(
 			c.Artifact.ANF, methodName, flatState, namedArgs, c.constructorArgs,
 		)

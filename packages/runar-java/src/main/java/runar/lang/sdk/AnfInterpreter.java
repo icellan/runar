@@ -198,7 +198,26 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null, null);
+        return computeNewStateAndDataOutputs(anf, methodName, currentState, args, constructorArgs, null);
+    }
+
+    /**
+     * R67: like {@link #computeNewStateAndDataOutputs(Map, String, Map, Map, List)},
+     * but additionally supplies a {@link WitnessContext} so
+     * {@code extractScriptCode(txPreimage)} can return the contract's own
+     * real codePart (set via {@code witness.setMockPreimageBytes("scriptCode",
+     * ...)}) instead of the historical empty dummy. {@code RunarContract}'s
+     * call path always supplies one now.
+     */
+    public static ExecutionResult computeNewStateAndDataOutputs(
+        Map<String, Object> anf,
+        String methodName,
+        Map<String, Object> currentState,
+        Map<String, Object> args,
+        List<Object> constructorArgs,
+        WitnessContext witness
+    ) {
+        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null, witness);
         return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs, r.outputs);
     }
 
@@ -1440,22 +1459,27 @@ public final class AnfInterpreter {
             }
             case "bin2num":    return bin2numBigInt(asString(args.get(0)));
             case "cat":        return asString(args.get(0)) + asString(args.get(1));
+            // R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP
+            // <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the
+            // second against the REMAINDER `size(data) - start`. It
+            // ABORTS whenever `start` is outside [0, size(data)] or
+            // `length` is outside [0, size(data) - start], which
+            // collapses to: start<0, length<0, or start+length>size(data).
+            // This used to clamp -- the comment here used to say "Empty
+            // extractScriptCode (SDK mock) + substr(sc, 0, len-49) produces
+            // a negative length ... match Go", but Go's own clamp was
+            // ITSELF the bug (N-171). `extractScriptCode` now supplies a
+            // realistic scriptCode (R67) so the one caller that fed this an
+            // empty placeholder (FungibleToken.merge) no longer hits the
+            // abort path either.
             case "substr": {
                 String h = asString(args.get(0));
                 int s = toBigInt(args.get(1)).intValueExact();
                 int len = toBigInt(args.get(2)).intValueExact();
-                // Empty extractScriptCode (SDK mock) + substr(sc, 0, len-49)
-                // produces a negative length. String.substring throws; Bitcoin
-                // Script and the TS interpreter yield empty. Match Go.
-                if (s < 0 || len <= 0) {
-                    return "";
+                if (s < 0 || len < 0 || (long) s * 2 + (long) len * 2 > h.length()) {
+                    throw new ArithmeticException("substr: start " + s + ", length " + len + " is outside a " + h.length() / 2 + "-byte value");
                 }
-                int lo = Math.min(s * 2, h.length());
-                int hi = Math.min((s + len) * 2, h.length());
-                if (hi < lo) {
-                    return "";
-                }
-                return h.substring(lo, hi);
+                return h.substring(s * 2, s * 2 + len * 2);
             }
             case "reverseBytes": {
                 String h = asString(args.get(0));
@@ -1488,6 +1512,27 @@ public final class AnfInterpreter {
                     throw new ArithmeticException("right: length " + len + " is outside a " + h.length() / 2 + "-byte value");
                 }
                 return h.substring(h.length() - len * 2);
+            }
+
+            // N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds
+            // the RIGHT half. It ABORTS whenever `index` is outside
+            // [0, size(data)]. Unmodelled before this (fell through to the
+            // `default` arm's `null`), the same bug shape F-274 fixed for
+            // `left`/`right`.
+            //
+            // `substr` is deliberately NOT fixed here: its default
+            // `extractScriptCode` mock is empty, and FungibleToken's `merge`
+            // method computes `substr(sc, 0, 1)` on that placeholder during
+            // off-chain state derivation -- a POSITIVE overflow this check
+            // would have to reject, breaking state derivation for every
+            // token-ft-shaped contract (escalated, not fixed here).
+            case "split": {
+                String h = asString(args.get(0));
+                int index = toBigInt(args.get(1)).intValueExact();
+                if (index < 0 || index * 2 > h.length()) {
+                    throw new ArithmeticException("split: index " + index + " is outside a " + h.length() / 2 + "-byte value");
+                }
+                return h.substring(index * 2);
             }
 
             // Math built-ins (delegate to MockCrypto where possible)
@@ -1589,8 +1634,15 @@ public final class AnfInterpreter {
                 return HEX.formatHex(
                     witness != null ? witness.mockBytes("outpoint", new byte[36]) : new byte[36]
                 );
+            // R67: the contract's own real codePart when the caller
+            // supplied it via `WitnessContext.setMockPreimageBytes("scriptCode",
+            // ...)` -- `RunarContract`'s call path always supplies it now.
+            // Falls back to the historical empty dummy otherwise (e.g. a
+            // bare `computeNewState` call with no witness in a test).
             case "extractScriptCode":
-                return "";
+                return witness != null
+                    ? HEX.formatHex(witness.mockBytes("scriptCode", new byte[0]))
+                    : "";
 
             // Post-quantum / proof-system primitives — delegate to MockCrypto
             // so they raise UnsupportedOperationException loudly. Never silently

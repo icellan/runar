@@ -282,6 +282,7 @@ def compute_new_state(
     current_state: dict,
     args: dict,
     constructor_args: list = None,
+    intent: Optional[_IntentCtx] = None,
 ) -> dict:
     """Compute the new state after executing a contract method.
 
@@ -291,12 +292,16 @@ def compute_new_state(
         current_state: Current contract state (property name -> value).
         args: Method arguments (param name -> value).
         constructor_args: Constructor arg values (declaration order) for readonly fields.
+        intent: R67 -- optional witness/mock-preimage context. Pass one with
+            ``mock_preimage_bytes['scriptCode']`` set to give
+            ``extractScriptCode`` the contract's real codePart instead of
+            the historical empty dummy.
 
     Returns:
         The updated state (merged with current_state).
     """
     state, _, _ = compute_new_state_and_data_outputs(
-        anf, method_name, current_state, args, constructor_args,
+        anf, method_name, current_state, args, constructor_args, intent=intent,
     )
     return state
 
@@ -308,6 +313,7 @@ def compute_new_state_and_data_outputs(
     args: dict,
     constructor_args: list = None,
     ordered_outputs: Optional[List[dict]] = None,
+    intent: Optional[_IntentCtx] = None,
 ) -> Tuple[dict, list, list]:
     """Like :func:`compute_new_state` but also returns data + raw outputs.
 
@@ -343,7 +349,7 @@ def compute_new_state_and_data_outputs(
     """
     return _run_method(
         anf, method_name, current_state, args, constructor_args, strict=None,
-        ordered_outputs=ordered_outputs,
+        ordered_outputs=ordered_outputs, intent=intent,
     )
 
 
@@ -1326,10 +1332,23 @@ def _eval_call(
         return _bin2num_int(str(args[0] or ''))
     if func == 'cat':
         return str(args[0] or '') + str(args[1] or '')
+    # R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+    # OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+    # REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+    # [0, size(data)] or `length` is outside [0, size(data) - start], which
+    # collapses to: start<0, length<0, or start+length>size(data). This
+    # used to clamp via Python slicing; `extractScriptCode` now supplies a
+    # realistic scriptCode (R67) so the one caller that fed this an empty
+    # placeholder (FungibleToken.merge) no longer hits the abort path
+    # either.
     if func == 'substr':
         hex_str = str(args[0] or '')
         start = int(_to_int(args[1]))
         length = int(_to_int(args[2]))
+        if start < 0 or length < 0 or (start + length) * 2 > len(hex_str):
+            raise ValueError(
+                f'substr: start {start}, length {length} is outside a {len(hex_str) // 2}-byte value'
+            )
         return hex_str[start * 2:(start + length) * 2]
     if func == 'reverseBytes':
         hex_str = str(args[0] or '')
@@ -1356,6 +1375,23 @@ def _eval_call(
         if length < 0 or length * 2 > len(hex_str):
             raise ValueError(f'right: length {length} is outside a {len(hex_str) // 2}-byte value')
         return hex_str[len(hex_str) - length * 2:]
+    # N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+    # RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+    # Unmodelled before this (fell through to `return None`), the same bug
+    # shape F-274 fixed for `left`/`right`.
+    #
+    # `substr` above is deliberately NOT given this abort check: its
+    # default `extractScriptCode` mock is `''`, and FungibleToken's `merge`
+    # method computes `substr(sc, 0, 1)` on that placeholder during
+    # off-chain state derivation -- a POSITIVE overflow this check would
+    # have to reject, breaking state derivation for every token-ft-shaped
+    # contract (escalated, not fixed here).
+    if func == 'split':
+        hex_str = str(args[0] or '')
+        index = int(_to_int(args[1]))
+        if index < 0 or index * 2 > len(hex_str):
+            raise ValueError(f'split: index {index} is outside a {len(hex_str) // 2}-byte value')
+        return hex_str[index * 2:]
 
     # Math builtins
     if func == 'abs':
@@ -1483,6 +1519,15 @@ def _eval_call(
         if intent is not None and 'outpoint' in intent.mock_preimage_bytes:
             return intent.mock_preimage_bytes['outpoint'].hex()
         return '00' * 36
+    # R67: the contract's own real codePart when the caller supplied it
+    # (see `_IntentCtx.mock_preimage_bytes`'s doc comment) -- contract.py's
+    # `prepare_call` always supplies it now. Falls back to the historical
+    # empty dummy for a bare `compute_new_state` call with no intent
+    # (e.g. a hand-built ANF probe in a test).
+    if func == 'extractScriptCode':
+        if intent is not None and 'scriptCode' in intent.mock_preimage_bytes:
+            return intent.mock_preimage_bytes['scriptCode'].hex()
+        return ''
 
     return None
 

@@ -249,6 +249,25 @@ export function patchCodePartLenSlots(
   return out;
 }
 
+/**
+ * R67: BIP-143's `scriptCode` preimage field is a Bitcoin CompactSize-prefixed
+ * script (same encoding as a transaction's `scriptSig`/`scriptPubKey` length),
+ * which is exactly what `extractScriptCode` extracts on-chain
+ * (`05-stack-lower.ts`'s `preimage[104 .. len-52]` spans the varint AND the
+ * script bytes together — there is no separate trim step). Used to build the
+ * REAL off-chain `scriptCode` mock passed to the ANF interpreter, below.
+ */
+function compactSizeHex(byteLen: number): string {
+  const le = (n: number, width: number): string => {
+    let out = '';
+    for (let i = 0; i < width; i++) out += ((n >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+    return out;
+  };
+  if (byteLen < 0xfd) return byteLen.toString(16).padStart(2, '0');
+  if (byteLen <= 0xffff) return 'fd' + le(byteLen, 2);
+  return 'fe' + le(byteLen, 4);
+}
+
 function decodeExactCodePartLenPins(scriptHex: string): number[] {
   const values: number[] = [];
   for (let i = 0; i + 18 <= scriptHex.length; i += 2) {
@@ -1399,10 +1418,22 @@ export class RunarContract {
         const interpArgs = methodNeedsNewAmount
           ? { ...namedArgs, _newAmount: BigInt(options?.satoshis ?? this.currentUtxo!.satoshis) }
           : namedArgs;
+        // R67: give extractScriptCode(txPreimage) the contract's OWN real
+        // codePart (post-OP_CODESEPARATOR, CompactSize-prefixed exactly as
+        // the BIP-143 preimage carries it) instead of the historical empty
+        // dummy, so a method like FungibleToken.merge that inspects its own
+        // scriptCode during off-chain state derivation sees realistic bytes
+        // rather than aborting substr on an empty value.
+        // getSubscriptForSigning is the SAME call every other signing path
+        // uses to trim the codePart to the post-separator subscript.
+        const scriptCodeHex = this.getSubscriptForSigning(this.getCodePartHex(), methodIndex);
         const { state: computed, dataOutputs: anfDataOutputs, outputs: anfOutputs } = computeNewStateAndDataOutputs(
           this.artifact.anf, methodName, flatState, interpArgs,
           flatCtorArgs,
-          this.currentUtxo ? { inputAmount: BigInt(this.currentUtxo.satoshis) } : undefined,
+          {
+            ...(this.currentUtxo ? { inputAmount: BigInt(this.currentUtxo.satoshis) } : {}),
+            scriptCode: compactSizeHex(scriptCodeHex.length / 2) + scriptCodeHex,
+          },
         );
         autoComputedState = computed;
         autoFlatState = flatState;

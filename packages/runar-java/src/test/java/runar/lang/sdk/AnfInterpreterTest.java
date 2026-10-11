@@ -357,32 +357,37 @@ class AnfInterpreterTest {
     }
 
     /**
-     * W8 merge: extractScriptCode is empty in the SDK mock, so
-     * {@code substr(sc, 0, len(sc)-49)} has length -49. Java's
-     * {@code String.substring} throws {@code StringIndexOutOfBoundsException}
-     * on a negative end ({@code begin 0, end -98, length 0}); Bitcoin Script
-     * and the TS interpreter's {@code String.slice} yield empty instead.
-     * Pin matching {@code TestAnfEvalCall_SubstrNegativeLength_NoPanic} in Go.
+     * R67: these two used to pin the W8 merge walk's historical clamp --
+     * extractScriptCode was empty in the SDK mock, so
+     * {@code substr(sc, 0, len(sc)-49)} had a negative length, and the OLD
+     * substr clamped that to {@code ""} instead of aborting. That was
+     * ITSELF the bug (N-171): OP_SPLIT aborts on a negative or
+     * past-the-end position, it does not clamp. {@code extractScriptCode}
+     * now returns the contract's own REAL codePart
+     * ({@code RunarContract}'s call path), so {@code merge}'s own
+     * scriptCode reads no longer go negative in practice -- but
+     * {@code substr(data, start, length)} with a literal negative
+     * start/length, as pinned directly here, must still abort on its own
+     * terms regardless of where the data came from. Mirrors
+     * {@code TestAnfEvalCall_SubstrNegativeLength_Panics} in Go.
      */
     @Test
-    void substrNegativeLengthYieldsEmptyNotBoundsError() {
-        Object got = AnfInterpreter.evalCall(
+    void substrNegativeLengthThrowsNotEmpty() {
+        assertThrows(ArithmeticException.class, () -> AnfInterpreter.evalCall(
             "substr",
             List.of("", BigInteger.ZERO, BigInteger.valueOf(-49)),
             null,
             null
-        );
-        assertEquals("", got);
+        ));
     }
 
     @Test
-    void substrNegativeStartYieldsEmptyNotBoundsError() {
-        Object got = AnfInterpreter.evalCall(
+    void substrNegativeStartThrowsNotEmpty() {
+        assertThrows(ArithmeticException.class, () -> AnfInterpreter.evalCall(
             "substr",
             List.of("aabb", BigInteger.valueOf(-1), BigInteger.ONE),
             null,
             null
-        );
-        assertEquals("", got);
+        ));
     }
 }

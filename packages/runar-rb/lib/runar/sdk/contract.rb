@@ -519,11 +519,29 @@ module Runar
                 (opts.satoshis && opts.satoshis.positive? ? opts.satoshis : @current_utxo.satoshis).to_i
             end
           end
-          computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
-            ANFInterpreter.compute_new_state_and_data_outputs(
-              @artifact.anf, method_name, flat_state, interp_args,
-              constructor_args: @constructor_args
-            )
+          # R67: extractScriptCode(txPreimage) gets the contract's OWN real
+          # codePart (post-OP_CODESEPARATOR, CompactSize-prefixed exactly as
+          # the BIP-143 preimage carries it) instead of the historical empty
+          # dummy, so a method like FungibleToken#merge that inspects its
+          # own scriptCode during off-chain state derivation sees realistic
+          # bytes rather than aborting substr on an empty value.
+          # get_code_sep_index is the SAME call every other signing path
+          # uses to trim the codePart to the post-separator subscript.
+          code_part_hex = get_code_part_hex
+          code_sep_idx = get_code_sep_index(find_method_index(method_name))
+          script_code_body = code_sep_idx >= 0 ? code_part_hex[(code_sep_idx + 1) * 2..] : code_part_hex
+          Thread.current[:runar_mock_preimage_bytes] = {
+            'scriptCode' => compact_size_hex(script_code_body.length / 2) + script_code_body
+          }
+          begin
+            computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
+              ANFInterpreter.compute_new_state_and_data_outputs(
+                @artifact.anf, method_name, flat_state, interp_args,
+                constructor_args: @constructor_args
+              )
+          ensure
+            Thread.current[:runar_mock_preimage_bytes] = nil
+          end
           if opts.new_state.nil?
             opts = opts.dup
             # ...and the post-state comes back under those same synthetic names.
@@ -2019,6 +2037,20 @@ module Runar
       # ---------------------------------------------------------------------------
       # Code separator helpers
       # ---------------------------------------------------------------------------
+
+      # R67: BIP-143's +scriptCode+ preimage field is a Bitcoin
+      # CompactSize-prefixed script (same encoding as a transaction's
+      # +scriptSig+/+scriptPubKey+ length), which is exactly what
+      # +extractScriptCode+ extracts on-chain (+05-stack-lower.ts+'s
+      # <tt>preimage[104 .. len-52]</tt> spans the varint AND the script
+      # bytes together -- there is no separate trim step). Used to build
+      # the REAL off-chain +scriptCode+ mock passed to the ANF interpreter.
+      def compact_size_hex(byte_len)
+        return format('%02x', byte_len) if byte_len < 0xfd
+        return format('fd%02x%02x', byte_len & 0xff, (byte_len >> 8) & 0xff) if byte_len <= 0xffff
+
+        format('fe%02x%02x%02x%02x', byte_len & 0xff, (byte_len >> 8) & 0xff, (byte_len >> 16) & 0xff, (byte_len >> 24) & 0xff)
+      end
 
       # Get the code script hex (locking script without state) for use as _codePart.
       #

@@ -982,11 +982,23 @@ module Runar
         when 'cat'
           (args[0] || '').to_s + (args[1] || '').to_s
 
+        # R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+        # OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+        # REMAINDER `size(data) - start`. It ABORTS whenever `start` is
+        # outside [0, size(data)] or `length` is outside
+        # [0, size(data) - start], which collapses to: start<0, length<0,
+        # or start+length>size(data). This used to clamp via Ruby's
+        # `String#[]`; `extractScriptCode` now supplies a realistic
+        # scriptCode (R67) so the one caller that fed this an empty
+        # placeholder (FungibleToken#merge) no longer hits the abort path
+        # either.
         when 'substr'
           hex_str = (args[0] || '').to_s
           start   = to_int(args[1]).to_i
           length  = to_int(args[2]).to_i
-          hex_str[start * 2, length * 2] || ''
+          raise "substr: start #{start}, length #{length} is outside a #{hex_str.length / 2}-byte value" if start.negative? || length.negative? || (start + length) * 2 > hex_str.length
+
+          hex_str[start * 2, length * 2]
 
         when 'reverseBytes'
           hex_str = (args[0] || '').to_s
@@ -1015,6 +1027,17 @@ module Runar
 
           n = length * 2
           n.zero? ? '' : hex_str[-n..]
+
+        # N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+        # RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+        # Unmodelled before this (fell through to `nil`), the same bug shape
+        # F-274 fixed for `left`/`right`.
+        when 'split'
+          hex_str = (args[0] || '').to_s
+          index   = to_int(args[1]).to_i
+          raise "split: index #{index} is outside a #{hex_str.length / 2}-byte value" if index.negative? || index * 2 > hex_str.length
+
+          hex_str[(index * 2)..]
 
         # Math built-ins.
         when 'abs'
@@ -1144,6 +1167,15 @@ module Runar
           # type here too -- otherwise the pin assert spuriously fails.
           mock_pre = Thread.current[:runar_mock_preimage]
           to_int((mock_pre && (mock_pre['sigHashType'] || mock_pre[:sigHashType])) || 0x41)
+
+        # R67: the contract's own real codePart when the caller supplied it
+        # via the mock-preimage channel -- contract.rb's `call`/`prepare_call`
+        # always supplies it now. Falls back to the historical empty dummy
+        # for a bare `compute_new_state` call with no scriptCode set (e.g. a
+        # hand-built ANF probe in a test).
+        when 'extractScriptCode'
+          mock_bytes = Thread.current[:runar_mock_preimage_bytes]
+          (mock_bytes && mock_bytes['scriptCode']) || ''
 
         else
           nil

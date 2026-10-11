@@ -141,9 +141,24 @@ export function cat(a: ByteString, b: ByteString): ByteString {
   return (a + b) as ByteString;
 }
 
+/**
+ * N-171 (sibling of F-274): `substr` compiles to `<data> <start> OP_SPLIT
+ * OP_NIP <length> OP_SPLIT OP_DROP` (lowerSubstr, 05-stack-lower.ts) — TWO
+ * chained OP_SPLITs, the second against the REMAINDER `size(data) - start`.
+ * It ABORTS whenever `start` is outside `[0, size(data)]` or `length` is
+ * outside `[0, size(data) - start]`, which collapses to: `start < 0`,
+ * `length < 0`, or `start + length > size(data)`. `.slice()` clamps instead
+ * of aborting, so the bound is checked explicitly here.
+ */
 export function substr(data: ByteString, start: bigint, length: bigint): ByteString {
   const s = Number(start) * 2;
   const l = Number(length) * 2;
+  if (start < 0n || length < 0n || s + l > data.length) {
+    throw new Error(
+      `substr: start ${start}, length ${length} is outside a ${data.length / 2}-byte value — ` +
+        'OP_SPLIT aborts on a position below zero or past the end of the element, it does not clamp',
+    );
+  }
   return data.slice(s, s + l) as ByteString;
 }
 
@@ -174,9 +189,21 @@ export function right(data: ByteString, length: bigint): ByteString {
  * Rúnar builtin binds (`OP_SPLIT OP_NIP`). `left(data, index)` is the other
  * side. This used to return the `[left, right]` pair; nothing could name the
  * pair from contract source, and the signature disagreed with the frontend.
+ *
+ * N-171 (sibling of F-274): `split` is a bare `OP_SPLIT`, which ABORTS
+ * whenever `index` is outside `[0, size(data)]`. `.slice()` clamps a
+ * negative or past-the-end index instead of aborting, so the bound is
+ * checked explicitly here.
  */
 export function split(data: ByteString, index: bigint): ByteString {
-  return data.slice(Number(index) * 2) as ByteString;
+  const n = Number(index) * 2;
+  if (index < 0n || n > data.length) {
+    throw new Error(
+      `split: index ${index} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on a ` +
+        'position below zero or past the end of the element, it does not clamp',
+    );
+  }
+  return data.slice(n) as ByteString;
 }
 
 export function reverseBytes(data: ByteString): ByteString {

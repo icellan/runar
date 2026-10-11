@@ -142,15 +142,22 @@ export function computeNewState(
  * `extractAmount(txPreimage)` returns on-chain. The continuation's own
  * satoshis (`continuationAmount()`) are passed as the `_newAmount` arg. When
  * `inputAmount` is omitted, `extractAmount` keeps its historical dummy answer.
+ *
+ * R67: `scriptCode` is the CompactSize-prefixed bytes `extractScriptCode(txPreimage)`
+ * returns on-chain — the contract's own codePart, exactly as `contract.ts`
+ * computes it via `getSubscriptForSigning(getCodePartHex(), methodIndex)`.
+ * When omitted, `extractScriptCode` keeps its historical empty-string dummy.
  */
 export interface ContinuationContext {
   inputAmount?: bigint;
+  scriptCode?: string;
 }
 
-/** Stand-in for `txPreimage` when the caller supplied the input amount. */
+/** Stand-in for `txPreimage` when the caller supplied the input amount and/or scriptCode. */
 interface MockPreimageValue {
   readonly __runarMockPreimage: true;
-  readonly amount: bigint;
+  readonly amount?: bigint;
+  readonly scriptCode?: string;
 }
 
 function isMockPreimage(v: unknown): v is MockPreimageValue {
@@ -412,8 +419,15 @@ function runMethod(
       env[param.name] = args[param.name];
     }
   }
-  if (continuation?.inputAmount !== undefined && method.params.some((p) => p.name === 'txPreimage')) {
-    const mock: MockPreimageValue = { __runarMockPreimage: true, amount: continuation.inputAmount };
+  if (
+    (continuation?.inputAmount !== undefined || continuation?.scriptCode !== undefined)
+    && method.params.some((p) => p.name === 'txPreimage')
+  ) {
+    const mock: MockPreimageValue = {
+      __runarMockPreimage: true,
+      amount: continuation?.inputAmount,
+      scriptCode: continuation?.scriptCode,
+    };
     env['txPreimage'] = mock;
   }
 
@@ -1079,11 +1093,29 @@ function evalCall(
     case 'cat': {
       return String(args[0] ?? '') + String(args[1] ?? '');
     }
+    // R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+    // OP_SPLIT OP_DROP` — TWO chained OP_SPLITs, the second against the
+    // REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+    // [0, size(data)] or `length` is outside [0, size(data) - start], which
+    // collapses to: start<0, length<0, or start+length>size(data) (see the
+    // native fix for the full derivation and the oracle vectors in
+    // n171-split-substr-builtins-onchain.json). This used to clamp via
+    // `.slice()`; `extractScriptCode` now supplies a realistic scriptCode
+    // (R67) so the one caller that fed this an empty placeholder
+    // (FungibleToken.merge) no longer hits the abort path either.
     case 'substr': {
       const hex = String(args[0] ?? '');
-      const start = Number(toBigInt(args[1]));
-      const len = Number(toBigInt(args[2]));
-      return hex.slice(start * 2, (start + len) * 2);
+      const start = toBigInt(args[1]);
+      const len = toBigInt(args[2]);
+      const s = Number(start) * 2;
+      const l = Number(len) * 2;
+      if (start < 0n || len < 0n || s + l > hex.length) {
+        throw new Error(
+          `substr: start ${start}, length ${len} is outside a ${hex.length / 2}-byte value — ` +
+            'OP_SPLIT aborts on a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return hex.slice(s, s + l);
     }
     case 'reverseBytes': {
       const hex = String(args[0] ?? '');
@@ -1124,6 +1156,31 @@ function evalCall(
         );
       }
       return data.slice(data.length - n);
+    }
+    // N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+    // RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+    // Unmodelled before this (fell through to the `default` refusal below),
+    // the same bug shape F-274 fixed for `left`/`right`.
+    //
+    // `substr` above is deliberately NOT given this abort check: its
+    // default `extractScriptCode` mock is `''`, and `FungibleToken.merge`
+    // computes `substr(sc, 0, 1)` on that placeholder during off-chain
+    // state derivation — a POSITIVE overflow this check would have to
+    // reject, breaking `RunarContract.call('merge')` for every
+    // token-ft-shaped contract (confirmed empirically:
+    // w8-token-ft-solo-merge-known-broken.test.ts fails 2/49 with the
+    // NEW-006 fail-closed error). Escalated as a follow-up, not fixed here.
+    case 'split': {
+      const data = String(args[0] ?? '');
+      const index = toBigInt(args[1]);
+      const n = Number(index) * 2;
+      if (index < 0n || n > data.length) {
+        throw new Error(
+          `split: index ${index} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on ` +
+            'a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return data.slice(n);
     }
 
     // Math builtins
@@ -1236,7 +1293,7 @@ function evalCall(
     // Preimage intrinsics — return dummy values in simulation
     case 'extractAmount':
       // F-024 (R14): the spent UTXO's satoshis when the caller supplied them.
-      if (isMockPreimage(args[0])) return args[0].amount;
+      if (isMockPreimage(args[0]) && args[0].amount !== undefined) return args[0].amount;
       return '00'.repeat(32);
     case 'extractOutputHash':
       return '00'.repeat(32);
@@ -1268,11 +1325,13 @@ function evalCall(
       return '00'.repeat(32);
     case 'extractOutpoint':
       return '00'.repeat(36);
-    // Dummy empty scriptCode. The real bytes are a property of a transaction
-    // that does not exist yet during off-chain state derivation; lenient mode
-    // skips the on-chain asserts that bind them. Without this arm `prepareCall`
-    // fails closed on every `merge` that reads extractScriptCode (NEW-006).
+    // R67: the contract's own real codePart when the caller supplied it
+    // (see `ContinuationContext.scriptCode`'s doc comment) — `contract.ts`
+    // always supplies it from `prepareCall` now. Falls back to the
+    // historical empty dummy for a bare `computeNewState` call with no
+    // `continuation` (e.g. a hand-built ANF probe in a test).
     case 'extractScriptCode':
+      if (isMockPreimage(args[0]) && args[0].scriptCode !== undefined) return args[0].scriptCode;
       return '';
 
     // A-3, KNOWN REMAINING GAP: `extractSigHashType` IS a real runar-lang
@@ -1318,9 +1377,9 @@ function evalCall(
       // made the `try/catch` guard in `contract.ts` structurally unable to
       // fire for the 76 of runar-lang's 105 builtins this interpreter does
       // not model — every EC op, every NIST P-256/P-384 op, all six SLH-DSA
-      // verifies, Rabin, `split` (F-274 modelled `left`/`right`, its two
-      // siblings, above), `sha256Compress`, `merkleRootSha256`. `contract.ts`
-      // then spreads the result over the
+      // verifies, Rabin, `sha256Compress`, `merkleRootSha256` (F-274 modelled
+      // `left`/`right`, above; N-171 modelled `split` the same way, above).
+      // `contract.ts` then spreads the result over the
       // real state and the `undefined` wins, so a `boolean` state field fed
       // by a signature verifier silently became false and the eventual error
       // pointed at the covenant instead of at this gap. Naming the builtin

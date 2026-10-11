@@ -641,10 +641,26 @@ public final class MockCrypto {
         return new ByteString(out);
     }
 
+    /**
+     * N-171 (sibling of F-274): {@code substr} compiles to {@code <data>
+     * <start> OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP} -- TWO chained
+     * OP_SPLITs, the second against the REMAINDER {@code size(data) -
+     * start}. It ABORTS whenever {@code start} is outside
+     * {@code [0, size(data)]} or {@code length} is outside
+     * {@code [0, size(data) - start]}, which collapses to: start &lt; 0,
+     * length &lt; 0, or start + length &gt; size(data). {@code
+     * Arrays.copyOfRange} does not enforce the upper bound: a {@code to}
+     * past the array's end is silently zero-padded instead of thrown (the
+     * same failure mode {@code left} had before F-274), so the bound is
+     * checked explicitly here.
+     */
     public static ByteString substr(ByteString bs, BigInteger start, BigInteger length) {
         int s = start.intValueExact();
         int l = length.intValueExact();
         byte[] all = bs.toByteArray();
+        if (s < 0 || l < 0 || s + l > all.length) {
+            throw new ArithmeticException("substr: start " + s + ", length " + l + " is outside a " + all.length + "-byte value");
+        }
         return new ByteString(Arrays.copyOfRange(all, s, s + l));
     }
 

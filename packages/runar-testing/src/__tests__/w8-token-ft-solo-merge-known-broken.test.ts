@@ -281,23 +281,44 @@ describe('W8 / SoloMerge: token-ft merge authenticates a companion parent', () =
     replaceAddressUtxos(provider, address, [parent.utxo]);
     contract.connect(provider, signer);
 
-    const prepared = await contract.prepareCall(
-      'merge',
-      [null, PHANTOM_BALANCE, null, parent.parentHex, 1n],
-      {
-        dryRun: true,
-        outputs: [
-          {
-            satoshis: 1,
-            state: {
-              owner: alice.pubKey,
-              balance: REAL_BALANCE,
-              mergeBalance: PHANTOM_BALANCE,
+    // R67: `extractScriptCode` now supplies the contract's REAL codePart
+    // (previously an empty dummy), so `merge`'s off-chain walk of
+    // `otherParentTx` runs on realistic data too — and a 25-byte P2PKH
+    // script where the walk expects a `0xfd`-prefixed token script can
+    // compute a garbage `scriptLen` that genuinely runs past the buffer.
+    // `substr` is abort-faithful (N-171/R67), so that surfaces as
+    // `prepareCall` throwing instead of silently clamping to a wrong
+    // value and deferring the rejection to `finalizeCall`'s on-chain
+    // dry-run. Either way the call is rejected; a throw here is just an
+    // earlier, equally valid rejection point.
+    let prepared;
+    let prepareError: unknown;
+    try {
+      prepared = await contract.prepareCall(
+        'merge',
+        [null, PHANTOM_BALANCE, null, parent.parentHex, 1n],
+        {
+          dryRun: true,
+          outputs: [
+            {
+              satoshis: 1,
+              state: {
+                owner: alice.pubKey,
+                balance: REAL_BALANCE,
+                mergeBalance: PHANTOM_BALANCE,
+              },
             },
-          },
-        ],
-      },
-    );
+          ],
+        },
+      );
+    } catch (e) {
+      prepareError = e;
+    }
+    if (prepareError !== undefined || !prepared) {
+      // Rejected before a signature was ever built — still a rejection.
+      expect(prepareError, 'prepareCall must throw, not silently return').toBeInstanceOf(Error);
+      return;
+    }
 
     let mIdx = 0;
     if (prepared._parentStateful) {

@@ -275,6 +275,7 @@ test {
     _ = @import("sdk_anf_interpreter_f164_prologue_test.zig");
     _ = @import("sdk_anf_interpreter_n030_math_test.zig");
     _ = @import("sdk_anf_interpreter_f274_test.zig");
+    _ = @import("sdk_anf_interpreter_n171_test.zig");
     _ = @import("sdk_anf_parse_failclosed_test.zig");
     _ = @import("sdk_g1_raw_outputs_test.zig");
     _ = @import("sdk_null_bytestring_arg_test.zig");
@@ -307,6 +308,7 @@ test {
     _ = @import("analyzer_conformance_test.zig");
     _ = @import("runtime_vectors_test.zig");
     _ = @import("builtins_math_onchain_test.zig");
+    _ = @import("builtins_n171_substr_onchain_test.zig");
     _ = @import("leak_detector_probe_test.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");

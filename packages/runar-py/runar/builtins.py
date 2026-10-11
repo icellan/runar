@@ -817,7 +817,20 @@ def cat(a, b) -> bytes:
     return _as_bytes(a) + _as_bytes(b)
 
 def substr(data, start: int, length: int) -> bytes:
-    return _as_bytes(data)[start:start + length]
+    """N-171 (sibling of F-274): `substr` compiles to `<data> <start>
+    OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the
+    second against the REMAINDER `size(data) - start`. It ABORTS whenever
+    `start` is outside [0, size(data)] or `length` is outside
+    [0, size(data) - start], which collapses to: start < 0, length < 0, or
+    start + length > size(data). Python slicing clamps instead of raising,
+    so the bound is checked explicitly here.
+    """
+    b = _as_bytes(data)
+    if start < 0 or length < 0 or start + length > len(b):
+        raise ValueError(
+            f'substr: start {start}, length {length} is outside a {len(b)}-byte value'
+        )
+    return b[start:start + length]
 
 def reverse_bytes(data) -> bytes:
     return _as_bytes(data)[::-1]

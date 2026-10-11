@@ -28,7 +28,7 @@ from runar.sdk.state import (
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
-from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs
+from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs, _IntentCtx
 from runar.sdk.ordinals import (
     Inscription, build_inscription_envelope, parse_inscription_envelope,
 )
@@ -915,9 +915,29 @@ class RunarContract:
                         interp_args['_newAmount'] = int(
                             opts.satoshis if opts is not None and opts.satoshis else self._current_utxo.satoshis
                         )
+                # R67: extractScriptCode(txPreimage) gets the contract's OWN
+                # real codePart (post-OP_CODESEPARATOR, CompactSize-prefixed
+                # exactly as the BIP-143 preimage carries it) instead of the
+                # historical empty dummy, so a method like
+                # FungibleToken.merge that inspects its own scriptCode
+                # during off-chain state derivation sees realistic bytes
+                # rather than aborting substr on an empty value.
+                # _get_code_sep_index is the SAME call every other signing
+                # path uses to trim the codePart to the post-separator
+                # subscript.
+                code_part_hex = self._get_code_part_hex()
+                method_index = self._find_method_index(method_name)
+                code_sep_idx = self._get_code_sep_index(method_index)
+                script_code_body = (
+                    code_part_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else code_part_hex
+                )
+                intent = _IntentCtx()
+                intent.mock_preimage_bytes['scriptCode'] = (
+                    _encode_varint(len(script_code_body) // 2) + bytes.fromhex(script_code_body)
+                )
                 computed, data_outs, _raw_outs = compute_new_state_and_data_outputs(
                     self.artifact.anf, method_name, flat_state, interp_args,
-                    flat_ctor_args, ordered_outputs=ordered,
+                    flat_ctor_args, ordered_outputs=ordered, intent=intent,
                 )
                 anf_ordered_outputs = ordered
             except Exception as err:

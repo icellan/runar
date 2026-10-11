@@ -493,10 +493,24 @@ pub fn hexToBytes(comptime hex_str: []const u8) *const [hex_str.len / 2]u8 {
     };
 }
 
+/// N-171 (sibling of F-274): `substr` compiles to `<data> <start> OP_SPLIT
+/// OP_NIP <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second
+/// against the REMAINDER `size(data) - start`. It ABORTS whenever `start` is
+/// outside `[0, size(data)]` or `length` is outside `[0, size(data) -
+/// start]`, which collapses to: start < 0, length < 0, or start + length >
+/// size(data). The previous `start < 0 or len <= 0` check returned an empty
+/// value for a negative `length` or an out-of-range `start` with `length ==
+/// 0` instead of aborting, and never checked `start + length` against the
+/// data's size at all.
 pub fn substr(bytes: base.ByteString, start: base.Bigint, len: base.Bigint) base.ByteString {
-    if (start < 0 or len <= 0) return &.{};
-    const start_usize = std.math.cast(usize, start) orelse return &.{};
-    const len_usize = std.math.cast(usize, len) orelse return &.{};
+    // CONTRACT-ABORT: OP_SPLIT fails on a position below zero or past the
+    // end of the element; it does not clamp.
+    if (start < 0 or len < 0) @panic("substr: start/length is negative");
+    const start_usize = std.math.cast(usize, start) orelse @panic("substr: start out of range");
+    const len_usize = std.math.cast(usize, len) orelse @panic("substr: length out of range");
+    if (start_usize > bytes.len or len_usize > bytes.len - start_usize) {
+        @panic("substr: start/length is outside the data's size");
+    }
     // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
     return bsvz.script.substr(std.heap.page_allocator, bytes, start_usize, len_usize) catch @panic("OOM");
 }
@@ -2281,12 +2295,22 @@ test "cat and substr preserve current Runar byte-string semantics" {
     defer freeIfOwned(middle);
     try std.testing.expectEqualSlices(u8, "world", middle);
 
-    try std.testing.expectEqualSlices(u8, &.{}, substr("hello", -1, 2));
+    // `substr(data, 0, 0)` is the only in-range case among the three below:
+    // start=0 <= size(data)=5, length=0 <= size(data)-start=5.
     try std.testing.expectEqualSlices(u8, &.{}, substr("hello", 0, 0));
 
-    const past_end = substr("hello", 99, 3);
-    defer freeIfOwned(past_end);
-    try std.testing.expectEqualSlices(u8, &.{}, past_end);
+    // N-171 (sibling of F-274): `substr("hello", -1, 2)` and
+    // `substr("hello", 99, 3)` used to clamp to an empty `ByteString` here
+    // -- this test's name used to call that "current ... semantics" without
+    // qualifying it as the on-chain value. Both now ABORT instead (start < 0
+    // and start > size(data), respectively; see `substr`'s doc comment for
+    // the full bound), matching what the compiled `OP_SPLIT`-based script
+    // does. A Zig panic aborts the whole test binary, so it cannot be
+    // asserted in-process here (same documented limitation as
+    // builtins_math_onchain_test.zig) -- `builtins_n171_substr_onchain_test.zig`
+    // replays every non-abort vector instead, and the abort vectors are
+    // proven on the real engine in
+    // packages/runar-testing/src/__tests__/n171-split-substr-builtins-onchain.test.ts.
 }
 
 test "mock preimage extractors round trip" {

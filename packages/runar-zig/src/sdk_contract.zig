@@ -3051,6 +3051,37 @@ pub const RunarContract = struct {
         try named_args.put("txPreimage", .{ .int = continuation.input_amount });
         try named_args.put("_newAmount", .{ .int = continuation.new_amount });
 
+        // R67: extractScriptCode(txPreimage) gets the contract's OWN real
+        // codePart (post-OP_CODESEPARATOR, CompactSize-prefixed exactly as
+        // the BIP-143 preimage carries it) instead of the historical empty
+        // dummy, so a method like FungibleToken#merge that inspects its own
+        // scriptCode during off-chain state derivation sees realistic bytes
+        // rather than aborting substr on an empty value. getCodeSepIndex is
+        // the SAME call every other signing path uses to trim the codePart
+        // to the post-separator subscript.
+        const code_part_hex = try self.getCodePartHex();
+        defer self.allocator.free(code_part_hex);
+        const public_methods_for_sep = try self.getPublicMethods();
+        defer self.allocator.free(public_methods_for_sep);
+        var method_index_for_sep: usize = 0;
+        for (public_methods_for_sep, 0..) |m, i| {
+            if (std.mem.eql(u8, m.name, method_name)) {
+                method_index_for_sep = i;
+                break;
+            }
+        }
+        const code_sep_idx = try self.getCodeSepIndex(method_index_for_sep);
+        const script_code_body = if (code_sep_idx) |idx|
+            code_part_hex[@as(usize, @intCast(idx + 1)) * 2 ..]
+        else
+            code_part_hex;
+        const script_code_hex = try std.fmt.allocPrint(work, "{s}{s}", .{
+            try writeVarIntHex(work, script_code_body.len / 2), script_code_body,
+        });
+        var mock_env = anf_interp.MockEnv.init(work);
+        defer mock_env.deinit();
+        mock_env.script_code_hex = script_code_hex;
+
         // Convert constructor_args to ANFValue slice for the interpreter
         var ctor_anf_args = try work.alloc(anf_interp.ANFValue, self.constructor_args.len);
         for (self.constructor_args, 0..) |arg, i| {
@@ -3078,9 +3109,17 @@ pub const RunarContract = struct {
         // interpreter is the only thing that knows the post-state and those
         // payloads, so there is nothing to fall back TO. Matches the TS, Go and
         // Rust tiers.
-        const result = try anf_interp.computeNewStateAndDataOutputs(
-            self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
-        );
+        const result = anf_interp.computeNewStateWithMockEnv(
+            self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args, &mock_env,
+        ) catch |err| switch (err) {
+            // Lenient mode (strict=false, passed internally by
+            // computeNewStateWithMockEnv) never reports AssertionFailure or
+            // MissingWitness -- mirrors computeNewStateAndDataOutputs's own
+            // coercion.
+            error.AssertionFailure => unreachable,
+            error.MissingWitness => unreachable,
+            else => |e| return e,
+        };
         var state_map = result.state;
         defer {
             var it = state_map.iterator();
@@ -3198,10 +3237,39 @@ pub const RunarContract = struct {
             collectBorrowedPtrs(&borrowed_ptrs, self.allocator, sv);
         }
 
+        // R67: extractScriptCode(txPreimage) gets the contract's OWN real
+        // codePart -- see the matching note in autoComputeState.
+        const code_part_hex = try self.getCodePartHex();
+        defer self.allocator.free(code_part_hex);
+        const public_methods_for_sep = try self.getPublicMethods();
+        defer self.allocator.free(public_methods_for_sep);
+        var method_index_for_sep: usize = 0;
+        for (public_methods_for_sep, 0..) |m, i| {
+            if (std.mem.eql(u8, m.name, method_name)) {
+                method_index_for_sep = i;
+                break;
+            }
+        }
+        const code_sep_idx = try self.getCodeSepIndex(method_index_for_sep);
+        const script_code_body = if (code_sep_idx) |idx|
+            code_part_hex[@as(usize, @intCast(idx + 1)) * 2 ..]
+        else
+            code_part_hex;
+        const script_code_hex = try std.fmt.allocPrint(work, "{s}{s}", .{
+            try writeVarIntHex(work, script_code_body.len / 2), script_code_body,
+        });
+        var mock_env = anf_interp.MockEnv.init(work);
+        defer mock_env.deinit();
+        mock_env.script_code_hex = script_code_hex;
+
         // FAIL CLOSED (NEW-006) — see the matching note in autoComputeState.
-        const result = try anf_interp.computeNewStateAndDataOutputs(
-            self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
-        );
+        const result = anf_interp.computeNewStateWithMockEnv(
+            self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args, &mock_env,
+        ) catch |err| switch (err) {
+            error.AssertionFailure => unreachable,
+            error.MissingWitness => unreachable,
+            else => |e| return e,
+        };
         var state_map = result.state;
         {
             var it = state_map.iterator();

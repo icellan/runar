@@ -670,7 +670,17 @@ module Runar
 
     # Extract a substring of bytes from a hex string.
     # start and length are in bytes, not hex characters.
+    # N-171 (sibling of F-274): `substr` compiles to `<data> <start> OP_SPLIT
+    # OP_NIP <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second
+    # against the REMAINDER `size(data) - start`. It ABORTS whenever `start`
+    # is outside [0, size(data)] or `length` is outside
+    # [0, size(data) - start], which collapses to: start < 0, length < 0, or
+    # start + length > size(data). `data[start*2, length*2]` on a native Ruby
+    # String never aborts -- it clamps a too-large range and returns `nil`
+    # for a negative `start` or `length` -- so the bound is checked here.
     def substr(data, start, length)
+      raise ArgumentError, "substr: start #{start}, length #{length} is outside a #{data.length / 2}-byte value" if start.negative? || length.negative? || (start + length) * 2 > data.length
+
       data[start * 2, length * 2]
     end
 

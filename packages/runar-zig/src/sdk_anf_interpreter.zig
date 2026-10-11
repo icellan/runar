@@ -289,6 +289,14 @@ pub const MockEnv = struct {
     hash_prevouts_hex: ?[]const u8 = null,
     hash_sequence_hex: ?[]const u8 = null,
 
+    /// R67: the contract's own real codePart (post-OP_CODESEPARATOR,
+    /// CompactSize-prefixed exactly as the BIP-143 preimage carries it),
+    /// surfaced by `extractScriptCode`. Hex-encoded; null falls back to the
+    /// historical empty-string dummy (not the 32-zero-byte stub the other
+    /// preimage byte fields use — `extractScriptCode`'s dummy has always
+    /// been `""`, matching every other tier).
+    script_code_hex: ?[]const u8 = null,
+
     /// Caller-supplied allocator used to allocate the witness-name keys
     /// (the bytes themselves are caller-owned). Same allocator must be
     /// used for both `init` and `deinit`.
@@ -1553,12 +1561,35 @@ fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *cons
 /// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
 /// lowerRight). A negative or past-the-end `length` must abort, never return
 /// a clamped value.
+///
+/// N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the RIGHT
+/// half -- same bound, `index` in place of `length`.
+///
+/// R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+/// OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+/// REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+/// [0, size(data)] or `length` is outside [0, size(data) - start], which
+/// collapses to: start<0, length<0, or start+length>size(data). `substr`
+/// used to be excluded here because its one caller via `extractScriptCode`
+/// (`FungibleToken#merge`) got an empty dummy scriptCode, turning a
+/// realistic `substr(sc, ...)` into a POSITIVE overflow this check would
+/// have to reject. `extractScriptCode` now returns the contract's own REAL
+/// codePart (`sdk_contract.zig`'s call path, via `MockEnv.script_code_hex`),
+/// so `substr` can be fully abort-faithful too.
 fn splitBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
     const eql = std.mem.eql;
-    if (!eql(u8, func, "left") and !eql(u8, func, "right")) return false;
-    const hex = asHex(getArg(arg_names, 0, env));
-    const length = toInt(getArg(arg_names, 1, env));
-    return length < 0 or length * 2 > @as(i64, @intCast(hex.len));
+    if (eql(u8, func, "left") or eql(u8, func, "right") or eql(u8, func, "split")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const length = toInt(getArg(arg_names, 1, env));
+        return length < 0 or length * 2 > @as(i64, @intCast(hex.len));
+    }
+    if (eql(u8, func, "substr")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const start = toInt(getArg(arg_names, 1, env));
+        const length = toInt(getArg(arg_names, 2, env));
+        return start < 0 or length < 0 or (start + length) * 2 > @as(i64, @intCast(hex.len));
+    }
+    return false;
 }
 
 fn evalCall(
@@ -1731,14 +1762,12 @@ fn evalCall(
         const hex = asHex(getArg(arg_names, 0, env));
         return .{ .int = @intCast(hex.len / 2) };
     }
+    // R67: bounds already verified by `splitBuiltinAborts` above.
     if (std.mem.eql(u8, func, "substr")) {
         const hex = asHex(getArg(arg_names, 0, env));
-        const start: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 2, env))));
-        const hex_start = start * 2;
-        const hex_end = @min((start + length) * 2, hex.len);
-        if (hex_start >= hex.len) return .{ .bytes = "" };
-        const result = allocator.dupe(u8, hex[hex_start..hex_end]) catch return .{ .bytes = "" };
+        const start: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const length: usize = @intCast(toInt(getArg(arg_names, 2, env)));
+        const result = allocator.dupe(u8, hex[start * 2 .. start * 2 + length * 2]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "split")) {
@@ -1752,10 +1781,11 @@ fn evalCall(
         // surface can name one, so an artifact run here and then spent on-chain
         // took two different branches for every contract that splits.
         // `sdk_anf_interpreter_split_test.zig` is the guard.
+        //
+        // N-171: bounds already verified by `splitBuiltinAborts` above.
         const hex = asHex(getArg(arg_names, 0, env));
-        const pos: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const hex_pos = @min(pos * 2, hex.len);
-        const result = allocator.dupe(u8, hex[hex_pos..]) catch return .{ .bytes = "" };
+        const pos: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const result = allocator.dupe(u8, hex[pos * 2 ..]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "left")) {
@@ -1867,6 +1897,17 @@ fn evalCall(
             if (me.hash_sequence_hex) |h| return .{ .bytes = h };
         }
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
+    }
+    // R67: the contract's own real codePart when the caller supplied it via
+    // `MockEnv.script_code_hex` -- sdk_contract.zig's call path always
+    // supplies it now. Falls back to the historical empty dummy for a bare
+    // `computeNewStateAndDataOutputs` call with no MockEnv (e.g. a
+    // hand-built ANF probe in a test).
+    if (std.mem.eql(u8, func, "extractScriptCode")) {
+        if (mock_env) |me| {
+            if (me.script_code_hex) |h| return .{ .bytes = h };
+        }
+        return .{ .bytes = "" };
     }
 
     return anf_none;

@@ -95,6 +95,28 @@ fn normalize_witness_hex(s: &str) -> Result<String, String> {
 /// deploy-time pin (`codePartLenSlots`) holds only the compile-time lower
 /// bound in the template and is patched to the real code-part length -- the
 /// inscription envelope included -- in the built script.
+/// R67: BIP-143's `scriptCode` preimage field is a Bitcoin CompactSize-prefixed
+/// script (same encoding as a transaction's `scriptSig`/`scriptPubKey`
+/// length), which is exactly what `extractScriptCode` extracts on-chain
+/// (`05-stack-lower.ts`'s `preimage[104 .. len-52]` spans the varint AND the
+/// script bytes together -- there is no separate trim step). Used to build
+/// the REAL off-chain `scriptCode` mock passed to the ANF interpreter.
+fn compact_size_hex(byte_len: usize) -> String {
+    if byte_len < 0xfd {
+        format!("{:02x}", byte_len)
+    } else if byte_len <= 0xffff {
+        format!("fd{:02x}{:02x}", byte_len & 0xff, (byte_len >> 8) & 0xff)
+    } else {
+        format!(
+            "fe{:02x}{:02x}{:02x}{:02x}",
+            byte_len & 0xff,
+            (byte_len >> 8) & 0xff,
+            (byte_len >> 16) & 0xff,
+            (byte_len >> 24) & 0xff,
+        )
+    }
+}
+
 fn decode_exact_code_part_len_pins(script_hex: &str) -> Vec<usize> {
     let mut values = Vec::new();
     let bytes = script_hex.as_bytes();
@@ -1049,10 +1071,33 @@ impl RunarContract {
                         interp_args.insert("_newAmount".to_string(), SdkValue::Int(new_sats));
                     }
                 }
+                // R67: extractScriptCode(txPreimage) gets the contract's OWN
+                // real codePart (post-OP_CODESEPARATOR, CompactSize-prefixed
+                // exactly as the BIP-143 preimage carries it) instead of the
+                // historical empty dummy, so a method like
+                // FungibleToken::merge that inspects its own scriptCode
+                // during off-chain state derivation sees realistic bytes
+                // rather than aborting substr on an empty value.
+                // get_code_sep_index is the SAME call every other signing
+                // path uses to trim the codePart to the post-separator
+                // subscript.
+                let code_part_hex = self.get_code_part_hex();
+                let method_index = self.find_method_index(method_name);
+                let code_sep_idx = self.get_code_sep_index(method_index);
+                let script_code_body = if code_sep_idx >= 0 {
+                    &code_part_hex[(code_sep_idx as usize + 1) * 2..]
+                } else {
+                    code_part_hex.as_str()
+                };
+                let script_code_hex = format!(
+                    "{}{}",
+                    compact_size_hex(script_code_body.len() / 2),
+                    script_code_body,
+                );
                 let (state, data_outs, _raw_outs, ordered_outs) =
-                    anf_interpreter::compute_new_state_and_data_outputs(
+                    anf_interpreter::compute_new_state_and_data_outputs_with_script_code(
                         anf, method_name, &flat_state, &interp_args,
-                        &self.constructor_args,
+                        &self.constructor_args, Some(&script_code_hex),
                     )
                     .map_err(|e| {
                         format!(

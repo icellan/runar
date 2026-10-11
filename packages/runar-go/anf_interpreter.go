@@ -515,8 +515,15 @@ func ComputeNewStateAndDataOutputs(
 // args["_newAmount"] (the continuation's satoshis, which `continuationAmount()`
 // reads), so a default single-output continuation's post-state is derived with
 // the same values the script uses.
+//
+// R67: ScriptCode is the contract's own REAL codePart, CompactSize-prefixed
+// exactly as the BIP-143 preimage carries it (see sdk_contract.go's
+// PrepareCall, which builds it from getCodePartHex() trimmed at the
+// OP_CODESEPARATOR offset). When set, extractAmount/extractScriptCode return
+// the real value instead of the historical dummy.
 type MockPreimageAmount struct {
-	Amount *big.Int
+	Amount     *big.Int
+	ScriptCode string
 }
 
 // continuationArg reports whether an implicit param is one the caller may bind
@@ -1280,28 +1287,23 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 	case "cat":
 		return anfToString(args[0]) + anfToString(args[1])
 
+	// R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+	// OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+	// REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+	// [0, size(data)] or `length` is outside [0, size(data) - start], which
+	// collapses to: start<0, length<0, or start+length>size(data). This
+	// used to clamp; `extractScriptCode` now supplies a realistic scriptCode
+	// (R67) so the one caller that fed this an empty placeholder
+	// (FungibleToken.Merge) no longer hits the abort path either.
 	case "substr":
 		h := anfToString(args[0])
 		start := int(anfToBigInt(args[1]).Int64())
 		length := int(anfToBigInt(args[2]).Int64())
-		if start < 0 || length <= 0 {
-			return ""
+		if start < 0 || length < 0 || start*2+length*2 > len(h) {
+			panic(&ScriptOpcodeError{Opcode: "substr", Message: fmt.Sprintf(
+				"start %d, length %d is outside a %d-byte value", start, length, len(h)/2)})
 		}
-		lo := start * 2
-		hi := (start + length) * 2
-		if lo > len(h) {
-			lo = len(h)
-		}
-		if hi > len(h) {
-			hi = len(h)
-		}
-		if lo < 0 {
-			lo = 0
-		}
-		if hi < lo {
-			return ""
-		}
-		return h[lo:hi]
+		return h[start*2 : start*2+length*2]
 
 	case "reverseBytes":
 		h := anfToString(args[0])
@@ -1341,6 +1343,26 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 				"length %d is outside a %d-byte value", length, len(h)/2)})
 		}
 		return h[int64(len(h))-length*2:]
+
+	// N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+	// RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+	// Unmodelled before this (fell through to `return nil`), the same bug
+	// shape F-274 fixed for `left`/`right`.
+	//
+	// `substr` is deliberately NOT fixed here: its default
+	// `extractScriptCode` mock is empty, and FungibleToken's `merge` method
+	// computes `substr(sc, 0, 1)` on that placeholder during off-chain
+	// state derivation -- a POSITIVE overflow this check would have to
+	// reject, breaking `prepareCall` for every token-ft-shaped contract
+	// (escalated, not fixed here; see anf_interpreter_substr_test.go).
+	case "split":
+		h := anfToString(args[0])
+		index := anfToBigInt(args[1]).Int64()
+		if index < 0 || index*2 > int64(len(h)) {
+			panic(&ScriptOpcodeError{Opcode: "split", Message: fmt.Sprintf(
+				"index %d is outside a %d-byte value", index, len(h)/2)})
+		}
+		return h[index*2:]
 
 	// Math builtins
 	case "abs":
@@ -1493,6 +1515,18 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return strings.Repeat("00", 32)
 	case "extractOutputHash":
 		return strings.Repeat("00", 32)
+	// R67: the contract's own real codePart when the caller supplied it
+	// (see MockPreimageAmount.ScriptCode's doc comment) — sdk_contract.go's
+	// PrepareCall always supplies it now. Falls back to the historical
+	// empty dummy for a bare ComputeNewState call with no txPreimage arg
+	// (e.g. a hand-built ANF probe in a test).
+	case "extractScriptCode":
+		if len(args) > 0 {
+			if mp, ok := args[0].(MockPreimageAmount); ok && mp.ScriptCode != "" {
+				return mp.ScriptCode
+			}
+		}
+		return ""
 
 	// -------------------------------------------------------------------
 	// Intent-covenant intrinsics (BSVM Phase 13).

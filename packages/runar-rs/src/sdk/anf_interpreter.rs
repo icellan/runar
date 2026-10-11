@@ -548,10 +548,36 @@ pub fn compute_new_state_and_data_outputs(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
 ) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String> {
+    compute_new_state_and_data_outputs_with_script_code(
+        anf, method_name, current_state, args, constructor_args, None,
+    )
+}
+
+/// R67: like [`compute_new_state_and_data_outputs`], but additionally
+/// supplies the REAL off-chain `scriptCode` that `extractScriptCode(txPreimage)`
+/// returns on-chain -- the contract's own codePart, CompactSize-prefixed
+/// exactly as the BIP-143 preimage carries it. `contract.rs`'s `prepare_call`
+/// computes it from `get_code_part_hex()` trimmed at the OP_CODESEPARATOR
+/// offset and calls this function instead of the plain one above. A separate
+/// (additive) function rather than a new parameter on the existing one, so
+/// every other caller (tests, `compute_new_state`) keeps its exact arity.
+///
+/// Deliberately NOT threaded through `StrictCtx`/`witness`: that context is
+/// gated on `strict.is_some()`, which ALSO turns on full assert enforcement
+/// (see `run_method`'s "lenient mode skips asserts" invariant) -- `scriptCode`
+/// must reach `extractScriptCode` in LENIENT mode without flipping that.
+pub fn compute_new_state_and_data_outputs_with_script_code(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+    script_code: Option<&str>,
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String> {
     // Lenient mode: any assert() in the body is skipped — the on-chain
     // script handles enforcement, and `run_method` cannot return an
     // AssertionFailureError when `strict = None`.
-    match run_method(anf, method_name, current_state, args, constructor_args, None) {
+    match run_method(anf, method_name, current_state, args, constructor_args, None, script_code) {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(s)) => Err(s),
         // Unreachable: lenient mode never produces strict assertion failures.
@@ -592,6 +618,7 @@ pub fn execute_strict(
         args,
         constructor_args,
         Some(&strict),
+        None,
     ) {
         Ok(Ok((state, data_outputs, raw_outputs, _ordered))) => Ok((state, data_outputs, raw_outputs)),
         Ok(Err(s)) => panic!("execute_strict: interpreter error: {}", s),
@@ -632,6 +659,7 @@ pub fn execute_on_chain_authoritative(
         args,
         constructor_args,
         Some(&strict),
+        None,
     ) {
         Ok(Ok((state, data_outputs, raw_outputs, _ordered))) => Ok((state, data_outputs, raw_outputs)),
         Ok(Err(s)) => panic!("execute_on_chain_authoritative: interpreter error: {}", s),
@@ -777,6 +805,7 @@ pub fn execute_with_witness(
         &merged_args,
         constructor_args,
         Some(&strict),
+        None,
     ) {
         Ok(Ok((state, data_outputs, raw_outputs, _ordered))) => Ok((state, data_outputs, raw_outputs)),
         Ok(Err(s)) => Err(IntentInterpreterError::Driver(s)),
@@ -796,6 +825,10 @@ fn run_method(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
     strict: Option<&StrictCtx>,
+    // R67: the real off-chain scriptCode for `extractScriptCode`, independent
+    // of `strict`/`witness` (see `compute_new_state_and_data_outputs_with_script_code`'s
+    // doc comment for why it can't be threaded through `StrictCtx`).
+    script_code: Option<&str>,
 ) -> Result<
     Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String>,
     AssertionFailureError,
@@ -910,6 +943,7 @@ fn run_method(
         anf,
         effective_strict,
         &mut script_bytes,
+        script_code,
     )?;
 
     // Merge delta into current_state
@@ -934,6 +968,7 @@ fn eval_bindings(
     anf: &ANFProgram,
     strict: Option<&StrictCtx>,
     script_bytes: &mut HashMap<String, Vec<u8>>,
+    script_code: Option<&str>,
 ) -> Result<(), AssertionFailureError> {
     for binding in bindings {
         let val = eval_value(
@@ -947,6 +982,7 @@ fn eval_bindings(
             strict,
             &binding.name,
             script_bytes,
+            script_code,
         )?;
         env.insert(binding.name.clone(), val);
     }
@@ -964,6 +1000,7 @@ fn eval_value(
     strict: Option<&StrictCtx>,
     binding_name: &str,
     script_bytes: &mut HashMap<String, Vec<u8>>,
+    script_code: Option<&str>,
 ) -> Result<Val, AssertionFailureError> {
     let kind = match value.get("kind").and_then(|k| k.as_str()) {
         Some(k) => k,
@@ -1164,7 +1201,7 @@ fn eval_value(
             }
             let real_crypto = strict.and_then(|c| c.real_crypto.as_ref());
             let witness = strict.and_then(|c| c.witness.as_ref());
-            eval_call(&func, &args, real_crypto, witness)
+            eval_call(&func, &args, real_crypto, witness, script_code)
         }
 
         "method_call" => {
@@ -1192,7 +1229,7 @@ fn eval_value(
                 // byte-array-op results get a fresh side map (mirrors the TS
                 // reference, which calls evalBindings with a default `{}`).
                 let mut child_script_bytes: HashMap<String, Vec<u8>> = HashMap::new();
-                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, &mut child_script_bytes)?;
+                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, &mut child_script_bytes, script_code)?;
                 // Copy property updates back to caller env
                 for prop in &anf.properties {
                     if let Some(v) = child_env.get(&prop.name) {
@@ -1220,7 +1257,7 @@ fn eval_value(
                     .collect();
                 // Create child env for the branch
                 let mut child_env = env.clone();
-                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes)?;
+                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes, script_code)?;
                 // Copy new bindings back
                 for (k, v) in &child_env {
                     env.insert(k.clone(), v.clone());
@@ -1255,7 +1292,7 @@ fn eval_value(
                 for i in 0..count {
                     env.insert(iter_var.clone(), Val::Int(start + i * step));
                     let mut loop_env = env.clone();
-                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes)?;
+                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes, script_code)?;
                     // Copy loop bindings back
                     for (k, v) in &loop_env {
                         env.insert(k.clone(), v.clone());
@@ -1710,13 +1747,36 @@ fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
 /// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
 /// lowerRight). A negative or past-the-end `length` must fail the spend, not
 /// return a clamped value.
+///
+/// N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the RIGHT
+/// half -- same bound, `index` in place of `length`.
+///
+/// R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+/// OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+/// REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+/// [0, size(data)] or `length` is outside [0, size(data) - start], which
+/// collapses to: start<0, length<0, or start+length>size(data). `substr`
+/// used to be excluded here because its one caller via `extractScriptCode`
+/// (`FungibleToken::merge`) got an empty dummy scriptCode, turning a
+/// realistic `substr(sc, ...)` into a POSITIVE overflow this check would
+/// have to reject. `extractScriptCode` now returns the contract's own REAL
+/// codePart (`contract.rs`'s `prepare_call`), so `substr` can be fully
+/// abort-faithful too.
 fn split_builtin_aborts(func: &str, args: &[Val]) -> bool {
-    if func != "left" && func != "right" {
-        return false;
+    match func {
+        "left" | "right" | "split" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            length < 0 || length * 2 > hex.len() as i64
+        }
+        "substr" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let start = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            let length = args.get(2).map(|v| v.to_i64()).unwrap_or(0);
+            start < 0 || length < 0 || (start + length) * 2 > hex.len() as i64
+        }
+        _ => false,
     }
-    let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
-    let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
-    length < 0 || length * 2 > hex.len() as i64
 }
 
 fn eval_call(
@@ -1724,6 +1784,7 @@ fn eval_call(
     args: &[Val],
     real_crypto: Option<&OnChainCryptoContext>,
     witness: Option<&IntentWitnessContext>,
+    script_code: Option<&str>,
 ) -> Val {
     match func {
         // Crypto — mocked unless real-crypto context is present.
@@ -1778,15 +1839,12 @@ fn eval_call(
             let b = args.get(1).map(|v| v.as_hex()).unwrap_or_default();
             Val::Bytes(format!("{}{}", a, b))
         }
+        // R67: bounds already verified by `split_builtin_aborts` above.
         "substr" => {
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
             let start = args.get(1).map(|v| v.to_i64()).unwrap_or(0) as usize;
             let len = args.get(2).map(|v| v.to_i64()).unwrap_or(0) as usize;
-            let from = start * 2;
-            let to = (start + len) * 2;
-            let to = to.min(hex.len());
-            let from = from.min(hex.len());
-            Val::Bytes(hex[from..to].to_string())
+            Val::Bytes(hex[start * 2..start * 2 + len * 2].to_string())
         }
         "reverseBytes" => {
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
@@ -1813,6 +1871,15 @@ fn eval_call(
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
             let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
             Val::Bytes(hex[hex.len() - (length * 2) as usize..].to_string())
+        }
+        // N-171 (sibling of F-274): bounds already verified by
+        // `split_builtin_aborts` above. `split` binds the RIGHT half from
+        // `index` onwards -- a bare OP_SPLIT, unmodelled before this (fell
+        // through to the `default` arm's wrong value).
+        "split" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let index = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            Val::Bytes(hex[(index * 2) as usize..].to_string())
         }
 
         // Math builtins
@@ -1949,6 +2016,13 @@ fn eval_call(
             // preserve that to avoid breaking existing callers.
             None => Val::Bytes("00".repeat(32)),
         },
+        // R67: the contract's own real codePart when the caller supplied it
+        // (see `compute_new_state_and_data_outputs_with_script_code`'s doc
+        // comment) -- `contract.rs`'s `prepare_call` always supplies it now.
+        // Falls back to the historical empty dummy for a bare
+        // `compute_new_state` call with no script_code (e.g. a hand-built
+        // ANF probe in a test).
+        "extractScriptCode" => Val::Bytes(script_code.unwrap_or("").to_string()),
         "extractVersion" => Val::Int(
             witness
                 .and_then(|w| w.mock_preimage.get("version").copied())

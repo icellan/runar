@@ -616,7 +616,28 @@ public final class RunarContract {
             // funds were stranded. That is exactly how the on-chain merge test
             // failed: state correct, continuation at 5000 instead of 4000.
             if (artifact.anf() != null) {
-                Map<String, Object> namedArgs = buildNamedArgs(userParams, args);
+                // R67: the null-arg resolution loop below (which fills
+                // `allPrevouts` with a realistic-length placeholder, see
+                // `isAutoPrevoutsParam`) runs AFTER this interpreter call,
+                // so without this the interpreter sees the caller's raw
+                // `null` for `allPrevouts` -- and a method like
+                // FungibleToken.merge that does `substr(allPrevouts, 0,
+                // 36)` hit the exact same "empty placeholder feeds a real
+                // substr call" shape extractScriptCode did, previously
+                // masked by substr's clamp. Build a LOCAL copy with just
+                // that one param patched for the interpreter; `resolved`'s
+                // own independent computation later (below) is untouched.
+                // `estimatedInputs` mirrors that later computation
+                // (~line 729) exactly -- keep the two in step.
+                List<Object> interpArgsSource = args;
+                for (int i = 0; i < userParams.size(); i++) {
+                    if (isAutoPrevoutsParam(userParams.get(i), args.get(i))) {
+                        if (interpArgsSource == args) interpArgsSource = new ArrayList<>(args);
+                        int estimatedInputs = 1 + extraContractInputCount(options) + 1;
+                        interpArgsSource.set(i, "00".repeat(36 * estimatedInputs));
+                    }
+                }
+                Map<String, Object> namedArgs = buildNamedArgs(userParams, interpArgsSource);
                 try {
                     // The interpreter knows only the EXPANDED scalar property
                     // names, so a grouped FixedArray entry has to be spread
@@ -641,8 +662,26 @@ public final class RunarContract {
                             ? options.satoshis : currentUtxo.satoshis();
                         interpArgs.put("_newAmount", java.math.BigInteger.valueOf(newAmountForInterp));
                     }
+                    // R67: extractScriptCode(txPreimage) gets the contract's
+                    // OWN real codePart (post-OP_CODESEPARATOR) instead of
+                    // the historical empty dummy, so a method like
+                    // FungibleToken.merge that inspects its own scriptCode
+                    // during off-chain state derivation sees realistic
+                    // bytes rather than aborting substr on an empty value.
+                    // getCodeSepIndex/findPublicMethodIndex are the SAME
+                    // calls every other signing path uses to trim the
+                    // codePart to the post-separator subscript.
+                    String codePartHex = getCodePartHex();
+                    int methodIndexForScriptCode = findPublicMethodIndex(methodName);
+                    int codeSepIdxForScriptCode = getCodeSepIndex(methodIndexForScriptCode);
+                    String scriptCodeBody = codeSepIdxForScriptCode >= 0
+                        ? codePartHex.substring((codeSepIdxForScriptCode + 1) * 2)
+                        : codePartHex;
+                    String scriptCodeHex = ScriptUtils.encodeVarInt(scriptCodeBody.length() / 2) + scriptCodeBody;
+                    AnfInterpreter.WitnessContext scriptCodeWitness = new AnfInterpreter.WitnessContext()
+                        .setMockPreimageBytes("scriptCode", ScriptUtils.hexToBytes(scriptCodeHex));
                     AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
-                        artifact.anf(), methodName, flatState, interpArgs, constructorArgs
+                        artifact.anf(), methodName, flatState, interpArgs, constructorArgs, scriptCodeWitness
                     );
                     // Caller-supplied state wins; the interpreter's is the
                     // fallback. The output shape below is taken either way.
