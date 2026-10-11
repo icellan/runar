@@ -2245,9 +2245,23 @@ export class RunarContract {
       type Substitution = { byteOffset: number; encoded: string };
       const subs: Substitution[] = [];
 
-      // Constructor arg slots: replace OP_0 placeholder with encoded arg
+      // Constructor arg slots: replace OP_0 placeholder with encoded arg.
+      // N-081: the constructor only checks `constructorArgs.length` against
+      // `abi.constructor.params.length` (see the constructor above) — it never
+      // cross-checks that every slot's paramIndex actually falls within that
+      // range. A malformed or hostile artifact can declare a slot whose
+      // paramIndex is out of bounds; without this check,
+      // `this.constructorArgs[slot.paramIndex]` reads `undefined`, which
+      // `encodeArg`'s fallback silently turns into the literal bytes of the
+      // string "undefined" spliced into the deployed script. Fail closed
+      // with a named error instead.
       if (hasConstructorSlots) {
         for (const slot of this.artifact.constructorSlots!) {
+          if (slot.paramIndex < 0 || slot.paramIndex >= this.constructorArgs.length) {
+            throw new Error(
+              `RunarContract: constructorSlots entry for ${this.artifact.contractName} has out-of-range paramIndex ${slot.paramIndex} (constructorArgs has ${this.constructorArgs.length} entries)`,
+            );
+          }
           subs.push({
             byteOffset: slot.byteOffset,
             encoded: encodeArg(this.constructorArgs[slot.paramIndex]),

@@ -158,4 +158,45 @@ describe('getLockingScript — constructor slot splicing', () => {
     // The OP_0 at byte 0 stays untouched
     expect(lockingScript).toBe('0093' + '012a' + '88');
   });
+
+  it('N-081: throws a named error instead of splicing "undefined" when a constructorSlots paramIndex is out of range', () => {
+    // The constructor only checks `constructorArgs.length === abi.constructor.params.length`
+    // (see contract.ts ~L499) — it never cross-checks that every
+    // constructorSlots[].paramIndex actually falls within that range. A
+    // malformed or hostile artifact (hand-crafted JSON, or a buggy producer)
+    // can declare a slot with a paramIndex past the end of constructorArgs
+    // and slip through that check untouched: there is exactly 1 ctor arg
+    // (index 0) below, matching the 1 ABI param, but the slot references
+    // paramIndex 1.
+    //
+    // Before the fix, buildCodeScript's `encodeArg(this.constructorArgs[slot.paramIndex])`
+    // read `constructorArgs[1]` -> `undefined`, and encodeArg's fallback
+    // (`encodePushData(String(value))`) silently spliced the literal bytes
+    // of the string "undefined" into the deployed locking script hex
+    // instead of refusing. This proves the fix fails closed with a named
+    // error instead.
+    //
+    // What this does NOT prove: it does not cover the two other sites in
+    // this file that index `constructorArgs[slot.paramIndex]` without the
+    // same guard (`adjustCodeSepOffset`, used by `getSubscriptForSigning` /
+    // `computeOpPushTxWithCodeSep`, and `_resolvedCodeSepSlotValues` — the
+    // latter is already shielded on this path because `buildCodeScript`
+    // runs the now-guarded constructor-slot loop first, but
+    // `adjustCodeSepOffset` is independently reachable and still unguarded).
+    // It also does not cover the pre-existing `constructorArgs.length !==
+    // abi.constructor.params.length` check (contract.ts ~L499), which this
+    // test deliberately satisfies so the new guard is what's under test,
+    // nor the equivalent code path in the other six SDKs.
+    const artifact = makeArtifact({
+      script: '009c69',
+      abi: {
+        constructor: { params: [{ name: 'threshold', type: 'bigint' }] },
+        methods: [{ name: 'check', params: [], isPublic: true }],
+      },
+      constructorSlots: [{ paramIndex: 1, byteOffset: 0 }],
+    });
+
+    const contract = new RunarContract(artifact, [1000n]);
+    expect(() => contract.getLockingScript()).toThrow(/paramIndex/i);
+  });
 });
