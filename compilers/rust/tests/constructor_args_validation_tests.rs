@@ -336,3 +336,54 @@ fn f103_ir_entry_points_validate_constructor_args() {
         .expect("no-args IR compile");
     assert!(!plain.constructor_slots.is_empty());
 }
+
+/// F-266: with several unrecognised constructor_args keys, the refusal text
+/// must be the same on every compile. `constructor_args` is a `HashMap`, and
+/// each fresh `HashMap` gets its own `RandomState` seed, so iterating its keys
+/// directly reorders the per-key diagnostics from one compile to the next.
+/// The keys are reported in sorted order — the TypeScript reference reports
+/// them in insertion order, which a `HashMap` does not keep, so sorted order is
+/// the deterministic order that equals TS whenever the caller inserts keys in
+/// sorted order (as here).
+///
+/// Proves: the joined error string is identical across 64 compiles with
+/// independently seeded maps, and lists the keys in sorted order.
+/// Does not prove: anything about script bytes (baking walks
+/// `program.properties` in declaration order and never iterated the map), or
+/// cross-process stability beyond what independent per-map seeds exercise.
+#[test]
+fn f266_unknown_key_diagnostics_are_deterministic() {
+    let keys = ["zeta", "alpha", "mu", "beta", "omega", "kappa", "delta", "gamma"];
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let mut args = HashMap::new();
+        for k in keys {
+            args.insert(k.to_string(), serde_json::json!(1));
+        }
+        let err = compile_from_source_str_with_options(
+            HASH_LOCK_SOURCE,
+            Some("HashLock.runar.ts"),
+            &opts_with(args),
+        )
+        .expect_err("unknown keys must be refused");
+        seen.insert(err);
+    }
+    assert_eq!(
+        seen.len(),
+        1,
+        "diagnostic text varied across compiles ({} variants):\n{:#?}",
+        seen.len(),
+        seen
+    );
+    let err = seen.into_iter().next().unwrap();
+    let mut sorted = keys.to_vec();
+    sorted.sort();
+    let positions: Vec<usize> = sorted
+        .iter()
+        .map(|k| err.find(&format!("key '{k}'")).expect("every unknown key is reported"))
+        .collect();
+    assert!(
+        positions.windows(2).all(|w| w[0] < w[1]),
+        "unknown keys must be reported in sorted order, got: {err}"
+    );
+}

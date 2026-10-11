@@ -119,7 +119,11 @@ fn apply_constructor_args(
     let prop_name_set: std::collections::HashSet<&str> =
         program.properties.iter().map(|p| p.name.as_str()).collect();
     let mut shape_errors: Vec<String> = Vec::new();
-    for key in args.keys() {
+    // F-266: sorted, not `args.keys()` — HashMap order is randomised per map,
+    // which made this refusal text change from one compile to the next.
+    let mut keys: Vec<&String> = args.keys().collect();
+    keys.sort();
+    for key in keys {
         if !prop_name_set.contains(key.as_str()) {
             let prop_names: Vec<&str> =
                 program.properties.iter().map(|p| p.name.as_str()).collect();
