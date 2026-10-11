@@ -98,8 +98,17 @@ class TestParserMoveEdges < Minitest::Test
   end
 
   def test_garbage_input_does_not_crash
+    # Proves the parser does not raise on unparseable input AND does not
+    # silently treat it as a valid contract: the TS reference
+    # (01-parse-move.ts) reports an "Unexpected character '@'" lexer error
+    # plus downstream parse errors for this exact input, and Ruby must
+    # likewise flag it. We assert only error presence, not text/count,
+    # since the two tiers' diagnostic wording differs. Does not prove:
+    # diagnostic text/count parity with TS, or anything about `contract`
+    # when errors are present.
     begin
-      parse('@@@ not move !!!', 'garbage.runar.move')
+      result = parse('@@@ not move !!!', 'garbage.runar.move')
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed: #{e.class}: #{e.message}"
     end

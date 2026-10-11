@@ -458,10 +458,21 @@ class TestParserRubyEdges < Minitest::Test
         # No end, no methods, no constructor
     RB
 
-    # Must NOT raise — the parser may recover (auto-generate ctor, etc.) or
-    # report diagnostics. Either is acceptable as long as it terminates.
+    # Must NOT raise. The TS reference (01-parse-ruby.ts) recovers from the
+    # missing `end` by treating EOF as an implicit close: it reports no
+    # errors and produces a contract named `Broken` with property `x` and
+    # no methods (constructor auto-generated). Ruby must agree on that
+    # specific recovered shape, not merely avoid raising — a stub that
+    # always returns an empty/wrong-named contract would still pass the old
+    # assertion-free body but fails these checks.
+    # Does not prove: anything about method bodies (this fixture has none).
     begin
-      parse(source)
+      result = parse(source)
+      assert_empty result.errors
+      refute_nil result.contract
+      assert_equal 'Broken', result.contract.name
+      assert_equal %w[x], result.contract.properties.map(&:name)
+      assert_empty result.contract.methods
     rescue StandardError => e
       flunk "parser crashed on malformed source: #{e.class}: #{e.message}"
     end

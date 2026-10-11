@@ -111,8 +111,16 @@ class TestParserZigEdges < Minitest::Test
   end
 
   def test_garbage_input_does_not_crash
+    # The TS reference (01-parse-zig.ts) rejects this input: it reports
+    # "Expected `const runar = @import(\"runar\");`..." plus a missing
+    # contract-declaration error for this exact source. Ruby must likewise
+    # flag it as invalid, not merely avoid raising. We assert only error
+    # presence, not text/count, since the two tiers' wording differs.
+    # Does not prove: diagnostic text/count parity with TS, or anything
+    # about `contract` when errors are present.
     begin
-      parse('@@@ not zig !!!', 'garbage.runar.zig')
+      result = parse('@@@ not zig !!!', 'garbage.runar.zig')
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed: #{e.class}: #{e.message}"
     end

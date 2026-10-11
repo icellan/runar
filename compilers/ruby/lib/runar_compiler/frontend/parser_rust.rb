@@ -485,7 +485,11 @@ module RunarCompiler
           next
         end
 
-        # Skip unknown
+        # Unrecognized character — reject it rather than dropping it
+        # silently (matches the TS reference's tokenize() in
+        # 01-parse-rust.ts, which pushes the same "Unexpected character"
+        # diagnostic instead of skipping the byte).
+        lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, l, c)
         pos += 1
         col += 1
       end

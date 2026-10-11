@@ -136,8 +136,18 @@ class TestParserSolEdges < Minitest::Test
   end
 
   def test_garbage_input_does_not_crash
+    # Proves two things: (1) the parser does not raise on unparseable input,
+    # and (2) it does not silently accept it as a valid contract — matching
+    # the TS reference (packages/runar-compiler/src/passes/01-parse-sol.ts),
+    # which reports "Unexpected character '@'" plus downstream parse errors
+    # for this exact input. We assert only on error presence, not message
+    # text or count: TS's errors and Ruby's single "expected 'contract'
+    # keyword" diagnostic differ in wording, but both agree the input is
+    # rejected. Does not prove: diagnostic text/count parity with TS, or
+    # anything about the `contract` field's shape when errors are present.
     begin
-      parse('@@@ not solidity !!!', 'garbage.runar.sol')
+      result = parse('@@@ not solidity !!!', 'garbage.runar.sol')
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed: #{e.class}: #{e.message}"
     end

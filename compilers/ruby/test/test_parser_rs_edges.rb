@@ -108,8 +108,18 @@ class TestParserRsEdges < Minitest::Test
   end
 
   def test_garbage_input_does_not_crash
+    # The TS reference (01-parse-rust.ts) tokenizer explicitly documents
+    # "reject it rather than dropping it silently" for a character it does
+    # not recognize, and reports an "Unexpected character '@'" diagnostic
+    # for each '@' in this input. Ruby's tokenizer must do the same rather
+    # than silently skipping unknown bytes and synthesizing a bogus
+    # contract. Does not prove: diagnostic count parity with TS (TS emits
+    # one per '@'; we only require at least one, worded the same way).
     begin
-      parse('@@@ not rust !!!', 'garbage.runar.rs')
+      result = parse('@@@ not rust !!!', 'garbage.runar.rs')
+      refute_empty result.errors, 'expected diagnostics for garbage input'
+      assert(result.errors.any? { |e| e.format_message.include?("Unexpected character") },
+             "expected an 'Unexpected character' diagnostic, got: #{result.errors.map(&:format_message)}")
     rescue StandardError => e
       flunk "parser crashed: #{e.class}: #{e.message}"
     end
