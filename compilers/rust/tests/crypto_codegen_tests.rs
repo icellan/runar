@@ -182,6 +182,33 @@ fn test_emit_verify_ecdsa_p384_nontrivial() {
     );
 }
 
+// F-338: emit_verify_ecdsa_p384 is the largest emitter in this crate (453K+
+// tree ops) and, unlike its p384_add/p384_mul/p384_mul_gen/p384_negate
+// siblings above and verify_ecdsa_p256 below, had NO count_op_tree golden —
+// only the ops.len() > 100 threshold test above, which cannot detect a
+// regression confined to an `if` branch body (see count_op_tree's doc
+// comment) or indeed almost any regression, since the real program is 4500x
+// the threshold. Verified: injecting one extra StackOp at the end of
+// emit_verify_ecdsa_p384 left test_emit_verify_ecdsa_p384_nontrivial green.
+//
+// Cross-tier check: Go's countOpTree for EmitVerifyECDSA_P384 (not itself
+// pinned in compilers/go/codegen/crypto_codegen_test.go, measured directly)
+// is 453369, Δ8 from this tier's 453361. That Δ8 is the same raw-StackOp
+// quirk already pinned and explained for verify_ecdsa_p256 above (Δ8 =
+// "two mul/mul_gen invocations x the 4-op divergence" — see
+// test_verify_ecdsa_p256_op_count_golden and the p256_mul/p384_mul comments):
+// c_emit_verify_ecdsa calls the scalar-multiplication ladder (c_emit_mul,
+// the same ladder p384_mul uses) twice internally (u1*G and u2*Q), same as
+// p256, so it inherits the same per-ladder Δ4 x 2 = Δ8. Final
+// script bytes are byte-identical across tiers (conformance/tests/p384-wallet
+// exercises verifyECDSA_P384 end to end at 7-tier parity), confirming this is
+// the known pre-peephole StackOp-count divergence, not a codegen bug.
+#[test]
+fn test_verify_ecdsa_p384_op_count_golden() {
+    let ops = collect(|s| emit_verify_ecdsa_p384(s));
+    assert_eq!(count_op_tree(&ops), 453361, "verify_ecdsa_p384 op count drift");
+}
+
 // ---------------------------------------------------------------------------
 // SLH-DSA codegen
 // ---------------------------------------------------------------------------
