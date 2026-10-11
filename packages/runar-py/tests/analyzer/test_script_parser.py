@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from runar.analyzer import analyze_script
 from runar.analyzer.script_parser import (
     collapse_raw_script_spans,
     normalize_hex,
@@ -40,10 +43,35 @@ def test_normalize_hex_does_not_strip_c0_separators():
     # keeps them in the normalized string (and then rejects them as
     # non-hex characters - confirmed live: the TS analyzer throws
     # "Invalid hex character" on this exact input). normalize_hex() must
-    # not strip them either. (parse_script's handling of the resulting
-    # invalid hex is a separate, pre-existing leniency - not asserted
-    # here; see F-272 dispatcher notes.)
+    # not strip them either. (parse_script now refuses the resulting
+    # invalid hex too - see test_parse_script_refuses_non_hex_characters
+    # below; fixed under N-176, was a pre-existing leniency.)
     assert normalize_hex("76\u001ca9") == "76\u001ca9"
+
+
+def test_parse_script_refuses_non_hex_characters():
+    # N-176. A C0 separator survives normalize_hex (see above) and must
+    # then be refused by parse_script, matching the TS reference's
+    # `hexVal` throw ("Invalid hex character: ...") rather than silently
+    # truncating to the longest clean hex prefix. Proves: both a control
+    # character and a plain non-hex letter pair raise. Does not prove
+    # every non-hex byte is handled identically - only these two shapes.
+    with pytest.raises(ValueError, match="Invalid hex character"):
+        parse_script("76\u001ca90")  # even length overall
+    with pytest.raises(ValueError, match="Invalid hex character"):
+        parse_script("zz")
+    # Also through the public entry point: `analyze_script` must not catch
+    # and swallow this (it doesn't today, but nothing else pins that).
+    with pytest.raises(ValueError, match="Invalid hex character"):
+        analyze_script("76\u001ca90")
+
+
+def test_parse_script_refuses_odd_length():
+    # N-176. Odd-length hex (after normalization) used to be swallowed by
+    # the same truncating fallback; must now raise, matching the TS
+    # reference's other `hexToBytes` throw.
+    with pytest.raises(ValueError, match="odd length"):
+        parse_script("abc")
 
 
 def test_opcode_names_canonical():

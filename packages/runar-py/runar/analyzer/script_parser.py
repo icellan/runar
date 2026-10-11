@@ -164,6 +164,29 @@ def normalize_hex(hex_script: str) -> str:
     return "".join(out_chars).lower()
 
 
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _decode_hex(hex_script: str) -> bytes:
+    """Decode a normalized hex string into bytes.
+
+    Raises `ValueError` with the TS reference's exact diagnostic text
+    (`hexToBytes`/`hexVal` in packages/runar-testing/src/vm/utils.ts) on
+    odd length or a non-hex-digit character, instead of silently
+    truncating the input to the longest clean prefix (N-176: the old
+    behaviour here was documented as a deliberate TS-mirroring "defensive"
+    fallback, but TS actually throws on this input — confirmed against the
+    live TS analyzer and recorded in F-272's dispatcher notes — so the old
+    comment's premise was wrong, not a feature anything relies on).
+    """
+    if len(hex_script) % 2 != 0:
+        raise ValueError(f"Invalid hex string: odd length ({len(hex_script)})")
+    for ch in hex_script:
+        if ch not in _HEX_DIGITS:
+            raise ValueError(f"Invalid hex character: {ch}")
+    return bytes.fromhex(hex_script)
+
+
 def parse_script(hex_script: str) -> List[ParsedOpcode]:
     """Parse normalized lowercase-hex script bytes into ParsedOpcodes.
 
@@ -171,23 +194,7 @@ def parse_script(hex_script: str) -> List[ParsedOpcode]:
     stop the parser. No findings are emitted from this layer.
     """
     # Convert hex to bytes. Caller passes already-normalized hex.
-    try:
-        data = bytes.fromhex(hex_script)
-    except ValueError:
-        # Odd-length or invalid hex — treat as empty stream of bytes by
-        # parsing as much as we can. The TS reference parses byte-by-byte
-        # from the hex string; we mirror this by truncating to even length
-        # then stopping on bad chars. The 8 canonical fixtures are all
-        # valid hex, so this branch is defensive.
-        clean = []
-        for ch in hex_script:
-            if ch in "0123456789abcdef":
-                clean.append(ch)
-            else:
-                break
-        if len(clean) % 2:
-            clean.pop()
-        data = bytes.fromhex("".join(clean))
+    data = _decode_hex(hex_script)
 
     out: List[ParsedOpcode] = []
     i = 0

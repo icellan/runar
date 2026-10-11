@@ -3,7 +3,7 @@
 //! Truncated pushes are emitted with whatever data is available; no
 //! dedicated finding is produced (spec §6.1).
 
-use super::types::{ParsedOp, PushEncoding, RawScriptSpan};
+use super::types::{AnalyzerError, ParsedOp, PushEncoding, RawScriptSpan};
 
 /// Normalize a hex string: strip whitespace, lowercase. "Whitespace" here
 /// is exactly what JS's `/\s/g` matches (what the TS reference strips) —
@@ -178,10 +178,37 @@ pub fn opcode_name(byte: u8) -> String {
 }
 
 /// Parse a normalized hex script into the opcode list. Returns the parsed
-/// operations. Truncation is silent.
-pub fn parse_script(hex: &str) -> Vec<ParsedOp> {
-    let bytes = decode_hex(hex).unwrap_or_default();
-    parse_bytes(&bytes)
+/// operations, or `AnalyzerError::InvalidHex` — with the TS reference's
+/// exact diagnostic text — if `hex` has odd length or contains a
+/// non-hex-digit character (N-176: this used to fall back to
+/// `decode_hex(..).unwrap_or_default()`, silently treating the invalid
+/// input as an empty byte stream). Truncation of a well-formed but
+/// incomplete push is still silent (spec §6.1); that is unrelated to hex
+/// decoding and is unaffected by this check.
+pub fn parse_script(hex: &str) -> Result<Vec<ParsedOp>, AnalyzerError> {
+    let bytes = decode_hex(hex).ok_or_else(|| invalid_hex_error(hex))?;
+    Ok(parse_bytes(&bytes))
+}
+
+/// Build the TS reference's exact diagnostic for why `decode_hex` rejected
+/// `hex`. Re-scans to distinguish the two cases `hexToBytes` throws on:
+/// odd length ("Invalid hex string: odd length (N)") or the first
+/// non-hex-digit character ("Invalid hex character: X").
+fn invalid_hex_error(hex: &str) -> AnalyzerError {
+    if !hex.len().is_multiple_of(2) {
+        return AnalyzerError::InvalidHex(format!(
+            "Invalid hex string: odd length ({})",
+            hex.len()
+        ));
+    }
+    for b in hex.bytes() {
+        if hex_digit(b).is_none() {
+            return AnalyzerError::InvalidHex(format!("Invalid hex character: {}", b as char));
+        }
+    }
+    // decode_hex only returns None for the two cases above, so this is
+    // unreachable in practice; kept total rather than panicking.
+    AnalyzerError::InvalidHex("invalid hex".to_string())
 }
 
 fn parse_bytes(bytes: &[u8]) -> Vec<ParsedOp> {

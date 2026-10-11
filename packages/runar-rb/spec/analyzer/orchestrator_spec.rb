@@ -67,4 +67,11 @@ RSpec.describe 'Runar::Analyzer.analyze_script orchestrator' do
     expect(result[:script]).to eq('76a988ac')
     expect(result[:script_size]).to eq(4)
   end
+
+  # N-176. A C0 separator survives normalize (see above) and must then be
+  # refused by the public entry point, not just by ScriptParser.parse
+  # directly - proves analyze_script doesn't rescue and swallow it.
+  it 'refuses non-hex characters that survive normalization' do
+    expect { Runar::Analyzer.analyze_script("76\u001ca90") }.to raise_error(ArgumentError, /Invalid hex character/)
+  end
 end
