@@ -409,7 +409,19 @@ export interface ReplayOptions {
 
 export function runReplay(opts: ReplayOptions = {}): ReplayReport {
   const started = Date.now();
-  let corpus = loadCorpus(opts.entriesDir);
+  const fullCorpus = loadCorpus(opts.entriesDir);
+  // An empty corpus (entriesDir missing, or present but with zero entries) is
+  // not a passing run — it is "entries are never deleted" (README.md rule 3)
+  // having been violated. Checked against the UNFILTERED corpus so a
+  // `--filter` that happens to match nothing stays its own, separate case.
+  if (fullCorpus.length === 0) {
+    throw new Error(
+      `fuzzer regression corpus at ${opts.entriesDir ?? ENTRIES_DIR} is empty — entries are ` +
+        'never deleted (see conformance/fuzz-regressions/README.md rule 3); a corpus with no ' +
+        'entries must fail loudly, not replay as a green 0/0/0 run',
+    );
+  }
+  let corpus = fullCorpus;
   if (opts.filter) corpus = corpus.filter((c) => c.entry.id.includes(opts.filter!));
 
   const outcomes = corpus.map((loaded) => {
@@ -660,7 +672,10 @@ export function runReplayAndReport(opts: ReplayOptions = {}): ReplayReport {
   const report = runReplay(opts);
 
   if (report.total === 0) {
-    console.log('  (corpus is empty)');
+    // runReplay() throws before returning when the corpus itself is empty
+    // (see its own guard), so the only way to reach this with total === 0 is
+    // a `--filter` that matched nothing.
+    console.log('  (no entries matched the filter)');
   }
   console.log('');
   console.log(`  Entries: ${report.total}`);
