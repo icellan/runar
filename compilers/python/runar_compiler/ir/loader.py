@@ -466,8 +466,18 @@ def _validate_bindings(
     mutable_count: int,
     readonly_props: frozenset[str] = frozenset(),
     declared_props: frozenset[str] | None = None,
+    enclosing_loop_count: int = 1,
 ) -> list[str]:
-    """Validate a list of ANF bindings, including nested ones."""
+    """Validate a list of ANF bindings, including nested ones.
+
+    ``enclosing_loop_count`` is the product of every loop count already
+    entered on the path from the method body down to ``bindings`` (1 at the
+    top). F-283 / CL-GAP-164: the per-binding ``MAX_LOOP_COUNT`` check below
+    bounds a single loop's own count but never the PRODUCT across nesting --
+    two loops of 10,000 each, one inside the other, each pass that check
+    independently while the real unrolled work is 10,000 x 10,000 =
+    100,000,000.
+    """
     errors: list[str] = []
 
     for i, binding in enumerate(bindings):
@@ -583,11 +593,11 @@ def _validate_bindings(
         if kind == "if":
             if binding.value.then:
                 errors.extend(
-                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props, declared_props)
+                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props, declared_props, enclosing_loop_count)
                 )
             if binding.value.else_:
                 errors.extend(
-                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props, declared_props)
+                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props, declared_props, enclosing_loop_count)
                 )
 
         if kind == "loop":
@@ -602,9 +612,24 @@ def _validate_bindings(
                     f"method {method_name} binding {binding.name} "
                     f"has loop count {count} exceeding maximum {MAX_LOOP_COUNT}"
                 )
+            # F-283 / CL-GAP-164: the product check. Only meaningful once the
+            # per-binding count is itself sane (non-negative and within
+            # MAX_LOOP_COUNT) -- otherwise the checks above already named the
+            # problem and this would just be a confusing second diagnostic
+            # for the same single binding.
+            effective_count = 0 if count < 0 else count
+            total_loop_count = enclosing_loop_count * effective_count
+            if 0 <= count <= MAX_LOOP_COUNT and total_loop_count > MAX_LOOP_COUNT:
+                errors.append(
+                    f"method {method_name} binding {binding.name} has loop "
+                    f"count {count} nested inside an enclosing loop of total "
+                    f"count {enclosing_loop_count}, producing "
+                    f"{total_loop_count} total iterations, exceeding "
+                    f"maximum {MAX_LOOP_COUNT}"
+                )
             if binding.value.body:
                 errors.extend(
-                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props, declared_props)
+                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props, declared_props, total_loop_count)
                 )
 
         if kind == "raw_script":

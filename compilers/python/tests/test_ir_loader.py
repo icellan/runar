@@ -258,6 +258,92 @@ class TestValidateIR_LoopCountExceedsMax:
 
 
 # ---------------------------------------------------------------------------
+# Test: validate_ir rejects a nested-loop PRODUCT exceeding maximum
+# (F-283 / CL-GAP-164)
+# ---------------------------------------------------------------------------
+
+class TestValidateIR_NestedLoopProductExceedsMax:
+    """The per-binding check above bounds a single loop's own count but
+    never the PRODUCT across nesting. Two loops of MAX_LOOP_COUNT each, one
+    nested inside the other, each individually satisfy the per-binding check
+    while the real unrolled work is MAX_LOOP_COUNT x MAX_LOOP_COUNT =
+    100,000,000.
+
+    What this proves: validate_ir rejects a nested-loop IR whose counts each
+    individually satisfy MAX_LOOP_COUNT but whose product does not, before
+    any lowering pass sees the program.
+    What this does not prove: that stack lowering itself would be safe
+    against such a product if it arrived some other way -- only that this
+    loader-level route is closed.
+    """
+
+    def _nested_program(self, outer_count, inner_count):
+        return ANFProgram(
+            contract_name="Test",
+            properties=[],
+            methods=[
+                ANFMethod(
+                    name="run",
+                    params=[],
+                    body=[
+                        ANFBinding(
+                            name="outer",
+                            value=ANFValue(
+                                kind="loop",
+                                count=outer_count,
+                                iter_var="i",
+                                body=[
+                                    ANFBinding(
+                                        name="inner",
+                                        value=ANFValue(
+                                            kind="loop",
+                                            count=inner_count,
+                                            iter_var="j",
+                                            body=[],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                        # N-071: a public method must end with an assert().
+                        ANFBinding(
+                            name="tTrue",
+                            value=ANFValue(kind="load_const", raw_value=True),
+                        ),
+                        ANFBinding(
+                            name="tAssert",
+                            value=ANFValue(kind="assert", raw_value="tTrue"),
+                        ),
+                    ],
+                    is_public=True,
+                ),
+            ],
+        )
+
+    def test_nested_loop_product_exceeds_max(self):
+        program = self._nested_program(MAX_LOOP_COUNT, MAX_LOOP_COUNT)
+        errors = validate_ir(program)
+        assert any("100000000" in e for e in errors), (
+            f"expected error naming the total iteration count, got: {errors}"
+        )
+
+    def test_small_nested_counts_whose_product_exceeds_max(self):
+        # Neither 101 nor 100 alone trips the per-binding ceiling, but their
+        # product (10,100) does. Proves the rule is the product, not a
+        # disguised re-check of the single bound.
+        program = self._nested_program(101, 100)
+        errors = validate_ir(program)
+        assert any("10100" in e for e in errors), (
+            f"expected error naming the total iteration count, got: {errors}"
+        )
+
+    def test_nested_loop_product_within_max_is_accepted(self):
+        program = self._nested_program(10, 10)
+        errors = validate_ir(program)
+        assert errors == [], f"expected no errors, got: {errors}"
+
+
+# ---------------------------------------------------------------------------
 # Test: validate_ir rejects negative loop count
 # ---------------------------------------------------------------------------
 

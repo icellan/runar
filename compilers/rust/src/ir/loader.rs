@@ -324,7 +324,7 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
                 ));
             }
         }
-        validate_bindings(&method.body, &method.name, mutable_count)?;
+        validate_bindings(&method.body, &method.name, mutable_count, 1)?;
     }
 
     // N-071: --ir skips frontend/validator.rs, whose ends-with-assert rule is
@@ -396,10 +396,21 @@ fn ends_with_terminal_assert(bindings: &[ANFBinding]) -> bool {
     }
 }
 
+// `enclosing_loop_count` is the product of every loop count already entered
+// on the path from the method body down to `bindings` (1 at the top). F-283
+// / CL-GAP-164: the per-binding MAX_LOOP_COUNT check below bounds a single
+// loop's own count but never the PRODUCT across nesting -- two loops of
+// 10,000 each, one inside the other, each pass that check independently
+// while the real unrolled work is 10,000 x 10,000 = 100,000,000. By the time
+// this function is called with a non-default `enclosing_loop_count`, every
+// level above it has already returned early if its own count failed the
+// per-binding check, so `enclosing_loop_count` is always <= MAX_LOOP_COUNT
+// here and the multiplication below cannot overflow `usize`.
 fn validate_bindings(
     bindings: &[ANFBinding],
     method_name: &str,
     mutable_count: usize,
+    enclosing_loop_count: usize,
 ) -> Result<(), String> {
     for (i, binding) in bindings.iter().enumerate() {
         if binding.name.is_empty() {
@@ -511,8 +522,8 @@ fn validate_bindings(
             ANFValue::If {
                 then, else_branch, ..
             } => {
-                validate_bindings(then, method_name, mutable_count)?;
-                validate_bindings(else_branch, method_name, mutable_count)?;
+                validate_bindings(then, method_name, mutable_count, enclosing_loop_count)?;
+                validate_bindings(else_branch, method_name, mutable_count, enclosing_loop_count)?;
             }
             ANFValue::Loop { count, body, start, .. } => {
                 // N-133: `start` is `integer | "<decimal>n"`, and anything
@@ -600,7 +611,18 @@ fn validate_bindings(
                         method_name, binding.name, count, MAX_LOOP_COUNT
                     ));
                 }
-                validate_bindings(body, method_name, mutable_count)?;
+                // F-283 / CL-GAP-164: the product check. Reached only once the
+                // binding's own count is within MAX_LOOP_COUNT, so both
+                // operands are <= MAX_LOOP_COUNT and the multiplication
+                // cannot overflow `usize`.
+                let total_loop_count = enclosing_loop_count * count;
+                if total_loop_count > MAX_LOOP_COUNT as usize {
+                    return Err(format!(
+                        "IR validation: method {} binding {} has loop count {} nested inside an enclosing loop of total count {}, producing {} total iterations, exceeding maximum {}",
+                        method_name, binding.name, count, enclosing_loop_count, total_loop_count, MAX_LOOP_COUNT
+                    ));
+                }
+                validate_bindings(body, method_name, mutable_count, total_loop_count)?;
             }
             ANFValue::RawScript {
                 bytes,
@@ -1159,6 +1181,94 @@ mod tests {
         assert!(
             err.contains("loop count 10001 exceeding maximum 10000"),
             "diagnostic must name the count and the limit, as Go's does: {err}"
+        );
+    }
+
+    /// F-283 / CL-GAP-164 — the product across nested loops.
+    ///
+    /// `rejects_loop_count_over_max` above proves the per-binding ceiling.
+    /// That ceiling is checked independently for each `loop` binding, never
+    /// against the PRODUCT of counts along a nesting path, so two loops of
+    /// `MAX_LOOP_COUNT` each, one inside the other, each individually satisfy
+    /// it while the real unrolled work is `MAX_LOOP_COUNT x MAX_LOOP_COUNT` =
+    /// 100,000,000. Measured upstream (same shape, Ruby tier): a 1,175-byte
+    /// payload loaded instantly and then drove `compile_from_ir` to 5m07s /
+    /// 3.7GB RSS and climbing.
+    fn nested_loop_count_program(outer_count: usize, inner_count: usize) -> String {
+        let program = ANFProgram {
+            contract_name: "Bounded".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "unlock".to_string(),
+                params: vec![],
+                body: vec![ANFBinding {
+                    name: "_outer".to_string(),
+                    value: ANFValue::Loop {
+                        count: outer_count,
+                        body: vec![ANFBinding {
+                            name: "_inner".to_string(),
+                            value: ANFValue::Loop {
+                                count: inner_count,
+                                body: vec![ANFBinding {
+                                    name: "_lb".to_string(),
+                                    value: ANFValue::LoadConst {
+                                        value: serde_json::json!(0),
+                                    },
+                                    source_loc: None,
+                                }],
+                                iter_var: "j".to_string(),
+                                start: serde_json::json!(0),
+                                step: 1,
+                            },
+                            source_loc: None,
+                        }],
+                        iter_var: "i".to_string(),
+                        start: serde_json::json!(0),
+                        step: 1,
+                    },
+                    source_loc: None,
+                }]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
+                is_public: true,
+                sighash_type: None,
+            }],
+        };
+        serde_json::to_string(&program).expect("serialization should succeed")
+    }
+
+    #[test]
+    fn control_nested_loop_product_within_max_still_loads() {
+        let loaded = load_ir_from_str(&nested_loop_count_program(10, 10))
+            .expect("a nested loop product of 100 (well within MAX_LOOP_COUNT) must still load");
+        assert_eq!(loaded.contract_name, "Bounded");
+    }
+
+    #[test]
+    fn rejects_nested_loop_product_over_max() {
+        let err = load_ir_from_str(&nested_loop_count_program(
+            MAX_LOOP_COUNT as usize,
+            MAX_LOOP_COUNT as usize,
+        ))
+        .expect_err("a nested loop product above MAX_LOOP_COUNT must be refused on the --ir path");
+        assert!(
+            err.contains("100000000"),
+            "diagnostic must name the total iteration count: {err}"
+        );
+    }
+
+    /// Neither 101 nor 100 alone trips the per-binding ceiling (both are far
+    /// below MAX_LOOP_COUNT), but their product (10,100) does. Proves the new
+    /// rule is the product, not a disguised re-check of the single bound.
+    #[test]
+    fn rejects_small_nested_counts_whose_product_exceeds_max() {
+        let err = load_ir_from_str(&nested_loop_count_program(101, 100))
+            .expect_err("a nested loop product above MAX_LOOP_COUNT must be refused on the --ir path");
+        assert!(
+            err.contains("10100"),
+            "diagnostic must name the total iteration count: {err}"
         );
     }
 

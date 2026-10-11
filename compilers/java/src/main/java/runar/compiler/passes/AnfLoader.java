@@ -168,6 +168,15 @@ public final class AnfLoader {
                 throw new RuntimeException(err);
             }
         }
+        // F-283 / CL-GAP-164: the per-binding MAX_LOOP_COUNT check in
+        // loopCount() bounds a single loop's own count but never the
+        // PRODUCT across nesting. See checkLoopProductBound's doc comment.
+        for (AnfMethod m : methods) {
+            String err = checkLoopProductBound(m.body(), m.name(), 1L);
+            if (err != null) {
+                throw new RuntimeException(err);
+            }
+        }
         // R-126 / CL-BUG-164: an add_output must name exactly one state value
         // per MUTABLE property.
         //
@@ -702,6 +711,65 @@ public final class AnfLoader {
                 }
             }
         }
+    }
+
+    /**
+     * F-283 / CL-GAP-164 — the PRODUCT of nested loop counts, at the
+     * external-input trust boundary.
+     *
+     * <p>{@code loopCount} above bounds a single {@code loop} binding's own
+     * count to {@code [0, Loop.MAX_LOOP_COUNT]} but never the product across
+     * nesting: two loops of {@code MAX_LOOP_COUNT} each, one inside the
+     * other, each individually pass that check while the real unrolled work
+     * is {@code MAX_LOOP_COUNT x MAX_LOOP_COUNT} = 100,000,000. A payload
+     * shaped that way loads instantly and then drives whatever lowers it
+     * into multi-GB memory growth (measured on the Ruby tier, same shape: a
+     * 1,175-byte payload loaded in 0.0s and then drove compilation to
+     * 5m07s / 3.7GB RSS and climbing).
+     *
+     * <p>Walked AFTER parsing (unlike {@code loopCount}, which runs during
+     * parsing), because by then every {@code Loop} node's own count is
+     * already known to be in {@code [0, MAX_LOOP_COUNT]} — {@code loopCount}
+     * would have thrown otherwise — so both operands of the multiplication
+     * below are always {@code <= MAX_LOOP_COUNT} and it cannot overflow
+     * {@code long}.
+     *
+     * <p>{@code enclosingLoopCount} is the product of every loop count
+     * already entered on the path from the method body down to
+     * {@code bindings} (1 at the top).
+     */
+    private static String checkLoopProductBound(
+        List<AnfBinding> bindings, String methodName, long enclosingLoopCount
+    ) {
+        if (bindings == null) {
+            return null;
+        }
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            if (v instanceof runar.compiler.ir.anf.If branch) {
+                String err = checkLoopProductBound(branch.thenBranch(), methodName, enclosingLoopCount);
+                if (err == null) {
+                    err = checkLoopProductBound(branch.elseBranch(), methodName, enclosingLoopCount);
+                }
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                long totalLoopCount = enclosingLoopCount * loop.count();
+                if (totalLoopCount > Loop.MAX_LOOP_COUNT) {
+                    return "IR validation: method " + methodName + " binding " + b.name()
+                        + " has loop count " + loop.count()
+                        + " nested inside an enclosing loop of total count " + enclosingLoopCount
+                        + ", producing " + totalLoopCount + " total iterations, exceeding maximum "
+                        + Loop.MAX_LOOP_COUNT;
+                }
+                String err = checkLoopProductBound(loop.body(), methodName, totalLoopCount);
+                if (err != null) {
+                    return err;
+                }
+            }
+        }
+        return null;
     }
 
     /** Walks every binding, including nested ones, checking builtin arity. */

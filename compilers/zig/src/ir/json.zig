@@ -756,7 +756,7 @@ fn parseMethod(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) !ty
         .body = &.{},
         .sighash_type = sighash_type,
     };
-    const bindings = try parseBindings(allocator, body_val.array, 0);
+    const bindings = try parseBindings(allocator, body_val.array, 0, 1);
 
     return .{
         .name = try allocator.dupe(u8, name),
@@ -784,18 +784,24 @@ fn parseParams(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) ![]
 
 const BindingError = ParseError || std.mem.Allocator.Error || unknown_anf_kind.UnknownAnfKindError;
 
-fn parseBindings(allocator: std.mem.Allocator, arr: std.json.Array, depth: u32) BindingError![]types.ANFBinding {
+// `enclosing_loop_count` is the product of every loop count already entered
+// on the path from the method body down to `arr` (1 at the top). F-283 /
+// CL-GAP-164: the per-binding MAX_LOOP_COUNT check in parseLoop bounds a
+// single loop's own count but never the PRODUCT across nesting -- two loops
+// of 10,000 each, one inside the other, each pass that check independently
+// while the real unrolled work is 10,000 x 10,000 = 100,000,000.
+fn parseBindings(allocator: std.mem.Allocator, arr: std.json.Array, depth: u32, enclosing_loop_count: i64) BindingError![]types.ANFBinding {
     var result = try allocator.alloc(types.ANFBinding, arr.items.len);
     for (arr.items, 0..) |binding_val, i| {
-        result[i] = try parseBinding(allocator, binding_val.object, depth);
+        result[i] = try parseBinding(allocator, binding_val.object, depth, enclosing_loop_count);
     }
     return result;
 }
 
-fn parseBinding(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFBinding {
+fn parseBinding(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFBinding {
     const name = try getString(obj, "name");
     const value_json = obj.get("value") orelse return ParseError.MissingField;
-    const value = try parseANFValue(allocator, value_json.object, depth);
+    const value = try parseANFValue(allocator, value_json.object, depth, enclosing_loop_count);
 
     return .{
         .name = try allocator.dupe(u8, name),
@@ -832,7 +838,7 @@ const kind_map = std.StaticStringMap(KindTag).initComptime(.{
     .{ "raw_script", .raw_script },
 });
 
-fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
+fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFValue {
     if (depth >= max_parse_depth) return ParseError.MaxRecursionDepthExceeded;
 
     const kind = try getString(obj, "kind");
@@ -854,8 +860,8 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
         .unary_op => try parseUnaryOp(allocator, obj),
         .call => try parseCall(allocator, obj),
         .method_call => try parseMethodCall(allocator, obj),
-        .@"if" => try parseIf(allocator, obj, depth),
-        .loop => try parseLoop(allocator, obj, depth),
+        .@"if" => try parseIf(allocator, obj, depth, enclosing_loop_count),
+        .loop => try parseLoop(allocator, obj, depth, enclosing_loop_count),
         .assert => try parseAssert(allocator, obj),
         .update_prop => try parseUpdateProp(allocator, obj),
         .get_state_script => .{ .get_state_script = {} },
@@ -1066,13 +1072,13 @@ fn parseMethodCall(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types
     } };
 }
 
-fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
+fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFValue {
     const cond = try getString(obj, "cond");
     const then_val = obj.get("then") orelse return ParseError.MissingField;
-    const then_bindings = try parseBindings(allocator, then_val.array, depth + 1);
+    const then_bindings = try parseBindings(allocator, then_val.array, depth + 1, enclosing_loop_count);
 
     const else_bindings: []types.ANFBinding = if (obj.get("else")) |else_val|
-        try parseBindings(allocator, else_val.array, depth + 1)
+        try parseBindings(allocator, else_val.array, depth + 1, enclosing_loop_count)
     else
         try allocator.alloc(types.ANFBinding, 0);
 
@@ -1097,7 +1103,7 @@ fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) Bi
     return .{ .@"if" = if_expr };
 }
 
-fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
+fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFValue {
     const count_val = obj.get("count") orelse return ParseError.MissingField;
 
     // N-115: the unroll ceiling, checked BEFORE the narrowing cast.
@@ -1136,9 +1142,19 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
         return ParseError.LoopCountExceedsMaximum;
     }
     const count: u32 = @intCast(raw_count);
+
+    // F-283 / CL-GAP-164: the product check. Reached only once the
+    // binding's own count is within [0, MAX_LOOP_COUNT] (the guard above
+    // already returned otherwise), so both operands are <= MAX_LOOP_COUNT
+    // (10_000) and the multiplication cannot overflow i64.
+    const total_loop_count: i64 = enclosing_loop_count * raw_count;
+    if (total_loop_count > types.MAX_LOOP_COUNT) {
+        return ParseError.LoopCountExceedsMaximum;
+    }
+
     const iter_var = try getString(obj, "iterVar");
     const body_val = obj.get("body") orelse return ParseError.MissingField;
-    const body_bindings = try parseBindings(allocator, body_val.array, depth + 1);
+    const body_bindings = try parseBindings(allocator, body_val.array, depth + 1, total_loop_count);
 
     // Issue #121: decode the iterator start value (a bare number, or a decimal
     // `Nn` string for oversize starts) and step direction. Older ANF payloads

@@ -105,7 +105,7 @@ func ValidateIR(program *ANFProgram) error {
 				return fmt.Errorf("IR validation: method %s param %s has empty type", method.Name, param.Name)
 			}
 		}
-		if err := validateBindings(method.Body, method.Name, mutableCount); err != nil {
+		if err := validateBindings(method.Body, method.Name, mutableCount, 1); err != nil {
 			return err
 		}
 	}
@@ -186,7 +186,16 @@ var validSighashFlags = map[int]bool{
 	0xC1: true, 0xC2: true, 0xC3: true,
 }
 
-func validateBindings(bindings []ANFBinding, methodName string, mutableCount int) error {
+// enclosingLoopCount is the product of every loop count already entered on
+// the path from the method body down to bindings (1 at the top). F-283 /
+// CL-GAP-164: the per-binding MaxLoopCount check below bounds a single
+// loop's own count but never the PRODUCT across nesting -- two loops of
+// 10,000 each, one inside the other, each pass that check independently
+// while the real unrolled work is 10,000 x 10,000 = 100,000,000. By the time
+// this function is called with a non-default enclosingLoopCount, every
+// level above it has already returned early if its own count failed the
+// per-binding check, so enclosingLoopCount is always <= MaxLoopCount here.
+func validateBindings(bindings []ANFBinding, methodName string, mutableCount int, enclosingLoopCount int) error {
 	for i, binding := range bindings {
 		if binding.Name == "" {
 			return fmt.Errorf("IR validation: method %s binding[%d] has empty name", methodName, i)
@@ -293,10 +302,10 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 
 		// Validate nested bindings
 		if kind == "if" {
-			if err := validateBindings(binding.Value.Then, methodName, mutableCount); err != nil {
+			if err := validateBindings(binding.Value.Then, methodName, mutableCount, enclosingLoopCount); err != nil {
 				return err
 			}
-			if err := validateBindings(binding.Value.Else, methodName, mutableCount); err != nil {
+			if err := validateBindings(binding.Value.Else, methodName, mutableCount, enclosingLoopCount); err != nil {
 				return err
 			}
 		}
@@ -307,7 +316,14 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 			if binding.Value.Count > MaxLoopCount {
 				return fmt.Errorf("IR validation: method %s binding %s has loop count %d exceeding maximum %d", methodName, binding.Name, binding.Value.Count, MaxLoopCount)
 			}
-			if err := validateBindings(binding.Value.Body, methodName, mutableCount); err != nil {
+			// F-283 / CL-GAP-164: the product check. Reached only once the
+			// binding's own count is within MaxLoopCount, so both operands
+			// are <= MaxLoopCount and the multiplication cannot overflow.
+			totalLoopCount := enclosingLoopCount * binding.Value.Count
+			if totalLoopCount > MaxLoopCount {
+				return fmt.Errorf("IR validation: method %s binding %s has loop count %d nested inside an enclosing loop of total count %d, producing %d total iterations, exceeding maximum %d", methodName, binding.Name, binding.Value.Count, enclosingLoopCount, totalLoopCount, MaxLoopCount)
+			}
+			if err := validateBindings(binding.Value.Body, methodName, mutableCount, totalLoopCount); err != nil {
 				return err
 			}
 		}

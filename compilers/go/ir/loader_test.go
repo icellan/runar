@@ -3,6 +3,7 @@ package ir
 import (
 	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -285,6 +286,148 @@ func TestValidateIR_LoopCountExceedsMax(t *testing.T) {
 	err := ValidateIR(program)
 	if err == nil {
 		t.Fatal("expected error for loop count exceeding maximum")
+	}
+}
+
+// F-283 / CL-GAP-164: the per-binding check above bounds a single loop's own
+// count but never the PRODUCT across nesting. Two loops of MaxLoopCount each,
+// one nested inside the other, each individually satisfy the per-binding
+// check while the real unrolled work is MaxLoopCount x MaxLoopCount =
+// 100,000,000. This proves ValidateIR refuses that shape too.
+//
+// What this proves: the loader rejects a nested-loop IR whose counts each
+// individually satisfy MaxLoopCount but whose product does not, before any
+// lowering pass sees the program.
+// What this does not prove: that stack lowering itself would be safe against
+// such a product if it arrived some other way -- only that this loader-level
+// route is closed.
+func TestValidateIR_NestedLoopProductExceedsMax(t *testing.T) {
+	program := &ANFProgram{
+		ContractName: "Test",
+		Properties:   []ANFProperty{},
+		Methods: []ANFMethod{
+			{
+				Name:   "run",
+				Params: nil,
+				Body: []ANFBinding{
+					{
+						Name: "outer",
+						Value: ANFValue{
+							Kind:    "loop",
+							Count:   MaxLoopCount,
+							IterVar: "i",
+							Body: []ANFBinding{
+								{
+									Name: "inner",
+									Value: ANFValue{
+										Kind:    "loop",
+										Count:   MaxLoopCount,
+										IterVar: "j",
+										Body:    []ANFBinding{},
+									},
+								},
+							},
+						},
+					},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+	err := ValidateIR(program)
+	if err == nil {
+		t.Fatal("expected error for nested loop product exceeding maximum")
+	}
+	want := "100000000"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error to name the total iteration count %q, got: %v", want, err)
+	}
+}
+
+// Smaller counts, neither of which trips the per-binding ceiling alone (101
+// and 100 are both far below MaxLoopCount), but whose product (10,100) does.
+// Proves the new rule is the product, not a disguised re-check of the single
+// bound.
+func TestValidateIR_SmallNestedCountsProductExceedsMax(t *testing.T) {
+	program := &ANFProgram{
+		ContractName: "Test",
+		Properties:   []ANFProperty{},
+		Methods: []ANFMethod{
+			{
+				Name:   "run",
+				Params: nil,
+				Body: []ANFBinding{
+					{
+						Name: "outer",
+						Value: ANFValue{
+							Kind:    "loop",
+							Count:   101,
+							IterVar: "i",
+							Body: []ANFBinding{
+								{
+									Name: "inner",
+									Value: ANFValue{
+										Kind:    "loop",
+										Count:   100,
+										IterVar: "j",
+										Body:    []ANFBinding{},
+									},
+								},
+							},
+						},
+					},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+	err := ValidateIR(program)
+	if err == nil {
+		t.Fatal("expected error for nested loop product exceeding maximum")
+	}
+	want := "10100"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error to name the total iteration count %q, got: %v", want, err)
+	}
+}
+
+// Control: nested loops whose product stays within MaxLoopCount must still
+// load cleanly -- the new check must not be a disguised depth limit.
+func TestValidateIR_NestedLoopProductWithinMax(t *testing.T) {
+	program := &ANFProgram{
+		ContractName: "Test",
+		Properties:   []ANFProperty{},
+		Methods: []ANFMethod{
+			{
+				Name:   "run",
+				Params: nil,
+				Body: []ANFBinding{
+					{
+						Name: "outer",
+						Value: ANFValue{
+							Kind:    "loop",
+							Count:   10,
+							IterVar: "i",
+							Body: []ANFBinding{
+								{
+									Name: "inner",
+									Value: ANFValue{
+										Kind:    "loop",
+										Count:   10,
+										IterVar: "j",
+										Body:    []ANFBinding{},
+									},
+								},
+							},
+						},
+					},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+	if err := ValidateIR(program); err != nil {
+		t.Fatalf("expected nested loop product 100 (well within MaxLoopCount) to be accepted, got: %v", err)
 	}
 }
 

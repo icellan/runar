@@ -164,7 +164,7 @@ module RunarCompiler
           end
         end
 
-        errors.concat(_validate_bindings(m.body, m.name, mutable_count))
+        errors.concat(_validate_bindings(m.body, m.name, mutable_count, 1))
       end
 
       program.properties.each_with_index do |prop, i|
@@ -395,7 +395,19 @@ module RunarCompiler
         "#{got} argument(s); it takes #{wanted}"
     end
 
-    def self._validate_bindings(bindings, method_name, mutable_count)
+    # +enclosing_loop_count+ is the product of every loop count already
+    # entered on the path from the method body down to +bindings+ (1 at the
+    # top). F-283 / CL-GAP-164: the per-binding MAX_LOOP_COUNT check below
+    # bounds a single loop's own count but never the PRODUCT across nesting --
+    # two loops of 10_000 each, one inside the other, each pass that check
+    # independently while the real unrolled work is 10_000 x 10_000 =
+    # 100_000_000. A 1,175-byte payload shaped that way loaded in 0.0s and then
+    # drove compile_from_ir to 5m07s / 3.7GB RSS and climbing. The new check
+    # below catches that: it fires only when the single binding's own count is
+    # already within MAX_LOOP_COUNT (otherwise the existing per-binding error
+    # already names the problem) but the product with everything enclosing it
+    # is not.
+    def self._validate_bindings(bindings, method_name, mutable_count, enclosing_loop_count = 1)
       errors = []
 
       bindings.each_with_index do |binding, i|
@@ -473,10 +485,10 @@ module RunarCompiler
         # Validate nested bindings
         if kind == "if"
           if binding.value.then
-            errors.concat(_validate_bindings(binding.value.then, method_name, mutable_count))
+            errors.concat(_validate_bindings(binding.value.then, method_name, mutable_count, enclosing_loop_count))
           end
           if binding.value.else_
-            errors.concat(_validate_bindings(binding.value.else_, method_name, mutable_count))
+            errors.concat(_validate_bindings(binding.value.else_, method_name, mutable_count, enclosing_loop_count))
           end
         end
 
@@ -490,8 +502,20 @@ module RunarCompiler
             errors << "method #{method_name} binding #{binding.name} " \
                       "has loop count #{count} exceeding maximum #{MAX_LOOP_COUNT}"
           end
+          # F-283 / CL-GAP-164: the product check. Only meaningful once the
+          # per-binding count is itself sane (non-negative and within
+          # MAX_LOOP_COUNT) -- otherwise the checks above already named the
+          # problem and this would just be a confusing second diagnostic for
+          # the same single binding.
+          effective_count = count.negative? ? 0 : count
+          total_loop_count = enclosing_loop_count * effective_count
+          if count >= 0 && count <= MAX_LOOP_COUNT && total_loop_count > MAX_LOOP_COUNT
+            errors << "method #{method_name} binding #{binding.name} has loop count #{count} " \
+                      "nested inside an enclosing loop of total count #{enclosing_loop_count}, " \
+                      "producing #{total_loop_count} total iterations, exceeding maximum #{MAX_LOOP_COUNT}"
+          end
           if binding.value.body
-            errors.concat(_validate_bindings(binding.value.body, method_name, mutable_count))
+            errors.concat(_validate_bindings(binding.value.body, method_name, mutable_count, total_loop_count))
           end
         end
 

@@ -127,6 +127,7 @@ import { eliminateDeadBindings } from './optimizer/dce.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact, StackOp } from './ir/index.js';
+import { MAX_LOOP_COUNT } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
@@ -865,6 +866,7 @@ export function loadANFFromJSON(json: string): ANFProgram {
   // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
   assertNoReservedIrNames(program as ANFProgram);
   coerceNumericBigInts(program as ANFProgram);
+  assertLoopCountWithinBounds(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
   // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
@@ -1057,6 +1059,83 @@ function assertSuperOnlyInConstructor(program: ANFProgram): void {
   for (const method of program.methods) {
     if (method.name === 'constructor') continue;
     walk(method.body ?? [], method.name);
+  }
+}
+
+/**
+ * F-283 / CL-GAP-164 — bound a loop's own iteration count, and the PRODUCT
+ * of every loop count nested inside it.
+ *
+ * `loadANFFromJSON` had NEITHER check. `MAX_LOOP_COUNT` (CL-BUG-088) is read
+ * only by `04-anf-lower.ts` on the SOURCE path, which `compileFromANF` never
+ * runs — IR arriving via `--from-ir` skips straight to stack lowering. A
+ * loop count of 10001, or two loops of 10000 nested inside each other
+ * (product 100,000,000), both loaded clean here while the six native
+ * loaders already bounded the SINGLE count (Go `ir.MaxLoopCount`,
+ * Python/Ruby/Rust/Zig/Java's own copies). The PRODUCT bound is new
+ * everywhere (F-283 / CL-GAP-164): two loops of 10,000 each, one nested
+ * inside the other, each independently satisfy the single-binding bound
+ * while the real unrolled work is 10,000 x 10,000 = 100,000,000 — a count
+ * that, if it reached stack lowering, drives the unroller into multi-GB
+ * memory growth (measured on the Ruby tier, same shape: a 1,175-byte
+ * payload loaded in 0.0s and then drove compilation to 5m07s / 3.7GB RSS
+ * and climbing).
+ *
+ * Both diagnostics are shared verbatim with the six native tiers.
+ */
+function assertLoopCountWithinBounds(program: ANFProgram): void {
+  const walk = (
+    bindings: readonly ANFBinding[],
+    methodName: string,
+    enclosingLoopCount: number,
+  ): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string } & Record<string, unknown>;
+      if (value?.kind === 'loop') {
+        if (typeof value.count !== 'number') {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} loop count ` +
+              `must be an integer, got ${JSON.stringify(value.count)}`,
+          );
+        }
+        const count = value.count;
+        if (count < 0) {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} ` +
+              `has negative loop count ${count}`,
+          );
+        }
+        if (count > MAX_LOOP_COUNT) {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} ` +
+              `has loop count ${count} exceeding maximum ${MAX_LOOP_COUNT}`,
+          );
+        }
+        // Reached only once the binding's own count is within
+        // [0, MAX_LOOP_COUNT], so both operands are <= MAX_LOOP_COUNT and
+        // the multiplication stays well inside Number's safe-integer range.
+        const totalLoopCount = enclosingLoopCount * count;
+        if (totalLoopCount > MAX_LOOP_COUNT) {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} ` +
+              `has loop count ${count} nested inside an enclosing loop of total ` +
+              `count ${enclosingLoopCount}, producing ${totalLoopCount} total ` +
+              `iterations, exceeding maximum ${MAX_LOOP_COUNT}`,
+          );
+        }
+        const body = value.body;
+        if (Array.isArray(body)) walk(body as ANFBinding[], methodName, totalLoopCount);
+      } else {
+        for (const key of ['then', 'else'] as const) {
+          const nested = value[key];
+          if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName, enclosingLoopCount);
+        }
+      }
+    }
+  };
+
+  for (const method of program.methods) {
+    walk(method.body ?? [], method.name, 1);
   }
 }
 

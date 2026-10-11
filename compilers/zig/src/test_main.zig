@@ -12,6 +12,7 @@ test {
     _ = @import("ir/n101_stateful_scaffold_test.zig");
     _ = @import("ir/n096_synthetic_array_chain_test.zig");
     _ = @import("ir/n115_ir_loop_cap_test.zig");
+    _ = @import("ir/f283_ir_loop_product_bound_test.zig");
     _ = @import("ir/n115_ir_float_narrowing_test.zig");
     _ = @import("ir/n133_loop_start_test.zig");
     _ = @import("tests/n119_ir_cli_clean_stderr.zig");

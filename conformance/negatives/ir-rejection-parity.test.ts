@@ -177,6 +177,17 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
  * on such a chain (exit 2); Python, Java, Zig and TS compiled it.
  */
 
+/*
+ * `I58` (F-283 / CL-GAP-164, the nested-loop PRODUCT bound) reuses the
+ * `bounded-loop` control with the `verify` method's one `loop` binding
+ * changed: its `count` set to 10,000 and its `body` wrapped in a second
+ * `loop` of count 10,000 (the original body becomes that inner loop's
+ * body). Each of the two counts individually satisfies MAX_LOOP_COUNT
+ * (10,000) — the per-binding bound I07 already covers — but their product
+ * is 100,000,000. Every tier bounded the single count; before this fix none
+ * bounded the product.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],
