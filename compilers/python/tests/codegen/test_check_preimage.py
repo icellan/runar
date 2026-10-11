@@ -137,6 +137,57 @@ def test_stateful_increment_emits_binding_blob():
     # The blob declares net-zero stack effect (preimage in -> preimage out).
     assert blobs[0].in_arity == 1 and blobs[0].out_arity == 1
 
+# F-284: ``_is_binding_blob`` compares against ``_CHECK_PREIMAGE_BINDING_HEX``
+# imported from the module under test, so a mutation of that constant moves the
+# expectation with it -- the test above cannot see it. The literal below is
+# copied from the TS reference (``CHECK_PREIMAGE_BINDING_HEX`` in
+# packages/runar-compiler/src/passes/oppushtx-codegen.ts), the blob
+# oppushtx-binding.test.ts exploit-tests against forged/decoupled/zeroed
+# preimages. A same-length forgery (OP_HASH256 -> OP_NOP at byte 1) is ACCEPTED
+# by the @bsv/sdk Spend interpreter with a 32-byte non-preimage, so neither
+# length nor self-comparison is a guard.
+_TS_REFERENCE_PREIMAGE_BINDING_HEX = (
+    "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
+    "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
+    "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
+    "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
+    "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
+    "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
+    "bf66a71ae74a1e83b0ad"
+)
+_TS_REFERENCE_PREIMAGE_BINDING_SHA256 = (
+    "5784cfa33516fe07e8c0466c2608a9f812e5ecc8a35283a23700832fbe2144d5"
+)
+
+
+def test_stateful_increment_binding_blob_is_byte_identical_to_ts_reference():
+    """Pins the emitted blob to the TS reference bytes, independently of stack.py.
+
+    Proves: the stateful increment method emits exactly that blob, once.
+    Does NOT prove: the blob is binding on-chain (proven once for these bytes
+    in TS via @bsv/sdk Spend), nor non-default @sighash variants.
+    """
+    import hashlib
+
+    reference = bytes.fromhex(_TS_REFERENCE_PREIMAGE_BINDING_HEX)
+    # Guard the literal itself against a silent edit.
+    assert len(reference) == 428
+    assert hashlib.sha256(reference).hexdigest() == _TS_REFERENCE_PREIMAGE_BINDING_SHA256
+
+    methods = _lower_source(COUNTER_SRC)
+    inc = next(m for m in methods if m.name == "increment")
+    flat = _flatten_ops(inc.ops)
+    exact = [op for op in flat if op.op == "raw_bytes" and op.raw_bytes == reference]
+    assert len(exact) == 1, (
+        "stateful increment must emit the TS-reference OP_PUSH_TX binding blob "
+        f"(sha256 {_TS_REFERENCE_PREIMAGE_BINDING_SHA256}) exactly once; got {len(exact)}"
+    )
+
 
 def test_stateful_increment_has_no_discrete_checksig_or_g_push():
     """After the fix the signature check lives INSIDE the opaque binding blob;
