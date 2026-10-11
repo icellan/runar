@@ -90,12 +90,35 @@ describe('loadANFFromJSON number handling', () => {
     expect((anf.methods[0]!.body[0]!.value as { value: unknown }).value).toBe(true);
   });
 
-  it('rejects an integer JSON.parse has already rounded rather than compiling the rounded value', () => {
-    // 2^53 + 1 does not survive JSON.parse. Silently pushing 2^53 would be a
-    // wrong locking script with no diagnostic; peer emitters encode anything
-    // this large as a "…n" decimal string precisely to avoid the round trip.
+  it('decodes 2^53+1 exactly rather than compiling the value JSON.parse already rounded (or refuses it without context.source)', () => {
+    // 9007199254740993 (2^53 + 1) does not survive JSON.parse as a number —
+    // it rounds to 9007199254740992. N-212 (R82: parse exactly everywhere)
+    // reads the undamaged token from the reviver's `context.source`
+    // (Node >= 21) for the `value` / `initialValue` positions and returns
+    // the exact BigInt instead of silently compiling the rounded value. On a
+    // runtime without `context.source` the digits are unrecoverable and the
+    // pre-N-212 refusal is still the correct answer — asserted here, not
+    // skipped, same as packages/runar-compiler/src/__tests__/n212-ir-bare-big-integer.test.ts.
+    //
+    // Proves: on this runtime, loadANFFromJSON yields the exact bigint
+    // 9007199254740993n for a bare too-large JSON integer, not 2^53 and not
+    // a JS number.
+    // Does not prove: the compiled script hex (see n212-ir-bare-big-integer.test.ts),
+    // other tiers, or the `initialValue` / `loop.start` positions.
+    let hasSource = false;
+    JSON.parse('1', function (this: unknown, _k: string, v: unknown, ctx?: { source?: string }) {
+      hasSource = ctx?.source === '1';
+      return v;
+    } as never);
+
     const tooBig = wrap('[{"name":"t0","value":{"kind":"load_const","value":9007199254740993}}]');
-    expect(() => loadANFFromJSON(tooBig)).toThrow(/precision|safe integer/i);
+    if (!hasSource) {
+      expect(() => loadANFFromJSON(tooBig)).toThrow(/safe-integer precision/);
+      return;
+    }
+    const value = (loadANFFromJSON(tooBig).methods[0]!.body[0]!.value as { value: unknown }).value;
+    expect(typeof value).toBe('bigint');
+    expect(value).toBe(9007199254740993n);
   });
 
   it('decodes a numeric loop start as a bigint', () => {
