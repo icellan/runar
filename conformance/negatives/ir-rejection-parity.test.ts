@@ -186,6 +186,15 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
  * (10,000) — the per-binding bound I07 already covers — but their product
  * is 100,000,000. Every tier bounded the single count; before this fix none
  * bounded the product.
+ *
+ * `I59` (F-357) reuses the `bounded-loop` control with ONE field changed:
+ * the `loop` binding's `step` is the string `"abc"` instead of an integer.
+ * Go, Rust, Python, Ruby and Java all already refuse this (their JSON
+ * decoders type-check the field on the way in); Zig's hand-rolled loader
+ * read it through `if (obj.get("step")) |v| switch (v) { .integer => ...,
+ * .float => ..., else => 1 }` — a wrong-typed value fell into the same
+ * `else` arm as a genuinely absent one and silently became the commonest
+ * step value (1) instead of an error. (I58 is F-283's.)
  */
 
 /** Every golden a fixture in this lane is derived from. */

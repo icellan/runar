@@ -1023,11 +1023,20 @@ fn parseBinOp(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFV
     const left = try getString(obj, "left");
     const right = try getString(obj, "right");
 
-    // Optional result_type field
+    // Optional result_type field.
+    //
+    // F-357: a non-string, non-null value (e.g. `"result_type": 1`) used to
+    // fall into the same `else => null` arm as a genuinely absent field,
+    // silently discarding the "bytes" hint a byte-equality comparison
+    // depends on and lowering it as a numeric comparison instead -- a
+    // different script with no diagnostic. `null` still means "absent" (Go's
+    // encoding/json leaves a non-pointer string field at its zero value for
+    // a JSON null, which this loader treats as "no hint" the same way).
     const result_type: ?[]const u8 = if (obj.get("result_type")) |rt|
         switch (rt) {
             .string => |s| try allocator.dupe(u8, s),
-            else => null,
+            .null => null,
+            else => return ParseError.UnexpectedValueType,
         }
     else
         null;
@@ -1203,10 +1212,20 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, 
         // that is the `else 0` on the `if (obj.get(...))` below, not here.
         else => return ParseError.InvalidLoopStart,
     } else 0;
+    // F-357: a wrong-typed `step` (a string, bool, object, array) used to
+    // fall into the same `else => 1` arm as a genuinely absent field,
+    // silently substituting the commonest step value with no diagnostic --
+    // `.float` is unreachable here in practice (floats are refused at the
+    // JSON-parse boundary, see `FloatNotAllowedInIR`), but is left as a
+    // direction-only read since it predates this fix and is not the defect.
+    // `null` still means "absent", matching Go (a JSON null into a
+    // non-pointer `int` field leaves it at the zero value, which this
+    // tier's own post-unmarshal default then turns into 1).
     const step: i8 = if (obj.get("step")) |v| switch (v) {
         .integer => |i| if (i < 0) @as(i8, -1) else 1,
         .float => |f| if (f < 0) @as(i8, -1) else 1,
-        else => 1,
+        .null => 1,
+        else => return ParseError.UnexpectedValueType,
     } else 1;
 
     const loop_node = try allocator.create(types.ANFLoop);
@@ -1223,8 +1242,18 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, 
 
 fn parseAssert(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
     const val_ref = try getString(obj, "value");
+    // F-357: a wrong-typed `isAutoInjectedStateCheck` (e.g. the string
+    // `"true"`) used to satisfy neither arm of `v == .bool`, so the
+    // expression fell through to `false` -- the same silent-default shape as
+    // the other five fields this item closes. `null` still means "absent"
+    // (Go's encoding/json leaves a non-pointer `bool` field at its zero
+    // value, `false`, for a JSON null).
     const marker = if (obj.get("isAutoInjectedStateCheck")) |v|
-        v == .bool and v.bool
+        switch (v) {
+            .bool => |b| b,
+            .null => false,
+            else => return ParseError.UnexpectedValueType,
+        }
     else
         false;
 
@@ -1248,11 +1277,22 @@ fn parseAddOutput(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     const satoshis = try getString(obj, "satoshis");
     const state_values = try parseStringArray(allocator, obj, "stateValues");
 
-    // preimage field is present in JSON but may be empty string
+    // preimage field is present in JSON but may be empty string.
+    //
+    // F-357: a non-string, non-null value used to fall into the same
+    // `else => ""` arm as a genuinely absent/empty field. No lowerer in any
+    // tier currently emits a non-empty `add_output.preimage` (it is always
+    // written as `""`), but `--ir` accepts IR from outside the compiler, and
+    // the field's type (a reference to the binding holding the verified
+    // preimage, per types.zig) is still a `string | null`, never a number,
+    // bool, object or array. `null` still means "absent" (Go's
+    // encoding/json leaves a non-pointer string field at its zero value for
+    // a JSON null).
     const preimage: []const u8 = if (obj.get("preimage")) |p|
         switch (p) {
             .string => |s| try allocator.dupe(u8, s),
-            else => try allocator.dupe(u8, ""),
+            .null => try allocator.dupe(u8, ""),
+            else => return ParseError.UnexpectedValueType,
         }
     else
         try allocator.dupe(u8, "");
@@ -3131,6 +3171,170 @@ test "parse add_output ANF IR" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+// F-357: a wrong-typed `bin_op.result_type` used to be swallowed by the same
+// `else => null` arm as a genuinely absent field, silently discarding the
+// "bytes" hint and lowering the comparison as a numeric one instead of a
+// byte-equality one -- a different script, with no diagnostic. Proven
+// against a `byte-builtins`-shaped comparison rather than a stateful
+// scaffold's continuation check, because the latter's own `===` structural
+// check happens to reject the mutated program for an UNRELATED reason
+// (missing scaffolding) and would mask this defect.
+test "bin_op.result_type must be a string or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "ResultTypeTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {"name": "t0", "value": {"kind": "load_const", "value": 1}},
+        \\        {"name": "t1", "value": {"kind": "load_const", "value": 1}},
+        \\        {
+        \\          "name": "t2",
+        \\          "value": {
+        \\            "kind": "bin_op",
+        \\            "left": "t0",
+        \\            "op": "===",
+        \\            "result_type": 1,
+        \\            "right": "t1"
+        \\          }
+        \\        },
+        \\        {"name": "_ok_assert", "value": {"kind": "assert", "value": "t2"}}
+        \\      ],
+        \\      "isPublic": true,
+        \\      "name": "run",
+        \\      "params": []
+        \\    }
+        \\  ],
+        \\  "properties": []
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
+}
+
+// F-357: a wrong-typed `assert.isAutoInjectedStateCheck` (e.g. the string
+// `"true"` instead of a JSON boolean) used to satisfy neither arm of the old
+// `v == .bool and v.bool` expression and silently fall through to `false`.
+test "assert.isAutoInjectedStateCheck must be a bool or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "AutoInjectedTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {"name": "t0", "value": {"kind": "load_const", "value": true}},
+        \\        {
+        \\          "name": "t1",
+        \\          "value": {
+        \\            "kind": "assert",
+        \\            "value": "t0",
+        \\            "isAutoInjectedStateCheck": "true"
+        \\          }
+        \\        }
+        \\      ],
+        \\      "isPublic": true,
+        \\      "name": "run",
+        \\      "params": []
+        \\    }
+        \\  ],
+        \\  "properties": []
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
+}
+
+// F-357: a wrong-typed `loop.step` used to be swallowed by the same
+// `else => 1` arm as a genuinely absent field, silently substituting the
+// commonest step value with no diagnostic.
+test "loop.step must be an integer or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "LoopStepTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {
+        \\          "name": "t0",
+        \\          "value": {
+        \\            "kind": "loop",
+        \\            "count": 2,
+        \\            "iterVar": "i",
+        \\            "step": "abc",
+        \\            "body": [
+        \\              {"name": "t1", "value": {"kind": "load_const", "value": 0}}
+        \\            ]
+        \\          }
+        \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
+        \\      ],
+        \\      "isPublic": true,
+        \\      "name": "run",
+        \\      "params": []
+        \\    }
+        \\  ],
+        \\  "properties": []
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
+}
+
+// F-357: a wrong-typed `add_output.preimage` used to be swallowed by the
+// same `else => ""` arm as a genuinely absent/empty field. No lowerer in any
+// tier emits a non-empty value for this field today, but `--ir` takes IR
+// from outside the compiler and the field is typed `string | null`, never a
+// number.
+test "add_output.preimage must be a string or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "OutputTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {
+        \\          "name": "t0",
+        \\          "value": {
+        \\            "kind": "add_output",
+        \\            "preimage": 12345,
+        \\            "satoshis": "sat_ref",
+        \\            "stateValues": ["v1", "v2"]
+        \\          }
+        \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
+        \\      ],
+        \\      "isPublic": false,
+        \\      "name": "spend",
+        \\      "params": []
+        \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
+        \\  ],
+        \\  "properties": [
+        \\    { "name": "a", "readonly": false, "type": "bigint" },
+        \\    { "name": "b", "readonly": false, "type": "bigint" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
 }
 
 test "parse method_call ANF IR" {
