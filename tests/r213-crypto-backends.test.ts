@@ -16,10 +16,23 @@
  *   Python  bsv-sdk when importable, bundled pure-Python otherwise
  *   Ruby    bundled pure-Ruby (the bsv-sdk branch cannot be taken — see below)
  *
- * Zig is NOT hand-rolled: `builtins.zig` routes ecAdd / ecMul / ecMulGen
- * through `bsvz.crypto.Point`, and the envelope signer uses the Zig standard
+ * Zig is NOT hand-rolled: `builtins.zig` routes ecMul / ecMulGen through
+ * `bsvz.crypto.Point`, and the envelope signer uses the Zig standard
  * library's `Secp256k1` / `EcdsaSecp256k1Sha256`. That is a declared,
  * version-pinned dependency like the other four.
+ *
+ * N-111 (commit 86a7e4aa) deliberately moved `ecAdd` / `ecNegate` /
+ * `ecEncodeCompressed` OFF `bsvz.crypto.Point` and onto a direct affine-law
+ * implementation against `std.crypto.ecc.Secp256k1.Fe` (Zig's own
+ * standard-library secp256k1 field element). The reason is not a
+ * regression: `bsvz`'s point decoder refuses off-curve operands and the
+ * all-zero identity O, while the compiled script's ecAdd/ecNegate accept
+ * both (R-053/R-117), so the on-chain gate and the off-chain one disagreed.
+ * `Fe` is still a maintained library type doing the field arithmetic (mod
+ * p add/sub/mul/invert) — the affine curve LAW (which coordinates to
+ * combine, and when) is written here because no library offers one that
+ * matches the script's off-curve/identity handling, not because the field
+ * math itself was hand-rolled.
  *
  * The real asymmetry is Python and Ruby, and it is "optional library with a
  * hand-rolled fallback", not "zero dependency". Ruby's is the sharper case:
@@ -97,12 +110,55 @@ describe('R-213: every tier with a required crypto library still declares it', (
     expect(bodyOf('fn parsePoint(')).toMatch(/bsvz\.crypto\.Point\.(identity|fromRaw64)/);
     expect(bodyOf('fn serializePoint(')).toMatch(/point\.toRaw64\(\)/);
 
-    // And the builtins must delegate rather than compute: each one calls into
-    // the parsed library point, none of them do field arithmetic inline.
-    for (const fn of ['pub fn ecAdd(', 'pub fn ecMul(', 'pub fn ecMulGen(']) {
-      const body = bodyOf(fn);
+    // A builtin that merely forwards to a sibling `*Checked` helper (N-111
+    // split the abort-vs-panic behaviour out that way) is checked through
+    // that helper's body, not its own one-line wrapper — otherwise the
+    // assertion below would read nothing but a function call.
+    const effectiveBodyOf = (signature: string): string => {
+      const body = bodyOf(signature);
+      const checkedCall = /\b(ec\w+Checked)\(/.exec(body);
+      return checkedCall ? bodyOf(`pub fn ${checkedCall[1]}(`) : body;
+    };
+
+    // ecMul and ecMulGen still delegate to the parsed bsvz library point —
+    // none of them do field arithmetic inline.
+    for (const fn of ['pub fn ecMul(', 'pub fn ecMulGen(']) {
+      const body = effectiveBodyOf(fn);
       expect(body, `${fn} does not delegate to a library point`)
         .toMatch(/parsePoint|Secp256k1|basePoint|\.mul\(|\.add\(/);
+      expect(body, `${fn} looks like it computes a modular inverse itself`)
+        .not.toMatch(/modInverse|invMod|powMod/);
+    }
+
+    // N-111 (commit 86a7e4aa): ecAdd / ecNegate must delegate to their
+    // *Checked helper (parsePoint's gate is wrong for them — see the header
+    // comment), and that helper's own field arithmetic must go through
+    // `Secp256k1Fe` (std.crypto.ecc.Secp256k1.Fe) rather than a private
+    // modular-inverse routine. This still fails if the field math is ever
+    // hand-rolled: inlining a from-scratch modInverse/invMod/powMod into
+    // ecAddChecked/ecNegateChecked, or dropping the Secp256k1Fe-typed
+    // decode, turns this assertion red (verified while writing this test by
+    // temporarily replacing `.invert()` with an inline extended-Euclid
+    // `modInverse` call, which failed exactly these two checks).
+    for (const [fn, checkedFn] of [
+      ['pub fn ecAdd(', 'ecAddChecked'],
+      ['pub fn ecNegate(', 'ecNegateChecked'],
+    ] as const) {
+      const body = bodyOf(fn);
+      expect(body, `${fn} does not delegate to ${checkedFn}`).toContain(`${checkedFn}(`);
+
+      const checkedBody = effectiveBodyOf(fn);
+      expect(checkedBody, `${checkedFn} does not use the Secp256k1Fe library field type`)
+        .toMatch(/Secp256k1Fe|ecDecodeCanonical|ecEncodeFe/);
+      expect(checkedBody, `${checkedFn} looks like it computes a modular inverse itself`)
+        .not.toMatch(/modInverse|invMod|powMod/);
+    }
+
+    // The helpers that actually touch field elements must use Secp256k1Fe's
+    // own methods for every field op, not a hand-rolled equivalent.
+    for (const fn of ['fn ecDecodeCanonical(', 'fn ecEncodeFe(']) {
+      const body = bodyOf(fn);
+      expect(body, `${fn} does not use Secp256k1Fe`).toMatch(/Secp256k1Fe/);
       expect(body, `${fn} looks like it computes a modular inverse itself`)
         .not.toMatch(/modInverse|invMod|powMod/);
     }
