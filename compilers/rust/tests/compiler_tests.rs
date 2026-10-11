@@ -498,6 +498,57 @@ fn load_conformance_ir(test_name: &str) -> String {
         .unwrap_or_else(|e| panic!("failed to read conformance IR {}: {}", path.display(), e))
 }
 
+/// Discover every fixture under `conformance/tests/` that is NOT opted out of
+/// Rust Stack-IR / hex parity via a `source.json` `"compilers"` allowlist that
+/// omits `"rust"`. Mirrors `fixture_allowlisted_for_rust` in
+/// `conformance_goldens.rs` (which auto-discovers the full fixture set; this
+/// gate did not, per F-336). A fixture with no `source.json`, or one whose
+/// `source.json` has no `compilers` key, is eligible by default — the
+/// allowlist is opt-OUT, not opt-in.
+fn rust_eligible_conformance_fixtures() -> Vec<String> {
+    let tests_dir = conformance_dir();
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&tests_dir)
+        .unwrap_or_else(|e| panic!("readdir {}: {}", tests_dir.display(), e))
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+
+    let mut eligible = Vec::new();
+    let mut opted_out = Vec::new();
+    for dir in dirs {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let config_path = dir.join("source.json");
+        let allowed = if config_path.exists() {
+            let raw = std::fs::read_to_string(&config_path)
+                .unwrap_or_else(|e| panic!("read {}: {}", config_path.display(), e));
+            let cfg: serde_json::Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("parse {}: {}", config_path.display(), e));
+            match cfg.get("compilers") {
+                Some(serde_json::Value::Array(arr)) => {
+                    arr.iter().any(|v| v.as_str() == Some("rust"))
+                }
+                _ => true,
+            }
+        } else {
+            true
+        };
+        if allowed {
+            eligible.push(name);
+        } else {
+            opted_out.push(name);
+        }
+    }
+    println!(
+        "rust_eligible_conformance_fixtures: {} eligible, {} opted out: {:?}",
+        eligible.len(),
+        opted_out.len(),
+        opted_out
+    );
+    eligible
+}
+
 // ---------------------------------------------------------------------------
 // Test: Bounded loop conformance
 // ---------------------------------------------------------------------------
@@ -575,41 +626,23 @@ fn load_expected_script_hex(test_name: &str) -> Option<String> {
     std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
 }
 
+// PROVES: for every rust-eligible conformance fixture (discovered from
+// `conformance/tests/`, not a hard-coded subset — F-336), compiling the
+// golden `expected-ir.json` through the Rust IR path produces script hex
+// byte-identical to `expected-script.hex`, and a missing golden for an
+// eligible fixture is a hard test failure, not a silently-skipped check.
+// DOES NOT PROVE: `.runar.rs`-source-path parity (that's
+// `conformance_goldens.rs`, a separate declared gate — F-285, untouched
+// here), fold-ON cross-tier parity, or anything about the 4 fixtures
+// opted out of Rust via `source.json`'s `compilers` allowlist
+// (babybear, babybear-ext4, merkle-proof, state-covenant).
 #[test]
 fn test_all_conformance_tests() {
-    let test_dirs = [
-        "arithmetic",
-        "auction",
-        "basic-p2pkh",
-        "blake3",
-        "boolean-logic",
-        "bounded-loop",
-        "convergence-proof",
-        "covenant-vault",
-        "ec-demo",
-        "ec-primitives",
-        "escrow",
-        "function-patterns",
-        "if-else",
-        "if-without-else",
-        "math-demo",
-        "multi-method",
-        "oracle-price",
-        "post-quantum-slhdsa",
-        "post-quantum-wallet",
-        "post-quantum-wots",
-        "property-initializers",
-        // schnorr-zkp omitted — BUG-001's secp256k1-n inline literal
-        // (256 bits) overflows Rust's i128 BigIntLiteral. See
-        // conformance/tests/schnorr-zkp/source.json (compilers allowlist
-        // is ts/go/python only).
-        "sphincs-wallet",
-        "stateful",
-        "stateful-bytestring",
-        "stateful-counter",
-        "token-ft",
-        "token-nft",
-    ];
+    // Fixture list is discovered, not hard-coded (F-336): every fixture under
+    // `conformance/tests/` whose `source.json` does not opt Rust out via a
+    // `compilers` allowlist is exercised here. `schnorr-zkp` has no such
+    // allowlist and is included.
+    let test_dirs = rust_eligible_conformance_fixtures();
 
     let no_fold = CompileOptions { disable_constant_folding: true, ..Default::default() };
 
@@ -635,16 +668,22 @@ fn test_all_conformance_tests() {
         );
 
         // Compare against golden expected-script.hex (with folding disabled to
-        // match the golden files which were generated without constant folding)
-        if let Some(expected_hex) = load_expected_script_hex(dir) {
-            let artifact_no_fold = compile_from_ir_str_with_options(&ir_json, &no_fold)
-                .unwrap_or_else(|e| panic!("compilation (no-fold) failed for {}: {}", dir, e));
-            assert_eq!(
-                artifact_no_fold.script, expected_hex,
-                "{}: IR-compiled script hex does not match golden file",
+        // match the golden files which were generated without constant folding).
+        // Fail closed: a rust-eligible fixture with no golden file is a gate
+        // defect, not a free pass (F-336 — the old code silently skipped this).
+        let expected_hex = load_expected_script_hex(dir).unwrap_or_else(|| {
+            panic!(
+                "{}: missing golden expected-script.hex — the conformance gate must not silently skip a rust-eligible fixture",
                 dir
-            );
-        }
+            )
+        });
+        let artifact_no_fold = compile_from_ir_str_with_options(&ir_json, &no_fold)
+            .unwrap_or_else(|e| panic!("compilation (no-fold) failed for {}: {}", dir, e));
+        assert_eq!(
+            artifact_no_fold.script, expected_hex,
+            "{}: IR-compiled script hex does not match golden file",
+            dir
+        );
 
         println!(
             "{}: hex={} bytes, asm={} chars",
@@ -1045,43 +1084,21 @@ fn test_source_compile_stateful() {
     );
 }
 
+// PROVES: for every rust-eligible conformance fixture (same discovered set
+// as `test_all_conformance_tests` — F-336), compiling the fixture's
+// `.runar.ts` source through the Rust TS frontend produces script hex
+// byte-identical to `expected-script.hex`, and a missing golden for an
+// eligible fixture is a hard test failure, not a silently-skipped check.
+// DOES NOT PROVE: `.runar.rs`-source-path parity (that's
+// `conformance_goldens.rs` — F-285, untouched here), fold-ON cross-tier
+// parity, or anything about the 4 fixtures opted out of Rust via
+// `source.json`'s `compilers` allowlist.
 #[test]
 fn test_source_compile_all_conformance() {
-    // All 27 conformance tests — source files are resolved from either
+    // Fixture list is discovered, not hard-coded (F-336) — same set as
+    // `test_all_conformance_tests`. Source files are resolved from either
     // direct .runar.ts files or via source.json references.
-    let test_dirs = [
-        "arithmetic",
-        "auction",
-        "basic-p2pkh",
-        "blake3",
-        "boolean-logic",
-        "bounded-loop",
-        "convergence-proof",
-        "covenant-vault",
-        "ec-demo",
-        "ec-primitives",
-        "escrow",
-        "function-patterns",
-        "if-else",
-        "if-without-else",
-        "math-demo",
-        "multi-method",
-        "oracle-price",
-        "post-quantum-slhdsa",
-        "post-quantum-wallet",
-        "post-quantum-wots",
-        "property-initializers",
-        // schnorr-zkp omitted — BUG-001's secp256k1-n inline literal
-        // (256 bits) overflows Rust's i128 BigIntLiteral. See
-        // conformance/tests/schnorr-zkp/source.json (compilers allowlist
-        // is ts/go/python only).
-        "sphincs-wallet",
-        "stateful",
-        "stateful-bytestring",
-        "stateful-counter",
-        "token-ft",
-        "token-nft",
-    ];
+    let test_dirs = rust_eligible_conformance_fixtures();
 
     let no_fold = CompileOptions { disable_constant_folding: true, ..Default::default() };
 
@@ -1107,16 +1124,22 @@ fn test_source_compile_all_conformance() {
         );
 
         // Compare against golden expected-script.hex (with folding disabled to
-        // match the golden files which were generated without constant folding)
-        if let Some(expected_hex) = load_expected_script_hex(dir) {
-            let artifact_no_fold = compile_from_source_str_with_options(&source, Some(&format!("{}.runar.ts", dir)), &no_fold)
-                .unwrap_or_else(|e| panic!("source compilation (no-fold) failed for {}: {}", dir, e));
-            assert_eq!(
-                artifact_no_fold.script, expected_hex,
-                "{}: source-compiled script hex does not match golden file",
+        // match the golden files which were generated without constant folding).
+        // Fail closed: a rust-eligible fixture with no golden file is a gate
+        // defect, not a free pass (F-336 — the old code silently skipped this).
+        let expected_hex = load_expected_script_hex(dir).unwrap_or_else(|| {
+            panic!(
+                "{}: missing golden expected-script.hex — the conformance gate must not silently skip a rust-eligible fixture",
                 dir
-            );
-        }
+            )
+        });
+        let artifact_no_fold = compile_from_source_str_with_options(&source, Some(&format!("{}.runar.ts", dir)), &no_fold)
+            .unwrap_or_else(|e| panic!("source compilation (no-fold) failed for {}: {}", dir, e));
+        assert_eq!(
+            artifact_no_fold.script, expected_hex,
+            "{}: source-compiled script hex does not match golden file",
+            dir
+        );
 
         println!(
             "{}: hex={} bytes, asm={} chars",
