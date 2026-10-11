@@ -1908,6 +1908,72 @@ export class RunarContract {
         finalPreimage = finalPre;
         realUnlockingScript = this.buildStatefulPrefix(finalSig) +
           this.buildUnlockingScript(methodName, resolvedArgs);
+
+        // N-085: the BIP-143 scriptCode is everything AFTER the
+        // checkPreimage-injected OP_CODESEPARATOR, which can sit right at
+        // method entry — for a zero-mutable-field StatefulSmartContract
+        // (empty `stateFields` makes `isStateful` false here even though it
+        // IS `parentStateful` and still auto-injects checkPreimage) that
+        // leaves almost the ENTIRE locking script as scriptCode. The real
+        // preimage — and therefore `realUnlockingScript` — can end up far
+        // bigger than the sizing pass above assumed (which stubbed a short
+        // placeholder preimage). The `isStateful` branch above already
+        // re-derives fee/change from the REAL unlock via a second
+        // `buildCallTransaction` call; do the same here so `changeAmount`
+        // isn't pinned to the undersized estimate — otherwise the broadcast
+        // tx pays less than the fee floor even though its real byte size is
+        // larger than what fee/change were computed for.
+        ({ tx, inputCount, changeAmount } = buildCallTransaction(
+          this.currentUtxo,
+          realUnlockingScript,
+          newLockingScript,
+          newSatoshis,
+          changeAddress,
+          changeScript,
+          additionalUtxos.length > 0 ? additionalUtxos : undefined,
+          feeRate,
+          {
+            contractOutputs,
+            additionalContractInputs: extraContractUtxos.length > 0
+              ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlockPlaceholders[i]! }))
+              : undefined,
+            dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
+            locktime: options?.locktime,
+            sequence: options?.sequence,
+          },
+        ));
+        // buildCallTransaction above returned a FRESH Transaction whose P2PKH
+        // funding inputs (already signed once, before this stateless branch
+        // ran) are blank again — re-sign them against the rebuilt tx (issue
+        // #134's fundingSigner), mirroring the isStateful branch's re-sign
+        // step below.
+        txHex = tx.toHex();
+        for (let i = p2pkhStartIdx; i < inputCount; i++) {
+          const utxo = additionalUtxos[i - p2pkhStartIdx];
+          if (utxo) {
+            const sig = await fundingSigner.sign(txHex, i, utxo.script, utxo.satoshis);
+            const pubKey = await fundingSigner.getPublicKey();
+            const unlockScript = encodePushData(sig) + encodePushData(pubKey);
+            tx.inputs[i]!.unlockingScript = UnlockingScript.fromHex(unlockScript);
+            invalidateTxCache(tx);
+            txHex = tx.toHex();
+          }
+        }
+        // The rebuild may have changed the change output's satoshis, which
+        // hashOutputs (and therefore the preimage above) commits to — the
+        // preimage is now stale. Recompute it against the REBUILT tx before
+        // embedding it in the final unlock (same scriptCode => same preimage
+        // byte length, so this does not reopen the sizing question above).
+        tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
+        invalidateTxCache(tx);
+        const { sigHex: rebuiltSig, preimageHex: rebuiltPre } = this.computeOpPushTxWithCodeSep(
+          tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
+        );
+        resolvedArgs[preimageIndex] = rebuiltPre;
+        finalOpPushTxSig = rebuiltSig;
+        finalPreimage = rebuiltPre;
+        realUnlockingScript = this.buildStatefulPrefix(rebuiltSig) +
+          this.buildUnlockingScript(methodName, resolvedArgs);
       }
       tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
       invalidateTxCache(tx);
