@@ -2284,11 +2284,11 @@
     },
     {
       "path": "conformance/source-map/if-else/ts/expected-source-map.json",
-      "sha256": "ba513edbc31095101db8771c91b2f25b0b0b13e2fa262b5fe28947dc1391cab8",
+      "sha256": "0fa0dcbfb67993d94b137240206176ef0a6120000654f7b008299c5e29d85928",
       "verified-against": "second-implementation",
-      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reason": "F-224 / CL-BUG-005 (R71, user decision 2026-10-11): the TS peephole optimizer (packages/runar-compiler/src/optimizer/peephole.ts) now gives every rewritten op the source location of the first op of the matched window (withHeadSourceLoc, the Python _propagate_source_loc / Rust head_loc convention), and optimizeNestedIf keeps the rebuilt if op's own location. Before, fused ops carried no sourceLoc and the emitter, which clears its pending location after every op, left them out of the map. Verified against: (1) a second implementation, the independent source-anchor oracle in conformance/source-map/run.ts (checkSourceAnchors re-reads each claimed line/column from the real source file on disk): byte-id/structural/anchor OK for all 5 TS fixtures on the regenerated maps; every added entry lies between neighbours already mapped to the same statement, and the Python and Rust peepholes already follow the same rule; (2) the delta is additions only, no entry removed or changed; (3) script hex is unchanged (conformance golden STRICT 87/87), since source locations never reach the bytes. Delta: 13 -> 14 mappings: added opcodeIndex 11 OP_IF -> 13:4 (if (mode) {), from the optimizeNestedIf location fix. || PREVIOUS (still describes the rest of the file): RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
       "reviewer": "siggi",
-      "date": "2026-09-17",
+      "date": "2026-10-11",
       "review-status": "reviewed"
     },
     {
@@ -2347,11 +2347,11 @@
     },
     {
       "path": "conformance/source-map/stateful-counter/ts/expected-source-map.json",
-      "sha256": "9b6c5adde5af67eabcd87c52da2ced22e71ae17b1e2318d706bdbdc2a6cfe80a",
-      "verified-against": "intentional-spec-change",
-      "reason": "F-024 / R14 (user decision 2026-09-27): every default single-output state continuation now carries the compiler-injected assert(_newAmount >= extractAmount(txPreimage)). This source map is regenerated (conformance/source-map/run.ts --update) for the moved stateful-counter script: opcode indices after the injected check shift and the check's opcodes gain entries; run.ts reports byte-id/structural/anchor OK for every available tier. Independent evidence: (1) @bsv/sdk Spend on a real BIP-143 preimage rejects the F-024 drain (_newAmount = 1, rest of the input to the spender's change) and accepts the honest spend and a deposit, for the stateful-counter script from all seven tiers (packages/runar-testing/src/__tests__/f024-stateful-value-drain.test.ts) and in the real-crypto witness conformance/witnesses/real-crypto/stateful-counter.json; (2) removing the five injected ANF bindings from the new IR and re-emitting reproduces the previous golden byte for byte (remediation-logs/F-024/attempt2/verify-goldens.mjs, all 22 fixtures); (3) all seven tiers emit these bytes in both fold modes (multi-format 745/745 fold-OFF and fold-ON). || PREVIOUS (still describes the rest of the file): RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "sha256": "f4b1fae7f44cae0dd2afa9d9af11a5d599d9f836e939a01bc6e845d8645748a8",
+      "verified-against": "second-implementation",
+      "reason": "F-224 / CL-BUG-005 (R71, user decision 2026-10-11): the TS peephole optimizer (packages/runar-compiler/src/optimizer/peephole.ts) now gives every rewritten op the source location of the first op of the matched window (withHeadSourceLoc, the Python _propagate_source_loc / Rust head_loc convention), and optimizeNestedIf keeps the rebuilt if op's own location. Before, fused ops carried no sourceLoc and the emitter, which clears its pending location after every op, left them out of the map. Verified against: (1) a second implementation, the independent source-anchor oracle in conformance/source-map/run.ts (checkSourceAnchors re-reads each claimed line/column from the real source file on disk): byte-id/structural/anchor OK for all 5 TS fixtures on the regenerated maps; every added entry lies between neighbours already mapped to the same statement, and the Python and Rust peepholes already follow the same rule; (2) the delta is additions only, no entry removed or changed; (3) script hex is unchanged (conformance golden STRICT 87/87), since source locations never reach the bytes. Delta: 8 -> 10 mappings: added opcodeIndex 108 OP_1ADD -> 39:4 (this.count++) and 344 OP_1SUB -> 48:4 (this.count--). || PREVIOUS (still describes the rest of the file): F-024 / R14 (user decision 2026-09-27): every default single-output state continuation now carries the compiler-injected assert(_newAmount >= extractAmount(txPreimage)). This source map is regenerated (conformance/source-map/run.ts --update) for the moved stateful-counter script: opcode indices after the injected check shift and the check's opcodes gain entries; run.ts reports byte-id/structural/anchor OK for every available tier. Independent evidence: (1) @bsv/sdk Spend on a real BIP-143 preimage rejects the F-024 drain (_newAmount = 1, rest of the input to the spender's change) and accepts the honest spend and a deposit, for the stateful-counter script from all seven tiers (packages/runar-testing/src/__tests__/f024-stateful-value-drain.test.ts) and in the real-crypto witness conformance/witnesses/real-crypto/stateful-counter.json; (2) removing the five injected ANF bindings from the new IR and re-emitting reproduces the previous golden byte for byte (remediation-logs/F-024/attempt2/verify-goldens.mjs, all 22 fixtures); (3) all seven tiers emit these bytes in both fold modes (multi-format 745/745 fold-OFF and fold-ON). || PREVIOUS (still describes the rest of the file): RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
       "reviewer": "siggi",
-      "date": "2026-09-27",
+      "date": "2026-10-11",
       "review-status": "reviewed"
     },
     {
@@ -2938,6 +2938,33 @@
       "reviewer": "siggi",
       "review-status": "reviewed",
       "date": "2026-10-11"
+    },
+    {
+      "path": "conformance/source-map/basic-p2pkh/ts/expected-source-map.json",
+      "sha256": "1fc7df1105dc500352b3af207868f4a4439d76ee8ef2f4025ba46132eea12ee7",
+      "verified-against": "second-implementation",
+      "reason": "F-224 / CL-BUG-005 (R71, user decision 2026-10-11): the TS peephole optimizer (packages/runar-compiler/src/optimizer/peephole.ts) now gives every rewritten op the source location of the first op of the matched window (withHeadSourceLoc, the Python _propagate_source_loc / Rust head_loc convention), and optimizeNestedIf keeps the rebuilt if op's own location. Before, fused ops carried no sourceLoc and the emitter, which clears its pending location after every op, left them out of the map. Verified against: (1) a second implementation, the independent source-anchor oracle in conformance/source-map/run.ts (checkSourceAnchors re-reads each claimed line/column from the real source file on disk): byte-id/structural/anchor OK for all 5 TS fixtures on the regenerated maps; every added entry lies between neighbours already mapped to the same statement, and the Python and Rust peepholes already follow the same rule; (2) the delta is additions only, no entry removed or changed; (3) script hex is unchanged (conformance golden STRICT 87/87), since source locations never reach the bytes. Delta: 4 -> 5 mappings: added opcodeIndex 3 OP_EQUALVERIFY -> line 43 col 4 (assert(hash160(pubKey) === this.pubKeyHash)).",
+      "reviewer": "siggi",
+      "date": "2026-10-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/escrow/ts/expected-source-map.json",
+      "sha256": "7f95bd5914b965664284955c3212bc0356e3086cf572f6700dfa399e80394b76",
+      "verified-against": "second-implementation",
+      "reason": "F-224 / CL-BUG-005 (R71, user decision 2026-10-11): the TS peephole optimizer (packages/runar-compiler/src/optimizer/peephole.ts) now gives every rewritten op the source location of the first op of the matched window (withHeadSourceLoc, the Python _propagate_source_loc / Rust head_loc convention), and optimizeNestedIf keeps the rebuilt if op's own location. Before, fused ops carried no sourceLoc and the emitter, which clears its pending location after every op, left them out of the map. Verified against: (1) a second implementation, the independent source-anchor oracle in conformance/source-map/run.ts (checkSourceAnchors re-reads each claimed line/column from the real source file on disk): byte-id/structural/anchor OK for all 5 TS fixtures on the regenerated maps; every added entry lies between neighbours already mapped to the same statement, and the Python and Rust peepholes already follow the same rule; (2) the delta is additions only, no entry removed or changed; (3) script hex is unchanged (conformance golden STRICT 87/87), since source locations never reach the bytes. Delta: 8 -> 10 mappings: added opcodeIndex 7 and 15 OP_CHECKSIGVERIFY -> 48:4 and 57:4 (the assert(checkSig(...)) statements).",
+      "reviewer": "siggi",
+      "date": "2026-10-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/arithmetic/ts/expected-source-map.json",
+      "sha256": "60ab81cacdba1226a4fac1a624e865dcf4aab166c45f4d00a01239a1f2d6b288",
+      "verified-against": "second-implementation",
+      "reason": "F-224 / CL-BUG-005 (R71, user decision 2026-10-11): the TS peephole optimizer (packages/runar-compiler/src/optimizer/peephole.ts) now gives every rewritten op the source location of the first op of the matched window (withHeadSourceLoc, the Python _propagate_source_loc / Rust head_loc convention), and optimizeNestedIf keeps the rebuilt if op's own location. Before, fused ops carried no sourceLoc and the emitter, which clears its pending location after every op, left them out of the map. Verified against: (1) a second implementation, the independent source-anchor oracle in conformance/source-map/run.ts (checkSourceAnchors re-reads each claimed line/column from the real source file on disk): byte-id/structural/anchor OK for all 5 TS fixtures on the regenerated maps; every added entry lies between neighbours already mapped to the same statement, and the Python and Rust peepholes already follow the same rule; (2) the delta is additions only, no entry removed or changed; (3) script hex is unchanged (conformance golden STRICT 87/87), since source locations never reach the bytes. Delta: 27 -> 28 mappings: added opcodeIndex 0 OP_2DUP (over,over fusion) -> 12:4 (const sum: bigint = a + b).",
+      "reviewer": "siggi",
+      "date": "2026-10-11",
+      "review-status": "reviewed"
     }
   ]
 }

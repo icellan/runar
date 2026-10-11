@@ -507,9 +507,21 @@ function optimizeNestedIf(op: StackOp): StackOp {
       op: 'if',
       then: optimizedThen,
       else: optimizedElse,
+      ...(op.sourceLoc ? { sourceLoc: op.sourceLoc } : {}),
     };
   }
   return op;
+}
+
+/**
+ * F-224: a replacement op with no location of its own inherits the location
+ * of the first op of the matched window (the Python and Rust convention), so
+ * the emitter still maps the fused / rewritten opcode to its statement.
+ */
+function withHeadSourceLoc(head: StackOp, replacement: StackOp[]): StackOp[] {
+  const loc = head.sourceLoc;
+  if (!loc) return replacement;
+  return replacement.map(r => (r.sourceLoc ? r : { ...r, sourceLoc: loc }));
 }
 
 /**
@@ -565,7 +577,7 @@ function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
       for (const rule of sizeRules) {
         const replacement = rule.match(window);
         if (replacement !== null) {
-          result.push(...replacement);
+          result.push(...withHeadSourceLoc(window[0]!, replacement));
           i += size;
           changed = true;
           matched = true;

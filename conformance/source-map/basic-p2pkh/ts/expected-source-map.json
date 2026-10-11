@@ -19,6 +19,12 @@
       "column": 4
     },
     {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/ts/p2pkh/P2PKH.runar.ts",
+      "line": 43,
+      "column": 4
+    },
+    {
       "opcodeIndex": 4,
       "sourceFile": "examples/ts/p2pkh/P2PKH.runar.ts",
       "line": 45,

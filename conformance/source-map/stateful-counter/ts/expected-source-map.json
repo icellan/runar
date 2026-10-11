@@ -7,6 +7,12 @@
       "column": 4
     },
     {
+      "opcodeIndex": 108,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 39,
+      "column": 4
+    },
+    {
       "opcodeIndex": 109,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 39,
@@ -38,6 +44,12 @@
     },
     {
       "opcodeIndex": 343,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 48,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 344,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 48,
       "column": 4
