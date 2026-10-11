@@ -126,6 +126,12 @@
           "column": 4
         },
         {
+          "opcodeIndex": 118,
+          "sourceFile": "SingleCounter.runar.ts",
+          "line": 31,
+          "column": 4
+        },
+        {
           "opcodeIndex": 119,
           "sourceFile": "SingleCounter.runar.ts",
           "line": 31,
