@@ -385,7 +385,7 @@
         {
           "kind": "cross-tier-golden",
           "path": "packages/runar-zig/src/sdk_bip143_interop_test.zig",
-          "note": "Zig side of the same fixture. The N-170 test additionally replays LocalSigner.sign -- a different code path via bsvz.transaction.sighash.digest, not oppushtx -- against every scenario."
+          "note": "Zig side of the same fixture. The N-170 test additionally replays LocalSigner.sign -- a different code path via bsvz.transaction.sighash.digest, not oppushtx -- against every scenario. N-185 additionally asserts computeOpPushTxWithSigHash's own sig_hex (not just its preimage) against the fixture's sigHex for every scenario."
         },
         {
           "kind": "cross-tier-golden",

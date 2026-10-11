@@ -149,3 +149,61 @@ test "N-170: LocalSigner matches the TS BIP-143 fixture reference" {
         };
     }
 }
+
+// N-185: the first test in this file ("interop: BIP-143 preimage + signature
+// for every scenario") already calls `oppushtx.computeOpPushTxWithSigHash`
+// for every scenario, but it only checks the recomputed PREIMAGE and that the
+// TS-produced `sigHex` verifies under this tier's own digest -- it never
+// asserts that THIS tier's OWN signature (`result.sig_hex`) matches the TS
+// reference byte-for-byte. computeOpPushTxWithSigHash always signs with the
+// fixed OP_PUSH_TX private key k=1, which is exactly this fixture's
+// `signer_priv_hex` (0x...01, public key = the secp256k1 generator point G)
+// -- so the fixture doubles as an OP_PUSH_TX signature vector, not only a
+// preimage vector, and no new fixture needs to be generated.
+//
+// Proves: `computeOpPushTxWithSigHash`'s own `sig_hex` is byte-identical to
+// the TS reference (@bsv/sdk) for all 8 scenarios, covering all six FORKID
+// modes (0x41/42/43/c1/c2/c3) -- i.e. the OP_PUSH_TX signing path derives the
+// same canonical RFC-6979 nonce as every other tier and as the fixture.
+// Does not prove: that a node accepts an on-chain OP_PUSH_TX unlocking script
+// assembled from this signature (no regtest node available here; broadcast
+// coverage for the shared preimage lives in integration/ts/bip143-crosstier.test.ts).
+test "N-185: computeOpPushTxWithSigHash matches the TS BIP-143 fixture reference" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const priv_hex = parsed.value.object.get("signer_priv_hex").?.string;
+    // Sanity check the premise above: the fixture's signer key must BE the
+    // OP_PUSH_TX key (k=1) for its sigHex to be a valid vector for
+    // computeOpPushTxWithSigHash, which signs with k=1 unconditionally.
+    try std.testing.expectEqualStrings(
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        priv_hex,
+    );
+
+    const scenarios = parsed.value.object.get("scenarios").?.array;
+    try std.testing.expect(scenarios.items.len > 0);
+
+    for (scenarios.items) |sv| {
+        const s = sv.object;
+        const name = s.get("scenario").?.string;
+        const tx_hex = s.get("unsignedTxHex").?.string;
+        const input_index: usize = @intCast(s.get("inputIndex").?.integer);
+        const subscript = s.get("prevScriptHex").?.string;
+        const sats: i64 = s.get("prevValueSats").?.integer;
+        const sighash_flags: u32 = @intCast(s.get("sighashFlags").?.integer);
+        const want_sig = s.get("sigHex").?.string;
+
+        var result = try oppushtx.computeOpPushTxWithSigHash(
+            allocator, tx_hex, input_index, subscript, sats, -1, sighash_flags);
+        defer result.deinit(allocator);
+
+        std.testing.expectEqualStrings(want_sig, result.sig_hex) catch |err| {
+            std.debug.print("\n{s}: OP_PUSH_TX signature divergence from TS reference\n", .{name});
+            return err;
+        };
+    }
+}

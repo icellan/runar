@@ -1,7 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const state_mod = @import("sdk_state.zig");
-const der_mod = @import("sdk_der.zig");
+const envelope_sign = @import("sdk_envelope_sign.zig");
 
 // ---------------------------------------------------------------------------
 // OP_PUSH_TX — private key k=1 signing for sighash preimage verification
@@ -41,7 +41,8 @@ pub fn opPushTxPubKeyHex(allocator: std.mem.Allocator) ![]u8 {
     return hex_buf;
 }
 
-// DER canonicalization is in sdk_der.zig (shared with sdk_signer.zig)
+// N-185: signing is in sdk_envelope_sign.zig (shared with sdk_signer.zig's
+// LocalSigner, N-170); see that module's canonical-RFC-6979 doc comment.
 
 pub const OpPushTxError = error{
     InvalidKey,
@@ -147,14 +148,23 @@ pub fn computeOpPushTxWithSigHash(
     // Compute sighash digest
     const digest_result = bsvz.transaction.sighash.digest(allocator, &tx, input_index, subscript, satoshis, scope) catch return OpPushTxError.SigningFailed;
 
-    // Sign with k=1 private key and enforce low-S
-    var der = priv_key.signDigest256(digest_result.bytes) catch return OpPushTxError.SigningFailed;
-    der = der_mod.canonicalizeDer(der);
+    // N-185: bsvz's PrivateKey.signDigest256 derives its ECDSA nonce via Zig
+    // stdlib's "Deterministic ECDSA with Additional Randomness" draft, not
+    // canonical RFC 6979 (see sdk_envelope_sign.zig's GAP-064 doc comment,
+    // and sdk_signer.zig's N-170 fix of the same bug in LocalSigner) -- it
+    // folds a 32-byte zero "noise" block into the HMAC-DRBG seed. The result
+    // is a VALID but non-reproducible signature: it verifies, but never
+    // matches the RFC-6979 signature every other tier (and
+    // conformance/sdk-bip143's fixture) produces for the same (key, digest).
+    // Sign with the same canonical RFC-6979 + low-S implementation the
+    // signed-envelope wire protocol and LocalSigner already use.
+    var der_buf: [72]u8 = undefined;
+    const der = envelope_sign.signDigestLowSDer(priv_key.bytes, digest_result.bytes, &der_buf) catch return OpPushTxError.SigningFailed;
 
     // Build sig hex: DER bytes + sighash type byte
     const sig_total_len = der.len + 1;
     var sig_raw: [73]u8 = undefined;
-    @memcpy(sig_raw[0..der.len], der.asSlice());
+    @memcpy(sig_raw[0..der.len], der);
     sig_raw[der.len] = @truncate(scope);
 
     const sig_hex = allocator.alloc(u8, sig_total_len * 2) catch return OpPushTxError.OutOfMemory;
