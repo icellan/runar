@@ -17,7 +17,7 @@ import {
   SLH_SHA2_192s, SLH_SHA2_192f,
   SLH_SHA2_256s, SLH_SHA2_256f,
 } from '../crypto/slh-dsa.js';
-import { verifyTestMessageSig } from '../crypto/ecdsa.js';
+import { verifyTestMessageSig, checkSigEncodingError } from '../crypto/ecdsa.js';
 import { rabinVerify as rabinVerifyImpl } from '../crypto/rabin.js';
 import type {
   ContractNode,
@@ -1010,6 +1010,17 @@ export class RunarInterpreter {
         // Real ECDSA verification over the fixed TEST_MESSAGE.
         const sig = this.toBytes(args[0]!);
         const pubKey = this.toBytes(args[1]!);
+        // F-227: OP_CHECKSIG ABORTS on a malformed signature or public-key
+        // encoding; it does not push false. Answering false here let
+        // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+        // spend the chain aborts on.
+        const encodingError = checkSigEncodingError(sig, pubKey);
+        if (encodingError !== null) {
+          throw new Error(
+            `checkSig: ${encodingError} — OP_CHECKSIG aborts the script on a malformed ` +
+              'signature or public key encoding, it does not push false',
+          );
+        }
         return { kind: 'boolean', value: verifyTestMessageSig(sig, pubKey) };
       }
 
