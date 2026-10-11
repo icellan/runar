@@ -466,8 +466,12 @@ fn compute_last_uses_with_arrays(
             // Without following it the elements got no last-use at all and
             // were consumed at the first checkMultiSig, so a second read
             // failed.
-            if s.len() > 5 && &s[..5] == "@ref:" {
-                if let Some(elems) = array_elems.get(&s[5..]).cloned() {
+            // F-268 / CL-BUG-049: `starts_with` compares bytes without ever
+            // constructing an invalid `str` slice, so it never panics on a
+            // non-ASCII string (unlike the old `s.len() > 5 && &s[..5] ==
+            // "@ref:"`, which could land its `..5` byte offset mid-character).
+            if let Some(ref_name) = s.strip_prefix("@ref:") {
+                if let Some(elems) = array_elems.get(ref_name).cloned() {
                     array_elems.insert(b.name.clone(), elems);
                 }
             }
@@ -662,10 +666,12 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
         | ANFValue::GetStateScript { .. } => {}
 
         ANFValue::LoadConst { value: v } => {
-            // load_const with @ref: values reference another binding
+            // load_const with @ref: values reference another binding.
+            // F-268 / CL-BUG-049: `strip_prefix` never panics on a non-ASCII
+            // string (unlike the old `s.len() > 5 && &s[..5] == "@ref:"`).
             if let Some(s) = v.as_str() {
-                if s.len() > 5 && &s[..5] == "@ref:" {
-                    refs.push(s[5..].to_string());
+                if let Some(ref_name) = s.strip_prefix("@ref:") {
+                    refs.push(ref_name.to_string());
                 }
             }
         }
@@ -1834,8 +1840,17 @@ impl LoweringContext {
         // to another binding. We bring that value to the top via PICK (non-consuming)
         // unless this is the last use, in which case we consume it via ROLL.
         if let Some(ConstValue::Str(ref s)) = value.const_value() {
-            if s.len() > 5 && &s[..5] == "@ref:" {
-                let ref_name = &s[5..];
+            // F-268 / CL-BUG-049: `s.len() > 5 && &s[..5] == "@ref:"` byte-
+            // sliced an arbitrary `load_const` string with no char-boundary
+            // check — a string whose 5th byte lands inside a multi-byte
+            // UTF-8 character (e.g. a hand-written `--ir` constant) panicked
+            // Rust's slicing instead of being refused as a diagnostic.
+            // `str::starts_with` compares bytes directly without ever
+            // constructing an invalid slice, so it is safe for any input;
+            // `strip_prefix` returning `Some` guarantees byte offset 5 is a
+            // valid char boundary (it is exactly after the 5 ASCII bytes of
+            // "@ref:"), so the remainder slice it hands back is always safe.
+            if let Some(ref_name) = s.strip_prefix("@ref:") {
                 // Special case: aliasing an array_literal (metadata-only
                 // binding, not present in the stack-map). Copy the array
                 // metadata under the new binding name and emit no stack moves.
@@ -6860,19 +6875,35 @@ fn lower_method_with_private_methods(
 /// in `catch_unwind`, so the refusal reaches the CLI as `Compilation error:
 /// stack lowering: …` and exit 1, exactly as the odd-length case already did.
 fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
-    if hex_str.is_empty() {
+    // F-268 / CL-BUG-049: this used to index with `&hex_str[i..i + 2]`, a
+    // byte-range slice into a `str`. `hex_str.len()` is already a BYTE
+    // count (same value as `hex_str.as_bytes().len()`), so the length check
+    // above was never the problem — but a non-ASCII byte in the input can
+    // still put `i` or `i + 2` in the middle of a multi-byte UTF-8 character,
+    // and slicing a `str` (unlike a `[u8]`) panics on an off-boundary index
+    // instead of just returning unexpected bytes. Working on `as_bytes()`
+    // directly removes the UTF-8 validity constraint entirely: every `u8` is
+    // a valid input, so indexing is always safe, and a non-hex-digit byte
+    // (which includes every UTF-8 continuation byte) is rejected by
+    // `to_digit(16)` exactly as it already was for ASCII non-hex bytes.
+    let bytes = hex_str.as_bytes();
+    if bytes.is_empty() {
         return Vec::new();
     }
     assert!(
-        hex_str.len() % 2 == 0,
+        bytes.len() % 2 == 0,
         "invalid hex string length: {}",
-        hex_str.len()
+        bytes.len()
     );
-    (0..hex_str.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex_str[i..i + 2], 16)
-                .unwrap_or_else(|_| panic!("invalid hex string: {hex_str}"))
+    bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            let hi = (pair[0] as char).to_digit(16);
+            let lo = (pair[1] as char).to_digit(16);
+            match (hi, lo) {
+                (Some(h), Some(l)) => ((h as u8) << 4) | (l as u8),
+                _ => panic!("invalid hex string: {hex_str}"),
+            }
         })
         .collect()
 }
