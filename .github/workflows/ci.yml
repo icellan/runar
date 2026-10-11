@@ -1009,6 +1009,11 @@ jobs:
         # `tsx sdk-vertical/runner/vertical-runner.ts` — that does not execute
         # the directory's vitest files.
         #
+        # sdk-call (N-038) and sdk-output/runner/sdk-runner-refusal-build-
+        # isolation.test.ts (N-091) are the same shape: their CI steps below
+        # invoke the sdk-output/sdk-vertical runners directly, which never
+        # collects either test file as vitest.
+        #
         # tests/conformance-tests-reachable-from-ci.test.ts fails if a future
         # conformance test file is added without being named here.
         run: >
@@ -1023,6 +1028,8 @@ jobs:
           conformance/source-map
           conformance/subtype-parity
           conformance/sdk-vertical
+          conformance/sdk-call
+          conformance/sdk-output/runner/sdk-runner-refusal-build-isolation.test.ts
           conformance/runner/__tests__
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
           conformance/analyzer/__tests__
