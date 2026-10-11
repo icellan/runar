@@ -671,19 +671,17 @@ impl<'a> ZigParser<'a> {
         // - SmartContract: all properties readonly.
         // - StatefulSmartContract: readonly iff explicitly marked, OR has no
         //   initializer AND is not mutated in any method body.
-        // - Strip `initializer` for properties that are also constructor
-        //   params (the constructor param overrides the default; the Zig
-        //   compiler reference omits `initialValue` in this case).
-        let ctor_param_names: HashSet<String> = constructor
-            .params
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
+        // - The initializer of a property the constructor assigns is no
+        //   longer stripped here. anf_lower.rs now applies that rule to
+        //   EVERY surface (see constructor_assigned_properties), keyed on
+        //   the constructor assignment rather than on a name match, so the
+        //   Zig surface no longer needs -- and must not keep -- a private
+        //   copy that only fired when the struct field and the `init`
+        //   parameter happened to share a name. readonly inference still
+        //   reads the ORIGINAL initializer, exactly as it did when the
+        //   strip ran in the same expression.
         for prop in &mut properties {
             let had_initializer = prop.initializer.is_some();
-            if ctor_param_names.contains(&prop.name) {
-                prop.initializer = None;
-            }
             if parent_class == "SmartContract" || parent_class == "UnsafeSmartContract" {
                 prop.readonly = true;
             } else if !prop.readonly && !had_initializer && !mutated.contains(&prop.name) {
@@ -1724,6 +1722,19 @@ impl<'a> ZigParser<'a> {
                     operand: Box::new(operand),
                 }
             }
+            // Zig's `&` is the address-of operator used for slice coercion
+            // at call sites like `&.{sig1, sig2}` (an anonymous-struct
+            // literal coerced to a slice) and typed forms like
+            // `&[_]T{...}`. Slices have no Rúnar IR analogue -- the inner
+            // array literal IS the IR node -- so we simply skip the `&` and
+            // parse the operand. Recurse into parse_primary directly,
+            // mirroring 01-parse-zig.ts and parse_zig.zig: `&.foo()` is not
+            // legal Zig and `&` never pairs with a postfix chain in
+            // practice.
+            Token::BitAnd => {
+                self.advance();
+                self.parse_primary()
+            }
             _ => {
                 let expr = self.parse_primary();
                 self.parse_postfix(expr)
@@ -1789,6 +1800,25 @@ impl<'a> ZigParser<'a> {
             let expr = self.parse_expression();
             self.expect(&Token::RParen);
             return expr;
+        }
+
+        // `[_]T{...}` — typed array literal with inferred length. The
+        // element type is parsed and discarded; Rúnar infers element types
+        // from the literal contents. The element list is the same `{...}`
+        // form used by `.{...}` anon-struct literals. Mirrors
+        // 01-parse-zig.ts and parse_zig.zig.
+        if *self.peek() == Token::LBracket
+            && matches!(self.peek_at(1), Token::Ident(n) if n == "_")
+            && *self.peek_at(2) == Token::RBracket
+        {
+            self.advance(); // '['
+            self.advance(); // '_'
+            self.advance(); // ']'
+            self.parse_type(); // discard element type
+            self.expect(&Token::LBrace);
+            let elements = self.parse_list_elements(&Token::RBrace);
+            self.expect(&Token::RBrace);
+            return Expression::ArrayLiteral { elements };
         }
 
         // Array literal: [ ... ]
@@ -2450,13 +2480,17 @@ pub const Counter = struct {
         assert_eq!(contract.parent_class, "StatefulSmartContract");
         assert_eq!(contract.properties.len(), 1);
         assert_eq!(contract.properties[0].name, "count");
-        // count is mutated in increment/decrement -> not readonly even after
-        // the initializer is stripped below.
+        // count is mutated in increment/decrement -> not readonly.
         assert!(!contract.properties[0].readonly);
-        // `count: i64 = 0` collides with `pub fn init(count: i64)`: the ctor
-        // param always overrides the default so the parser strips the
-        // initializer to match the Zig compiler reference IR.
-        assert!(contract.properties[0].initializer.is_none());
+        // F-207: `count: i64 = 0` collides with `pub fn init(count: i64)`,
+        // and the constructor assigns that param to `count`. The PARSER no
+        // longer strips the initializer for this -- that decision now
+        // belongs exclusively to anf_lower.rs's
+        // `constructor_assigned_properties`, keyed on the actual
+        // constructor assignment rather than a name coincidence, matching
+        // the TS reference's explicit architecture (01-parse-zig.ts:424-434:
+        // "no longer stripped here").
+        assert!(contract.properties[0].initializer.is_some());
         assert_eq!(contract.methods.len(), 2);
         assert_eq!(contract.methods[0].name, "increment");
         assert_eq!(contract.methods[1].name, "decrement");

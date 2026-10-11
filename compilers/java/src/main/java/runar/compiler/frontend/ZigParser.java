@@ -612,24 +612,22 @@ public final class ZigParser {
                 collectMutatedProperties(m.body(), mutated);
             }
 
-            // Constructor parameter names — used to strip property
-            // initializers overridden by an explicit ctor param.
-            Set<String> ctorParamNames = new HashSet<>();
-            if (constructor != null) {
-                for (ParamNode p : constructor.params()) {
-                    ctorParamNames.add(p.name());
-                }
-            }
+            // The initializer of a property the constructor assigns is no
+            // longer stripped here. AnfLower.java now applies that rule to
+            // EVERY surface (see constructorAssignedProperties), keyed on
+            // the constructor assignment rather than on a name match, so
+            // the Zig surface no longer needs -- and must not keep -- a
+            // private copy that only fired when the struct field and the
+            // `init` parameter happened to share a name. readonly
+            // inference still reads the ORIGINAL initializer, exactly as
+            // it did when the strip ran in the same expression.
 
-            // Apply readonly + initializer normalization.
+            // Apply readonly normalization.
             List<PropertyNode> normalized = new ArrayList<>(properties.size());
             for (PropertyNode prop : properties) {
                 boolean hadInitializer = prop.initializer() != null;
                 Expression init = prop.initializer();
                 boolean readonly = prop.readonly();
-                if (ctorParamNames.contains(prop.name())) {
-                    init = null;
-                }
                 if (parentClass == ParentClass.SMART_CONTRACT
                     || parentClass == ParentClass.UNSAFE_SMART_CONTRACT) {
                     readonly = true;
@@ -1324,6 +1322,19 @@ public final class ZigParser {
                 advance();
                 return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
             }
+            // Zig's `&` is the address-of operator used for slice coercion
+            // at call sites like `&.{sig1, sig2}` (an anonymous-struct
+            // literal coerced to a slice) and typed forms like
+            // `&[_]T{...}`. Slices have no Rúnar IR analogue -- the inner
+            // array literal IS the IR node -- so we simply skip the `&`
+            // and parse the operand. Recurse into parsePrimary directly,
+            // mirroring 01-parse-zig.ts and parse_zig.zig: `&.foo()` is
+            // not legal Zig and `&` never pairs with a postfix chain in
+            // practice.
+            if (k == Kind.AMP) {
+                advance();
+                return parsePrimary();
+            }
             Expression expr = parsePrimary();
             return parsePostfixChain(expr);
         }
@@ -1376,6 +1387,23 @@ public final class ZigParser {
                 expect(Kind.RPAREN, ")");
                 return e;
             }
+            // `[_]T{...}` — typed array literal with inferred length. The
+            // element type is parsed and discarded; Rúnar infers element
+            // types from the literal contents. The element list is the
+            // same `{...}` form used by `.{...}` anon-struct literals.
+            // Mirrors 01-parse-zig.ts and parse_zig.zig.
+            if (tok.kind == Kind.LBRACKET && peekAhead(1).kind == Kind.IDENT
+                    && "_".equals(peekAhead(1).value) && peekAhead(2).kind == Kind.RBRACKET) {
+                advance(); // '['
+                advance(); // '_'
+                advance(); // ']'
+                parseType(); // discard element type
+                expect(Kind.LBRACE, "{");
+                List<Expression> elements = parseListElements(Kind.RBRACE);
+                expect(Kind.RBRACE, "}");
+                return new ArrayLiteralExpr(elements);
+            }
+
             if (tok.kind == Kind.LBRACKET) {
                 advance();
                 List<Expression> elements = parseListElements(Kind.RBRACKET);

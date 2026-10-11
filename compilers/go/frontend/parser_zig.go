@@ -736,20 +736,16 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 		constructor = &ctor
 	}
 
-	// Strip initializers for properties that are also constructor params
-	// (the constructor param overrides the default; the Zig compiler reference
-	// omits `initialValue` in this case) and finalize readonly flags.
-	ctorParamSet := make(map[string]bool)
-	if constructor != nil {
-		for _, param := range constructor.Params {
-			ctorParamSet[param.Name] = true
-		}
-	}
+	// The initializer of a property the constructor assigns is no longer
+	// stripped here. anf_lower.go now applies that rule to EVERY surface
+	// (see constructorAssignedProperties), keyed on the constructor
+	// assignment rather than on a name match, so the Zig surface no longer
+	// needs -- and must not keep -- a private copy that only fired when the
+	// struct field and the `init` parameter happened to share a name.
+	// readonly inference still reads the ORIGINAL initializer, exactly as
+	// it did when the strip ran in the same expression.
 	for i := range properties {
 		hadInitializer := properties[i].Initializer != nil
-		if ctorParamSet[properties[i].Name] {
-			properties[i].Initializer = nil
-		}
 		if p.parentClass == "SmartContract" || p.parentClass == "UnsafeSmartContract" {
 			properties[i].Readonly = true
 		} else if !properties[i].Readonly && !hadInitializer && !mutatedProps[properties[i].Name] {
@@ -1504,6 +1500,16 @@ func (p *zigParser) parseUnary() Expression {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
+	// Zig's `&` is the address-of operator used for slice coercion at call
+	// sites like `&.{sig1, sig2}` (an anonymous-struct literal coerced to a
+	// slice) and typed forms like `&[_]T{...}`. Slices have no Rúnar IR
+	// analogue -- the inner array literal IS the IR node -- so we simply
+	// skip the `&` and parse the operand. Recurse into parsePrimary
+	// directly, mirroring 01-parse-zig.ts and parse_zig.zig: `&.foo()` is
+	// not legal Zig and `&` never pairs with a postfix chain in practice.
+	if p.match(zigTokAmp) {
+		return p.parsePrimary()
+	}
 	expr := p.parsePrimary()
 	return p.parsePostfixChain(expr)
 }
@@ -1566,6 +1572,22 @@ func (p *zigParser) parsePrimary() Expression {
 		expr := p.parseExpression()
 		p.expect(zigTokRParen)
 		return expr
+	}
+
+	// `[_]T{...}` — typed array literal with inferred length. The element
+	// type is parsed and discarded; Rúnar infers element types from the
+	// literal contents. The element list is the same `{...}` form used by
+	// `.{...}` anon-struct literals. Mirrors 01-parse-zig.ts and
+	// parse_zig.zig.
+	if tok.kind == zigTokLBracket && p.peekAt(1).kind == zigTokIdent && p.peekAt(1).value == "_" && p.peekAt(2).kind == zigTokRBracket {
+		p.advance() // '['
+		p.advance() // '_'
+		p.advance() // ']'
+		p.parseType() // discard element type
+		p.expect(zigTokLBrace)
+		elements := p.parseListElements(zigTokRBrace)
+		p.expect(zigTokRBrace)
+		return ArrayLiteralExpr{Elements: elements}
 	}
 
 	// Array literal: [elem, ...]

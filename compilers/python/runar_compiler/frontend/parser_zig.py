@@ -681,17 +681,17 @@ class _ZigParser:
         for method in self._methods:
             _collect_mutated_properties(method.body, mutated)
 
-        # Constructor param names (used to strip property initializers whose
-        # value is overridden by an explicit ctor param — matches the Zig
-        # compiler reference behaviour of omitting `initialValue`).
-        ctor_param_names: set[str] = set()
-        if self._constructor is not None:
-            ctor_param_names = {p.name for p in self._constructor.params}
-
+        # The initializer of a property the constructor assigns is no longer
+        # stripped here. `anf_lower.py` now applies that rule to EVERY
+        # surface (see `_constructor_assigned_properties`), keyed on the
+        # constructor assignment rather than on a name match, so the Zig
+        # surface no longer needs -- and must not keep -- a private copy
+        # that only fired when the struct field and the `init` parameter
+        # happened to share a name. `readonly` inference still reads the
+        # ORIGINAL initializer, exactly as it did when the strip ran in the
+        # same expression.
         for prop in self._properties:
             had_initializer = prop.initializer is not None
-            if prop.name in ctor_param_names:
-                prop.initializer = None
             if self._parent_class in ("SmartContract", "UnsafeSmartContract"):
                 prop.readonly = True
             elif (not prop.readonly
@@ -1383,6 +1383,18 @@ class _ZigParser:
             with self._nest.nested(self._loc):
                 return UnaryExpr(op="~", operand=self._parse_unary())
 
+        # Zig's `&` is the address-of operator used for slice coercion at
+        # call sites like `&.{sig1, sig2}` (an anonymous-struct literal
+        # coerced to a slice) and typed forms like `&[_]T{...}`. Slices have
+        # no Rúnar IR analogue -- the inner array literal IS the IR node --
+        # so we simply skip the `&` and parse the operand. Recurse into
+        # `_parse_primary` directly, mirroring 01-parse-zig.ts and
+        # parse_zig.zig: `&.foo()` is not legal Zig and `&` never pairs with
+        # a postfix chain in practice.
+        if kind == TOK_AMP:
+            self._advance()
+            return self._parse_primary()
+
         expr = self._parse_primary()
         return self._parse_postfix_chain(expr)
 
@@ -1438,6 +1450,26 @@ class _ZigParser:
             expr = self._parse_expression()
             self._expect(TOK_RPAREN, ")")
             return expr
+
+        # `[_]T{...}` — typed array literal with inferred length. The
+        # element type is parsed and discarded; Rúnar infers element types
+        # from the literal contents. The element list is the same `{...}`
+        # form used by `.{...}` anon-struct literals. Mirrors
+        # 01-parse-zig.ts and parse_zig.zig.
+        if (
+            tok.kind == TOK_LBRACKET
+            and self._peek_ahead(1).kind == TOK_IDENT
+            and self._peek_ahead(1).value == "_"
+            and self._peek_ahead(2).kind == TOK_RBRACKET
+        ):
+            self._advance()  # '['
+            self._advance()  # '_'
+            self._advance()  # ']'
+            self._parse_type()  # discard element type
+            self._expect(TOK_LBRACE, "{")
+            elements = self._parse_list_elements(TOK_RBRACE)
+            self._expect(TOK_RBRACE, "}")
+            return ArrayLiteralExpr(elements=elements)
 
         # Array literal: [elem, ...]
         if tok.kind == TOK_LBRACKET:

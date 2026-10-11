@@ -651,20 +651,21 @@ module RunarCompiler
           _collect_mutated_properties(m.body, mutated)
         end
 
-        # Constructor param names (used to strip initializer overrides so the
-        # AST matches the Zig compiler reference which omits `initialValue`
-        # when the field is also an explicit constructor parameter).
-        ctor_param_names = Set.new
-        if @constructor_node
-          @constructor_node.params.each { |p| ctor_param_names.add(p.name) }
-        end
-
+        # The initializer of a property the constructor assigns is no
+        # longer stripped here. anf_lower.rb now applies that rule to EVERY
+        # surface (see _constructor_assigned_properties), keyed on the
+        # constructor assignment rather than on a name match, so the Zig
+        # surface no longer needs -- and must not keep -- a private copy
+        # that only fired when the struct field and the `init` parameter
+        # happened to share a name. readonly inference still reads the
+        # ORIGINAL initializer, exactly as it did when the strip ran in the
+        # same expression.
+        #
         # For SmartContract (and UnsafeSmartContract), all properties are
         # readonly. For StatefulSmartContract: readonly iff explicitly marked
         # OR has no initializer AND is not mutated in any method body.
         @properties = @properties.map do |prop|
           had_initializer = !prop.initializer.nil?
-          stripped_initializer = ctor_param_names.include?(prop.name) ? nil : prop.initializer
           readonly = if @parent_class == "SmartContract" || @parent_class == "UnsafeSmartContract"
                        true
                      elsif prop.readonly
@@ -678,7 +679,7 @@ module RunarCompiler
             name: prop.name,
             type: prop.type,
             readonly: readonly,
-            initializer: stripped_initializer,
+            initializer: prop.initializer,
             source_location: prop.source_location
           )
         end
@@ -1398,6 +1399,18 @@ module RunarCompiler
           return UnaryExpr.new(op: "~", operand: operand)
         end
 
+        # Zig's `&` is the address-of operator used for slice coercion at
+        # call sites like `&.{sig1, sig2}` (an anonymous-struct literal
+        # coerced to a slice) and typed forms like `&[_]T{...}`. Slices
+        # have no Rúnar IR analogue -- the inner array literal IS the IR
+        # node -- so we simply skip the `&` and parse the operand. Recurse
+        # into parse_primary directly, mirroring 01-parse-zig.ts and
+        # parse_zig.zig: `&.foo()` is not legal Zig and `&` never pairs
+        # with a postfix chain in practice.
+        if match_tok(TOK_AMP)
+          return parse_primary
+        end
+
         expr = parse_primary
         parse_postfix_chain(expr)
       end
@@ -1464,6 +1477,22 @@ module RunarCompiler
           expr = parse_expression
           expect(TOK_RPAREN)
           return expr
+        end
+
+        # `[_]T{...}` — typed array literal with inferred length. The
+        # element type is parsed and discarded; Rúnar infers element types
+        # from the literal contents. The element list is the same `{...}`
+        # form used by `.{...}` anon-struct literals. Mirrors
+        # 01-parse-zig.ts and parse_zig.zig.
+        if tok.kind == TOK_LBRACKET && peek_at(1).kind == TOK_IDENT && peek_at(1).value == "_" && peek_at(2).kind == TOK_RBRACKET
+          advance # '['
+          advance # '_'
+          advance # ']'
+          parse_type # discard element type
+          expect(TOK_LBRACE)
+          elements = parse_list_elements(TOK_RBRACE)
+          expect(TOK_RBRACE)
+          return ArrayLiteralExpr.new(elements: elements)
         end
 
         # Array literal: [ ... ]
