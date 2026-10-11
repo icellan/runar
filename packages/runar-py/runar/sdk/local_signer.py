@@ -157,6 +157,12 @@ class LocalSigner(Signer):
 
         # Set the unlocking script template so sign() knows how to sign this input
         tx.inputs[input_index].unlocking_script_template = P2PKH().unlock(self._priv_key)
+        # N-108: the P2PKH template signs tx.preimage() under the INPUT's
+        # sighash (default ALL|FORKID) and appends that byte. Without this the
+        # caller's flag was dropped and NONE/SINGLE/ANYONECANPAY methods got an
+        # ALL|FORKID signature. SIGHASH(flag) refuses a value bsv-sdk does not
+        # model rather than signing something else.
+        tx.inputs[input_index].sighash = SIGHASH(flag)
 
         # Set locking script and satoshis for BIP-143 sighash preimage computation
         tx.inputs[input_index].locking_script = locking_script

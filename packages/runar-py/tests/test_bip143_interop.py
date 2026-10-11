@@ -111,6 +111,38 @@ def test_local_signer_fallback_matches_ts_reference(fixture: dict, monkeypatch) 
         assert sig == s["sigHex"], f"{s['scenario']}: LocalSigner diverges from TS reference"
 
 
+# N-108: LocalSigner's DEFAULT backend (bsv-sdk, used whenever it is installed)
+# built a P2PKH().unlock() template and called tx.sign(), which always signs
+# ALL|FORKID and appends 0x41 — the caller's sighash_type was dropped. The
+# fallback test above monkeypatches bsv-sdk away, so it never saw this.
+#
+# Proves: with bsv-sdk installed, LocalSigner's default backend produces the
+# byte-identical TS (@bsv/sdk) reference sigHex for every fixture scenario,
+# including all six FORKID modes, so digest AND trailing flag byte match.
+# Does not prove: node acceptance (see test_local_signer_sighash_on_spend.py
+# for the bsv-sdk Spend interpreter check), or anything when bsv-sdk is absent
+# (then this test is skipped and the fallback test above covers the signer).
+
+
+def test_local_signer_bsv_backend_matches_ts_reference(fixture: dict) -> None:
+    pytest.importorskip("bsv")
+    import runar.sdk.local_signer as ls_module
+
+    signer = ls_module.LocalSigner(fixture["signer_priv_hex"])
+    assert signer._backend == "bsv"
+    assert signer.get_public_key() == fixture["signer_pub_hex"]
+
+    for s in fixture["scenarios"]:
+        sig = signer.sign(
+            s["unsignedTxHex"], s["inputIndex"], s["prevScriptHex"],
+            s["prevValueSats"], s["sighashFlags"],
+        )
+        assert sig == s["sigHex"], (
+            f"{s['scenario']} (flags 0x{s['sighashFlags']:02x}): bsv-sdk LocalSigner "
+            f"diverges from TS reference\n  want {s['sigHex']}\n  got  {sig}"
+        )
+
+
 def test_wallet_signer_matches_ts_reference(fixture: dict) -> None:
     from runar.ecdsa import ecdsa_sign
     from runar.sdk.wallet import WalletClient, WalletSigner
