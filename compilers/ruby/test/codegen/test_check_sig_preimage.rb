@@ -201,12 +201,36 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
     TS
 
     artifact = compile_ts_source(source, 'Counter.runar.ts')
-    # The artifact must expose the code-separator byte index for the SDK
-    # to compute correct preimage signatures.
-    assert artifact.respond_to?(:code_separator_index) ||
-           artifact.respond_to?(:codeSeparatorIndex) ||
-           artifact.respond_to?(:code_separator_indices),
-           'stateful artifact must expose codeSeparatorIndex'
+
+    # F-331: the previous version of this test only asserted
+    # `artifact.respond_to?(:code_separator_index) || ...`. `Artifact` is a
+    # `Struct`, so every declared member always responds_to? true regardless
+    # of its value -- the assertion passed even when `code_separator_index`
+    # was hard-coded wrong. It never checked the SDK-relevant thing: the
+    # actual byte offset, which the SDK uses to slice `scriptCode` out of the
+    # locking script before hashing the BIP-143 preimage. A wrong offset
+    # produces a preimage over the wrong bytes, so `checkSig`/`checkPreimage`
+    # verify against a signature the spender never actually signed.
+    #
+    # Pin to the TS reference compiler's value for this exact contract
+    # (verified directly against packages/runar-compiler's `compile()`):
+    # for a single-public-method stateful contract, codegen emits
+    # `OP_NOP OP_CODESEPARATOR ...` so OP_CODESEPARATOR sits at byte
+    # offset 1 (see packages/runar-compiler/src/passes/06-emit.ts
+    # `codeSeparatorIndex = this.byteLength` right after the OP_NOP, and
+    # compilers/ruby/lib/runar_compiler/codegen/emit.rb which mirrors it).
+    assert_equal 1, artifact.code_separator_index,
+                 'codeSeparatorIndex must be the actual OP_CODESEPARATOR byte offset, ' \
+                 'not merely present on the artifact'
+    assert_equal [1], artifact.code_separator_indices,
+                 'codeSeparatorIndices must list the actual OP_CODESEPARATOR byte offset(s)'
+
+    # Cross-check against the emitted bytes themselves: the byte at
+    # code_separator_index must really be OP_CODESEPARATOR (0xab). This is
+    # what ties the recorded index to the thing an SDK actually signs with.
+    script_bytes = [artifact.script].pack('H*').bytes
+    assert_equal 0xab, script_bytes[artifact.code_separator_index],
+                 'the byte at codeSeparatorIndex must be OP_CODESEPARATOR (0xab)'
   end
 
   # ---------------------------------------------------------------------------
