@@ -156,6 +156,60 @@ if amount > threshold {
 
 Go does not have a ternary operator. Use if/else blocks to achieve the same effect. The compiler may optimize simple if/else patterns to `OP_IF`/`OP_ELSE`/`OP_ENDIF`.
 
+### Operator Precedence
+
+The Go tier parses `.runar.go` with Go's own five-level operator precedence
+(`* / % << >> & &^` binds tighter than `+ - | ^`, which binds tighter than the
+comparisons, then `&&`, then `||`). TypeScript and the other five tiers parse
+`.runar.go` with the C-style ladder Rúnar uses on every other surface
+(`* / %` > `+ -` > `<< >>` > relational > equality > `&` > `^` > `|` > `&&` >
+`||`). The two ladders agree on most operator pairs, but for some pairs an
+unparenthesised `x OP1 y OP2 z` groups left under one scheme and right under
+the other — e.g. `a + b << c` is `a + (b << c)` under Go precedence but
+`(a + b) << c` under the C ladder; `a & b == c` is `(a & b) == c` under Go but
+`a & (b == c)` under the C ladder (and the latter does not even type-check).
+
+Since N-056 (per user decision R51), all seven compilers refuse an
+unparenthesised `.runar.go` expression wherever the two schemes would group it
+differently, with one shared diagnostic:
+
+```
+ambiguous operator precedence in .runar.go: `a <op1> b <op2> c` groups differently
+under Go precedence than in Rúnar's other surfaces; add parentheses
+```
+
+The refused combinations are the adjacent-operator-class pairs on which the
+two ladders disagree (classes: `mul` = `* / %`, `add` = `+ -`, `shift` =
+`<< >>`, `and` = `&`, `xor` = `^`, `or` = `|`, `rel` = `< <= > >=`, `eq` =
+`== !=`; `&&`/`||` never conflict with anything):
+
+| First operator's class | Second operator's class is one of |
+|---|---|
+| `shift` | `mul`, `add` |
+| `and` | `mul`, `shift`, `add`, `rel`, `eq` |
+| `add` | `shift`, `and` |
+| `or` | `add`, `xor`, `rel`, `eq` |
+| `xor` | `add`, `rel`, `eq` |
+| `rel` | `and`, `or`, `xor` |
+| `eq` | `and`, `or`, `xor`, `rel` |
+
+Add parentheses to disambiguate — whichever grouping you parenthesise, both
+spellings compile once the grouping is explicit:
+
+```go
+// Refused: ambiguous operator precedence in .runar.go: `a + b << c` groups
+// differently under Go precedence than in Rúnar's other surfaces; add
+// parentheses
+runar.Assert((a + b << 2) == c.T)
+
+// Accepted: parenthesised, so the grouping is unambiguous (and matches what
+// Go itself would do with this source)
+runar.Assert((a + (b << 2)) == c.T)
+```
+
+Expressions where the two schemes already agree — most operator pairs —
+compile unparenthesised exactly as before.
+
 ---
 
 ## Type Mapping
