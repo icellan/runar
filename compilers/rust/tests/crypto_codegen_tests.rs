@@ -247,13 +247,43 @@ fn test_emit_verify_slh_dsa_deterministic() {
 }
 
 /// Cross-language byte-equality canary: the Rust StackOp counts for every
-/// FIPS 205 SHA-2 parameter set must match the Go reference implementation.
-/// These numbers come from running the equivalent loop against
-/// `compilers/go/codegen` (see `EmitVerifySLHDSA`). Go and TS are the
-/// golden references; deviation indicates the Rust port has drifted.
+/// FIPS 205 SHA-2 parameter set must match the Go/TS reference
+/// implementations. Go and TS are the golden references; deviation
+/// indicates the Rust port has drifted.
+///
+/// F-339: this canary used to pin the flat `ops.len()` -- exactly the metric
+/// `count_op_tree`'s own doc comment (above) warns is blind inside an `if`
+/// body, and WOTS+/SLH-DSA are almost entirely conditional. Verified by
+/// temporarily injecting one extra `StackOp` into an `else` branch inside
+/// `emit_slh_merkle`'s authentication-path loop (section 6, the XMSS root
+/// computation) in `compilers/rust/src/codegen/slh_dsa.rs` (reverted after
+/// the measurement): the OLD assertion (`ops.len()`), unmodified, still
+/// reported `ok` because the mutated op never changed the length of the
+/// top-level `Vec<StackOp>` -- only the branch body it lives inside -- while
+/// the NEW assertion below (`count_op_tree`) went red (179322 vs 179259 for
+/// SHA2_128s, h=63 loop iterations x 1 extra op). `count_op_tree` catches it
+/// because it recurses into `StackOp::If` bodies, which is also why its
+/// counts below are far larger than the old flat ones (e.g. SHA2_128s: 29577
+/// flat vs 179259 tree).
+///
+/// Values cross-checked against both reference tiers for all six parameter
+/// sets (not just the two Go/TS already pin as goldens:
+/// compilers/go/codegen/crypto_codegen_test.go's TestSlhdsaEmitOpCountGoldens,
+/// packages/runar-compiler/src/__tests__/slh-dsa-codegen.test.ts):
+///   - Go: `countOpTree` run directly against `EmitVerifySLHDSA` for all six
+///     sets (compilers/go/codegen, package-internal helper already used by
+///     the pinned goldens).
+///   - TS: `countOpTree` run directly against `emitVerifySLHDSA` for all six
+///     sets (packages/runar-compiler/src/passes/slh-dsa-codegen.ts).
+/// Go and TS agree with each other and with the counts below for every one
+/// of the six sets; 128f/192s also match the pre-existing pinned Go/TS
+/// goldens exactly (514175 / 256948).
 #[test]
 fn test_emit_verify_slh_dsa_op_counts_match_go_reference() {
-    // (key, expected_op_count_from_go)
+    // Change history below predates F-339 and was measured under the OLD
+    // flat `ops.len()` metric; kept as provenance, not as tree-count
+    // arithmetic for the (much larger) values pinned further down.
+    //
     // BUG-011: each verifySLHDSA_* prologue now emits an OP_SIZE exact-length
     // guard (+5 ops per parameter set) before the existing FORS / Merkle
     // path expansion. Counts updated in lockstep with the Go reference
@@ -274,22 +304,27 @@ fn test_emit_verify_slh_dsa_op_counts_match_go_reference() {
     //     key pair address after set_type(WOTS_PK) (FIPS 205 Alg. 8 lines 8-11),
     //     turning a 1-op 4-zero-byte push into a 2-op push-depth + PICK.
     // d = 7, 22, 7, 22, 8, 17 for 128s, 128f, 192s, 192f, 256s, 256f.
+    //
+    // F-034: 256f now uses FIPS 205's FORS height a=9 (one more auth level
+    // per FORS tree) and a 9-byte first tree-address encoding.
+    //
+    // F-339: switched the metric itself from flat `ops.len()` to
+    // `count_op_tree`; see the function doc comment above for why and the
+    // cross-tier check. (key, expected_op_tree_count_from_go_and_ts)
     let expected = [
-        ("SHA2_128s", 29577usize),
-        ("SHA2_128f", 85793),
-        ("SHA2_192s", 41964),
-        ("SHA2_192f", 121740),
-        ("SHA2_256s", 61207),
-        // F-034: 256f now uses FIPS 205's FORS height a=9 (one more auth
-        // level per FORS tree) and a 9-byte first tree-address encoding.
-        ("SHA2_256f", 123680),
+        ("SHA2_128s", 179259usize),
+        ("SHA2_128f", 514175),
+        ("SHA2_192s", 256948),
+        ("SHA2_192f", 741052),
+        ("SHA2_256s", 350411),
+        ("SHA2_256f", 703277),
     ];
     for (key, want) in expected {
         let ops = collect(|s| emit_verify_slh_dsa(s, key));
         assert_eq!(
-            ops.len(),
+            count_op_tree(&ops),
             want,
-            "verify_slh_dsa {} op count diverged from Go reference",
+            "verify_slh_dsa {} op-tree count diverged from Go/TS reference",
             key
         );
     }
