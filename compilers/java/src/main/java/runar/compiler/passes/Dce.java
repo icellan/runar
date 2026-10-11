@@ -51,10 +51,14 @@ import runar.compiler.ir.anf.UpdateProp;
  * arms happened to be pure, and the merged locals kept their pre-branch
  * values. See {@code conformance/dce/live-if.test.ts}.
  *
- * <p>This module is the canonical, standalone DCE pass for the Java
- * compiler. It mirrors the Zig reference implementation in
- * {@code compilers/zig/src/passes/dce.zig}. The earlier inline
- * implementation in {@code AnfOptimize.java} has been surgically
+ * <p>This module is the canonical DEFINITION of DCE for the Java compiler —
+ * one extracted implementation, mirroring the Zig reference in
+ * {@code compilers/zig/src/passes/dce.zig} — but it is NOT a standalone
+ * pipeline pass (F-275). Its only caller is
+ * {@code AnfOptimize.optimizeEcMethod}, reached only after the
+ * {@code anyChanged}/{@code hasEcCalls} gate in {@code AnfOptimize.run()}, so
+ * a program no method of which has an EC call is never DCE'd. The earlier
+ * inline implementation in {@code AnfOptimize.java} has been surgically
  * extracted here.
  *
  * <p>Behaviour: byte-for-byte identical, at the time of that extraction, to

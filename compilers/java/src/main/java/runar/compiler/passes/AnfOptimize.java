@@ -64,8 +64,14 @@ import runar.compiler.ir.UnknownAnfKindError;
  *       transitively perform crypto / output ops).</li>
  * </ol>
  *
- * <p>This pass is unconditional in the pipeline (no CLI flag), matching the
- * Python reference.
+ * <p>F-275: despite the paragraph above, this pass is NOT unconditional.
+ * {@link #run} returns the program UNCHANGED when no method contains an EC
+ * intrinsic call ({@code hasEcCalls} / the {@code anyChanged} gate below) —
+ * so none of the three transformations above, dead-binding elimination
+ * included, touch a non-EC program. Go's {@code anf_optimize.go} and
+ * Python's {@code anf_optimize.py} ({@code _has_ec_calls}) gate the same
+ * way, so this is cross-tier architecture, not a Java-only oversight. See
+ * {@code F275DceInvocationTest} for the pinned current behaviour.
  */
 public final class AnfOptimize {
 

@@ -671,9 +671,9 @@ public final class Cli {
             anf = ConstantFold.run(anf);
         }
         // AnfOptimize delegates internally to {@link Dce#eliminateDead} for
-        // dead-binding cleanup after any EC rewrite. The standalone Dce class
-        // exists as the canonical, named DCE pass module mirroring Zig's
-        // compilers/zig/src/passes/dce.zig.
+        // dead-binding cleanup, but only as part of the EC rewrite: no path
+        // here calls Dce.run on its own, so a program with no EC call is not
+        // DCE'd (F-275).
         anf = AnfOptimize.run(anf);
         return anf;
     }
