@@ -5,6 +5,9 @@ import { compile, compileFromANF, loadANFFromJSON } from '../index.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ANFProgram, ANFBinding, ANFMethod, ANFValue, StackOp } from '../ir/index.js';
+import { emitMethod } from '../passes/06-emit.js';
+// @ts-expect-error vitest resolves this via alias (runar-testing is not a tsc dep of runar-compiler)
+import { ScriptVM, bytesToHex } from 'runar-testing';
 
 /** N-065: the ANF the (now refused) N-064 collision probes lowered to. */
 const N064_COLLISION_ANF = JSON.parse(
@@ -1253,17 +1256,51 @@ describe('Optimizer: Peephole (Stack IR)', () => {
 
   // -----------------------------------------------------------------------
   // Opcode-string Roll/Pick forms
-  // SLH-DSA codegen emits Opcode("OP_ROLL") string form instead of typed
-  // Roll/Pick ops. The peephole optimizer currently does NOT reduce these
-  // (it only reduces the typed roll/pick forms above).
+  //
+  // F-353 (resolved 2026-10): this block used to carry a comment claiming
+  // "SLH-DSA codegen emits Opcode('OP_ROLL') string form instead of typed
+  // Roll/Pick ops" and flagging the gap below as a "POTENTIAL BUG" with an
+  // open "Go/Rust/Python compilers may handle this differently" risk. Both
+  // claims were investigated and are stale/incorrect at HEAD:
+  //
+  //   - SLH-DSA codegen (`slh-dsa-codegen.ts` `roll()`/`pick()`, lines
+  //     ~267-284) uses TYPED roll/pick ops, with its own depth 0/1/2
+  //     short-circuit to swap/rot/dup/over -- it never reaches the typed
+  //     push+roll{0..2}/pick{0..2} forms the rules below exist for, and it
+  //     never emits the opcode-string form at all.
+  //   - The only 5 places in `packages/runar-compiler/src` that DO emit
+  //     opcode-string `OP_ROLL`/`OP_PICK` are: `wots-codegen.ts` (push 2n +
+  //     OP_PICK once, push 3n + OP_ROLL twice), the `pow()` loop in
+  //     `05-stack-lower.ts` (push 2n + OP_PICK), and
+  //     `oppushtx-codegen.ts`'s `emitCheckPreimageBindingLegacy` (push 2n +
+  //     OP_ROLL) -- which is exported but called from nowhere in the
+  //     compiler; the live checkPreimage-binding path
+  //     (`emitCheckPreimageBindingRaw` -> `emitCheckPreimageBinding`) emits
+  //     the whole construction as one opaque `raw_bytes` span that contains
+  //     no OP_ROLL byte at all. None of the five real sites use depth 0 or
+  //     1, and none of the depths they do use (2 for PICK, 3 for ROLL) has a
+  //     typed-form optimization rule to diverge from either -- so the
+  //     asymmetry the tests below pin (depth 0, where a typed rule exists)
+  //     is not reachable from any live TS codegen path, and there is no
+  //     cross-tier byte-divergence risk to resolve.
+  //   - Independently of reachability, the pattern is behaviourally inert
+  //     even if it were reached: see 'string-form Roll/Pick execution
+  //     equivalence' below, which runs the un-reduced sequences through the
+  //     real @bsv/sdk Spend engine and shows they are semantically identical
+  //     to their typed-rule replacements. It is a missed optimization (extra
+  //     bytes), never a miscompile.
+  //
+  // The peephole optimizer still does NOT reduce the opcode-string forms
+  // (nothing below changes that -- there is no live site a generalized rule
+  // would help, so generalizing would be speculative code for zero benefit).
   // -----------------------------------------------------------------------
 
   describe('opcode-string Roll/Pick forms', () => {
     it('does NOT optimize PUSH(0) + opcode OP_ROLL (string form, typed form is optimized)', () => {
       // Typed roll{0} is optimized away. Opcode-string OP_ROLL is not.
-      // POTENTIAL BUG: OP_ROLL string form and OP_PICK string form are not
-      // reduced by the same rules as typed Roll/Pick ops. Go/Rust/Python
-      // compilers may handle this differently.
+      // See the F-353 note above: this exact (push 0, string OP_ROLL) shape
+      // does not occur in any live codegen path, and is a missed
+      // optimization, not a miscompile, even when constructed synthetically.
       const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'roll', depth: 0 }];
       expect(optimizeStackIR(typedOps)).toEqual([]);
 
@@ -1280,6 +1317,67 @@ describe('Optimizer: Peephole (Stack IR)', () => {
       const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_PICK' }];
       // Currently passes through unchanged (not optimized)
       expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // F-353: string-form Roll/Pick execution equivalence
+  //
+  // The comment above (before this fix) flagged the un-reduced opcode-string
+  // Roll/Pick sequences as a "POTENTIAL BUG". These tests settle the actual
+  // question -- is the un-reduced form a MISCOMPILE (different runtime
+  // behaviour) or merely a missed optimization (same behaviour, more bytes)?
+  // -- by running both the un-reduced sequence and its typed-rule equivalent
+  // through the real @bsv/sdk Spend engine (via ScriptVM, not the ANF
+  // interpreter or TestContract, which share the compiler's own model) and
+  // comparing the full final stack. They PASS at HEAD: that is the correct,
+  // expected result, and is the proof that closes this item.
+  //
+  // What this proves: the three un-reduced sequences below execute
+  // identically to their typed-rule replacements on the production script
+  // interpreter -- OP_0 OP_ROLL is a true no-op, OP_0 OP_PICK behaves like
+  // OP_DUP, and OP_2 OP_ROLL behaves like OP_ROT. There is no hidden runtime
+  // divergence.
+  //
+  // What this does NOT prove: that `optimizeStackIR` reduces the
+  // opcode-string forms (it still does not -- see the describe block above),
+  // or that every string-form Roll/Pick depth is behaviourally safe (only
+  // the three depths tested are covered; the general claim follows from
+  // Bitcoin Script's OP_ROLL/OP_PICK semantics, not from exhaustive testing).
+  // -----------------------------------------------------------------------
+
+  describe('string-form Roll/Pick execution equivalence (F-353)', () => {
+    function emitOps(ops: StackOp[]): string {
+      return emitMethod({ name: 'f353', ops, maxStackDepth: 0 }).scriptHex;
+    }
+    function runEffect(ops: StackOp[]): { success: boolean; stack: string[] } {
+      const r = new ScriptVM().executeHex(emitOps(ops));
+      return { success: r.success, stack: r.stack.map(bytesToHex) };
+    }
+
+    it('PUSH(0) + opcode OP_ROLL executes identically to a true no-op (typed roll{0})', () => {
+      const witness: StackOp[] = [{ op: 'push', value: 11n }, { op: 'push', value: 22n }];
+      const unreduced = runEffect([...witness, { op: 'push', value: 0n }, { op: 'opcode', code: 'OP_ROLL' }]);
+      const noop = runEffect(witness);
+      expect(unreduced).toEqual(noop);
+    });
+
+    it('PUSH(0) + opcode OP_PICK executes identically to OP_DUP (typed pick{0})', () => {
+      const witness: StackOp[] = [{ op: 'push', value: 11n }, { op: 'push', value: 22n }];
+      const unreduced = runEffect([...witness, { op: 'push', value: 0n }, { op: 'opcode', code: 'OP_PICK' }]);
+      const dup = runEffect([...witness, { op: 'dup' }]);
+      expect(unreduced).toEqual(dup);
+    });
+
+    it('PUSH(2) + opcode OP_ROLL executes identically to OP_ROT (typed roll{2}) -- covers the dead emitCheckPreimageBindingLegacy shape, unreachable from compile() but still checked for safety', () => {
+      const witness: StackOp[] = [
+        { op: 'push', value: 11n },
+        { op: 'push', value: 22n },
+        { op: 'push', value: 33n },
+      ];
+      const unreduced = runEffect([...witness, { op: 'push', value: 2n }, { op: 'opcode', code: 'OP_ROLL' }]);
+      const rotated = runEffect([...witness, { op: 'rot' }]);
+      expect(unreduced).toEqual(rotated);
     });
   });
 
