@@ -864,6 +864,21 @@ module Runar
       def finalize_call(prepared, signatures, provider = nil)
         provider = resolve_provider(provider, 'finalize_call')
 
+        # F-247: every declared sig_indices slot MUST be covered by
+        # `signatures`. A missing entry would otherwise leave
+        # resolved_args[idx] at the 72-zero-byte placeholder stubbed in by
+        # prepare_call — a well-formed but all-zero signature push that
+        # would silently reach provider.broadcast below instead of being
+        # refused up front.
+        missing_sig_indices = prepared.sig_indices.reject { |idx| signatures.key?(idx) }
+        unless missing_sig_indices.empty?
+          raise "RunarContract#finalize_call: missing signature(s) for method " \
+                "'#{prepared.method_name}' at sig_indices #{missing_sig_indices} (F-247). " \
+                'Every index in prepared.sig_indices must have a corresponding entry in ' \
+                'the signatures hash, or finalize_call would broadcast a 72-byte all-zero ' \
+                'placeholder signature in its place'
+        end
+
         resolved_args = prepared.resolved_args.dup
         prepared.sig_indices.each { |idx| resolved_args[idx] = signatures[idx] if signatures.key?(idx) }
 

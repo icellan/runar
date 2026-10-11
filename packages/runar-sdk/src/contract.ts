@@ -1960,6 +1960,22 @@ export class RunarContract {
 
     const { provider } = this.resolveProviderSigner();
 
+    // F-247: every declared sigIndices slot MUST be covered by `signatures`.
+    // A missing entry would otherwise leave `resolvedArgs[idx]` at the
+    // `'00'.repeat(72)` placeholder stubbed in by `prepareCall` — a
+    // well-formed but all-zero signature push that silently reaches
+    // `provider.broadcast()` below instead of being refused up front.
+    const missingSigIndices = prepared.sigIndices.filter((idx) => signatures[idx] === undefined);
+    if (missingSigIndices.length > 0) {
+      throw new Error(
+        `RunarContract.finalizeCall: missing signature(s) for method ` +
+          `'${prepared._methodName}' at sigIndices [${missingSigIndices.join(', ')}] (F-247). ` +
+          `Every index in \`prepared.sigIndices\` must have a corresponding entry in the ` +
+          `\`signatures\` map, or finalizeCall would broadcast a 72-byte all-zero placeholder ` +
+          `signature in its place.`,
+      );
+    }
+
     // Replace placeholder sigs with real signatures
     const resolvedArgs = [...prepared._resolvedArgs];
     for (const idx of prepared.sigIndices) {

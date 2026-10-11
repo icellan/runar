@@ -1710,6 +1710,26 @@ func (c *RunarContract) FinalizeCall(
 		return "", nil, fmt.Errorf("RunarContract.FinalizeCall: no provider available")
 	}
 
+	// F-247: every declared SigIndices slot MUST be covered by `signatures`.
+	// A missing entry would otherwise leave resolvedArgs[idx] at the
+	// 72-zero-byte placeholder stubbed in by PrepareCall — a well-formed but
+	// all-zero signature push that would silently reach provider.Broadcast
+	// below instead of being refused up front.
+	var missingSigIndices []int
+	for _, idx := range prepared.SigIndices {
+		if _, ok := signatures[idx]; !ok {
+			missingSigIndices = append(missingSigIndices, idx)
+		}
+	}
+	if len(missingSigIndices) > 0 {
+		return "", nil, fmt.Errorf(
+			"RunarContract.FinalizeCall: missing signature(s) for method '%s' at SigIndices %v (F-247). "+
+				"Every index in prepared.SigIndices must have a corresponding entry in the signatures map, "+
+				"or FinalizeCall would broadcast a 72-byte all-zero placeholder signature in its place",
+			prepared.methodName, missingSigIndices,
+		)
+	}
+
 	// Replace placeholder sigs with real signatures
 	resolvedArgs := make([]interface{}, len(prepared.resolvedArgs))
 	copy(resolvedArgs, prepared.resolvedArgs)

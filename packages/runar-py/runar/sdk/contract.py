@@ -1466,6 +1466,22 @@ class RunarContract:
         if provider is None:
             raise RuntimeError("finalize_call: no provider")
 
+        # F-247: every declared sig_indices slot MUST be covered by
+        # `signatures`. A missing entry would otherwise leave
+        # resolved_args[idx] at the 72-zero-byte placeholder stubbed in by
+        # prepare_call -- a well-formed but all-zero signature push that
+        # would silently reach provider.broadcast below instead of being
+        # refused up front.
+        missing_sig_indices = [idx for idx in prepared.sig_indices if idx not in signatures]
+        if missing_sig_indices:
+            raise RuntimeError(
+                f"RunarContract.finalize_call: missing signature(s) for method "
+                f"'{prepared.method_name}' at sig_indices {missing_sig_indices} (F-247). "
+                f"Every index in prepared.sig_indices must have a corresponding entry in "
+                f"the signatures dict, or finalize_call would broadcast a 72-byte all-zero "
+                f"placeholder signature in its place"
+            )
+
         # Replace placeholder sigs with real signatures
         resolved_args = list(prepared.resolved_args)
         for idx in prepared.sig_indices:

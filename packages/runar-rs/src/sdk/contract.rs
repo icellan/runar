@@ -1795,6 +1795,28 @@ impl RunarContract {
         signatures: &HashMap<usize, String>,
         provider: &mut dyn Provider,
     ) -> Result<(String, TransactionData), String> {
+        // F-247: every declared sig_indices slot MUST be covered by
+        // `signatures`. A missing entry would otherwise leave
+        // resolved_args[idx] at the 72-zero-byte placeholder stubbed in by
+        // prepare_call — a well-formed but all-zero signature push that
+        // would silently reach provider.broadcast below instead of being
+        // refused up front.
+        let missing_sig_indices: Vec<usize> = prepared
+            .sig_indices
+            .iter()
+            .copied()
+            .filter(|idx| !signatures.contains_key(idx))
+            .collect();
+        if !missing_sig_indices.is_empty() {
+            return Err(format!(
+                "RunarContract.finalize_call: missing signature(s) for method '{}' at \
+                 sig_indices {:?} (F-247). Every index in prepared.sig_indices must have a \
+                 corresponding entry in the signatures map, or finalize_call would broadcast a \
+                 72-byte all-zero placeholder signature in its place",
+                prepared.method_name, missing_sig_indices
+            ));
+        }
+
         // Replace placeholder sigs with real signatures
         let mut resolved_args = prepared.resolved_args.clone();
         for &idx in &prepared.sig_indices {
