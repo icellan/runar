@@ -302,15 +302,29 @@ module RunarCompiler
   end
   private_class_method :_optimize_ec
 
-  # Dead Code Elimination -- discrete named pass (Pass 4.75).
-  # See frontend/dce.rb. Idempotent w.r.t. the EC optimizer's internal DCE;
-  # runs as a safety net for any post-EC residual dead bindings and to
-  # mirror the standalone DCE pass shape used by the Zig reference compiler.
-  def self._eliminate_dead_code(program)
-    require_relative "frontend/dce"
-    Frontend::DCE.eliminate_dead_code(program)
-  end
-  private_class_method :_eliminate_dead_code
+  # F-326 (CX-GAP-020): a `_eliminate_dead_code` wrapper used to sit here,
+  # documented as "Dead Code Elimination -- discrete named pass (Pass 4.75)"
+  # that "runs as a safety net for any post-EC residual dead bindings". It
+  # was called by neither pipeline entry point below, so it ran never and
+  # guarded nothing.
+  #
+  # Where dead-binding elimination actually happens: frontend/anf_optimize.rb's
+  # optimize_ec calls Frontend::DCE.eliminate_dead_bindings per method, but
+  # only when the program contains EC calls -- see the
+  # `return program unless any_changed` gate. A program with no EC calls is
+  # not swept by this path at all.
+  #
+  # That gate mirrors the same early-exit DCE already has in the Python
+  # (R-240) and TypeScript (R-194) tiers. Measured here too: forcing the
+  # sweep to run unconditionally diverges this tier's golden/cross-tier
+  # output for `all-readonly-cleanstack` (1 of 87 conformance fixtures --
+  # see frontend/dce.rb for detail). A shared defect in DCE's
+  # binding-removal rules (N-140), not a wiring gap to close here.
+  #
+  # `Frontend::DCE.eliminate_dead_code` (the whole-program entry) is still
+  # used directly, on deep-copied probes, by `_collect_referenced_props`
+  # below and by `Frontend::EmbedAlwaysDCE.collect_warnings`, to compute the
+  # @embedAlways warning.
 
   # Stack lowering: ANF -> Stack IR.
   def self._lower_to_stack(program)

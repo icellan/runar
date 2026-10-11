@@ -17,8 +17,30 @@
 # deleted whenever its arms happened to be pure, and the merged locals kept
 # their pre-branch values. See +conformance/dce/live-if.test.ts+.
 #
-# This module is the canonical, standalone DCE pass for the Ruby
-# compiler. It mirrors the Zig reference implementation in
+# F-326: this used to say "the canonical, standalone DCE pass for the
+# Ruby compiler". It is canonical -- every dead-binding sweep in this
+# tier comes from here -- but it is NOT standalone. Its only pipeline
+# caller is +Frontend::ANFOptimize.optimize_ec+, which runs it (via
+# +eliminate_dead_bindings+, per method) only when the program contains
+# EC calls -- see the +return program unless any_changed+ gate. A
+# program with no EC calls is never swept by this path at all.
+# +eliminate_dead_code+ (the whole-program entry) has two other
+# callers, +Compiler._collect_referenced_props+ and
+# +Frontend::EmbedAlwaysDCE.collect_warnings+, each running on a
+# deep-copied probe purely to compute the @embedAlways warning.
+#
+# The gate is load-bearing, measured rather than assumed: forcing the
+# sweep to run unconditionally (bypassing +any_changed+) makes this
+# tier diverge from the golden/cross-tier IR and script hex for
+# `all-readonly-cleanstack` -- 1 of 87 conformance fixtures. Smaller
+# than the 11 TypeScript (R-194) and Python (R-240) fail under the same
+# probe, because this tier's deep-copy already carries the fuller
+# +IR::ANFValue::FIELDS+ list (see +anf_optimize.rb+'s N-140 comment
+# above +deep_copy_value+), but still a real, measured divergence and
+# not zero. "Make DCE standalone" remains a defect to fix inside DCE
+# before it is a wiring change, same as the other two tiers.
+#
+# This mirrors the Zig reference implementation in
 # +compilers/zig/src/passes/dce.zig+. The earlier inline implementation
 # in +anf_optimize.rb+ has been surgically extracted here.
 #
