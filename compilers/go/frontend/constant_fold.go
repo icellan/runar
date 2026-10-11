@@ -657,7 +657,10 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 
 // FoldConstants applies constant folding to an ANF program.
 // It evaluates compile-time-known expressions and replaces them with
-// load_const bindings. Also runs dead binding elimination afterward.
+// load_const bindings. It does NOT run dead-binding elimination (F-303):
+// FoldConstants is just `return foldConstantsOnly(program)` below. Any DCE a
+// compiled program receives comes later and conditionally, from OptimizeEC's
+// EC-gated cleanup (anf_optimize.go) — never from this pass.
 func FoldConstants(program *ir.ANFProgram) *ir.ANFProgram {
 	return foldConstantsOnly(program)
 }

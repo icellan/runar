@@ -17,10 +17,14 @@ package frontend
 // pure, and the merged locals kept their pre-branch values. See
 // conformance/dce/live-if.test.ts.
 //
-// This module is the canonical, standalone DCE pass for the Go compiler.
-// It mirrors the Zig reference implementation in
-// `compilers/zig/src/passes/dce.zig`. The earlier inline implementation in
-// `anf_optimize.go` has been surgically extracted here.
+// This module is the canonical DEFINITION of DCE for the Go compiler — one
+// extracted implementation, mirroring the Zig reference in
+// `compilers/zig/src/passes/dce.zig` — but it is NOT a standalone pipeline
+// pass (F-303). Its only caller is anf_optimize.go's optimizeMethodEC,
+// reached only after the `anyChanged` gate in OptimizeEC, so a program no
+// method of which triggers an EC rewrite is never DCE'd through any public
+// compile entrypoint. The earlier inline implementation in `anf_optimize.go`
+// has been surgically extracted here.
 //
 // Behaviour: byte-for-byte identical, at the time of that extraction, to the
 // previous inline DCE in anf_optimize.go. Verified by the conformance suite

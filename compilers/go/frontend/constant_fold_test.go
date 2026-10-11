@@ -892,8 +892,14 @@ func TestFoldConstants_Bool(t *testing.T) {
 // Dead binding elimination (tested via eliminateDeadBindings after fold)
 // ---------------------------------------------------------------------------
 
-// foldAndEliminate is a test helper that folds constants then eliminates dead bindings,
-// mirroring the full pipeline behavior (FoldConstants + EC optimizer's DCE).
+// foldAndEliminate is a test helper that folds constants then eliminates dead
+// bindings UNCONDITIONALLY. It does NOT mirror the production pipeline
+// (F-303): CompileFromProgram only runs EliminateDeadBindings conditionally,
+// via OptimizeEC's `anyChanged` gate (anf_optimize.go) — a program that
+// triggers no EC rewrite gets no DCE at all through any public compile
+// entrypoint. This helper exists to exercise DCE's behavior on folded ANF in
+// isolation; see f303_dce_invocation_test.go for the pinned production
+// behavior.
 func foldAndEliminate(p *ir.ANFProgram) *ir.ANFProgram {
 	result := FoldConstants(p)
 	for i := range result.Methods {
