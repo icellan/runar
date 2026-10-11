@@ -5,16 +5,40 @@
 
 use super::types::{ParsedOp, PushEncoding, RawScriptSpan};
 
-/// Normalize a hex string: strip whitespace, lowercase.
+/// Normalize a hex string: strip whitespace, lowercase. "Whitespace" here
+/// is exactly what JS's `/\s/g` matches (what the TS reference strips) —
+/// a fixed 25-codepoint set per ECMA-262 (WhiteSpace + LineTerminator) —
+/// not `char::is_whitespace`, which additionally treats U+0085 (NEL) as
+/// whitespace (JS does not) and does not treat U+FEFF (the BOM) as
+/// whitespace (JS does).
 pub fn normalize_hex(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
-        if c.is_whitespace() {
+        if is_js_whitespace(c) {
             continue;
         }
         out.push(c.to_ascii_lowercase());
     }
     out
+}
+
+/// True iff `c` is matched by JS's regex `\s` class. Written with hex
+/// codepoint literals (`char::from_u32`) rather than `'\u{XXXX}'` escapes
+/// to keep this file plain ASCII; verified by enumerating every BMP
+/// codepoint against a live `node` `/\s/` regex.
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20 // TAB,LF,VT,FF,CR,SPACE
+        | 0xA0   // NBSP
+        | 0x1680 // OGHAM SPACE MARK
+        | 0x2000..=0x200A // EN QUAD..HAIR SPACE
+        | 0x2028 | 0x2029 // LINE/PARAGRAPH SEPARATOR
+        | 0x202F // NARROW NBSP
+        | 0x205F // MEDIUM MATHEMATICAL SPACE
+        | 0x3000 // IDEOGRAPHIC SPACE
+        | 0xFEFF // ZERO WIDTH NO-BREAK SPACE (BOM)
+    )
 }
 
 /// Decode a normalized lowercase hex string into bytes. Returns `None` on

@@ -258,15 +258,34 @@ func TestFormatKilobytes(t *testing.T) {
 		// Spec example: 1024 → "1.0", 1500 → "1.5".
 		{1024, "1.0"},
 		{1500, "1.5"},
-		// Golden fixtures.
+		// Golden fixtures (conformance/analyzer/{ec-demo,schnorr-zkp}) —
+		// pinned here so the tie-rounding fix below is proven not to move
+		// them: neither size lands on an exact .5 tie at the tenths digit.
 		{1328100, "1297.0"},
 		{872248, "851.8"},
+		{1337343, "1306.0"},
+		{877253, "856.7"},
 	}
 	for _, c := range cases {
 		got := formatKilobytes(c.n)
 		if got != c.want {
 			t.Errorf("formatKilobytes(%d) = %q, want %q", c.n, got, c.want)
 		}
+	}
+}
+
+func TestFormatKilobytesBreaksTiesLikeJsNotHalfToEven(t *testing.T) {
+	// 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+	// division has no floating-point error). Scaled by 10 that is 4892.5 —
+	// an exact tie at the tenths digit. JS Number.prototype.toFixed(1)
+	// does not use round-half-to-even: per spec it picks the integer n for
+	// which n/10 - x is closest to zero, and on a tie picks the LARGER n.
+	// Verified live: node -e "console.log((500992/1024).toFixed(1))" ->
+	// "489.3". math.RoundToEven rounds 4892.5 down to 4892 (already even),
+	// producing the wrong "489.2".
+	got := formatKilobytes(500992)
+	if got != "489.3" {
+		t.Errorf("formatKilobytes(500992) = %q, want %q", got, "489.3")
 	}
 }
 
@@ -399,6 +418,35 @@ func TestNormalizeHex(t *testing.T) {
 	got := normalizeHex(" Ab\tcD\n")
 	if got != "abcd" {
 		t.Errorf("normalize: %q", got)
+	}
+}
+
+func TestNormalizeHexStripsJsWhitespaceSet(t *testing.T) {
+	// normalizeHex only matched a handful of ASCII whitespace runes
+	// (space, tab, \n, \r, \v, \f) and passed every other rune through
+	// unchanged. JS's /\s/g (what the TS reference strips) additionally
+	// matches NBSP (U+00A0) and ZERO WIDTH NO-BREAK SPACE / BOM (U+FEFF),
+	// among other Unicode whitespace. Verified against the live TS
+	// analyzer: both inputs below normalize to "76a988ac".
+	got := normalizeHex("76\u00a0a9\u00a088\u00a0ac")
+	if got != "76a988ac" {
+		t.Errorf("normalize (NBSP): %q", got)
+	}
+	got = normalizeHex("\ufeff76a988ac")
+	if got != "76a988ac" {
+		t.Errorf("normalize (BOM): %q", got)
+	}
+}
+
+func TestNormalizeHexDoesNotStripC0Separators(t *testing.T) {
+	// U+001C-U+001F are not matched by JS /\s/g, so the TS reference keeps
+	// them in the normalized string (and then rejects them as non-hex
+	// characters — verified live: the TS analyzer throws "Invalid hex
+	// character" on this exact input). normalizeHex must not strip them
+	// either.
+	got := normalizeHex("76\u001ca9")
+	if got != "76\u001ca9" {
+		t.Errorf("normalize (C0 separator): %q, want kept", got)
 	}
 }
 

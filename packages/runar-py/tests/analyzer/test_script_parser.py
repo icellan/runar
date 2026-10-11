@@ -22,6 +22,30 @@ def test_normalize_hex_lowercases_and_strips_whitespace():
     assert normalize_hex("  76 A9 88\nAC  ") == "76a988ac"
 
 
+def test_normalize_hex_strips_js_whitespace_set():
+    # The TS reference strips exactly what JS's /\s/g matches: a fixed
+    # 25-codepoint set (ECMA-262 WhiteSpace + LineTerminator), not what
+    # Python's str.isspace() considers whitespace. NBSP (U+00A0) and the
+    # BOM (U+FEFF) are both in the JS set; str.isspace() agrees on NBSP
+    # but returns False for the BOM, so the old normalize_hex() left it
+    # in place. Verified against the live TS analyzer: both inputs below
+    # normalize to "76a988ac".
+    assert normalize_hex("76\u00a0a9\u00a088\u00a0ac") == "76a988ac"
+    assert normalize_hex("\ufeff76a988ac") == "76a988ac"
+
+
+def test_normalize_hex_does_not_strip_c0_separators():
+    # U+001C-U+001F (file/group/record/unit separator) are whitespace per
+    # str.isspace() but are NOT matched by JS /\s/g, so the TS reference
+    # keeps them in the normalized string (and then rejects them as
+    # non-hex characters - confirmed live: the TS analyzer throws
+    # "Invalid hex character" on this exact input). normalize_hex() must
+    # not strip them either. (parse_script's handling of the resulting
+    # invalid hex is a separate, pre-existing leniency - not asserted
+    # here; see F-272 dispatcher notes.)
+    assert normalize_hex("76\u001ca9") == "76\u001ca9"
+
+
 def test_opcode_names_canonical():
     assert opcode_name(0x00) == "OP_0"
     assert opcode_name(0x51) == "OP_1"

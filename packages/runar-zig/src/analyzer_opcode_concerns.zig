@@ -101,10 +101,16 @@ pub fn analyzeOpcodeConcerns(
 }
 
 /// Format `n / 1024` as JS `(n/1024).toFixed(1)` does.
-/// Per spec §5.1: k = round_half_to_even(n * 10 / 1024) / 10.
+///
+/// Per ECMA-262, toFixed picks the integer k for which k/10 - value is
+/// closest to zero, and on an exact tie picks the LARGER k —
+/// round-half-up (ties away from zero for our non-negative n), not
+/// IEEE-754 round-half-to-even. Verified live:
+/// `node -e "console.log((500992/1024).toFixed(1))"` prints "489.3",
+/// where round-half-to-even would give "489.2".
+/// Spec §5.1: k = round_half_up(n * 10 / 1024) / 10.
 /// Returns owned string like "1.0", "1.5", "851.8".
 pub fn formatToFixed1(allocator: std.mem.Allocator, n: i64) ![]u8 {
-    // banker's rounding (round half to even) of (n * 10) / 1024.
     const numerator: i64 = n * 10;
     const denom: i64 = 1024;
     const q = @divTrunc(numerator, denom);
@@ -112,11 +118,8 @@ pub fn formatToFixed1(allocator: std.mem.Allocator, n: i64) ![]u8 {
     // r in [0, denom) for non-negative n.
     const twice_r = r * 2;
     var k: i64 = q;
-    if (twice_r > denom) {
+    if (twice_r >= denom) {
         k += 1;
-    } else if (twice_r == denom) {
-        // tie — round to even.
-        if (@mod(q, 2) != 0) k += 1;
     }
     const whole = @divTrunc(k, 10);
     const frac_signed = k - whole * 10;
@@ -145,5 +148,36 @@ test "formatToFixed1 matches JS toFixed semantics" {
         const s = try formatToFixed1(a, 1328100);
         defer a.free(s);
         try std.testing.expectEqualStrings("1297.0", s);
+    }
+}
+
+test "formatToFixed1 breaks ties like JS, not half-to-even" {
+    // 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+    // division has no rounding error). Scaled by 10 that is 4892.5 — an
+    // exact tie at the tenths digit. JS Number.prototype.toFixed(1) picks
+    // the LARGER candidate on a tie (verified live: node -e
+    // "console.log((500992/1024).toFixed(1))" -> "489.3"), not the even
+    // one (round-half-to-even would give "489.2", since 4892 is even).
+    const a = std.testing.allocator;
+    const s = try formatToFixed1(a, 500992);
+    defer a.free(s);
+    try std.testing.expectEqualStrings("489.3", s);
+}
+
+test "formatToFixed1 does not move existing analyzer goldens" {
+    // Pins the two LARGE_SCRIPT conformance goldens
+    // (conformance/analyzer/{ec-demo,schnorr-zkp}) so the tie-rounding
+    // fix above is proven not to move them — neither size lands on an
+    // exact .5 tie at the tenths digit.
+    const a = std.testing.allocator;
+    {
+        const s = try formatToFixed1(a, 1337343);
+        defer a.free(s);
+        try std.testing.expectEqualStrings("1306.0", s);
+    }
+    {
+        const s = try formatToFixed1(a, 877253);
+        defer a.free(s);
+        try std.testing.expectEqualStrings("856.7", s);
     }
 }

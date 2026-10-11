@@ -132,12 +132,33 @@ def opcode_name(byte: int) -> str:
     return f"OP_UNKNOWN(0x{byte:02x})"
 
 
+#: Codepoints matched by JS's regex `\s` class: the fixed set ECMA-262
+#: assigns to it (WhiteSpace + LineTerminator production), not Python's
+#: notion of Unicode whitespace. str.isspace() disagrees in both
+#: directions: it treats U+0085 (NEL) and U+001C-U+001F (file/group/
+#: record/unit separator) as whitespace (JS does not), and does not
+#: treat U+FEFF (the BOM) as whitespace (JS does). Verified by
+#: enumerating every BMP codepoint against a live `node` /\s/ regex.
+_JS_WHITESPACE_CODEPOINTS = frozenset(
+    [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20]  # TAB,LF,VT,FF,CR,SPACE
+    + [0xA0]  # NBSP
+    + [0x1680]  # OGHAM SPACE MARK
+    + list(range(0x2000, 0x200B))  # EN QUAD..HAIR SPACE
+    + [0x2028, 0x2029]  # LINE/PARAGRAPH SEPARATOR
+    + [0x202F]  # NARROW NBSP
+    + [0x205F]  # MEDIUM MATHEMATICAL SPACE
+    + [0x3000]  # IDEOGRAPHIC SPACE
+    + [0xFEFF]  # ZERO WIDTH NO-BREAK SPACE (BOM)
+)
+
+
 def normalize_hex(hex_script: str) -> str:
     """Strip whitespace and lowercase; return canonical hex."""
-    # Strip any whitespace anywhere (spaces, tabs, newlines).
+    # Strip exactly what JS's /\s/g matches (what the TS reference
+    # strips), not what str.isspace() considers whitespace.
     out_chars = []
     for ch in hex_script:
-        if ch.isspace():
+        if ord(ch) in _JS_WHITESPACE_CODEPOINTS:
             continue
         out_chars.append(ch)
     return "".join(out_chars).lower()

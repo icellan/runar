@@ -180,3 +180,26 @@ def test_large_script_kb_round_half_to_even():
     assert _format_kb(872248) == "851.8"    # schnorr-zkp
     assert _format_kb(1024) == "1.0"
     assert _format_kb(1500) == "1.5"
+
+
+def test_format_kb_breaks_ties_like_js_not_half_to_even():
+    # 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+    # division has no floating-point error). Scaled by 10 that is 4892.5
+    # - an exact tie at the tenths digit. JS Number.prototype.toFixed(1)
+    # does NOT use round-half-to-even: per spec it picks the integer n for
+    # which n/10 - x is closest to zero, and on a tie picks the LARGER n.
+    # Verified live: node -e "console.log((500992/1024).toFixed(1))" ->
+    # "489.3". Round-half-to-even rounds 4892.5 down to 4892 (already
+    # even), producing the wrong "489.2".
+    from runar.analyzer.opcode_concerns import _format_kb
+    assert _format_kb(500992) == "489.3"
+
+
+def test_format_kb_does_not_move_existing_analyzer_goldens():
+    # Pins the two LARGE_SCRIPT conformance goldens
+    # (conformance/analyzer/{ec-demo,schnorr-zkp}/expected-analyzer-report.json)
+    # so the tie-rounding fix above is proven not to move them - neither
+    # size lands on an exact .5 tie at the tenths digit.
+    from runar.analyzer.opcode_concerns import _format_kb
+    assert _format_kb(1337343) == "1306.0"
+    assert _format_kb(877253) == "856.7"

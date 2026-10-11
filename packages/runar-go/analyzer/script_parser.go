@@ -67,13 +67,17 @@ func opcodeName(b byte) string {
 	return fmt.Sprintf("OP_UNKNOWN(0x%02x)", b)
 }
 
-// normalizeHex strips whitespace and lowercases.
+// normalizeHex strips whitespace and lowercases. "Whitespace" here is
+// exactly the set JS's /\s/g matches (what the TS reference strips), not
+// just ASCII: a fixed 25-codepoint set per ECMA-262 (WhiteSpace +
+// LineTerminator), covering NBSP, the BOM (U+FEFF), and other Unicode
+// space separators in addition to the ASCII run. Verified by enumerating
+// every BMP codepoint against a live `node` /\s/ regex.
 func normalizeHex(hexScript string) string {
 	var b strings.Builder
 	b.Grow(len(hexScript))
 	for _, r := range hexScript {
-		switch r {
-		case ' ', '\t', '\n', '\r', '\v', '\f':
+		if isJsWhitespace(r) {
 			continue
 		}
 		// Lowercase: only A-F → a-f, everything else passes through.
@@ -83,6 +87,27 @@ func normalizeHex(hexScript string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// isJsWhitespace reports whether r is matched by JS's regex \s class.
+// Written as hex codepoint literals (rather than '\uXXXX' rune literals)
+// to keep the source file plain ASCII.
+func isJsWhitespace(r rune) bool {
+	switch r {
+	case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, // TAB,LF,VT,FF,CR,SPACE
+		0xA0,                                           // NBSP
+		0x1680,                                         // OGHAM SPACE MARK
+		0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, // EN QUAD..SIX-PER-EM SPACE
+		0x2006, 0x2007, 0x2008, 0x2009, 0x200A, // SIX-PER-EM..HAIR SPACE
+		0x2028, 0x2029, // LINE/PARAGRAPH SEPARATOR
+		0x202F, // NARROW NBSP
+		0x205F, // MEDIUM MATHEMATICAL SPACE
+		0x3000, // IDEOGRAPHIC SPACE
+		0xFEFF: // ZERO WIDTH NO-BREAK SPACE (BOM)
+		return true
+	default:
+		return false
+	}
 }
 
 // parseScript consumes a normalized lowercase hex string and produces

@@ -116,17 +116,53 @@ public final class Analyzer {
     /**
      * Strip whitespace and lowercase. Spec §2: "Whitespace is permitted and
      * stripped; the canonical normalized form is lowercase-hex with no
-     * whitespace."
+     * whitespace." The TS reference strips exactly what JS's
+     * {@code /\s/g} matches — a fixed 25-codepoint set per ECMA-262
+     * (WhiteSpace + LineTerminator) — which is NOT the same set as
+     * {@link Character#isWhitespace}: the JDK excludes the "non-breaking"
+     * spaces (U+00A0, U+2007, U+202F) and the BOM (U+FEFF) that JS strips,
+     * and includes the C0 separators U+001C-U+001F that JS does not. Use
+     * {@link #isJsWhitespace} instead so both directions match the TS
+     * reference byte-for-byte.
      */
     private static String normalize(String hex) {
         StringBuilder sb = new StringBuilder(hex.length());
         for (int i = 0; i < hex.length(); i++) {
             char c = hex.charAt(i);
-            if (Character.isWhitespace(c)) continue;
+            if (isJsWhitespace(c)) continue;
             if (c >= 'A' && c <= 'F') c = (char) (c - 'A' + 'a');
             sb.append(c);
         }
         return sb.toString();
+    }
+
+    /**
+     * True iff {@code c} is matched by JS's regex {@code \s} class. This is
+     * the fixed character class ECMA-262 assigns to {@code \s}: TAB, LF,
+     * VT, FF, CR, SPACE, NBSP, OGHAM SPACE MARK, the EN QUAD..HAIR SPACE
+     * run, LINE/PARAGRAPH SEPARATOR, NARROW NBSP, MEDIUM MATHEMATICAL
+     * SPACE, IDEOGRAPHIC SPACE, and ZERO WIDTH NO-BREAK SPACE (BOM).
+     * Verified against a live `node` by enumerating every BMP codepoint
+     * against {@code /\s/}.
+     */
+    private static boolean isJsWhitespace(char c) {
+        switch (c) {
+            case '\t': case '\n': case '\u000B': case '\f': case '\r':
+            case ' ':
+            case ' ':
+            case ' ':
+            case ' ': case ' ': case ' ': case ' ':
+            case ' ': case ' ': case ' ': case ' ':
+            case ' ': case ' ': case ' ':
+            case ' ': case ' ':
+            case ' ':
+            case ' ':
+            case '　':
+            case '﻿':
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static void sortFindings(List<Finding> findings) {

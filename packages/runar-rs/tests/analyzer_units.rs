@@ -253,15 +253,56 @@ fn large_script_not_emitted_at_500_000() {
 }
 
 #[test]
-fn format_kb_round_half_to_even() {
+fn format_kb_non_tie_cases() {
+    // None of these land on an exact tie at the tenths digit, so
+    // round-half-up and round-half-to-even agree on all of them.
     // 1024 → "1.0"
     assert_eq!(format_kb(1024), "1.0");
     // 1536 (1024 + 512, exactly 1.5 KB) → "1.5" (no half).
     assert_eq!(format_kb(1536), "1.5");
     // 51 → 51/1024 = 0.04980... → "0.0"
     assert_eq!(format_kb(51), "0.0");
-    // 52 → 52/1024 = 0.05078 → "0.1" (banker still rounds 0.05->0.0 in halves, but this is 0.0508)
+    // 52 → 52/1024 = 0.05078 → "0.1"
     assert_eq!(format_kb(52), "0.1");
+}
+
+#[test]
+fn format_kb_breaks_ties_like_js_not_half_to_even() {
+    // 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+    // division has no rounding error). Scaled by 10 that is 4892.5 — an
+    // exact tie at the tenths digit. JS Number.prototype.toFixed(1) does
+    // NOT use round-half-to-even: per spec it picks the integer n for
+    // which n/10 - x is closest to zero, and on a tie picks the LARGER n.
+    // Verified live: node -e "console.log((500992/1024).toFixed(1))" ->
+    // "489.3". Round-half-to-even rounds 4892.5 down to 4892 (already
+    // even), producing the wrong "489.2".
+    assert_eq!(format_kb(500_992), "489.3");
+}
+
+#[test]
+fn format_kb_does_not_move_existing_analyzer_goldens() {
+    // Pins the two LARGE_SCRIPT conformance goldens
+    // (conformance/analyzer/{ec-demo,schnorr-zkp}) so the tie-rounding fix
+    // above is proven not to move them — neither size lands on an exact
+    // .5 tie at the tenths digit.
+    assert_eq!(format_kb(1_337_343), "1306.0");
+    assert_eq!(format_kb(877_253), "856.7");
+}
+
+#[test]
+fn analyze_script_normalize_strips_js_whitespace_set() {
+    // The TS reference strips exactly what JS's /\s/g matches: a fixed
+    // 25-codepoint set (ECMA-262 WhiteSpace + LineTerminator). NBSP
+    // (U+00A0) and the BOM (U+FEFF) are both in that set. Verified
+    // against the live TS analyzer: both inputs below normalize to
+    // "76a988ac".
+    let r = analyze_script("76\u{00a0}a9\u{00a0}88\u{00a0}ac").unwrap();
+    assert_eq!(r.script, "76a988ac");
+    assert_eq!(r.script_size, 4);
+
+    let r = analyze_script("\u{feff}76a988ac").unwrap();
+    assert_eq!(r.script, "76a988ac");
+    assert_eq!(r.script_size, 4);
 }
 
 #[test]

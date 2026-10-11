@@ -286,11 +286,15 @@ including punctuation (em dashes `—` are U+2014).
   - `pushdata4` of ≤65535-byte data: `OP_PUSHDATA4 used for <n>-byte data — OP_PUSHDATA2 would be more efficient`
 - `LARGE_SCRIPT`: `Script is <n> bytes (<k> KB) — consider if this is intentional`
   where `k` is `n / 1024` formatted with **exactly one** digit after the
-  decimal point, using banker-free truncation toward zero after standard
-  IEEE-754 rounding of `n/1024` to one decimal. To remove ambiguity, the
-  canonical formula is: `k = round_half_to_even(n * 10 / 1024) / 10`,
-  rendered as `<integer>.<digit>`. (Implementations may choose any
-  algorithm equivalent to JS `(n / 1024).toFixed(1)`.)
+  decimal point, matching JS `(n / 1024).toFixed(1)`. Per ECMA-262,
+  `toFixed` picks the integer that minimizes `|k/10 - n/1024|`, and on an
+  exact tie picks the LARGER `k` — round-half-up (ties away from zero for
+  non-negative `n`), **not** IEEE-754 round-half-to-even (verified live:
+  `node -e "console.log((500992/1024).toFixed(1))"` prints `"489.3"`,
+  where round-half-to-even would give `"489.2"`). To remove ambiguity, the
+  canonical formula is: `k = round_half_up(n * 10 / 1024) / 10`, rendered
+  as `<integer>.<digit>`. (Implementations may choose any algorithm
+  equivalent to JS `(n / 1024).toFixed(1)`.)
 - `PATHS_TRUNCATED`: two message forms, selected by `numBranches`:
   - For `numBranches < 53` (an exact 2^N fits in a JS safe integer):
     `Script has <numBranches> branch points (2^<numBranches> = <requested> paths); analysis truncated to the first 256. Consider reducing branching or splitting the contract into smaller spending paths.`

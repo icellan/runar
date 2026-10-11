@@ -51,4 +51,20 @@ RSpec.describe 'Runar::Analyzer.analyze_script orchestrator' do
     second_line = json.split("\n", 3)[1]
     expect(second_line).to match(/^  "/)
   end
+
+  it 'normalizes whitespace to exactly what JS /\\s/g matches' do
+    # The TS reference strips exactly what JS's /\s/g matches: a fixed
+    # 25-codepoint set (ECMA-262 WhiteSpace + LineTerminator). NBSP
+    # (U+00A0) and the BOM (U+FEFF) are both in that set, but Ruby's
+    # bare /\s/ (no Unicode option) only matches ASCII whitespace, so
+    # the old normalize left them in place. Verified against the live
+    # TS analyzer: both inputs below normalize to "76a988ac".
+    result = Runar::Analyzer.analyze_script("76\u00a0a9\u00a088\u00a0ac")
+    expect(result[:script]).to eq('76a988ac')
+    expect(result[:script_size]).to eq(4)
+
+    result = Runar::Analyzer.analyze_script("\ufeff76a988ac")
+    expect(result[:script]).to eq('76a988ac')
+    expect(result[:script_size]).to eq(4)
+  end
 end
