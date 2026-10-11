@@ -5301,9 +5301,12 @@ class _LoweringContext:
                 f"constant integer literal. Got a runtime value for '{depth_arg}'."
             )
         depth = int(depth_value)
-        if depth < 1 or depth > 64:
+        # The bound is 32, not 64 (F-260, mirrors Go R-172): emit_poseidon2_merkle_root
+        # refuses anything above 32, so a gate at 64 let 33..64 through to die in
+        # the emitter under its internal name.
+        if depth < 1 or depth > 32:
             raise RuntimeError(
-                f"merkleRootPoseidon2KB: depth must be between 1 and 64, got {depth}"
+                f"merkleRootPoseidon2KB: depth must be between 1 and 32, got {depth}"
             )
 
         # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
