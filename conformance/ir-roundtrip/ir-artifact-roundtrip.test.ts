@@ -120,7 +120,8 @@ function expectedSigHash(probe: (typeof PROBES)[number], method: string): number
 
 describe('F-038: --emit-ir -> --ir reproduces the --source artifact', () => {
   it('every --ir tier is built (strict in CI, ">=2" locally)', () => {
-    expect([...TIERS.map((t) => t.id)].sort()).toEqual([...IR_TIER_IDS].sort());
+    // TS is excluded by design: its --from-ir artifact carries no parentClass/abi/stateFields to round-trip.
+    expect([...TIERS.map((t) => t.id)].sort()).toEqual(IR_TIER_IDS.filter((id) => id !== 'ts').sort());
     if (process.env.CI === 'true') expect(TIERS.filter((t) => t.cmd === null)).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
