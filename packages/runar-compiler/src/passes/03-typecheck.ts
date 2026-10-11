@@ -1937,6 +1937,35 @@ class TypeChecker {
       }
     }
 
+    // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT argument.
+    // A literal negative start used to type-check as plain 'bigint' (the
+    // standard subtype loop below never inspects a literal's VALUE) and
+    // compile to a script that aborts at runtime -- `-5n` minimal-encodes
+    // to `<85>`, which OP_SPLIT rejects. Catch the literal case (bare or
+    // unary-negated BigIntLiteral) at compile time, mirroring the
+    // extractPrevOutputScript/requireOutputP2PKH "must be >= 0" pattern
+    // above. A non-literal start (a variable or computed expression) has
+    // no static value to check and is unaffected.
+    if (funcName === 'substr' && args.length >= 2) {
+      let litValue: bigint | null = null;
+      if (args[1]!.kind === 'bigint_literal') {
+        litValue = (args[1] as { value: bigint }).value;
+      } else if (
+        args[1]!.kind === 'unary_expr' &&
+        (args[1] as { op: string }).op === '-' &&
+        (args[1] as { operand: { kind: string } }).operand.kind === 'bigint_literal'
+      ) {
+        litValue = -(args[1] as { operand: { value: bigint } }).operand.value;
+      }
+      if (litValue !== null && litValue < 0n) {
+        this.errors.push(makeDiagnostic(
+          `substr() argument 2 (start) must be >= 0; got ${litValue.toString()}`,
+          'error',
+          args[1]!.sourceLocation,
+        ));
+      }
+    }
+
     // Standard argument count check
     if (args.length !== sig.params.length) {
       this.errors.push(makeDiagnostic(

@@ -1373,6 +1373,33 @@ public final class Typecheck {
                 }
             }
 
+            // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+            // argument. A literal negative start used to type-check as
+            // plain 'bigint' (the standard subtype loop below never
+            // inspects a literal's VALUE) and compile to a script that
+            // aborts at runtime -- `-5n` minimal-encodes to `<85>`, which
+            // OP_SPLIT rejects. Catch the literal case (bare or
+            // unary-negated BigIntLiteral) at compile time, mirroring the
+            // extractPrevOutputScript/requireOutputP2PKH "must be >= 0"
+            // pattern above. A non-literal start (a variable or computed
+            // expression) has no static value to check and is unaffected.
+            if ("substr".equals(name) && args.size() >= 2) {
+                Expression startArg = args.get(1);
+                BigIntLiteral startLit = null;
+                if (startArg instanceof BigIntLiteral b) {
+                    startLit = b;
+                } else if (startArg instanceof UnaryExpr u
+                    && u.op() == Expression.UnaryOp.NEG
+                    && u.operand() instanceof BigIntLiteral inner
+                    && inner.value() != null) {
+                    startLit = new BigIntLiteral(inner.value().negate());
+                }
+                if (startLit != null && startLit.value() != null
+                    && startLit.value().signum() < 0) {
+                    error("substr() argument 2 (start) must be >= 0; got " + startLit.value());
+                }
+            }
+
             if (args.size() != expectedParams.size()) {
                 error(
                     name + "() expects " + expectedParams.size()

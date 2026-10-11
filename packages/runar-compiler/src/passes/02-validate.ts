@@ -156,6 +156,19 @@ function validateProperties(ctx: ValidationContext): void {
           prop.sourceLocation,
         ));
       }
+
+      // F-265: the shape checks above only ask "is this a literal node at
+      // all?" -- they never validate a ByteStringLiteral's HEX FORMAT. That
+      // check lives in `validateExpression`'s `bytestring_literal` arm,
+      // which a method body reaches via the statement walk but a property
+      // INITIALIZER never did: it is read directly off `prop.initializer`
+      // and is not part of that walk. A malformed hex literal here (e.g.
+      // `"zzz" as ByteString`, or `toByteString('zzz')`) used to sail
+      // through this pass and only surface two passes later as an opaque
+      // stack-lowering error with no source location -- `validateExpression`
+      // recurses into array elements and `toByteString(...)` args, so this
+      // also covers FixedArray initializer elements.
+      validateExpression(prop.initializer, ctx);
     }
   }
 

@@ -1615,6 +1615,42 @@ const TypeChecker = struct {
             }
         }
 
+        // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        // argument. A literal negative start used to type-check as plain
+        // 'bigint' (the standard subtype loop below never inspects a
+        // literal's VALUE) and compile to a script that aborts at runtime
+        // -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects. Catch
+        // the literal case (bare or unary-negated literal_int) at compile
+        // time, mirroring the extractPrevOutputScript/requireOutputP2PKH
+        // "must be >= 0" pattern above. A non-literal start (a variable or
+        // computed expression) has no static value to check and is
+        // unaffected.
+        if (std.mem.eql(u8, func_name, "substr") and args.len >= 2) {
+            var start_lit: ?i64 = null;
+            switch (args[1]) {
+                .literal_int => |v| start_lit = v,
+                .unary_op => |u| {
+                    if (u.op == .negate) {
+                        switch (u.operand) {
+                            // Mirrors the extractPrevOutputScript/
+                            // requireOutputP2PKH guard above: `v > 0` is
+                            // `-v < 0` and also dodges negating minInt.
+                            .literal_int => |v| {
+                                if (v > 0) start_lit = -v;
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+            if (start_lit) |start| {
+                if (start < 0) {
+                    self.addError("substr() argument 2 (start) must be >= 0; got {d}", .{start});
+                }
+            }
+        }
+
         // Standard arity check
         if (args.len != func_sig.params.len) {
             self.addError("{s}() expects {d} argument(s), got {d}", .{ func_name, func_sig.params.len, args.len });

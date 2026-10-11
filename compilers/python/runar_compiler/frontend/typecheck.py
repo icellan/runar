@@ -1437,6 +1437,31 @@ class _TypeChecker:
                     f"{func_name}() is only available in StatefulSmartContract methods"
                 )
 
+        # F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        # argument. A literal negative start used to type-check as plain
+        # 'bigint' (the standard subtype loop below never inspects a
+        # literal's VALUE) and compile to a script that aborts at runtime
+        # -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects. Catch
+        # the literal case (bare or unary-negated BigIntLiteral) at compile
+        # time, mirroring the extractPrevOutputScript/requireOutputP2PKH
+        # "must be >= 0" pattern above. A non-literal start (a variable or
+        # computed expression) has no static value to check and is
+        # unaffected.
+        if func_name == "substr" and len(args) >= 2:
+            start_lit: BigIntLiteral | None = None
+            if isinstance(args[1], BigIntLiteral):
+                start_lit = args[1]
+            elif (
+                isinstance(args[1], UnaryExpr)
+                and args[1].op == "-"
+                and isinstance(args[1].operand, BigIntLiteral)
+            ):
+                start_lit = BigIntLiteral(value=-args[1].operand.value)
+            if start_lit is not None and start_lit.value < 0:
+                self._add_error(
+                    f"substr() argument 2 (start) must be >= 0; got {start_lit.value}"
+                )
+
         # Standard arg count check
         if len(args) != len(sig.params):
             self._add_error(

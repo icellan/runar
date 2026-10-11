@@ -847,6 +847,83 @@ describe('Pass 3: Type-Check', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // F-265: substr() literal negative start is a compile-time error
+  //
+  // substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+  // enforced start >= 0: a literal negative start (`substr(a, -5n, 3n)`)
+  // type-checked as 'bigint' (the standard subtype loop never inspects a
+  // literal's VALUE) and compiled to a script that aborts at runtime --
+  // `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects as out of range.
+  //
+  // Proves: a literal (bare or unary-negated BigIntLiteral) negative start
+  // is now a compile-time diagnostic, mirroring the existing
+  // extractPrevOutputScript/requireOutputP2PKH "must be >= 0" literal-bound
+  // pattern above. Does not prove: anything about a NON-literal negative
+  // start (e.g. a variable or computed expression) -- that remains a
+  // runtime abort, same as before, because the stack model has no static
+  // value range for a non-literal; that is unchanged pre-existing scope.
+  // ---------------------------------------------------------------------------
+
+  describe('F-265: substr() literal start bound', () => {
+    it('rejects a literal negative start', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: ByteString;
+
+          constructor(a: ByteString) {
+            super(a);
+            this.a = a;
+          }
+
+          public unlock() {
+            assert(substr(this.a, -5n, 3n) === this.a);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, 'substr() argument 2 (start) must be >= 0; got -5')).toBe(true);
+    });
+
+    it('accepts a non-negative literal start', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: ByteString;
+
+          constructor(a: ByteString) {
+            super(a);
+            this.a = a;
+          }
+
+          public unlock() {
+            assert(substr(this.a, 0n, 3n) === this.a);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('accepts a non-literal (variable) start unchanged', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: ByteString;
+
+          constructor(a: ByteString) {
+            super(a);
+            this.a = a;
+          }
+
+          public unlock(n: bigint) {
+            assert(substr(this.a, n, 3n) === this.a);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Affine type enforcement
   // ---------------------------------------------------------------------------
 

@@ -2429,3 +2429,78 @@ class C extends SmartContract {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-265: substr() literal negative start is a compile-time error
+//
+// substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+// enforced start >= 0: a literal negative start (`substr(a, -5n, 3n)`)
+// type-checked as plain 'bigint' (the standard subtype loop never inspects a
+// literal's VALUE) and compiled to a script that aborts at runtime -- `-5n`
+// minimal-encodes to `<85>`, which OP_SPLIT rejects as out of range.
+//
+// Proves: a literal (bare or unary-negated BigIntLiteral) negative start is
+// now a typecheck-time diagnostic, mirroring the existing
+// extractPrevOutputScript/requireOutputP2PKH "must be >= 0" literal-bound
+// pattern above. Does not prove: anything about a NON-literal negative start
+// (a variable or computed expression) -- that remains a runtime abort,
+// unchanged, because the stack model has no static value range for a
+// non-literal.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_F265_SubstrLiteralNegativeStartRejected(t *testing.T) {
+	source := `
+import { SmartContract, assert, ByteString, substr } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly a: ByteString;
+  constructor(a: ByteString) { super(a); this.a = a; }
+  public unlock(): void {
+    assert(substr(this.a, -5n, 3n) === this.a);
+  }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	for _, e := range res.Errors {
+		if strings.Contains(e.Message, "substr() argument 2 (start) must be >= 0; got -5") {
+			return
+		}
+	}
+	t.Fatalf("expected a substr() start-bound error, got: %v", res.ErrorStrings())
+}
+
+func TestTypeCheck_F265_SubstrLiteralNonNegativeStartAccepted(t *testing.T) {
+	source := `
+import { SmartContract, assert, ByteString, substr } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly a: ByteString;
+  constructor(a: ByteString) { super(a); this.a = a; }
+  public unlock(): void {
+    assert(substr(this.a, 0n, 3n) === this.a);
+  }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+	}
+}
+
+func TestTypeCheck_F265_SubstrNonLiteralStartUnchanged(t *testing.T) {
+	source := `
+import { SmartContract, assert, ByteString, substr } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly a: ByteString;
+  constructor(a: ByteString) { super(a); this.a = a; }
+  public unlock(n: bigint): void {
+    assert(substr(this.a, n, 3n) === this.a);
+  }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+	}
+}

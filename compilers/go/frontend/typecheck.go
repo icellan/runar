@@ -1512,6 +1512,30 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 		return sig.returnType
 	}
 
+	// F-265: substr(witness, start, len) lowers to a raw OP_SPLIT argument.
+	// A literal negative start used to type-check as plain 'bigint' (the
+	// standard subtype loop below never inspects a literal's VALUE) and
+	// compile to a script that aborts at runtime -- `-5n` minimal-encodes
+	// to `<85>`, which OP_SPLIT rejects. Catch the literal case (bare or
+	// unary-negated BigIntLiteral) at compile time, mirroring the
+	// extractPrevOutputScript/requireOutputP2PKH "must be >= 0" pattern
+	// above. A non-literal start (a variable or computed expression) has
+	// no static value to check and is unaffected.
+	if funcName == "substr" && len(args) >= 2 {
+		lit, ok := args[1].(BigIntLiteral)
+		if !ok {
+			if u, isUnary := args[1].(UnaryExpr); isUnary && u.Op == "-" {
+				if inner, innerOk := u.Operand.(BigIntLiteral); innerOk && inner.Value != nil {
+					lit = BigIntLiteral{Value: new(big.Int).Neg(inner.Value)}
+					ok = true
+				}
+			}
+		}
+		if ok && lit.Value != nil && lit.Value.Sign() < 0 {
+			tc.addError(fmt.Sprintf("substr() argument 2 (start) must be >= 0; got %s", lit.Value.String()))
+		}
+	}
+
 	// Standard arg count check
 	if len(args) != len(sig.params) {
 		tc.addError(fmt.Sprintf("%s() expects %d argument(s), got %d", funcName, len(sig.params), len(args)))

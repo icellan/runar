@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use num_bigint::BigInt;
+
 use super::ast::*;
 use super::diagnostic::Diagnostic;
 use super::side_effect_summary::{compute_side_effect_summary, MethodEffects, SideEffectSummary};
@@ -1768,6 +1770,40 @@ terminal (no state mutation)",
             // Fall through to the standard subtype check below.
         }
 
+        // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        // argument. A literal negative start used to type-check as plain
+        // 'bigint' (the standard subtype loop below never inspects a
+        // literal's VALUE) and compile to a script that aborts at runtime
+        // -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects.
+        // Catch the literal case (bare or unary-negated BigIntLiteral) at
+        // compile time, mirroring the extractPrevOutputScript /
+        // requireOutputP2PKH "must be >= 0" pattern above. Compares the
+        // arbitrary-precision `BigInt` directly rather than narrowing to
+        // `i128` first -- a literal outside `i128` range must not silently
+        // escape this check. A non-literal start (a variable or computed
+        // expression) has no static value to check and is unaffected.
+        if func_name == "substr" && args.len() >= 2 {
+            let start_lit: Option<BigInt> = match &args[1] {
+                Expression::BigIntLiteral { value } => Some(value.clone()),
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
+                    if let Expression::BigIntLiteral { value } = operand.as_ref() {
+                        Some(-value.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(start) = start_lit {
+                if start < BigInt::from(0) {
+                    self.add_error(format!(
+                        "substr() argument 2 (start) must be >= 0; got {}",
+                        start
+                    ));
+                }
+            }
+        }
+
         // Standard argument count check
         if args.len() != sig_params.len() {
             self.add_error(format!(
@@ -2580,5 +2616,108 @@ class C extends SmartContract {
                 assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-265 -- substr() literal negative start is a compile-time error
+    //
+    // substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+    // enforced start >= 0: a literal negative start
+    // (`substr(a, -5n, 3n)`) type-checked as plain 'bigint' (the standard
+    // subtype loop never inspects a literal's VALUE) and compiled to a
+    // script that aborts at runtime -- `-5n` minimal-encodes to `<85>`,
+    // which OP_SPLIT rejects as out of range.
+    //
+    // Proves: a literal (bare or unary-negated BigIntLiteral) negative start
+    // is now a typecheck-time diagnostic, mirroring the existing
+    // extractPrevOutputScript/requireOutputP2PKH "must be >= 0" literal-bound
+    // pattern above. Does not prove: anything about a NON-literal negative
+    // start (a variable or computed expression) -- that remains a runtime
+    // abort, unchanged, because the stack model has no static value range
+    // for a non-literal.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f265_substr_literal_negative_start_rejected() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly a: ByteString;
+
+    constructor(a: ByteString) {
+        super(a);
+        this.a = a;
+    }
+
+    public unlock() {
+        assert(substr(this.a, -5n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("substr() argument 2 (start) must be >= 0; got -5")),
+            "expected a substr() start-bound error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn f265_substr_literal_non_negative_start_accepted() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly a: ByteString;
+
+    constructor(a: ByteString) {
+        super(a);
+        this.a = a;
+    }
+
+    public unlock() {
+        assert(substr(this.a, 0n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn f265_substr_non_literal_start_unchanged() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly a: ByteString;
+
+    constructor(a: ByteString) {
+        super(a);
+        this.a = a;
+    }
+
+    public unlock(n: bigint) {
+        assert(substr(this.a, n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors, got: {:?}",
+            result.errors
+        );
     }
 }

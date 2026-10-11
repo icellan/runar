@@ -846,3 +846,51 @@ describe('Validator: array-literal elements are walked (F-063)', () => {
     expect(hasError(result, "Output intrinsic 'addOutput'")).toBe(true);
   });
 });
+
+describe('Validator: ByteString property initializer hex validation (F-265)', () => {
+  // Proves: a malformed ByteString literal used as a PROPERTY INITIALIZER is
+  // caught here, at the property's own source location, instead of surviving
+  // this pass and only surfacing two passes later as an opaque stack-lowering
+  // error with no location. `isLiteralExpression` only checks the literal's
+  // SHAPE (is it a ByteStringLiteral at all); it never validated the hex
+  // FORMAT, because that check lives in `validateExpression`'s
+  // `bytestring_literal` arm, which method bodies reach via the statement
+  // walk but a property initializer never did.
+  //
+  // Does not prove: anything about Rust or any other tier (see the Rust
+  // peer test in validator.rs and the cross-tier parity fixture in
+  // conformance/negatives), or about non-ByteString initializer defects.
+
+  it('rejects an odd-length ByteString literal used as a property initializer', () => {
+    const result = validateSource(`
+      class BadHexInit extends SmartContract {
+        readonly k: ByteString = "zzz" as ByteString;
+        constructor() { super(); }
+        public unlock() { assert(this.k === this.k); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zzz' has odd length (3)")).toBe(true);
+  });
+
+  it('rejects a non-hex (even-length) ByteString literal used as a property initializer', () => {
+    const result = validateSource(`
+      class BadHexInit2 extends SmartContract {
+        readonly k: ByteString = "zz" as ByteString;
+        constructor() { super(); }
+        public unlock() { assert(this.k === this.k); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zz' contains non-hex characters")).toBe(true);
+  });
+
+  it('rejects an odd-length ByteString literal inside a toByteString(...) property initializer', () => {
+    const result = validateSource(`
+      class BadHexInit3 extends SmartContract {
+        readonly k: ByteString = toByteString('zzz');
+        constructor() { super(); }
+        public unlock() { assert(this.k === this.k); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zzz' has odd length (3)")).toBe(true);
+  });
+});

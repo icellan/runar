@@ -170,6 +170,21 @@ fn validate_properties(contract: &ContractNode, errors: &mut Vec<Diagnostic>, wa
                     Some(prop.source_location.clone()),
                 ));
             }
+
+            // F-265: the shape checks above only ask "is this a literal node
+            // at all?" -- they never validate a ByteStringLiteral's HEX
+            // FORMAT. That check lives in `validate_expression`'s
+            // `ByteStringLiteral` arm, which a method body reaches via the
+            // statement walk but a property INITIALIZER never did: it is
+            // read directly off `prop.initializer` here and is not part of
+            // that walk. A malformed hex literal (e.g. `"zzz" as
+            // ByteString`, or `toByteString('zzz')`) used to sail through
+            // this pass and only surface two passes later as an opaque
+            // stack-lowering error with no source location --
+            // `validate_expression` recurses into array elements and
+            // `toByteString(...)` args, so this also covers FixedArray
+            // initializer elements.
+            validate_expression(init, errors);
         }
     }
 
@@ -3035,5 +3050,72 @@ class C extends StatefulSmartContract {
 "#,
         );
         f063_require(&errs, "Output intrinsic 'addOutput'");
+    }
+
+    // -----------------------------------------------------------------------
+    // F-265 -- ByteString property initializers skip hex validation
+    //
+    // `is_literal_expression` only checks the literal's SHAPE (is this a
+    // ByteStringLiteral / toByteString(<literal>) node at all?). It never
+    // validated the hex FORMAT -- that check lives in `validate_expression`'s
+    // `ByteStringLiteral` arm, which a method body reaches via the statement
+    // walk but a property INITIALIZER never did: it is read directly off
+    // `prop.initializer` in `validate_properties` and was never passed to
+    // `validate_expression`. `readonly k: ByteString = "zzz" as ByteString;`
+    // used to sail through this pass and only surface two passes later as
+    // an opaque stack-lowering error ("invalid hex string length: 3") with
+    // no source location.
+    //
+    // Proves: `validate()` itself now reports the hex-format diagnostic for
+    // a malformed ByteString property initializer, in both the bare-literal
+    // and `toByteString(...)` forms. Does not prove: a source LOCATION is
+    // attached -- `Expression::ByteStringLiteral` carries none, and
+    // `validate_expression`'s existing method-body check already pushes
+    // `None` for the same diagnostic (see f063 tests above), so this is not
+    // a regression. Also does not prove anything about any other tier; see
+    // the TS peer test in `02-validate.test.ts` and the cross-tier parity
+    // fixture in `conformance/negatives`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f265_odd_length_hex_property_initializer_rejected() {
+        let errs = f063_errors(
+            r#"
+class BadHexInit extends SmartContract {
+  readonly k: ByteString = "zzz" as ByteString;
+  constructor() { super(); }
+  public unlock() { assert(this.k === this.k); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'zzz' has odd length (3)");
+    }
+
+    #[test]
+    fn f265_non_hex_property_initializer_rejected() {
+        let errs = f063_errors(
+            r#"
+class BadHexInit2 extends SmartContract {
+  readonly k: ByteString = "zz" as ByteString;
+  constructor() { super(); }
+  public unlock() { assert(this.k === this.k); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'zz' contains non-hex characters");
+    }
+
+    #[test]
+    fn f265_odd_length_hex_inside_to_byte_string_property_initializer_rejected() {
+        let errs = f063_errors(
+            r#"
+class BadHexInit3 extends SmartContract {
+  readonly k: ByteString = toByteString('zzz');
+  constructor() { super(); }
+  public unlock() { assert(this.k === this.k); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'zzz' has odd length (3)");
     }
 }

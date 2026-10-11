@@ -1457,6 +1457,29 @@ module RunarCompiler
           # Fall through to the standard subtype check below.
         end
 
+        # F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        # argument. A literal negative start used to type-check as plain
+        # 'bigint' (the standard subtype loop below never inspects a
+        # literal's VALUE) and compile to a script that aborts at runtime
+        # -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects. Catch
+        # the literal case (bare or unary-negated BigIntLiteral) at compile
+        # time, mirroring the extractPrevOutputScript/requireOutputP2PKH
+        # "must be >= 0" pattern above. A non-literal start (a variable or
+        # computed expression) has no static value to check and is
+        # unaffected.
+        if func_name == "substr" && args.length >= 2
+          start_lit = nil
+          if args[1].is_a?(BigIntLiteral)
+            start_lit = args[1]
+          elsif args[1].is_a?(UnaryExpr) && args[1].op == "-" &&
+                args[1].operand.is_a?(BigIntLiteral) && !args[1].operand.value.nil?
+            start_lit = BigIntLiteral.new(value: -args[1].operand.value)
+          end
+          if !start_lit.nil? && !start_lit.value.nil? && start_lit.value < 0
+            add_error("substr() argument 2 (start) must be >= 0; got #{start_lit.value}")
+          end
+        end
+
         # Standard arg count check
         if args.length != sig.params.length
           add_error("#{func_name}() expects #{sig.params.length} argument(s), got #{args.length}")
