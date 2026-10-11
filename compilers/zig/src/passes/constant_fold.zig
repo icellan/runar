@@ -681,16 +681,6 @@ fn removeBoundNames(env: *ConstEnv, bindings: []const ANFBinding) void {
     }
 }
 
-/// Merge constants from a branch environment into the parent. Only adds new entries.
-fn mergeEnv(parent: *ConstEnv, branch: *const ConstEnv) void {
-    var it = branch.iterator();
-    while (it.next()) |entry| {
-        if (!parent.contains(entry.key_ptr.*)) {
-            parent.put(entry.key_ptr.*, entry.value_ptr.*) catch {};
-        }
-    }
-}
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -1442,6 +1432,18 @@ test "fold if with known condition does not propagate the taken arm's constants"
     }
 
     try testing.expect(result[2].value == .bin_op);
+}
+
+// N-068: `mergeEnv` ("merge constants from a branch environment into the
+// parent, only adding new entries") is the exact unsound add-only merge the
+// test above pins the ABSENCE of -- it is never called by the live `if` case
+// (which only ever removes names via `removeBoundNames`, never merges one
+// branch's env into the parent). This test proves no such helper exists to be
+// wired back in by a future edit. It does NOT prove the live if-fold path is
+// sound on its own -- that is what "fold if with known condition does not
+// propagate the taken arm's constants" above already covers.
+test "no branch-env merge helper exists to be wired into the if fold" {
+    try testing.expect(!@hasDecl(@This(), "mergeEnv"));
 }
 
 // --- Constant propagation ---
