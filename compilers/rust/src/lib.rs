@@ -807,7 +807,8 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     }
 
     // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR).
-    // Delegates internally to frontend::dce for dead-binding cleanup.
+    // Delegates internally to frontend::dce for dead-binding cleanup after any
+    // EC rewrite; with no rewrite, no DCE runs (F-219).
     let optimized = guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(program))
         .map_err(|e| e.message)?;
 
@@ -985,7 +986,8 @@ pub fn compile_from_source_str_with_result(
         };
     }
 
-    // Pass 4.5: EC optimization (delegates internally to frontend::dce)
+    // Pass 4.5: EC optimization (delegates internally to frontend::dce after
+    // any EC rewrite; with no rewrite, no DCE runs — F-219)
     anf_program =
         match guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program)) {
             Ok(p) => p,

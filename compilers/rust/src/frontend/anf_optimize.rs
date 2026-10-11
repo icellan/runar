@@ -616,8 +616,10 @@ fn optimize_method_ec_once(body: &[ANFBinding], used_names: &mut HashSet<String>
 
 /// Optimize EC operations in an ANF program (Pass 4.5).
 ///
-/// Applies algebraic simplification rules to EC function calls,
-/// then eliminates dead bindings. Always-on, runs before stack lowering.
+/// Applies algebraic simplification rules to EC function calls. Always-on (no
+/// flag), runs before stack lowering. Dead-binding elimination runs ONLY when
+/// some rewrite fired: if `any_changed` is false the program is returned
+/// untouched, dead bindings included (F-219; same gate as TS `optimizeEC`).
 pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
     let mut any_changed = false;
     let optimized_methods: Vec<ANFMethod> = program
