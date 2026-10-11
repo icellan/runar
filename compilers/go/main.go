@@ -102,6 +102,14 @@ func main() {
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
+	// F-305: the main --source/--ir compile path had no way to set
+	// CompileOptions.Groth16WAVKey, so a contract whose method body calls
+	// runar.AssertGroth16WitnessAssisted could only be compiled through the
+	// Go library API, never through this CLI — it always failed with "no
+	// Groth16WAConfig was supplied to the codegen". This is distinct from
+	// the `groth16-wa` subcommand above, which synthesizes a bare fixed-VK
+	// verifier and takes no --source file at all.
+	groth16WAVKey := flag.String("groth16-wa-vk", "", "path to a SP1-format Groth16 vk.json file; required to compile a --source/--ir contract whose method body calls assertGroth16WitnessAssisted")
 	flag.Parse()
 
 	opts := compiler.CompileOptions{
@@ -109,6 +117,7 @@ func main() {
 		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
 		// so the artifact carries the mapping table the user just asked for.
 		IncludeSourceMap: *emitSourceMap != "",
+		Groth16WAVKey:    *groth16WAVKey,
 	}
 
 	if *irFile == "" && *sourceFile == "" {
