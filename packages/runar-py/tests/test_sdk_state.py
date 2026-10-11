@@ -132,6 +132,57 @@ class TestFindLastOpReturn:
         assert pos == -1
 
 
+class TestFindLastOpReturnNaming:
+    """F-367 (CL-DOC-016): `find_last_op_return` actually returns the FIRST
+    opcode-boundary OP_RETURN — it returns immediately on the first 0x6a it
+    walks into and never keeps scanning for a later one. That is a deliberate,
+    correct design: the on-chain interpreter itself stops at the first
+    OP_RETURN it executes (post-Genesis, OP_RETURN terminates script
+    evaluation rather than failing it), so nothing placed after it is ever
+    interpreted as opcodes, and the compiler only ever emits one separator
+    (`codePart + OP_RETURN + stateBytes`) — "first" and "last" coincide for
+    every script this walk will ever see. But the name, docstring, and a dead
+    `last_pos` accumulator all claim the function hunts for the LAST match.
+    TS, Go, Rust, Zig, Ruby, and Java implement the identical "stop at the
+    first real OP_RETURN" behaviour byte-for-byte, so this is a naming/doc bug
+    repeated across tiers, not a functional one — this item fixes only the
+    Python copy.
+    """
+
+    def test_docstring_does_not_claim_to_find_the_last_op_return(self):
+        """The docstring must describe the real behaviour (stops at the first
+        opcode-boundary OP_RETURN) rather than claiming to find the last one.
+
+        Proves: the public docstring for find_last_op_return no longer
+        contradicts its own control flow (an immediate `return offset` on the
+        first match, with no later-match tracking).
+        Does not prove: that every caller's mental model matches; callers
+        rely on there being exactly one real OP_RETURN in a well-formed
+        script, which this test does not exercise.
+        """
+        doc = find_last_op_return.__doc__ or ''
+        assert 'last OP_RETURN' not in doc, (
+            "docstring still claims to find the 'last' OP_RETURN, but the "
+            "function returns at the FIRST opcode-boundary 0x6a it walks into"
+        )
+
+    def test_no_dead_last_pos_accumulator(self):
+        """`last_pos` is initialised to -1 and never reassigned — the function
+        always returns directly (`return offset` on a match, or the bare `-1`
+        at the end), so the accumulator is dead code implying a "last match"
+        tracking that does not exist.
+
+        Proves: the dead accumulator has been removed from the function body.
+        Does not prove: anything about runtime behaviour — this is a static
+        source-text check.
+        """
+        import inspect
+        source = inspect.getsource(find_last_op_return)
+        assert 'last_pos' not in source, (
+            "dead `last_pos` accumulator is still present in find_last_op_return"
+        )
+
+
 # ---------------------------------------------------------------------------
 # extract_state_from_script
 # ---------------------------------------------------------------------------

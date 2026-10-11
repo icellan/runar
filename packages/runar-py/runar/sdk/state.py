@@ -207,11 +207,23 @@ def extract_state_from_script(artifact: RunarArtifact, script_hex: str) -> dict 
 
 
 def find_last_op_return(script_hex: str) -> int:
-    """Find the last OP_RETURN (0x6a) at a real opcode boundary.
+    """Find the first OP_RETURN (0x6a) at a real opcode boundary and stop.
+
+    The name is kept for parity with the other six SDKs (TS, Go, Rust, Zig,
+    Ruby, Java all expose the same name), but the walk returns immediately on
+    the first opcode-boundary 0x6a it finds — it does not keep scanning for a
+    later one. That is deliberate: the on-chain interpreter itself stops at
+    the first OP_RETURN it executes (post-Genesis, OP_RETURN terminates
+    script evaluation; success is decided by whatever is already on the
+    stack), so nothing placed after it is ever interpreted as opcodes. The
+    compiler emits the script as exactly `codePart + OP_RETURN + stateBytes`
+    — one separator, with the state data living in the bytes that
+    interpretation never reaches — so "first" and "last" coincide for every
+    script this SDK will ever be asked to read. All seven SDKs implement this
+    same "stop at the first real OP_RETURN" walk byte-for-byte.
 
     Returns the hex-char offset, or -1 if not found.
     """
-    last_pos = -1
     offset = 0
     length = len(script_hex)
 
@@ -245,7 +257,7 @@ def find_last_op_return(script_hex: str) -> int:
         else:
             offset += 2
 
-    return last_pos
+    return -1
 
 
 # ---------------------------------------------------------------------------
