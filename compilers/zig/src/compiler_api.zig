@@ -39,6 +39,14 @@ pub const CompileError = anf_lower.LowerError || error{
     EmitFailed,
     // BUG-008 follow-up: typed DoS-bound rejection of oversized source.
     SourceSizeExceeded,
+    // F-230 (CX-BUG-128): a file extension no surface parser claims. Distinct
+    // from `ParseFailed` (which means a recognized surface's parser rejected
+    // the bytes) because this means NO parser ran at all — the caller's
+    // answer should not read as "this is invalid Rúnar", it should read as
+    // "this file is not one of the nine surfaces". Matches `main.zig`'s own
+    // `error.UnsupportedFormat` for the identical `.unknown` case, so the CLI
+    // and the library report the same error for the same refusal.
+    UnsupportedFormat,
 };
 
 pub const CompileResult = struct {
@@ -52,6 +60,11 @@ pub const CompileResult = struct {
 };
 
 const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, unknown };
+
+/// F-230: comptime-known text for `parseSource`'s `.unknown` branch, used
+/// when the per-call `allocPrint`/`dupe` of the file-name-carrying message
+/// fails under memory pressure. See the `.unknown` arm below.
+const UNSUPPORTED_FORMAT_FALLBACK = "unsupported format for this file";
 
 fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
@@ -100,6 +113,23 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
     }
 
     const format = detectFormat(file_name);
+
+    // F-230 (CX-BUG-128): an unrecognized extension is refused BEFORE the
+    // directive guard below (and before any parser runs) — it is the more
+    // fundamental refusal: no surface claims this file at all, so there is
+    // nothing to apply a surface-specific directive rule to. This ordering
+    // also matters for callers: `compile_check.zig`'s `compileCheckSource`
+    // calls `parseSource` directly (not through `runPipeline`), so if this
+    // check ran after the directive guard, a `foo.txt` carrying `@sighash`
+    // would report a `@sighash` diagnostic from one entry point while
+    // `runPipeline`'s own `.unknown` mapping (below) reported
+    // `UnsupportedFormat` from another — the same shape of divergence this
+    // item exists to close, just one guard later.
+    if (format == .unknown) {
+        const msg = std.fmt.allocPrint(work, "unsupported format for {s}", .{file_name}) catch UNSUPPORTED_FORMAT_FALLBACK;
+        const errs: []const []const u8 = work.dupe([]const u8, &.{msg}) catch &.{UNSUPPORTED_FORMAT_FALLBACK};
+        return .{ .contract = null, .errors = errs };
+    }
 
     // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment
     // directives are honoured ONLY on the `.runar.ts` surface (which implements
@@ -152,11 +182,14 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
             const r = parse_java.parseJava(work, source, file_name);
             break :blk .{ .contract = r.contract, .errors = r.errors };
         },
-        .unknown => blk: {
-            // Fall back to Zig parser for unknown extensions
-            const r = parse_zig.parseZig(work, source, file_name);
-            break :blk .{ .contract = r.contract, .errors = r.errors };
-        },
+        // F-230 (CX-BUG-128): `.unknown` is handled above, before the
+        // directive guard, and always returns from this function. It used to
+        // fall back to the Zig-format parser here instead, so a file like
+        // `contract.txt` was silently compiled as `.runar.zig` source
+        // through the library while the CLI's `compile` subcommand rejected
+        // the identical bytes outright — the same input accepted by one
+        // public entry point and refused by the other.
+        .unknown => unreachable,
     };
 }
 
@@ -267,6 +300,12 @@ pub fn runPipeline(
     // also carries the fail-closed `@sighash` / `@embedAlways` directive guard.
     const parse_result = parseSource(work, source, file_name);
     for (parse_result.errors) |message| diag.addError(work, "  parse error: ", message);
+    // F-230: an unrecognized extension is a distinct refusal class from a
+    // recognized surface's parser rejecting the bytes — `UnsupportedFormat`,
+    // matching the CLI's `error.UnsupportedFormat` for the same `.unknown`
+    // case, rather than `ParseFailed` (which would tell a caller the source
+    // itself was invalid Rúnar, which was never evaluated).
+    if (detectFormat(file_name) == .unknown) return error.UnsupportedFormat;
     if (parse_result.errors.len > 0) return error.ParseFailed;
     const contract = parse_result.contract orelse return error.ParseFailed;
 

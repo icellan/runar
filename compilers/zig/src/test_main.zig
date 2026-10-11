@@ -130,6 +130,7 @@ test {
     _ = @import("tests/n056_go_ambiguous_precedence.zig");
     _ = @import("tests/loop_update_clause.zig");
     _ = @import("tests/library_cli_parity.zig");
+    _ = @import("tests/f230_unknown_format_parity.zig");
     _ = @import("tests/n034_ec_fusing_rules.zig");
     _ = @import("tests/f086_ec_fresh_name_collision.zig");
     _ = @import("tests/f072_exit_phantom_slot.zig");
