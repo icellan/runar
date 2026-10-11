@@ -131,3 +131,69 @@ func TestCLI_Debug_Artifact(t *testing.T) {
 		t.Fatalf("expected 'final: pass' from --artifact OP_1, got:\n%s", string(stdout))
 	}
 }
+
+// TestCLI_Debug_Artifact_SourceMap verifies the `debug --artifact` trace
+// annotates each covered opcode's step line with the source location
+// (file:line:column) resolved from the artifact's `sourceMap.mappings`,
+// mirroring the resolution packages/runar-testing/src/source-map.ts
+// performs for `runar debug` (TS): the nearest mapping whose opcodeIndex is
+// <= the opcode's sequential step index.
+//
+// F-309: previously the artifact unmarshal struct only had a `Script`
+// field, so `sourceMap` was silently discarded and no trace line ever
+// carried a source location, regardless of how rich the artifact's map was.
+//
+// This test proves: a non-empty sourceMap on the artifact causes the Go
+// debugger to print the mapped file:line:column for the opcodes it covers.
+// It does NOT prove: that the mapping is correct for a real compiled
+// contract (the artifact here is a hand-built fixture, not compiler
+// output), or that opcode indices are resolved consistently when a
+// non-empty --unlock script precedes the locking script (TS's own resolver
+// counts steps across both contexts; this test only exercises the
+// locking-script-only case, which is unambiguous).
+func TestCLI_Debug_Artifact_SourceMap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI smoke test on -short")
+	}
+
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "runar-compiler-go")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Dir = "."
+	if buildOut, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, string(buildOut))
+	}
+
+	// Script "5152" = OP_1 OP_2 — two opcodes, so each gets its own mapping.
+	artifactPath := filepath.Join(tmp, "mapped.json")
+	artifactJSON := `{
+		"script": "5152",
+		"sourceMap": {
+			"mappings": [
+				{"opcodeIndex": 0, "sourceFile": "Foo.runar.ts", "line": 5, "column": 3},
+				{"opcodeIndex": 1, "sourceFile": "Foo.runar.ts", "line": 6, "column": 7}
+			]
+		}
+	}`
+	if err := os.WriteFile(artifactPath, []byte(artifactJSON), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	cmd := exec.Command(binPath, "debug", "--artifact", artifactPath)
+	stdout, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = string(ee.Stderr)
+		}
+		t.Fatalf("debug --artifact must exit 0, got: %v\nstderr: %s", err, stderr)
+	}
+
+	out := string(stdout)
+	if !strings.Contains(out, "src=Foo.runar.ts:5:3") {
+		t.Fatalf("expected step 1 to carry src=Foo.runar.ts:5:3, got:\n%s", out)
+	}
+	if !strings.Contains(out, "src=Foo.runar.ts:6:7") {
+		t.Fatalf("expected step 2 to carry src=Foo.runar.ts:6:7, got:\n%s", out)
+	}
+}
