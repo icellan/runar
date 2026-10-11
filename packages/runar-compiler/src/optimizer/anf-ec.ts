@@ -413,12 +413,17 @@ function optimizeBodyOnce(body: readonly ANFBinding[], usedNames: Set<string>): 
     const rewritten = tryRewrite(binding, valueMap, extraBindings, usedNames);
 
     if (rewritten !== null) {
+      // F-343: the rewritten binding keeps its source location, and every
+      // helper minted for it (fused scalar, N-104 operand gate) takes the
+      // same one, so the source map still covers their opcodes. Debug-only
+      // metadata: it never reaches the script bytes.
+      const loc = binding.sourceLoc ? { sourceLoc: binding.sourceLoc } : {};
       // Add any new helper bindings (e.g., computed scalars)
       for (const extra of extraBindings) {
-        result.push(extra);
+        result.push({ ...extra, ...loc });
         valueMap.set(extra.name, extra.value);
       }
-      const newBinding = { name: binding.name, value: rewritten };
+      const newBinding = { name: binding.name, value: rewritten, ...loc };
       result.push(newBinding);
       valueMap.set(binding.name, rewritten);
       changed = true;
