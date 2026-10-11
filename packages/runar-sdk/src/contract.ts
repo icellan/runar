@@ -1354,7 +1354,6 @@ export class RunarContract {
       return {
         sighash,
         preimage: finalPreimage,
-        opPushTxSig: finalOpPushTxSig,
         tx: termTx,
         sigIndices,
         _methodName: methodName,
@@ -1924,7 +1923,6 @@ export class RunarContract {
     return {
       sighash,
       preimage: finalPreimage,
-      opPushTxSig: finalOpPushTxSig,
       tx,
       sigIndices,
       _methodName: methodName,
@@ -2016,7 +2014,10 @@ export class RunarContract {
         newAmountHex = encodeArg(BigInt(prepared._newAmount));
       }
       primaryUnlock =
-        this.buildStatefulPrefix(prepared.opPushTxSig, prepared._methodUsesCodePart ?? prepared._methodNeedsChange) +
+        // F-369: buildStatefulPrefix's first param is accepted for call-site
+        // compatibility but ignored (post-BUG-100 no signature is pushed) —
+        // pass '' rather than a now-nonexistent `prepared.opPushTxSig`.
+        this.buildStatefulPrefix('', prepared._methodUsesCodePart ?? prepared._methodNeedsChange) +
         argsHex +
         changeHex +
         newAmountHex +
@@ -2028,7 +2029,7 @@ export class RunarContract {
       if (prepared._preimageIndex >= 0) {
         resolvedArgs[prepared._preimageIndex] = prepared.preimage;
       }
-      primaryUnlock = this.buildStatefulPrefix(prepared.opPushTxSig) +
+      primaryUnlock = this.buildStatefulPrefix('') +
         this.buildUnlockingScript(prepared._methodName, resolvedArgs);
     } else {
       primaryUnlock = this.buildUnlockingScript(prepared._methodName, resolvedArgs);

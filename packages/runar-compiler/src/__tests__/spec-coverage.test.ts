@@ -105,4 +105,20 @@ describe('R-098: spec/ documents what the compiler implements', () => {
     const missing = ['P256Point', 'P384Point'].filter((t) => !new RegExp(`\\b${t}\\b`).test(doc));
     expect(missing, `spec/abi.md omits: ${missing.join(', ')}`).toEqual([]);
   });
+
+  /**
+   * F-369: `spec/abi.md` §7.4 described a PRE-BUG-100 unlocking-script layout
+   * that no longer exists. BUG-100's fix made the OP_PUSH_TX signature
+   * derived ON-CHAIN from the preimage (see `codegen emitCheckPreimageBinding`
+   * and `runar-sdk/contract.ts`'s `buildStatefulPrefix` docstring), so the
+   * spender never pushes a `_opPushTxSig` witness — there is exactly ONE
+   * implicit parameter (`txPreimage`), not two. The stale doc told a porting
+   * author to push a value the real unlocking script has no slot for.
+   */
+  it('spec/abi.md does not claim the SDK must push a dead _opPushTxSig witness (F-369, post-BUG-100)', () => {
+    const doc = read('spec/abi.md');
+    expect(doc).not.toMatch(/must always provide `_opPushTxSig`/);
+    expect(doc).not.toMatch(/<_opPushTxSig>/);
+    expect(doc).not.toMatch(/\*\*two implicit parameters\*\*/);
+  });
 });

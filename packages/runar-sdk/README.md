@@ -409,7 +409,7 @@ console.log(counter.state.count); // decoded from the on-chain script
 
 ### OP_PUSH_TX
 
-The OP_PUSH_TX pattern lets a script verify the transaction it's part of without OP_CHECKSIGVERIFY of an external signature. The SDK uses private key `k = 1` (public key = generator point `G`), computes the BIP-143 preimage that the on-chain script will rebuild, signs the preimage with low-S enforcement, and pushes both onto the unlocking stack as `<opPushTxSig> <preimage>`. The on-chain `checkPreimage` opcode recomputes the preimage from the spending tx and verifies it against the signature.
+The OP_PUSH_TX pattern lets a script verify the transaction it's part of without OP_CHECKSIGVERIFY of an external signature. The SDK computes the BIP-143 preimage that the on-chain script will rebuild and pushes only that preimage onto the unlocking stack; the on-chain `checkPreimage` opcode recomputes the preimage from the spending tx and derives the authenticating signature itself (against the well-known `k = 1` generator-point key `G`), so no spender-supplied signature is pushed.
 
 `computeOpPushTx(tx, inputIndex, subscript, satoshis, codeSeparatorIndex?)` is exported for advanced use; you almost never need to call it manually because `RunarContract.call` invokes it as part of `prepareCall`. The `codeSeparatorIndex` argument is required for stateful contracts because the BIP-143 `scriptCode` for the OP_PUSH_TX sig must start *after* the contract's `OP_CODESEPARATOR`.
 
@@ -791,7 +791,6 @@ Multi-signer flow. See [9b](#9b-multi-signer-preparecall--finalizecall). Pass `n
 
 - `sighash` (hex): BIP-143 sighash for external signers.
 - `preimage` (hex): full preimage if you need to re-derive the sighash.
-- `opPushTxSig` (hex): OP_PUSH_TX DER signature + sighash byte. Empty when not needed.
 - `tx`: `@bsv/sdk` `Transaction` with funding inputs already signed.
 - `sigIndices`: argument indices that need external signatures.
 - Opaque internal fields (prefixed `_`) consumed by `finalizeCall`.
@@ -1329,7 +1328,7 @@ interface DeployOptions { satoshis?; changeAddress? }
 interface CallOptions { satoshis?; changeAddress?; changePubKey?; newState?; outputs?;
                         additionalContractInputs?; additionalContractInputArgs?;
                         terminalOutputs?; fundingUtxos?; dataOutputs? }
-interface PreparedCall { sighash; preimage; opPushTxSig; tx; sigIndices; ... }
+interface PreparedCall { sighash; preimage; tx; sigIndices; ... }
 
 // Re-exported from @bsv/sdk
 type Transaction        // @bsv/sdk Transaction class
