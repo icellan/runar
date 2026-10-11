@@ -337,6 +337,54 @@ export function loadMutants(path = join(__dirname, 'mutants.json')): Mutant[] {
 }
 
 // ---------------------------------------------------------------------------
+// Baseline regression check (nightly CI gate)
+// ---------------------------------------------------------------------------
+
+/** The shape read from `baseline.json`'s `results` array (see `serializeBaseline`). */
+export type BaselineEntry = Pick<MutantResult, 'id' | 'caught' | 'survived' | 'expectCaughtBy'>;
+
+/**
+ * Compare a stamped `baseline.json` against a fresh scorecard run and report
+ * every mutant that weakened since the baseline was last written.
+ *
+ * F-251: this used to be a `for (const b of base)` loop inlined directly in
+ * `.github/workflows/fuzzer-nightly.yml`, which only ever looks up a `base`
+ * entry's id in `cur` — it never visits a `cur` entry that has no `base`
+ * entry at all. `mutants.json` can grow (six `stacklower-*` mutants landed in
+ * `ef753a8f6` without a `--write-baseline` re-stamp, by that commit's own
+ * deliberate choice: "new ids are simply not compared and cannot produce a
+ * false failure") and every one of those un-stamped mutants is then
+ * structurally invisible to this specific gate — if one is caught today and
+ * survives tomorrow, the forward-only loop has nothing to compare it
+ * against and reports nothing. The reverse loop below closes that: a `cur`
+ * mutant absent from `base` that must be caught (`expectCaughtBy` non-empty)
+ * and is currently surviving is still reported. (The separate "must never
+ * survive" scorecard gate in `score()`/`main()` already catches a *brand
+ * new* mutant that is born surviving; this function is the regression-since-
+ * last-stamp gate, and the point is that un-stamped is not the same as
+ * exempt from it.)
+ */
+export function findBaselineRegressions(base: BaselineEntry[], cur: MutantResult[]): string[] {
+  const curById = new Map(cur.map((r) => [r.id, r]));
+  const baseIds = new Set(base.map((b) => b.id));
+  const regressions: string[] = [];
+  for (const b of base) {
+    const c = curById.get(b.id);
+    if (!c) {
+      regressions.push(`${b.id} (missing from current run)`);
+      continue;
+    }
+    if (b.caught && c.survived) regressions.push(`${b.id} (was caught, now SURVIVES)`);
+  }
+  for (const c of cur) {
+    if (!baseIds.has(c.id) && c.expectCaughtBy.length > 0 && c.survived) {
+      regressions.push(`${c.id} (no baseline entry, and currently SURVIVES)`);
+    }
+  }
+  return regressions;
+}
+
+// ---------------------------------------------------------------------------
 // Scorecard driver
 // ---------------------------------------------------------------------------
 

@@ -975,17 +975,19 @@ jobs:
             echo "no current scorecard produced — scorer aborted; failing"
             exit 1
           fi
-          node -e '
-            const fs = require("fs");
-            const base = JSON.parse(fs.readFileSync("mutation/baseline.json", "utf8")).results;
-            const cur = JSON.parse(fs.readFileSync("/tmp/mutation-current.json", "utf8")).results;
-            const curById = new Map(cur.map((r) => [r.id, r]));
-            const regressions = [];
-            for (const b of base) {
-              const c = curById.get(b.id);
-              if (!c) { regressions.push(b.id + " (missing from current run)"); continue; }
-              if (b.caught && c.survived) regressions.push(b.id + " (was caught, now SURVIVES)");
-            }
+          # F-251: this used to be a bare `for (const b of base)` loop inlined
+          # here, which never visits a `cur` mutant absent from `base` — a
+          # mutant added to mutants.json without a `--write-baseline`
+          # re-stamp was structurally invisible to this gate. The comparison
+          # now lives in `findBaselineRegressions` (conformance/mutation/run-mutation.ts),
+          # unit-tested in `__tests__/baseline-regression-reverse-loop.test.ts`,
+          # and is only invoked here.
+          node_modules/.bin/tsx -e '
+            import { readFileSync } from "node:fs";
+            import { findBaselineRegressions } from "./mutation/run-mutation.ts";
+            const base = JSON.parse(readFileSync("mutation/baseline.json", "utf8")).results;
+            const cur = JSON.parse(readFileSync("/tmp/mutation-current.json", "utf8")).results;
+            const regressions = findBaselineRegressions(base, cur);
             if (regressions.length) {
               console.error("MUTATION REGRESSION — the net weakened:");
               for (const r of regressions) console.error("  • " + r);
