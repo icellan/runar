@@ -130,6 +130,7 @@ import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact, StackOp } fro
 import { MAX_LOOP_COUNT } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
+import { builtinArityViolation } from './ir/builtin-arity.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
 import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
 import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
@@ -650,6 +651,15 @@ export function compileFromANF(
       );
     }
   }
+  // N-113 / R-081 (N-215): a contract with no public method has no spending
+  // entry point, and stack lowering then emits an EMPTY (anyone-can-spend)
+  // locking script. The constructor does not count: ANF flattens it into
+  // `methods`, but emission filters it out by name. Go's words.
+  if (!anf.methods.some((m) => m.isPublic && m.name !== 'constructor')) {
+    throw new Error(
+      `IR validation: contract ${anf.contractName} has no public methods — no spending entry points; an empty locking script is anyone-can-spend`,
+    );
+  }
   // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
   // the scaffolding the frontend injects into each public method.
   if (assertIrParentClassRules(anf) === 'StatefulSmartContract') {
@@ -866,6 +876,9 @@ export function loadANFFromJSON(json: string): ANFProgram {
       `loadANFFromJSON: input is not valid JSON: ${(e as Error).message}`,
     );
   }
+  // N-131 / N-215: float SYNTAX is refused, on the raw text (`1.0` parses to
+  // the number 1, so the parsed tree cannot show it).
+  assertNoJsonFloats(json);
 
   // Iterative depth-walk: cap structural nesting at MAX_NESTING before any
   // recursive consumer (typecheck, stack-lower) touches the tree.
@@ -881,6 +894,8 @@ export function loadANFFromJSON(json: string): ANFProgram {
   // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
   assertNoReservedIrNames(program as ANFProgram);
   coerceNumericBigInts(program as ANFProgram);
+  // N-133 / R-079 / R-163 (N-215): value rules the native loaders apply per binding.
+  assertBindingValueRules(program as ANFProgram);
   assertLoopCountWithinBounds(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
@@ -888,6 +903,91 @@ export function loadANFFromJSON(json: string): ANFProgram {
   // written (shared rule and diagnostic, 7 tiers).
   assertSyntheticArrayChains(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * N-131 — no JSON number in the IR may be written in float syntax.
+ *
+ * The ANF IR has no float-typed field, and the rule is LEXICAL (a `.` or an
+ * exponent), not value-based, so `1.0` is refused like `3.5` — the rule Go
+ * and Java implement and Python/Ruby adopted. JSON.parse has already turned
+ * `1.0` into 1 by the time any walker runs, so this scans the raw text: only
+ * number tokens are inspected (strings are skipped, and the only other
+ * barewords JSON allows are true/false/null). Runs after JSON.parse accepted
+ * the text, so the token grammar is known to be valid. Message shared with
+ * the Python and Ruby loaders.
+ */
+function assertNoJsonFloats(json: string): void {
+  let i = 0;
+  while (i < json.length) {
+    const c = json[i]!;
+    if (c === '"') {
+      i++;
+      while (i < json.length && json[i] !== '"') i += json[i] === '\\' ? 2 : 1;
+      i++;
+    } else if (c === '-' || (c >= '0' && c <= '9')) {
+      const start = i;
+      while (i < json.length && /[0-9eE+\-.]/.test(json[i]!)) i++;
+      const token = json.slice(start, i);
+      if (/[.eE]/.test(token)) {
+        throw new Error(
+          `loadANFFromJSON: IR JSON contains a floating-point number (${token}); every ` +
+            `numeric field in the ANF IR is an integer (write an oversize value as a ` +
+            `decimal string with an \`n\` suffix)`,
+        );
+      }
+    } else {
+      i++;
+    }
+  }
+}
+
+/**
+ * Per-binding value rules the six native `--ir` loaders apply and this one
+ * did not (N-215). Each message is Go's:
+ *
+ *   - N-133: a string `loop.start` must be the `<decimal>n` form. The reviver
+ *     has already turned every legal one into a bigint, so any string left is
+ *     unreadable — and stack lowering would have substituted 0 for it.
+ *   - R-079: a `raw_script` with an empty `bytes` body. Stack lowering models
+ *     the span from its declared arities while emission writes nothing, so
+ *     every later PICK/ROLL depth addresses the wrong slot.
+ *   - R-163 / R-165: a builtin `call` with the wrong argument count (see
+ *     ir/builtin-arity.ts).
+ */
+function assertBindingValueRules(program: ANFProgram): void {
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const v = binding.value as unknown as Record<string, unknown> & { kind: string };
+      if (v.kind === 'loop' && typeof v.start === 'string') {
+        throw new Error(
+          `IR validation: method ${methodName} binding ${binding.name} loop/start: ` +
+            `a string start must be the \`<decimal>n\` form, got ${JSON.stringify(v.start)}`,
+        );
+      }
+      if (v.kind === 'raw_script' && (typeof v.bytes !== 'string' || v.bytes.length === 0)) {
+        throw new Error(
+          `IR validation: method ${methodName} binding ${binding.name} raw_script has an ` +
+            `empty bytes body but declares in_arity ${String(v.in_arity)} / out_arity ` +
+            `${String(v.out_arity)}; a span that emits no bytes cannot have a stack effect`,
+        );
+      }
+      if (v.kind === 'call' && typeof v.func === 'string' && Array.isArray(v.args)) {
+        const takes = builtinArityViolation(v.func, v.args.length);
+        if (takes !== null) {
+          throw new Error(
+            `IR validation: method ${methodName} binding ${binding.name} calls ${v.func}() ` +
+              `with ${v.args.length} argument(s); it takes ${takes}`,
+          );
+        }
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = v[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
+  for (const method of program.methods) walk(method.body ?? [], method.name);
 }
 
 /**
