@@ -570,26 +570,24 @@ class Simple extends SmartContract {
 // ---------------------------------------------------------------------------
 
 func TestParseSource_DispatchesRustFormat(t *testing.T) {
-	// The Go compiler does NOT have a Rust parser — .runar.rs falls back to
-	// the TypeScript parser (the default case in ParseSource switch).
-	// We verify: no panic, and a ParseResult is returned.
-	source := []byte(`
-// This is valid TypeScript that happens to use .runar.rs extension
-import { SmartContract, assert } from 'runar-lang';
-
-class Simple extends SmartContract {
-  readonly x: bigint;
-
-  constructor(x: bigint) {
-    super(x);
-    this.x = x;
-  }
-
-  public check(val: bigint): void {
-    assert(val === this.x);
-  }
-}
-`)
+	// The Go compiler DOES have a Rust-macro parser (ParseRustMacro,
+	// parser_rustmacro.go, 600+ lines), and ParseSource's switch dispatches
+	// `.runar.rs` to it (frontend/parser.go). This test used to claim the
+	// opposite — "the Go compiler does NOT have a Rust parser" — and fed
+	// plain TypeScript source under a `.runar.rs` name, asserting only that
+	// ParseSource didn't panic and returned a non-nil result. That assertion
+	// holds regardless of which parser actually ran, so it proved nothing
+	// about dispatch correctness: see F-371.
+	//
+	// This test instead parses a REAL Rust-DSL conformance fixture
+	// (examples/rust/arithmetic/Arithmetic.runar.rs, contract name
+	// "Arithmetic") through frontend.ParseSource and asserts the resulting
+	// AST actually names that contract. Only the Rust-macro parser
+	// understands this fixture's `struct` / `impl` / `#[runar::contract]`
+	// syntax; routing it to the TypeScript parser instead would either
+	// error out or silently produce a differently-shaped/unnamed contract,
+	// not one named "Arithmetic".
+	source, fileName := readConformanceFormat(t, "arithmetic", ".runar.rs")
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -597,17 +595,21 @@ class Simple extends SmartContract {
 		}
 	}()
 
-	result := frontend.ParseSource(source, "Contract.runar.rs")
+	result := frontend.ParseSource(source, fileName)
 
 	if result == nil {
 		t.Fatal("ParseSource returned nil for .runar.rs extension")
 	}
-
-	// The Go compiler has no Rust parser — it falls back to the TS parser.
-	// This tests that the dispatch doesn't panic (no .runar.rs case in the switch).
-	t.Logf(".runar.rs dispatch: contract=%v, errors=%v",
-		result.Contract != nil,
-		result.Errors)
+	if len(result.Errors) > 0 {
+		t.Fatalf("ParseSource reported errors parsing the Rust-DSL fixture via the %q path: %v", fileName, result.Errors)
+	}
+	if result.Contract == nil {
+		t.Fatal("expected a non-nil contract from the Rust-macro parser")
+	}
+	if result.Contract.Name != "Arithmetic" {
+		t.Fatalf("expected contract name %q (the Rust fixture's struct name) — ParseSource did not dispatch %q to the Rust-macro parser, got contract %q",
+			"Arithmetic", fileName, result.Contract.Name)
+	}
 }
 
 // ---------------------------------------------------------------------------
