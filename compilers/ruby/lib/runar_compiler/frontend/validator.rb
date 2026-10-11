@@ -80,6 +80,7 @@ module RunarCompiler
       ctx.validate_methods
       ctx.check_no_recursion
       ctx.check_reserved_names
+      ctx.check_rabin_pubkey_provenance
 
       # Issue #123: reject preimage-field reads / output bindings that are
       # unsound under a method's declared @sighash mode (security core). This
@@ -422,6 +423,85 @@ module RunarCompiler
         end
       end
 
+      # F-286: the one diagnostic every tier emits (user decision R78).
+      RABIN_PUBKEY_PROVENANCE_MESSAGE =
+        "verifyRabinSig public key (4th argument) must be a contract property or a literal; " \
+        "a spender-supplied Rabin modulus lets anyone forge a signature"
+
+      # F-286: verifyRabinSig's modulus must not be chosen by the spender.
+      # A spender who picks +n+ forges any message (+n = 1+, +sig = 0+ passes
+      # on chain). Port of +checkRabinPubKeyProvenance+ in the TS reference
+      # (02-validate.ts). Trusted values for the 4th argument:
+      #   - a property read (+PropertyAccessExpr+, or +MemberExpr+ on +this+),
+      #     or a bare identifier naming a property that no parameter or local
+      #     of the method shadows (the Java surface's bare field);
+      #   - a bigint literal;
+      #   - a local whose initialiser AND every assignment to it are trusted
+      #     (+++/--+ on it makes it untrusted; the +mutable+ flag is irrelevant);
+      #   - a parameter of a PRIVATE method that every call site (at least one)
+      #     binds to a trusted value in the caller (least fixed point).
+      # Everything else -- public and constructor parameters, arithmetic,
+      # ternaries, calls -- is refused.
+      def check_rabin_pubkey_provenance
+        property_names = Set.new(@contract.properties.map(&:name))
+        private_methods = {}
+        @contract.methods.each do |m|
+          private_methods[m.name] = m if m.visibility == "private"
+        end
+
+        scopes = [rabin_scope_of(@contract.constructor, true)]
+        @contract.methods.each { |m| scopes << rabin_scope_of(m, false) }
+
+        trusted_params = {}
+        private_methods.each_key { |name| trusted_params[name] = Set.new }
+
+        call_sites = {}
+        private_methods.each_key { |name| call_sites[name] = [] }
+        scopes.each do |scope|
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            callee = rabin_private_callee(e, private_methods)
+            call_sites[callee] << { args: e.args, scope: scope } unless callee.nil?
+          })
+        end
+
+        # Least fixed point: a parameter becomes trusted once every call site
+        # binds it to a trusted value. Monotone, so it terminates.
+        changed = true
+        while changed
+          changed = false
+          private_methods.each do |name, method|
+            sites = call_sites[name]
+            next if sites.empty?
+
+            trusted = trusted_params[name]
+            method.params.each_index do |i|
+              next if trusted.include?(i)
+
+              all_ok = sites.all? do |site|
+                !site[:args][i].nil? &&
+                  rabin_trusted?(site[:args][i], site[:scope], Set.new, property_names, trusted_params)
+              end
+              if all_ok
+                trusted.add(i)
+                changed = true
+              end
+            end
+          end
+        end
+
+        scopes.each do |scope|
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            next unless e.is_a?(CallExpr) &&
+                        e.callee.is_a?(Identifier) &&
+                        e.callee.name == "verifyRabinSig" &&
+                        e.args.length >= 4
+            next if rabin_trusted?(e.args[3], scope, Set.new, property_names, trusted_params)
+
+            add_error(RABIN_PUBKEY_PROVENANCE_MESSAGE, loc: scope[:method].source_location)
+          })
+        end
+      end
+
       # N-065 / N-060: refuse a declared identifier spelled like a name a
       # compiler pass mints (see reserved_names.rb). Checks properties, method
       # names, constructor and method parameters, locals and loop variables.
@@ -466,6 +546,128 @@ module RunarCompiler
       end
 
       private
+
+      # -------------------------------------------------------------------
+      # F-286 helpers
+      # -------------------------------------------------------------------
+
+      # Per method: local name -> every value bound to it (inits +
+      # assignments), and names that are ever ++/-- (never trusted).
+      def rabin_scope_of(method, is_ctor)
+        scope = {
+          method: method,
+          is_ctor: is_ctor,
+          params: method.params.map(&:name),
+          bindings: {},
+          mutated: Set.new,
+        }
+        bind = lambda do |name, value|
+          (scope[:bindings][name] ||= []) << value
+        end
+        visit_expr = lambda do |expr|
+          walk_expr(expr, lambda { |e|
+            if (e.is_a?(IncrementExpr) || e.is_a?(DecrementExpr)) && e.operand.is_a?(Identifier)
+              scope[:mutated].add(e.operand.name)
+            end
+          })
+        end
+        visit = nil
+        visit = lambda do |stmts|
+          (stmts || []).each do |stmt|
+            case stmt
+            when VariableDeclStmt
+              bind.call(stmt.name, stmt.init)
+              visit_expr.call(stmt.init)
+            when AssignmentStmt
+              bind.call(stmt.target.name, stmt.value) if stmt.target.is_a?(Identifier)
+              visit_expr.call(stmt.target)
+              visit_expr.call(stmt.value)
+            when ExpressionStmt
+              visit_expr.call(stmt.expr)
+            when IfStmt
+              visit_expr.call(stmt.condition)
+              visit.call(stmt.then)
+              visit.call(stmt.else_)
+            when ForStmt
+              visit.call([stmt.init].compact)
+              visit_expr.call(stmt.condition)
+              visit.call([stmt.update].compact)
+              visit.call(stmt.body)
+            when ReturnStmt
+              visit_expr.call(stmt.value) unless stmt.value.nil?
+            end
+          end
+        end
+        visit.call(method.body)
+        scope
+      end
+
+      def rabin_trusted?(expr, scope, visiting, property_names, trusted_params)
+        case expr
+        when PropertyAccessExpr, BigIntLiteral
+          true
+        when MemberExpr
+          expr.object.is_a?(Identifier) && expr.object.name == "this"
+        when Identifier
+          name = expr.name
+          is_param = scope[:params].include?(name)
+          locals = scope[:bindings][name]
+          return property_names.include?(name) if !is_param && locals.nil?
+          return false if scope[:mutated].include?(name)
+
+          if is_param
+            method = scope[:method]
+            return false if scope[:is_ctor] || method.visibility != "private"
+
+            idx = method.params.index { |p| p.name == name }
+            return false unless trusted_params.fetch(method.name, Set.new).include?(idx)
+          end
+          unless locals.nil?
+            return false if visiting.include?(name)
+
+            visiting.add(name)
+            ok = locals.all? { |v| rabin_trusted?(v, scope, visiting, property_names, trusted_params) }
+            visiting.delete(name)
+            return false unless ok
+          end
+          true
+        else
+          false
+        end
+      end
+
+      def rabin_private_callee(expr, private_methods)
+        return nil unless expr.is_a?(CallExpr)
+
+        c = expr.callee
+        name =
+          if c.is_a?(PropertyAccessExpr)
+            c.property
+          elsif c.is_a?(MemberExpr) && c.object.is_a?(Identifier) && c.object.name == "this"
+            c.property
+          end
+        !name.nil? && private_methods.key?(name) ? name : nil
+      end
+
+      # Like +walk_expressions_in_body+, but also visits every +for+ loop's
+      # init and update, at any nesting depth.
+      def rabin_walk_body(stmts, visitor)
+        (stmts || []).each do |stmt|
+          case stmt
+          when IfStmt
+            walk_expr(stmt.condition, visitor)
+            rabin_walk_body(stmt.then, visitor)
+            rabin_walk_body(stmt.else_, visitor)
+          when ForStmt
+            rabin_walk_body([stmt.init].compact, visitor)
+            walk_expr(stmt.condition, visitor)
+            rabin_walk_body([stmt.update].compact, visitor)
+            rabin_walk_body(stmt.body, visitor)
+          else
+            walk_expressions_in_stmt(stmt, visitor)
+          end
+        end
+      end
 
       def add_error(msg, loc: nil)
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)

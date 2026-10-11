@@ -1,6 +1,7 @@
 package runar.compiler.passes;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -105,6 +106,7 @@ public final class Validate {
         ctx.checkNoRecursion();
         ctx.checkReservedNames();
         ctx.warnStrippedReadonlyFields();
+        RabinPubKeyProvenance.check(ctx);
 
         // Issue #123: reject preimage-field reads / output bindings that are
         // unsound under a method's declared @sighash mode (security core). Emits
@@ -168,6 +170,229 @@ public final class Validate {
             + " list, so the continuation hash would commit to fewer outputs than the transaction"
             + " actually creates: a spender can drop the output and the honest spend is rejected."
             + " Use an if/else statement instead.";
+    }
+
+    /**
+     * The F-286 diagnostic, shared verbatim with the other six tiers (TS
+     * reference: {@code RABIN_PUBKEY_PROVENANCE_MESSAGE} in 02-validate.ts).
+     */
+    static final String RABIN_PUBKEY_PROVENANCE_MESSAGE =
+        "verifyRabinSig public key (4th argument) must be a contract property or a literal; "
+            + "a spender-supplied Rabin modulus lets anyone forge a signature";
+
+    /**
+     * F-286: {@code verifyRabinSig(msg, sig, padding, n)} checks
+     * {@code (sig^2 + padding) mod n == SHA256(msg) mod n}. A spender who
+     * chooses {@code n} forges any message, so the modulus must be fixed by the
+     * deployer. Port of {@code checkRabinPubKeyProvenance} (TS reference).
+     *
+     * <p>Trusted 4th arguments: a property read ({@code PropertyAccessExpr}, a
+     * {@code MemberExpr} on {@code this}, or a bare identifier naming a
+     * property that no parameter or local shadows — the Java surface's bare
+     * field); a bigint literal; a local whose initialiser and every assignment
+     * are trusted (never one that is {@code ++}/{@code --}'d); a parameter of a
+     * PRIVATE method that every call site (at least one) binds to a trusted
+     * value (least fixed point). Everything else is refused.
+     */
+    private static final class RabinPubKeyProvenance {
+        private static final class Scope {
+            final MethodNode method;
+            final boolean isConstructor;
+            final Set<String> params = new HashSet<>();
+            final Map<String, List<Expression>> bindings = new LinkedHashMap<>();
+            final Set<String> mutated = new HashSet<>();
+
+            Scope(MethodNode method, boolean isConstructor) {
+                this.method = method;
+                this.isConstructor = isConstructor;
+                for (ParamNode p : method.params()) params.add(p.name());
+                visit(method.body());
+            }
+
+            private void bind(String name, Expression value) {
+                bindings.computeIfAbsent(name, k -> new ArrayList<>()).add(value);
+            }
+
+            private void visitExpr(Expression e) {
+                Ctx.walkExpression(e, x -> {
+                    if (x instanceof IncrementExpr ie && ie.operand() instanceof Identifier id) {
+                        mutated.add(id.name());
+                    } else if (x instanceof DecrementExpr de && de.operand() instanceof Identifier id) {
+                        mutated.add(id.name());
+                    }
+                });
+            }
+
+            private void visit(List<Statement> stmts) {
+                if (stmts == null) return;
+                for (Statement s : stmts) {
+                    if (s instanceof VariableDeclStatement v) {
+                        bind(v.name(), v.init());
+                        visitExpr(v.init());
+                    } else if (s instanceof AssignmentStatement a) {
+                        if (a.target() instanceof Identifier id) bind(id.name(), a.value());
+                        visitExpr(a.target());
+                        visitExpr(a.value());
+                    } else if (s instanceof ExpressionStatement es) {
+                        visitExpr(es.expression());
+                    } else if (s instanceof IfStatement i) {
+                        visitExpr(i.condition());
+                        visit(i.thenBody());
+                        visit(i.elseBody());
+                    } else if (s instanceof ForStatement f) {
+                        if (f.init() != null) visit(List.of(f.init()));
+                        visitExpr(f.condition());
+                        if (f.update() != null) visit(List.of(f.update()));
+                        visit(f.body());
+                    } else if (s instanceof ReturnStatement r) {
+                        if (r.value() != null) visitExpr(r.value());
+                    }
+                }
+            }
+        }
+
+        private record Site(List<Expression> args, Scope scope) {}
+
+        private final Set<String> propertyNames = new HashSet<>();
+        private final Map<String, MethodNode> privateMethods = new LinkedHashMap<>();
+        private final Map<String, Set<Integer>> trustedParams = new HashMap<>();
+
+        static void check(Ctx ctx) {
+            new RabinPubKeyProvenance().run(ctx);
+        }
+
+        private void run(Ctx ctx) {
+            ContractNode contract = ctx.contract;
+            for (PropertyNode p : contract.properties()) propertyNames.add(p.name());
+            for (MethodNode m : contract.methods()) {
+                if (m.visibility() == Visibility.PRIVATE) {
+                    privateMethods.put(m.name(), m);
+                    trustedParams.put(m.name(), new HashSet<>());
+                }
+            }
+
+            List<Scope> scopes = new ArrayList<>();
+            if (contract.constructor() != null) scopes.add(new Scope(contract.constructor(), true));
+            for (MethodNode m : contract.methods()) scopes.add(new Scope(m, false));
+
+            Map<String, List<Site>> callSites = new HashMap<>();
+            for (String name : privateMethods.keySet()) callSites.put(name, new ArrayList<>());
+            for (Scope scope : scopes) {
+                walkDeep(scope.method.body(), e -> {
+                    String callee = privateCallee(e);
+                    if (callee != null) callSites.get(callee).add(new Site(((CallExpr) e).args(), scope));
+                });
+            }
+
+            // Least fixed point: monotone, so it terminates.
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (Map.Entry<String, MethodNode> entry : privateMethods.entrySet()) {
+                    List<Site> sites = callSites.get(entry.getKey());
+                    if (sites.isEmpty()) continue;
+                    Set<Integer> trusted = trustedParams.get(entry.getKey());
+                    for (int i = 0; i < entry.getValue().params().size(); i++) {
+                        if (trusted.contains(i)) continue;
+                        final int idx = i;
+                        boolean all = sites.stream().allMatch(site ->
+                            idx < site.args().size()
+                                && isTrusted(site.args().get(idx), site.scope(), new HashSet<>()));
+                        if (all) {
+                            trusted.add(i);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            for (Scope scope : scopes) {
+                walkDeep(scope.method.body(), e -> {
+                    if (e instanceof CallExpr c
+                        && c.callee() instanceof Identifier id
+                        && "verifyRabinSig".equals(id.name())
+                        && c.args().size() >= 4
+                        && !isTrusted(c.args().get(3), scope, new HashSet<>())) {
+                        ctx.error(RABIN_PUBKEY_PROVENANCE_MESSAGE, scope.method.sourceLocation());
+                    }
+                });
+            }
+        }
+
+        private String privateCallee(Expression e) {
+            if (!(e instanceof CallExpr c)) return null;
+            String name = null;
+            if (c.callee() instanceof PropertyAccessExpr pa) {
+                name = pa.property();
+            } else if (c.callee() instanceof MemberExpr me
+                && me.object() instanceof Identifier obj
+                && "this".equals(obj.name())) {
+                name = me.property();
+            }
+            return name != null && privateMethods.containsKey(name) ? name : null;
+        }
+
+        private boolean isTrusted(Expression expr, Scope scope, Set<String> visiting) {
+            if (expr instanceof PropertyAccessExpr) return true;
+            if (expr instanceof MemberExpr me) {
+                return me.object() instanceof Identifier obj && "this".equals(obj.name());
+            }
+            if (expr instanceof BigIntLiteral) return true;
+            if (expr instanceof Identifier id) {
+                String name = id.name();
+                boolean isParam = scope.params.contains(name);
+                List<Expression> locals = scope.bindings.get(name);
+                if (!isParam && locals == null) return propertyNames.contains(name);
+                if (scope.mutated.contains(name)) return false;
+                if (isParam) {
+                    MethodNode m = scope.method;
+                    if (scope.isConstructor || m.visibility() != Visibility.PRIVATE) return false;
+                    int idx = -1;
+                    for (int i = 0; i < m.params().size(); i++) {
+                        if (m.params().get(i).name().equals(name)) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    Set<Integer> trusted = trustedParams.get(m.name());
+                    if (trusted == null || !trusted.contains(idx)) return false;
+                }
+                if (locals != null) {
+                    if (visiting.contains(name)) return false;
+                    visiting.add(name);
+                    boolean ok = true;
+                    for (Expression v : locals) {
+                        if (!isTrusted(v, scope, visiting)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    visiting.remove(name);
+                    if (!ok) return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        /** Visits every expression, including every for loop's init and update at any depth. */
+        private static void walkDeep(List<Statement> stmts, Ctx.ExprSink sink) {
+            if (stmts == null) return;
+            for (Statement s : stmts) {
+                if (s instanceof IfStatement i) {
+                    Ctx.walkExpression(i.condition(), sink);
+                    walkDeep(i.thenBody(), sink);
+                    walkDeep(i.elseBody(), sink);
+                } else if (s instanceof ForStatement f) {
+                    if (f.init() != null) walkDeep(List.of(f.init()), sink);
+                    Ctx.walkExpression(f.condition(), sink);
+                    if (f.update() != null) walkDeep(List.of(f.update()), sink);
+                    walkDeep(f.body(), sink);
+                } else {
+                    Ctx.walkExpressionsInStmt(s, sink);
+                }
+            }
+        }
     }
 
     private static final class Ctx {

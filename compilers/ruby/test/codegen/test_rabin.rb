@@ -79,15 +79,17 @@ class TestRabinCodegen < Minitest::Test
       import type { ByteString, RabinSig, RabinPubKey } from 'runar-lang';
 
       class RabinVerifyTest extends SmartContract {
-        readonly expectedHash: ByteString;
+        readonly pubKey: RabinPubKey;
 
-        constructor(expectedHash: ByteString) {
-          super(expectedHash);
-          this.expectedHash = expectedHash;
+        constructor(pubKey: RabinPubKey) {
+          super(pubKey);
+          this.pubKey = pubKey;
         }
 
-        public verify(msg: ByteString, sig: RabinSig, padding: ByteString, pubKey: RabinPubKey) {
-          assert(verifyRabinSig(msg, sig, padding, pubKey));
+        // F-286: the modulus is a contract property. A spending-method
+        // argument would let the spender pick it, and is refused.
+        public verify(msg: ByteString, sig: RabinSig, padding: ByteString) {
+          assert(verifyRabinSig(msg, sig, padding, this.pubKey));
         }
       }
     TS

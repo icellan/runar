@@ -76,6 +76,7 @@ def validate(contract: ContractNode) -> ValidationResult:
     ctx.validate_methods()
     ctx.check_no_recursion()
     ctx.check_reserved_names()
+    _check_rabin_pubkey_provenance(ctx)
 
     # Issue #123: reject preimage-field reads / output bindings that are unsound
     # under a method's declared @sighash mode (security core). This pass emits
@@ -1696,6 +1697,186 @@ def _walk_expr(expr: Expression | None, visitor) -> None:
     elif isinstance(expr, ArrayLiteralExpr):
         for el in expr.elements:
             _walk_expr(el, visitor)
+
+
+# ---------------------------------------------------------------------------
+# F-286: verifyRabinSig's public key must not be chosen by the spender
+# ---------------------------------------------------------------------------
+
+#: The one diagnostic every tier emits for F-286 (user decision R78).
+RABIN_PUBKEY_PROVENANCE_MESSAGE = (
+    "verifyRabinSig public key (4th argument) must be a contract property or a literal; "
+    "a spender-supplied Rabin modulus lets anyone forge a signature"
+)
+
+
+class _RabinScope:
+    """Per-method view: params, every value bound to each local, ++/-- names."""
+
+    def __init__(self, method: MethodNode) -> None:
+        self.method = method
+        self.params: list[str] = [p.name for p in method.params]
+        self.bindings: dict[str, list[Expression]] = {}
+        self.mutated: set[str] = set()
+        self._visit(method.body)
+
+    def _bind(self, name: str, value: Expression | None) -> None:
+        # A missing value cannot be shown trusted: record it as untrusted.
+        self.bindings.setdefault(name, []).append(value)  # type: ignore[arg-type]
+
+    def _visit_expr(self, expr: Expression | None) -> None:
+        def visitor(e: Expression) -> None:
+            if isinstance(e, (IncrementExpr, DecrementExpr)) and isinstance(e.operand, Identifier):
+                self.mutated.add(e.operand.name)
+        _walk_expr(expr, visitor)
+
+    def _visit(self, stmts: list[Statement]) -> None:
+        for stmt in stmts:
+            if stmt is None:
+                continue
+            if isinstance(stmt, VariableDeclStmt):
+                self._bind(stmt.name, stmt.init)
+                self._visit_expr(stmt.init)
+            elif isinstance(stmt, AssignmentStmt):
+                if isinstance(stmt.target, Identifier):
+                    self._bind(stmt.target.name, stmt.value)
+                self._visit_expr(stmt.target)
+                self._visit_expr(stmt.value)
+            elif isinstance(stmt, ExpressionStmt):
+                self._visit_expr(stmt.expr)
+            elif isinstance(stmt, IfStmt):
+                self._visit_expr(stmt.condition)
+                self._visit(stmt.then)
+                self._visit(stmt.else_)
+            elif isinstance(stmt, ForStmt):
+                self._visit([stmt.init] if stmt.init is not None else [])
+                self._visit_expr(stmt.condition)
+                self._visit([stmt.update] if stmt.update is not None else [])
+                self._visit(stmt.body)
+            elif isinstance(stmt, ReturnStmt):
+                self._visit_expr(stmt.value)
+
+
+def _walk_expressions_in_body_deep(stmts: list[Statement], visitor) -> None:
+    """Like ``_walk_expressions_in_body``, but also visits every ``for`` loop's
+    init and update, at any nesting depth."""
+    for stmt in stmts:
+        if stmt is None:
+            continue
+        if isinstance(stmt, IfStmt):
+            _walk_expr(stmt.condition, visitor)
+            _walk_expressions_in_body_deep(stmt.then, visitor)
+            _walk_expressions_in_body_deep(stmt.else_, visitor)
+        elif isinstance(stmt, ForStmt):
+            _walk_expressions_in_body_deep([stmt.init] if stmt.init is not None else [], visitor)
+            _walk_expr(stmt.condition, visitor)
+            _walk_expressions_in_body_deep([stmt.update] if stmt.update is not None else [], visitor)
+            _walk_expressions_in_body_deep(stmt.body, visitor)
+        else:
+            _walk_expressions_in_stmt(stmt, visitor)
+
+
+def _check_rabin_pubkey_provenance(ctx: "_ValidationContext") -> None:
+    """F-286: the 4th argument of ``verifyRabinSig`` must be fixed by the deployer.
+
+    Port of ``checkRabinPubKeyProvenance`` (TS 02-validate.ts). Trusted: a
+    property read (``this.x`` / member on ``this``, or a bare identifier naming
+    a property no param/local shadows); a bigint literal; a local whose init AND
+    every assignment are trusted (never if ++/--); a PRIVATE method's parameter
+    that every call site (at least one) binds to a trusted value -- least fixed
+    point. Public and constructor parameters, arithmetic, ternaries and calls
+    are refused.
+    """
+    contract = ctx.contract
+    property_names = {p.name for p in contract.properties}
+    private_methods: dict[str, MethodNode] = {
+        m.name: m for m in contract.methods if m.visibility == "private"
+    }
+    all_methods = [contract.constructor, *contract.methods]
+    scopes = [_RabinScope(m) for m in all_methods]
+    trusted_params: dict[str, set[int]] = {name: set() for name in private_methods}
+
+    def is_trusted(expr: Expression | None, scope: _RabinScope, visiting: set[str]) -> bool:
+        if isinstance(expr, PropertyAccessExpr):
+            return True
+        if isinstance(expr, MemberExpr):
+            return isinstance(expr.object, Identifier) and expr.object.name == "this"
+        if isinstance(expr, BigIntLiteral):
+            return True
+        if isinstance(expr, Identifier):
+            name = expr.name
+            is_param = name in scope.params
+            local_values = scope.bindings.get(name)
+            if not is_param and local_values is None:
+                return name in property_names
+            if name in scope.mutated:
+                return False
+            if is_param:
+                method = scope.method
+                if method.visibility != "private" or method is contract.constructor:
+                    return False
+                idx = scope.params.index(name)
+                if idx not in trusted_params.get(method.name, set()):
+                    return False
+            if local_values is not None:
+                if name in visiting:
+                    return False
+                visiting.add(name)
+                ok = all(is_trusted(v, scope, visiting) for v in local_values)
+                visiting.discard(name)
+                if not ok:
+                    return False
+            return True
+        return False
+
+    def private_callee(expr: Expression) -> str | None:
+        if not isinstance(expr, CallExpr):
+            return None
+        c = expr.callee
+        name: str | None = None
+        if isinstance(c, PropertyAccessExpr):
+            name = c.property
+        elif isinstance(c, MemberExpr) and isinstance(c.object, Identifier) and c.object.name == "this":
+            name = c.property
+        return name if name is not None and name in private_methods else None
+
+    call_sites: dict[str, list[tuple[list[Expression], _RabinScope]]] = {
+        name: [] for name in private_methods
+    }
+    for scope in scopes:
+        def collect(e: Expression, scope: _RabinScope = scope) -> None:
+            callee = private_callee(e)
+            if callee is not None:
+                call_sites[callee].append((e.args, scope))
+        _walk_expressions_in_body_deep(scope.method.body, collect)
+
+    # Least fixed point: monotone, so it terminates.
+    changed = True
+    while changed:
+        changed = False
+        for name, method in private_methods.items():
+            sites = call_sites[name]
+            if not sites:
+                continue
+            trusted = trusted_params[name]
+            for i in range(len(method.params)):
+                if i in trusted:
+                    continue
+                if all(i < len(args) and is_trusted(args[i], sc, set()) for args, sc in sites):
+                    trusted.add(i)
+                    changed = True
+
+    for scope in scopes:
+        def check(e: Expression, scope: _RabinScope = scope) -> None:
+            if (
+                isinstance(e, CallExpr)
+                and isinstance(e.callee, Identifier)
+                and e.callee.name == "verifyRabinSig"
+                and len(e.args) >= 4
+                and not is_trusted(e.args[3], scope, set())
+            ):
+                ctx._add_error(RABIN_PUBKEY_PROVENANCE_MESSAGE, scope.method.source_location)
+        _walk_expressions_in_body_deep(scope.method.body, check)
 
 
 # ---------------------------------------------------------------------------

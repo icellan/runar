@@ -74,6 +74,7 @@ fn validateWithMode(
     try validateMethods(allocator, contract, &errors, &warnings);
     try checkNoRecursion(allocator, contract, &errors);
     try checkReservedNames(allocator, contract, &errors);
+    try checkRabinPubKeyProvenance(allocator, contract, &errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
     // unsound under a method's declared @sighash mode (security core). The pass
@@ -2265,6 +2266,312 @@ fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *Stri
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
         .property_access,
         => {},
+    }
+}
+
+// ============================================================================
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ============================================================================
+
+/// The one diagnostic every tier emits for F-286 (user decision R78).
+pub const RABIN_PUBKEY_PROVENANCE_MESSAGE =
+    "verifyRabinSig public key (4th argument) must be a contract property or a literal; " ++
+    "a spender-supplied Rabin modulus lets anyone forge a signature";
+
+/// One method's (or the constructor's) view for the provenance check: its
+/// parameters, every value bound to each local name (initialisers and
+/// assignments), and the names that are ever ++/-- or are loop counters.
+const RabinScope = struct {
+    params: []const types.ParamNode,
+    /// Name of the private method this scope is, or null for a public method
+    /// or the constructor (whose parameters are never trusted).
+    private_name: ?[]const u8,
+    body: []const Statement,
+    loc: ?SourceLocation,
+    bindings: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Expression)) = .empty,
+    mutated: StringSet = .empty,
+
+    fn isParam(self: *const RabinScope, name: []const u8) ?usize {
+        for (self.params, 0..) |p, i| {
+            if (std.mem.eql(u8, p.name, name)) return i;
+        }
+        return null;
+    }
+};
+
+const RabinCallSite = struct { args: []const Expression, scope: *const RabinScope };
+
+/// Port of the TS reference `checkRabinPubKeyProvenance` (02-validate.ts).
+///
+/// `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod n ==
+/// SHA256(msg) mod n`; a spender who chooses `n` forges any message (`n = 1`,
+/// `sig = 0` passes on chain). Trusted values for the 4th argument:
+///   - a property read (`this.x`), or a bare identifier naming a property that
+///     no parameter or local of the method shadows (Java's bare field);
+///   - an integer literal;
+///   - a local whose every binding (initialiser and assignments) is trusted;
+///   - a parameter of a PRIVATE method that every call site (at least one)
+///     binds to a trusted value in the caller (least fixed point).
+/// Everything else is refused.
+fn checkRabinPubKeyProvenance(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const scopes = try a.alloc(RabinScope, contract.methods.len + 1);
+    scopes[0] = .{ .params = contract.constructor.params, .private_name = null, .body = contract.constructor.body, .loc = null };
+    for (contract.methods, 0..) |m, i| {
+        scopes[i + 1] = .{ .params = m.params, .private_name = if (m.is_public) null else m.name, .body = m.body, .loc = m.source_loc };
+    }
+    for (scopes) |*sc| try rabinCollectBindings(a, sc, sc.body);
+
+    // Private method name -> per-parameter "proven trusted" flags.
+    var trusted = std.StringHashMapUnmanaged([]bool){};
+    var sites = std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)){};
+    for (contract.methods) |m| {
+        if (m.is_public) continue;
+        const flags = try a.alloc(bool, m.params.len);
+        @memset(flags, false);
+        try trusted.put(a, m.name, flags);
+        try sites.put(a, m.name, .empty);
+    }
+
+    const SiteCollector = struct {
+        a: Allocator,
+        scope: *const RabinScope,
+        sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
+        fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
+            const hit: ?struct { name: []const u8, args: []const Expression } = switch (expr) {
+                .method_call => |mc| if (std.mem.eql(u8, mc.object, "this")) .{ .name = mc.method, .args = mc.args } else null,
+                .call => |c| .{ .name = c.callee, .args = c.args },
+                else => null,
+            };
+            if (hit) |h| {
+                if (self.sites.getPtr(h.name)) |list| try list.append(self.a, .{ .args = h.args, .scope = self.scope });
+            }
+        }
+    };
+    for (scopes) |*sc| {
+        try rabinWalkStmts(sc.body, sc.loc, SiteCollector{ .a = a, .scope = sc, .sites = &sites });
+    }
+
+    // Least fixed point: monotone, so it terminates.
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = trusted.iterator();
+        while (it.next()) |entry| {
+            const list = sites.get(entry.key_ptr.*).?;
+            if (list.items.len == 0) continue;
+            for (entry.value_ptr.*, 0..) |*flag, i| {
+                if (flag.*) continue;
+                var all = true;
+                for (list.items) |site| {
+                    if (i >= site.args.len or !(try rabinIsTrusted(a, contract, &trusted, site.args[i], site.scope))) {
+                        all = false;
+                        break;
+                    }
+                }
+                if (all) {
+                    flag.* = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    const Checker = struct {
+        a: Allocator,
+        gpa: Allocator,
+        contract: ContractNode,
+        trusted: *std.StringHashMapUnmanaged([]bool),
+        scope: *const RabinScope,
+        errs: *std.ArrayListUnmanaged(CompilerDiagnostic),
+        fn visit(self: @This(), expr: Expression, loc: ?SourceLocation) !void {
+            if (expr != .call) return;
+            const c = expr.call;
+            if (!std.mem.eql(u8, c.callee, "verifyRabinSig") or c.args.len < 4) return;
+            if (try rabinIsTrusted(self.a, self.contract, self.trusted, c.args[3], self.scope)) return;
+            try self.errs.append(self.gpa, .{
+                .message = RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                .location = loc orelse self.scope.loc,
+                .severity = .@"error",
+            });
+        }
+    };
+    for (scopes) |*sc| {
+        try rabinWalkStmts(sc.body, sc.loc, Checker{ .a = a, .gpa = allocator, .contract = contract, .trusted = &trusted, .scope = sc, .errs = errors });
+    }
+}
+
+fn rabinBind(a: Allocator, scope: *RabinScope, name: []const u8, value: Expression) !void {
+    const gop = try scope.bindings.getOrPut(a, name);
+    if (!gop.found_existing) gop.value_ptr.* = .empty;
+    try gop.value_ptr.append(a, value);
+}
+
+fn rabinCollectBindings(a: Allocator, scope: *RabinScope, stmts: []const Statement) !void {
+    const Mut = struct {
+        a: Allocator,
+        scope: *RabinScope,
+        fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
+            const operand: ?Expression = switch (expr) {
+                .increment => |inc| inc.operand,
+                .decrement => |dec| dec.operand,
+                else => null,
+            };
+            if (operand) |op| {
+                if (op == .identifier) try self.scope.mutated.put(self.a, op.identifier, {});
+            }
+        }
+    };
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| try rabinBind(a, scope, d.name, d.value),
+            .let_decl => |d| {
+                // A declaration with no initialiser binds nothing provable.
+                if (d.value) |v| try rabinBind(a, scope, d.name, v) else try scope.mutated.put(a, d.name, {});
+            },
+            .assign => |as| {
+                if (!as.target_is_property and as.index_target == null) try rabinBind(a, scope, as.target, as.value);
+            },
+            .if_stmt => |i| {
+                try rabinCollectBindings(a, scope, i.then_body);
+                if (i.else_body) |e| try rabinCollectBindings(a, scope, e);
+            },
+            .for_stmt => |f| {
+                // The loop counter is never a trusted modulus.
+                try scope.mutated.put(a, f.var_name, {});
+                if (f.update) |u| try rabinCollectBindings(a, scope, (u)[0..1]);
+                try rabinCollectBindings(a, scope, f.body);
+            },
+            else => {},
+        }
+    }
+    try rabinWalkStmtsShallow(stmts, Mut{ .a = a, .scope = scope });
+}
+
+/// Visit every expression directly in `stmts` (not nested statement bodies),
+/// for the ++/-- scan — `rabinCollectBindings` recurses into the bodies itself.
+fn rabinWalkStmtsShallow(stmts: []const Statement, ctx: anytype) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| try rabinWalkExpr(d.value, null, ctx),
+            .let_decl => |d| if (d.value) |v| try rabinWalkExpr(v, null, ctx),
+            .assign => |as| try rabinWalkExpr(as.value, null, ctx),
+            .if_stmt => |i| try rabinWalkExpr(i.condition, null, ctx),
+            .expr_stmt => |e| try rabinWalkExpr(e.expr, null, ctx),
+            .assert_stmt => |as| try rabinWalkExpr(as.condition, null, ctx),
+            .return_stmt => |r| if (r) |v| try rabinWalkExpr(v, null, ctx),
+            .for_stmt => {},
+        }
+    }
+}
+
+fn rabinIsTrusted(
+    a: Allocator,
+    contract: ContractNode,
+    trusted: *std.StringHashMapUnmanaged([]bool),
+    expr: Expression,
+    scope: *const RabinScope,
+) !bool {
+    var visiting = StringSet{};
+    return rabinIsTrustedInner(a, contract, trusted, expr, scope, &visiting);
+}
+
+fn rabinIsTrustedInner(
+    a: Allocator,
+    contract: ContractNode,
+    trusted: *std.StringHashMapUnmanaged([]bool),
+    expr: Expression,
+    scope: *const RabinScope,
+    visiting: *StringSet,
+) Allocator.Error!bool {
+    switch (expr) {
+        .property_access => |pa| return std.mem.eql(u8, pa.object, "this"),
+        .literal_int, .literal_bigint => return true,
+        .identifier => |name| {
+            const param_idx = scope.isParam(name);
+            const locals = scope.bindings.get(name);
+            if (param_idx == null and locals == null) {
+                if (scope.mutated.get(name) != null) return false;
+                for (contract.properties) |p| {
+                    if (std.mem.eql(u8, p.name, name)) return true;
+                }
+                return false;
+            }
+            if (scope.mutated.get(name) != null) return false;
+            if (param_idx) |idx| {
+                const pname = scope.private_name orelse return false;
+                const flags = trusted.get(pname) orelse return false;
+                if (idx >= flags.len or !flags[idx]) return false;
+            }
+            if (locals) |list| {
+                if (visiting.get(name) != null) return false;
+                try visiting.put(a, name, {});
+                defer _ = visiting.remove(name);
+                for (list.items) |v| {
+                    if (!(try rabinIsTrustedInner(a, contract, trusted, v, scope, visiting))) return false;
+                }
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// Visit every expression in `stmts` at any depth, including each `for`
+/// loop's update statement. `ctx.visit(expr, loc)` gets the nearest enclosing
+/// statement's location (or `fallback`).
+fn rabinWalkStmts(stmts: []const Statement, fallback: ?SourceLocation, ctx: anytype) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| try rabinWalkExpr(d.value, d.source_loc orelse fallback, ctx),
+            .let_decl => |d| if (d.value) |v| try rabinWalkExpr(v, d.source_loc orelse fallback, ctx),
+            .assign => |as| try rabinWalkExpr(as.value, as.source_loc orelse fallback, ctx),
+            .if_stmt => |i| {
+                try rabinWalkExpr(i.condition, i.source_loc orelse fallback, ctx);
+                try rabinWalkStmts(i.then_body, fallback, ctx);
+                if (i.else_body) |e| try rabinWalkStmts(e, fallback, ctx);
+            },
+            .for_stmt => |f| {
+                if (f.update) |u| try rabinWalkStmts((u)[0..1], f.source_loc orelse fallback, ctx);
+                try rabinWalkStmts(f.body, fallback, ctx);
+            },
+            .expr_stmt => |e| try rabinWalkExpr(e.expr, e.source_loc orelse fallback, ctx),
+            .assert_stmt => |as| try rabinWalkExpr(as.condition, as.source_loc orelse fallback, ctx),
+            .return_stmt => |r| if (r) |v| try rabinWalkExpr(v, fallback, ctx),
+        }
+    }
+}
+
+fn rabinWalkExpr(expr: Expression, loc: ?SourceLocation, ctx: anytype) !void {
+    try ctx.visit(expr, loc);
+    switch (expr) {
+        .call => |c| for (c.args) |arg| try rabinWalkExpr(arg, loc, ctx),
+        .method_call => |mc| for (mc.args) |arg| try rabinWalkExpr(arg, loc, ctx),
+        .binary_op => |b| {
+            try rabinWalkExpr(b.left, loc, ctx);
+            try rabinWalkExpr(b.right, loc, ctx);
+        },
+        .unary_op => |u| try rabinWalkExpr(u.operand, loc, ctx),
+        .ternary => |t| {
+            try rabinWalkExpr(t.condition, loc, ctx);
+            try rabinWalkExpr(t.then_expr, loc, ctx);
+            try rabinWalkExpr(t.else_expr, loc, ctx);
+        },
+        .index_access => |ia| {
+            try rabinWalkExpr(ia.object, loc, ctx);
+            try rabinWalkExpr(ia.index, loc, ctx);
+        },
+        .increment => |inc| try rabinWalkExpr(inc.operand, loc, ctx),
+        .decrement => |dec| try rabinWalkExpr(dec.operand, loc, ctx),
+        .array_literal => |els| for (els) |el| try rabinWalkExpr(el, loc, ctx),
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier, .property_access => {},
     }
 }
 

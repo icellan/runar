@@ -39,6 +39,7 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     validate_methods(contract, &mut errors, &mut warnings);
     check_no_recursion(contract, &mut errors);
     check_reserved_names(contract, &mut errors);
+    check_rabin_pubkey_provenance(contract, &mut errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
     // unsound under a method's declared @sighash mode (security core). This
@@ -2034,6 +2035,334 @@ fn warn_locktime_without_sequence_guard(
             ),
             Some(method.source_location.clone()),
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ---------------------------------------------------------------------------
+
+/// The one diagnostic every tier emits for F-286 (user decision R78).
+pub const RABIN_PUBKEY_PROVENANCE_MESSAGE: &str =
+    "verifyRabinSig public key (4th argument) must be a contract property or a literal; \
+a spender-supplied Rabin modulus lets anyone forge a signature";
+
+/// Per-method binding facts for the F-286 trust predicate.
+struct RabinScope<'a> {
+    method: &'a MethodNode,
+    is_constructor: bool,
+    params: HashSet<String>,
+    /// Local name -> every value bound to it (inits + assignments).
+    bindings: HashMap<String, Vec<&'a Expression>>,
+    /// Names that are ever ++/--: never trusted.
+    mutated: HashSet<String>,
+}
+
+fn rabin_scope_collect<'a>(stmts: &'a [Statement], scope: &mut RabinScope<'a>) {
+    fn note_mutations(expr: &Expression, mutated: &mut HashSet<String>) {
+        walk_expression(expr, &mut |e| match e {
+            Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                if let Expression::Identifier { name } = operand.as_ref() {
+                    mutated.insert(name.clone());
+                }
+            }
+            _ => {}
+        });
+    }
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDecl { name, init, .. } => {
+                scope.bindings.entry(name.clone()).or_default().push(init);
+                note_mutations(init, &mut scope.mutated);
+            }
+            Statement::Assignment { target, value, .. } => {
+                if let Expression::Identifier { name } = target {
+                    scope.bindings.entry(name.clone()).or_default().push(value);
+                }
+                note_mutations(target, &mut scope.mutated);
+                note_mutations(value, &mut scope.mutated);
+            }
+            Statement::ExpressionStatement { expression, .. } => note_mutations(expression, &mut scope.mutated),
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                note_mutations(condition, &mut scope.mutated);
+                rabin_scope_collect(then_branch, scope);
+                if let Some(e) = else_branch {
+                    rabin_scope_collect(e, scope);
+                }
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                rabin_scope_collect(std::slice::from_ref(init.as_ref()), scope);
+                note_mutations(condition, &mut scope.mutated);
+                rabin_scope_collect(std::slice::from_ref(update.as_ref()), scope);
+                rabin_scope_collect(body, scope);
+            }
+            Statement::ReturnStatement { value, .. } => {
+                if let Some(v) = value {
+                    note_mutations(v, &mut scope.mutated);
+                }
+            }
+        }
+    }
+}
+
+/// Like `walk_expressions_in_body`, but also visits every `for` loop's init
+/// and update, at any nesting depth.
+fn walk_expressions_in_body_deep(stmts: &[Statement], visitor: &mut impl FnMut(&Expression)) {
+    for stmt in stmts {
+        match stmt {
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                walk_expression(condition, visitor);
+                walk_expressions_in_body_deep(then_branch, visitor);
+                if let Some(e) = else_branch {
+                    walk_expressions_in_body_deep(e, visitor);
+                }
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                walk_expressions_in_body_deep(std::slice::from_ref(init.as_ref()), visitor);
+                walk_expression(condition, visitor);
+                walk_expressions_in_body_deep(std::slice::from_ref(update.as_ref()), visitor);
+                walk_expressions_in_body_deep(body, visitor);
+            }
+            _ => walk_expressions_in_statement(stmt, visitor),
+        }
+    }
+}
+
+fn rabin_private_callee<'a>(expr: &'a Expression, private: &HashMap<String, &MethodNode>) -> Option<(&'a str, &'a [Expression])> {
+    if let Expression::CallExpr { callee, args, .. } = expr {
+        let name = match callee.as_ref() {
+            Expression::PropertyAccess { property } => Some(property.as_str()),
+            Expression::MemberExpr { object, property } => match object.as_ref() {
+                Expression::Identifier { name } if name == "this" => Some(property.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(n) = name {
+            if private.contains_key(n) {
+                return Some((n, args.as_slice()));
+            }
+        }
+    }
+    None
+}
+
+/// Every `this.<private>(...)` call in `stmts` (any depth, `for` init/update included).
+fn rabin_collect_private_calls<'a>(
+    stmts: &'a [Statement],
+    private: &HashMap<String, &MethodNode>,
+    out: &mut Vec<(&'a str, &'a [Expression])>,
+) {
+    fn expr<'a>(e: &'a Expression, private: &HashMap<String, &MethodNode>, out: &mut Vec<(&'a str, &'a [Expression])>) {
+        if let Some(hit) = rabin_private_callee(e, private) {
+            out.push(hit);
+        }
+        match e {
+            Expression::CallExpr { callee, args, .. } => {
+                expr(callee, private, out);
+                for a in args {
+                    expr(a, private, out);
+                }
+            }
+            Expression::BinaryExpr { left, right, .. } => {
+                expr(left, private, out);
+                expr(right, private, out);
+            }
+            Expression::UnaryExpr { operand, .. }
+            | Expression::IncrementExpr { operand, .. }
+            | Expression::DecrementExpr { operand, .. } => expr(operand, private, out),
+            Expression::TernaryExpr { condition, consequent, alternate } => {
+                expr(condition, private, out);
+                expr(consequent, private, out);
+                expr(alternate, private, out);
+            }
+            Expression::MemberExpr { object, .. } => expr(object, private, out),
+            Expression::IndexAccess { object, index } => {
+                expr(object, private, out);
+                expr(index, private, out);
+            }
+            Expression::ArrayLiteral { elements } => {
+                for el in elements {
+                    expr(el, private, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDecl { init, .. } => expr(init, private, out),
+            Statement::Assignment { target, value, .. } => {
+                expr(target, private, out);
+                expr(value, private, out);
+            }
+            Statement::ExpressionStatement { expression, .. } => expr(expression, private, out),
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                expr(condition, private, out);
+                rabin_collect_private_calls(then_branch, private, out);
+                if let Some(e) = else_branch {
+                    rabin_collect_private_calls(e, private, out);
+                }
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                rabin_collect_private_calls(std::slice::from_ref(init.as_ref()), private, out);
+                expr(condition, private, out);
+                rabin_collect_private_calls(std::slice::from_ref(update.as_ref()), private, out);
+                rabin_collect_private_calls(body, private, out);
+            }
+            Statement::ReturnStatement { value, .. } => {
+                if let Some(v) = value {
+                    expr(v, private, out);
+                }
+            }
+        }
+    }
+}
+
+fn rabin_is_trusted(
+    expr: &Expression,
+    scope: &RabinScope,
+    property_names: &HashSet<&str>,
+    trusted_params: &HashMap<String, HashSet<usize>>,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match expr {
+        Expression::PropertyAccess { .. } => true,
+        Expression::MemberExpr { object, .. } => {
+            matches!(object.as_ref(), Expression::Identifier { name } if name == "this")
+        }
+        Expression::BigIntLiteral { .. } => true,
+        Expression::Identifier { name } => {
+            let is_param = scope.params.contains(name);
+            let locals = scope.bindings.get(name);
+            if !is_param && locals.is_none() {
+                return property_names.contains(name.as_str());
+            }
+            if scope.mutated.contains(name) {
+                return false;
+            }
+            if is_param {
+                let m = scope.method;
+                if m.visibility != Visibility::Private || scope.is_constructor {
+                    return false;
+                }
+                let idx = m.params.iter().position(|p| &p.name == name);
+                let ok = match (idx, trusted_params.get(&m.name)) {
+                    (Some(i), Some(set)) => set.contains(&i),
+                    _ => false,
+                };
+                if !ok {
+                    return false;
+                }
+            }
+            if let Some(values) = locals {
+                if visiting.contains(name) {
+                    return false;
+                }
+                visiting.insert(name.clone());
+                let ok = values
+                    .iter()
+                    .all(|v| rabin_is_trusted(v, scope, property_names, trusted_params, visiting));
+                visiting.remove(name);
+                if !ok {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// F-286: `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod
+/// n == SHA256(msg) mod n`; a spender who picks `n` forges any message. The
+/// 4th argument must be a property read (`this.x`, or a bare identifier naming
+/// a property no param/local shadows), a bigint literal, a local whose init
+/// and every assignment are trusted, or a private-method parameter that every
+/// call site (at least one) binds to a trusted value (least fixed point).
+/// Mirrors `checkRabinPubKeyProvenance` in the TS reference.
+fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    let property_names: HashSet<&str> = contract.properties.iter().map(|p| p.name.as_str()).collect();
+    let mut private: HashMap<String, &MethodNode> = HashMap::new();
+    for m in &contract.methods {
+        if m.visibility == Visibility::Private {
+            private.insert(m.name.clone(), m);
+        }
+    }
+
+    let mut scopes: Vec<RabinScope> = Vec::new();
+    let all = std::iter::once((&contract.constructor, true)).chain(contract.methods.iter().map(|m| (m, false)));
+    for (m, is_ctor) in all {
+        let mut scope = RabinScope {
+            method: m,
+            is_constructor: is_ctor,
+            params: m.params.iter().map(|p| p.name.clone()).collect(),
+            bindings: HashMap::new(),
+            mutated: HashSet::new(),
+        };
+        rabin_scope_collect(&m.body, &mut scope);
+        scopes.push(scope);
+    }
+
+    // Every call site of every private method: (callee, args, caller scope index).
+    let mut call_sites: HashMap<String, Vec<(&[Expression], usize)>> = HashMap::new();
+    for name in private.keys() {
+        call_sites.insert(name.clone(), Vec::new());
+    }
+    for (si, scope) in scopes.iter().enumerate() {
+        let mut found: Vec<(&str, &[Expression])> = Vec::new();
+        rabin_collect_private_calls(&scope.method.body, &private, &mut found);
+        for (callee, args) in found {
+            call_sites.get_mut(callee).unwrap().push((args, si));
+        }
+    }
+
+    let mut trusted_params: HashMap<String, HashSet<usize>> =
+        private.keys().map(|k| (k.clone(), HashSet::new())).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (name, m) in &private {
+            let sites = &call_sites[name];
+            if sites.is_empty() {
+                continue;
+            }
+            for i in 0..m.params.len() {
+                if trusted_params[name].contains(&i) {
+                    continue;
+                }
+                let all_ok = sites.iter().all(|(args, si)| match args.get(i) {
+                    Some(a) => rabin_is_trusted(a, &scopes[*si], &property_names, &trusted_params, &mut HashSet::new()),
+                    None => false,
+                });
+                if all_ok {
+                    trusted_params.get_mut(name).unwrap().insert(i);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    for scope in &scopes {
+        let mut bad = 0usize;
+        walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
+            if let Expression::CallExpr { callee, args, .. } = e {
+                if let Expression::Identifier { name } = callee.as_ref() {
+                    if name == "verifyRabinSig"
+                        && args.len() >= 4
+                        && !rabin_is_trusted(&args[3], scope, &property_names, &trusted_params, &mut HashSet::new())
+                    {
+                        bad += 1;
+                    }
+                }
+            }
+        });
+        for _ in 0..bad {
+            errors.push(Diagnostic::error(
+                RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                Some(scope.method.source_location.clone()),
+            ));
+        }
     }
 }
 

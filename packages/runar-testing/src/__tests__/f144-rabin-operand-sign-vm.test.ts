@@ -29,25 +29,42 @@
  * golden + its real-crypto witness), or that a NEGATIVE Script number keeps
  * its meaning: normalization reads its bytes as unsigned, by design. The
  * Mersenne-product key here is not a secure key; it only fixes the byte shape.
+ *
+ * F-286 (user decision R78): the modulus can no longer be a spending-method
+ * argument — the frontend refuses that as a universal forgery. So the modulus
+ * is now a contract property. A Script-number modulus is baked through
+ * `constructorArgs` (the same bytes the old argument push carried). The two
+ * RAW-modulus cases are re-homed to a raw construction: the SDK splices the
+ * raw 0xFF-terminated LE modulus into the constructor slot as plain push data
+ * (`RunarContract` with a hex-string arg), the unlocking script pushes
+ * msg / sig / padding, and real `Spend` runs that. The interpreter leg holds
+ * the same raw bytes as the property's value (`TestContract` with a
+ * `Uint8Array` property), so both engines still see the identical operand.
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
+import { compile } from 'runar-compiler';
+import { RunarContract } from 'runar-sdk';
+import { LockingScript, UnlockingScript } from '@bsv/sdk';
 import { runStatelessSigned } from '../oracle/real-crypto-execution.js';
+import { newConsensusSpend, CONSENSUS_SPEND_CONTEXT } from '../consensus-spend.js';
+import { TestContract } from '../test-contract.js';
+import { bytesToHex } from '../vm/utils.js';
 import { rabinSign, rabinVerify, RABIN_TEST_KEY, type RabinKeyPair } from '../crypto/rabin.js';
 
 const SOURCE = `
 import { SmartContract, assert, ByteString, RabinSig, RabinPubKey, verifyRabinSig } from 'runar-lang';
 
 class RabinOperands extends SmartContract {
-  readonly tag: bigint;
+  readonly pk: RabinPubKey;
 
-  constructor(tag: bigint) {
-    super(tag);
-    this.tag = tag;
+  constructor(pk: RabinPubKey) {
+    super(pk);
+    this.pk = pk;
   }
 
-  public check(msg: ByteString, sig: RabinSig, padding: ByteString, pk: RabinPubKey) {
-    assert(verifyRabinSig(msg, sig, padding, pk));
+  public check(msg: ByteString, sig: RabinSig, padding: ByteString) {
+    assert(verifyRabinSig(msg, sig, padding, this.pk));
   }
 }
 `;
@@ -111,14 +128,68 @@ function priceMsg(price: bigint): Uint8Array {
   return out;
 }
 
-function run(msg: Uint8Array, sig: Uint8Array, padding: Uint8Array, pk: Uint8Array) {
+/** Modulus baked as a Script number through constructorArgs. */
+function run(msg: Uint8Array, sig: Uint8Array, padding: Uint8Array, n: bigint) {
   return runStatelessSigned({
     source: SOURCE,
     fileName: 'RabinOperands.runar.ts',
     method: 'check',
-    args: [msg, sig, padding, pk],
-    constructorArgs: { tag: 1n },
+    args: [msg, sig, padding],
+    constructorArgs: { pk: n },
   });
+}
+
+/** Minimal push (consensus MINIMALDATA), as `runStatelessSigned` encodes args. */
+function push(data: Uint8Array): Uint8Array {
+  if (data.length === 0) return new Uint8Array([0x00]);
+  if (data.length === 1 && data[0]! >= 0x01 && data[0]! <= 0x10) return new Uint8Array([0x50 + data[0]!]);
+  if (data.length === 1 && data[0] === 0x81) return new Uint8Array([0x4f]);
+  if (data.length > 75) throw new Error('push: test operands are <= 75 bytes');
+  return new Uint8Array([data.length, ...data]);
+}
+
+/**
+ * Raw construction: the modulus is spliced into the constructor slot as RAW
+ * push data (no sign byte), exactly the bytes the old spending-argument push
+ * carried. Real `Spend` runs the fold-ON script; the interpreter holds the
+ * same raw bytes as the property's value.
+ */
+function runRawModulus(msg: Uint8Array, sig: Uint8Array, padding: Uint8Array, nRaw: Uint8Array) {
+  const compiled = compile(SOURCE, { fileName: 'RabinOperands.runar.ts', disableConstantFolding: false });
+  if (!compiled.success || !compiled.artifact) {
+    throw new Error(compiled.diagnostics.map((d) => d.message).join('; '));
+  }
+  const lockingHex = new RunarContract(compiled.artifact, [bytesToHex(nRaw)]).getLockingScript();
+  // The spliced slot must be the raw modulus push itself, or this is not the
+  // construction the test claims.
+  if (!lockingHex.includes(bytesToHex(push(nRaw)))) throw new Error('raw modulus push not found in locking script');
+  const unlockingHex = bytesToHex(new Uint8Array([...push(msg), ...push(sig), ...push(padding)]));
+
+  let reachedEngine = false;
+  let vmAccepted = false;
+  let vmError: string | undefined;
+  try {
+    const spend = newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
+      lockingScript: LockingScript.fromHex(lockingHex),
+      otherInputs: [],
+      outputs: [],
+      unlockingScript: UnlockingScript.fromHex(unlockingHex),
+    });
+    reachedEngine = true;
+    vmAccepted = spend.validate();
+  } catch (e) {
+    vmError = e instanceof Error ? e.message : String(e);
+  }
+
+  let interpreterAccepted: boolean;
+  try {
+    const tc = TestContract.fromSource(SOURCE, { pk: nRaw }, 'RabinOperands.runar.ts');
+    interpreterAccepted = tc.call('check', { msg, sig, padding }).success;
+  } catch {
+    interpreterAccepted = false;
+  }
+  return { reachedEngine, vmAccepted, vmError, interpreterAccepted };
 }
 
 // A 216-bit modulus whose most-significant (last LE) byte is 0xFF: the
@@ -139,7 +210,7 @@ describe('F-144: Rabin operands pushed as raw unsigned LE bytes keep their meani
     });
 
     it('honest signature: real Spend accepts (it read the padding as -72 and aborted OP_WITHIN)', () => {
-      const r = run(msg, scriptNum(sig), pad, scriptNum(RABIN_TEST_KEY.n));
+      const r = run(msg, scriptNum(sig), pad, RABIN_TEST_KEY.n);
       expect(r.reachedEngine).toBe(true);
       expect(r.vmAccepted, `Spend refused an honest padding=200 signature: ${r.vmError}`).toBe(true);
       expect(r.interpreterAccepted).toBe(true);
@@ -147,7 +218,7 @@ describe('F-144: Rabin operands pushed as raw unsigned LE bytes keep their meani
 
     it('sig+1 is still refused by both engines', () => {
       expect(rabinVerify(msg, sig + 1n, pad, RABIN_TEST_KEY.n)).toBe(false);
-      const r = run(msg, scriptNum(sig + 1n), pad, scriptNum(RABIN_TEST_KEY.n));
+      const r = run(msg, scriptNum(sig + 1n), pad, RABIN_TEST_KEY.n);
       expect(r.reachedEngine).toBe(true);
       expect(r.vmAccepted).toBe(false);
       expect(r.interpreterAccepted).toBe(false);
@@ -168,14 +239,14 @@ describe('F-144: Rabin operands pushed as raw unsigned LE bytes keep their meani
     });
 
     it('raw modulus: real Spend accepts the honest signature', () => {
-      const r = run(msg, scriptNum(sig), rawLE(padding), nRaw);
+      const r = runRawModulus(msg, scriptNum(sig), rawLE(padding), nRaw);
       expect(r.reachedEngine).toBe(true);
       expect(r.vmAccepted, `Spend refused an honest signature under a raw high-bit modulus: ${r.vmError}`).toBe(true);
       expect(r.interpreterAccepted).toBe(true);
     });
 
     it('raw signature: real Spend accepts the honest signature', () => {
-      const r = run(msg, sigRaw, rawLE(padding), scriptNum(HIGH_BIT_KEY.n));
+      const r = run(msg, sigRaw, rawLE(padding), HIGH_BIT_KEY.n);
       expect(r.reachedEngine).toBe(true);
       expect(r.vmAccepted, `Spend refused an honest raw high-bit signature: ${r.vmError}`).toBe(true);
       expect(r.interpreterAccepted).toBe(true);
@@ -183,14 +254,14 @@ describe('F-144: Rabin operands pushed as raw unsigned LE bytes keep their meani
 
     it('raw modulus and raw sig+1: both engines refuse', () => {
       expect(rabinVerify(msg, sig + 1n, rawLE(padding), HIGH_BIT_KEY.n)).toBe(false);
-      const r = run(msg, rawLE(sig + 1n), rawLE(padding), nRaw);
+      const r = runRawModulus(msg, rawLE(sig + 1n), rawLE(padding), nRaw);
       expect(r.reachedEngine).toBe(true);
       expect(r.vmAccepted).toBe(false);
       expect(r.interpreterAccepted).toBe(false);
     });
 
     it('the same signature pushed as Script numbers is still accepted (normalization is the identity there)', () => {
-      const r = run(msg, scriptNum(sig), scriptNum(padding), scriptNum(HIGH_BIT_KEY.n));
+      const r = run(msg, scriptNum(sig), scriptNum(padding), HIGH_BIT_KEY.n);
       expect(r.vmAccepted, `vmErr=${r.vmError}`).toBe(true);
       expect(r.interpreterAccepted).toBe(true);
     });

@@ -53,6 +53,7 @@ func Validate(contract *ContractNode) *ValidationResult {
 	ctx.validateMethods()
 	ctx.checkNoRecursion()
 	ctx.checkReservedNames()
+	ctx.checkRabinPubKeyProvenance()
 
 	// Issue #123: reject preimage-field reads / output bindings that are
 	// unsound under a method's declared @sighash mode (security core). This
@@ -1801,6 +1802,268 @@ func walkExpr(expr Expression, visitor func(Expression)) {
 	case ArrayLiteralExpr:
 		for _, el := range e.Elements {
 			walkExpr(el, visitor)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ---------------------------------------------------------------------------
+
+// RabinPubKeyProvenanceMessage is the one diagnostic every tier emits for
+// F-286 (user decision R78).
+const RabinPubKeyProvenanceMessage = "verifyRabinSig public key (4th argument) must be a contract property or a literal; " +
+	"a spender-supplied Rabin modulus lets anyone forge a signature"
+
+type rabinScope struct {
+	method    *MethodNode
+	isPrivate bool
+	params    map[string]int
+	bindings  map[string][]Expression
+	mutated   map[string]bool
+}
+
+type rabinCallSite struct {
+	args  []Expression
+	scope *rabinScope
+}
+
+// checkRabinPubKeyProvenance ports packages/runar-compiler/src/passes/
+// 02-validate.ts checkRabinPubKeyProvenance. verifyRabinSig(msg, sig,
+// padding, n) checks (sig^2 + padding) mod n == SHA256(msg) mod n; a spender
+// who chooses n forges any message, so n must be fixed by the deployer.
+//
+// Trusted 4th arguments: a property read (this.x, or a bare identifier naming
+// a property no parameter or local shadows); a bigint literal; a local whose
+// initialiser and every assignment are trusted; a parameter of a PRIVATE
+// method that every call site (at least one) binds to a trusted value (least
+// fixed point). Everything else is refused.
+func (ctx *validationContext) checkRabinPubKeyProvenance() {
+	contract := ctx.contract
+	props := map[string]bool{}
+	for _, p := range contract.Properties {
+		props[p.Name] = true
+	}
+	private := map[string]*MethodNode{}
+	for i := range contract.Methods {
+		if contract.Methods[i].Visibility == "private" {
+			private[contract.Methods[i].Name] = &contract.Methods[i]
+		}
+	}
+
+	newScope := func(m *MethodNode, isPrivate bool) *rabinScope {
+		sc := &rabinScope{method: m, isPrivate: isPrivate, params: map[string]int{},
+			bindings: map[string][]Expression{}, mutated: map[string]bool{}}
+		for i, p := range m.Params {
+			sc.params[p.Name] = i
+		}
+		visitExpr := func(e Expression) {
+			walkExpr(e, func(x Expression) {
+				switch v := x.(type) {
+				case IncrementExpr:
+					if id, ok := v.Operand.(Identifier); ok {
+						sc.mutated[id.Name] = true
+					}
+				case DecrementExpr:
+					if id, ok := v.Operand.(Identifier); ok {
+						sc.mutated[id.Name] = true
+					}
+				}
+			})
+		}
+		var visit func(stmts []Statement)
+		visit = func(stmts []Statement) {
+			for _, stmt := range stmts {
+				switch st := stmt.(type) {
+				case VariableDeclStmt:
+					sc.bindings[st.Name] = append(sc.bindings[st.Name], st.Init)
+					visitExpr(st.Init)
+				case AssignmentStmt:
+					if id, ok := st.Target.(Identifier); ok {
+						sc.bindings[id.Name] = append(sc.bindings[id.Name], st.Value)
+					}
+					visitExpr(st.Target)
+					visitExpr(st.Value)
+				case ExpressionStmt:
+					visitExpr(st.Expr)
+				case IfStmt:
+					visitExpr(st.Condition)
+					visit(st.Then)
+					visit(st.Else)
+				case ForStmt:
+					visit([]Statement{st.Init})
+					visitExpr(st.Condition)
+					if st.Update != nil {
+						visit([]Statement{st.Update})
+					}
+					visit(st.Body)
+				case ReturnStmt:
+					if st.Value != nil {
+						visitExpr(st.Value)
+					}
+				}
+			}
+		}
+		visit(m.Body)
+		return sc
+	}
+
+	scopes := []*rabinScope{newScope(&contract.Constructor, false)}
+	for i := range contract.Methods {
+		scopes = append(scopes, newScope(&contract.Methods[i], contract.Methods[i].Visibility == "private"))
+	}
+
+	trusted := map[string]map[int]bool{}
+	for name := range private {
+		trusted[name] = map[int]bool{}
+	}
+
+	var isTrusted func(e Expression, sc *rabinScope, visiting map[string]bool) bool
+	isTrusted = func(e Expression, sc *rabinScope, visiting map[string]bool) bool {
+		switch v := e.(type) {
+		case PropertyAccessExpr:
+			return true
+		case MemberExpr:
+			id, ok := v.Object.(Identifier)
+			return ok && id.Name == "this"
+		case BigIntLiteral:
+			return true
+		case Identifier:
+			name := v.Name
+			idx, isParam := sc.params[name]
+			locals, isLocal := sc.bindings[name]
+			if !isParam && !isLocal {
+				return props[name]
+			}
+			if sc.mutated[name] {
+				return false
+			}
+			if isParam {
+				if !sc.isPrivate || !trusted[sc.method.Name][idx] {
+					return false
+				}
+			}
+			if isLocal {
+				if visiting[name] {
+					return false
+				}
+				visiting[name] = true
+				defer delete(visiting, name)
+				for _, b := range locals {
+					if !isTrusted(b, sc, visiting) {
+						return false
+					}
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+
+	privateCallee := func(e Expression) (string, []Expression, bool) {
+		call, ok := e.(CallExpr)
+		if !ok {
+			return "", nil, false
+		}
+		name := ""
+		switch c := call.Callee.(type) {
+		case PropertyAccessExpr:
+			name = c.Property
+		case MemberExpr:
+			if id, ok := c.Object.(Identifier); ok && id.Name == "this" {
+				name = c.Property
+			}
+		}
+		if _, ok := private[name]; name == "" || !ok {
+			return "", nil, false
+		}
+		return name, call.Args, true
+	}
+
+	sites := map[string][]rabinCallSite{}
+	for _, sc := range scopes {
+		sc := sc
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, _ SourceLocation) {
+			if name, args, ok := privateCallee(e); ok {
+				sites[name] = append(sites[name], rabinCallSite{args: args, scope: sc})
+			}
+		})
+	}
+
+	// Least fixed point; monotone, so it terminates.
+	for changed := true; changed; {
+		changed = false
+		for name, m := range private {
+			ss := sites[name]
+			if len(ss) == 0 {
+				continue
+			}
+			for i := range m.Params {
+				if trusted[name][i] {
+					continue
+				}
+				all := true
+				for _, site := range ss {
+					if i >= len(site.args) || !isTrusted(site.args[i], site.scope, map[string]bool{}) {
+						all = false
+						break
+					}
+				}
+				if all {
+					trusted[name][i] = true
+					changed = true
+				}
+			}
+		}
+	}
+
+	for _, sc := range scopes {
+		sc := sc
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, loc SourceLocation) {
+			call, ok := e.(CallExpr)
+			if !ok {
+				return
+			}
+			id, ok := call.Callee.(Identifier)
+			if !ok || id.Name != "verifyRabinSig" || len(call.Args) < 4 {
+				return
+			}
+			if !isTrusted(call.Args[3], sc, map[string]bool{}) {
+				l := loc
+				ctx.addErrorWithLoc(RabinPubKeyProvenanceMessage, &l)
+			}
+		})
+	}
+}
+
+// walkRabinBodyDeep visits every expression in stmts, including every for
+// loop's init and update at any depth, with the enclosing statement's location.
+func walkRabinBodyDeep(stmts []Statement, fallback SourceLocation, visitor func(Expression, SourceLocation)) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case ExpressionStmt:
+			walkExpr(s.Expr, func(e Expression) { visitor(e, s.SourceLocation) })
+		case VariableDeclStmt:
+			walkExpr(s.Init, func(e Expression) { visitor(e, s.SourceLocation) })
+		case AssignmentStmt:
+			walkExpr(s.Target, func(e Expression) { visitor(e, s.SourceLocation) })
+			walkExpr(s.Value, func(e Expression) { visitor(e, s.SourceLocation) })
+		case IfStmt:
+			walkExpr(s.Condition, func(e Expression) { visitor(e, s.SourceLocation) })
+			walkRabinBodyDeep(s.Then, fallback, visitor)
+			walkRabinBodyDeep(s.Else, fallback, visitor)
+		case ForStmt:
+			walkRabinBodyDeep([]Statement{s.Init}, fallback, visitor)
+			walkExpr(s.Condition, func(e Expression) { visitor(e, s.SourceLocation) })
+			if s.Update != nil {
+				walkRabinBodyDeep([]Statement{s.Update}, fallback, visitor)
+			}
+			walkRabinBodyDeep(s.Body, fallback, visitor)
+		case ReturnStmt:
+			if s.Value != nil {
+				walkExpr(s.Value, func(e Expression) { visitor(e, s.SourceLocation) })
+			}
 		}
 	}
 }

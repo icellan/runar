@@ -46,6 +46,7 @@ export function validate(contract: ContractNode): ValidationResult {
   validateMethods(ctx);
   checkNoRecursion(ctx);
   checkReservedNames(ctx);
+  checkRabinPubKeyProvenance(ctx);
 
   // Issue #123: reject preimage-field reads / output bindings that are unsound
   // under a method's declared @sighash mode (security core). This pass emits
@@ -1788,6 +1789,227 @@ function hasCycle(
 
   stack.delete(methodName);
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ---------------------------------------------------------------------------
+
+/**
+ * The one diagnostic every tier emits for F-286 (user decision R78).
+ */
+export const RABIN_PUBKEY_PROVENANCE_MESSAGE =
+  'verifyRabinSig public key (4th argument) must be a contract property or a literal; ' +
+  'a spender-supplied Rabin modulus lets anyone forge a signature';
+
+/**
+ * `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod n ==
+ * SHA256(msg) mod n`. A spender who chooses `n` forges any message (`n = 1`,
+ * `sig = 0` passes on chain), so the modulus must be fixed by the deployer.
+ *
+ * Trusted values for the 4th argument:
+ *   - a property read: `this.x` (`property_access`, or `member_expr` on
+ *     `this`), or a bare identifier naming a property that no parameter or
+ *     local of the method shadows (the Java surface's bare field);
+ *   - a bigint literal;
+ *   - a local whose initialiser AND every assignment to it are trusted;
+ *   - a parameter of a PRIVATE method that every call site (at least one)
+ *     binds to a trusted value in the caller (least fixed point, so chains of
+ *     helpers work and an uncalled or cyclic helper stays untrusted).
+ * Everything else — public and constructor parameters, arithmetic, ternaries,
+ * calls — is refused.
+ */
+function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
+  const contract = ctx.contract;
+  const propertyNames = new Set(contract.properties.map((p) => p.name));
+  const privateMethods = new Map<string, MethodNode>();
+  for (const m of contract.methods) {
+    if (m.visibility === 'private') privateMethods.set(m.name, m);
+  }
+
+  // Per method: local name -> every value bound to it (inits + assignments),
+  // and names that are ever ++/-- (never trusted).
+  interface Scope {
+    method: MethodNode;
+    params: Set<string>;
+    bindings: Map<string, Expression[]>;
+    mutated: Set<string>;
+  }
+  const scopeOf = (method: MethodNode): Scope => {
+    const scope: Scope = {
+      method,
+      params: new Set(method.params.map((p) => p.name)),
+      bindings: new Map(),
+      mutated: new Set(),
+    };
+    const bind = (name: string, value: Expression) => {
+      const list = scope.bindings.get(name) ?? [];
+      list.push(value);
+      scope.bindings.set(name, list);
+    };
+    const visitExpr = (expr: Expression) => {
+      walkExpr(expr, (e) => {
+        if ((e.kind === 'increment_expr' || e.kind === 'decrement_expr') && e.operand.kind === 'identifier') {
+          scope.mutated.add(e.operand.name);
+        }
+      });
+    };
+    const visit = (stmts: Statement[]) => {
+      for (const stmt of stmts) {
+        switch (stmt.kind) {
+          case 'variable_decl':
+            bind(stmt.name, stmt.init);
+            visitExpr(stmt.init);
+            break;
+          case 'assignment':
+            if (stmt.target.kind === 'identifier') bind(stmt.target.name, stmt.value);
+            visitExpr(stmt.target);
+            visitExpr(stmt.value);
+            break;
+          case 'expression_statement':
+            visitExpr(stmt.expression);
+            break;
+          case 'if_statement':
+            visitExpr(stmt.condition);
+            visit(stmt.then);
+            if (stmt.else) visit(stmt.else);
+            break;
+          case 'for_statement':
+            visit([stmt.init]);
+            visitExpr(stmt.condition);
+            visit([stmt.update]);
+            visit(stmt.body);
+            break;
+          case 'return_statement':
+            if (stmt.value) visitExpr(stmt.value);
+            break;
+        }
+      }
+    };
+    visit(method.body);
+    return scope;
+  };
+
+  const allMethods = [contract.constructor, ...contract.methods];
+  const scopes = new Map<MethodNode, Scope>(allMethods.map((m) => [m, scopeOf(m)]));
+
+  // Private method name -> indices of parameters proven trusted so far.
+  const trustedParams = new Map<string, Set<number>>();
+  for (const name of privateMethods.keys()) trustedParams.set(name, new Set());
+
+  const isTrusted = (expr: Expression, scope: Scope, visiting: Set<string>): boolean => {
+    switch (expr.kind) {
+      case 'property_access':
+        return true;
+      case 'member_expr':
+        return expr.object.kind === 'identifier' && expr.object.name === 'this';
+      case 'bigint_literal':
+        return true;
+      case 'identifier': {
+        const name = expr.name;
+        const isParam = scope.params.has(name);
+        const locals = scope.bindings.get(name);
+        if (!isParam && !locals) return propertyNames.has(name);
+        if (scope.mutated.has(name)) return false;
+        if (isParam) {
+          const method = scope.method;
+          if (method.visibility !== 'private' || method === contract.constructor) return false;
+          const idx = method.params.findIndex((p) => p.name === name);
+          if (!trustedParams.get(method.name)?.has(idx)) return false;
+        }
+        if (locals) {
+          if (visiting.has(name)) return false;
+          visiting.add(name);
+          const ok = locals.every((v) => isTrusted(v, scope, visiting));
+          visiting.delete(name);
+          if (!ok) return false;
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
+  };
+
+  const privateCallee = (expr: Expression): string | undefined => {
+    if (expr.kind !== 'call_expr') return undefined;
+    const c = expr.callee;
+    let name: string | undefined;
+    if (c.kind === 'property_access') name = c.property;
+    else if (c.kind === 'member_expr' && c.object.kind === 'identifier' && c.object.name === 'this') name = c.property;
+    return name !== undefined && privateMethods.has(name) ? name : undefined;
+  };
+
+  // Every call site of every private method, with the caller's scope.
+  const callSites = new Map<string, { args: Expression[]; scope: Scope }[]>();
+  for (const name of privateMethods.keys()) callSites.set(name, []);
+  for (const scope of scopes.values()) {
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      const callee = privateCallee(e);
+      if (callee !== undefined && e.kind === 'call_expr') callSites.get(callee)!.push({ args: e.args, scope });
+    });
+  }
+
+  // Least fixed point: a parameter becomes trusted once every call site binds
+  // it to a trusted value. Monotone, so it terminates.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, method] of privateMethods) {
+      const sites = callSites.get(name)!;
+      if (sites.length === 0) continue;
+      const trusted = trustedParams.get(name)!;
+      for (let i = 0; i < method.params.length; i++) {
+        if (trusted.has(i)) continue;
+        if (sites.every((s) => s.args[i] !== undefined && isTrusted(s.args[i]!, s.scope, new Set()))) {
+          trusted.add(i);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  for (const scope of scopes.values()) {
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      if (
+        e.kind === 'call_expr' &&
+        e.callee.kind === 'identifier' &&
+        e.callee.name === 'verifyRabinSig' &&
+        e.args.length >= 4 &&
+        !isTrusted(e.args[3]!, scope, new Set())
+      ) {
+        ctx.errors.push(makeDiagnostic(
+          RABIN_PUBKEY_PROVENANCE_MESSAGE,
+          'error',
+          e.sourceLocation ?? scope.method.sourceLocation,
+        ));
+      }
+    });
+  }
+}
+
+/**
+ * Like `walkExpressionsInBody`, but also visits every `for` loop's init and
+ * update, at any nesting depth.
+ */
+function walkExpressionsInBodyDeep(stmts: Statement[], visitor: (expr: Expression) => void): void {
+  for (const stmt of stmts) {
+    switch (stmt.kind) {
+      case 'if_statement':
+        walkExpr(stmt.condition, visitor);
+        walkExpressionsInBodyDeep(stmt.then, visitor);
+        if (stmt.else) walkExpressionsInBodyDeep(stmt.else, visitor);
+        break;
+      case 'for_statement':
+        walkExpressionsInBodyDeep([stmt.init], visitor);
+        walkExpr(stmt.condition, visitor);
+        walkExpressionsInBodyDeep([stmt.update], visitor);
+        walkExpressionsInBodyDeep(stmt.body, visitor);
+        break;
+      default:
+        walkExpressionsInStatement(stmt, visitor);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
