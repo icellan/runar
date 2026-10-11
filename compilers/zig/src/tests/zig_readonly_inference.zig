@@ -265,6 +265,54 @@ test "mutation nested inside if / for bodies is found" {
     try testing.expect(propByName(c, "untouched").readonly);
 }
 
+test "F-393: a local that shadows a readonly property name must not flip it to mutable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // `limit` is a property with no default and no explicit runar.Readonly
+    // -- rule 3 (assignment) is the only thing that can make it mutable.
+    // `bump` declares a LOCAL also named `limit` and reassigns THAT local
+    // (`limit = limit + 1;`, target_is_property == false, per
+    // `types.targetIsProperty` / `parse_zig.zig`'s `parseExpressionStatement`)
+    // -- `self.limit` is never written anywhere. The property must stay
+    // readonly: a bare-name collision with a local is not a property write
+    // (see `validate.zig`'s `checkReadonlyWrites`, which keys off
+    // `target_is_property` for exactly this reason, and the Go reference
+    // `collectZigMutatedProperties`, which only records a target that type-
+    // asserts to `PropertyAccessExpr`).
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const Shadow = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\
+        \\    limit: i64,
+        \\    count: i64 = 0,
+        \\
+        \\    pub fn init(limit: i64, count: i64) Shadow {
+        \\        return .{ .limit = limit, .count = count };
+        \\    }
+        \\
+        \\    pub fn bump(self: *Shadow, amount: i64) void {
+        \\        var limit: i64 = amount;
+        \\        limit = limit + 1;
+        \\        runar.assert(limit > 0);
+        \\        self.count += 1;
+        \\        self.addOutput(1000, self.count);
+        \\    }
+        \\};
+    ;
+
+    const c = try parseInferred(arena.allocator(), source, &.{});
+    // expectEqual (not expect) so a failure prints "expected true, found
+    // false" instead of a bare boolean -- the zig test binary bundles 1290
+    // tests in one process and dumps a stale error-return-trace alongside
+    // any failure, so a self-describing message is the only reliable signal
+    // of WHY this test failed.
+    try testing.expectEqual(true, propByName(c, "limit").readonly);
+    try testing.expectEqual(false, propByName(c, "count").readonly);
+}
+
 test "SmartContract fields stay readonly regardless of assignment" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

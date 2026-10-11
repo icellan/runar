@@ -92,14 +92,19 @@ fn collectInStmt(allocator: Allocator, stmt: Statement, out: *NameSet) void {
     switch (stmt) {
         // The Zig AST flattens an assignment target to a bare name:
         // `self.count = ...` and a local `count = ...` both land here as
-        // `target = "count"`. Callers intersect the collected names with the
-        // property list, which matches how `anf_lower.zig` resolves the same
-        // statement (`ctx.isProperty(assign.target)` is checked before
-        // `ctx.isLocal`), so no new property/local ambiguity is introduced.
-        // Compound forms (`self.x += 1`) are already normalised by the parser
-        // into this same node with a synthesised binary RHS.
+        // `target = "count"` -- `target` alone cannot tell them apart.
+        // `target_is_property` is the parser's authoritative answer (set via
+        // `types.targetIsProperty` in `parse_zig.zig`), so only record the
+        // name when it is actually a property write; otherwise a local that
+        // shadows a property name would wrongly flip that property mutable.
+        // This mirrors the Go reference (`collectZigMutatedProperties` in
+        // `compilers/go/frontend/parser_zig.go`, which only records a target
+        // that type-asserts to `PropertyAccessExpr`) and `validate.zig`'s
+        // `checkReadonlyWrites`, which gates on the same flag for the same
+        // reason. Compound forms (`self.x += 1`) are already normalised by
+        // the parser into this same node with a synthesised binary RHS.
         .assign => |a| {
-            out.put(allocator, a.target, {}) catch {};
+            if (a.target_is_property) out.put(allocator, a.target, {}) catch {};
             collectInExpr(allocator, a.value, out);
         },
         .const_decl => |d| collectInExpr(allocator, d.value, out),
