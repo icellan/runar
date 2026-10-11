@@ -675,13 +675,28 @@ module Runar
     end
 
     # Left-most bytes of a hex string.
+    # Script: OP_SPLIT OP_DROP -- the split index is `length`; OP_SPLIT aborts
+    # when it is negative or past the end of `data` (F-274). `data[0, n]` on a
+    # native Ruby String never aborts -- it clamps a too-large `n` and returns
+    # the whole string for a negative one -- so the bound is checked here.
     def left(data, length)
+      raise ArgumentError, "left: length #{length} is outside a #{data.length / 2}-byte value" if length.negative? || length * 2 > data.length
+
       data[0, length * 2]
     end
 
     # Right-most bytes of a hex string.
+    # Script: OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP -- the split index
+    # is `size(data) - length`, so the same bound applies (F-274).
+    # `data[-(length * 2)..]` fails open at both ends: `length == 0` indexes
+    # with Ruby's `-0`, which native `String#[]` resolves to `0` and returns
+    # the WHOLE string instead of the empty one OP_SPLIT produces, and a
+    # `length` past the end returns `nil` instead of raising.
     def right(data, length)
-      data[-(length * 2)..]
+      raise ArgumentError, "right: length #{length} is outside a #{data.length / 2}-byte value" if length.negative? || length * 2 > data.length
+
+      n = length * 2
+      n.zero? ? '' : data[-n..]
     end
 
     # Reverse the byte order of a hex string.

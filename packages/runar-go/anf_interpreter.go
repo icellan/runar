@@ -1318,6 +1318,30 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		h := anfToString(args[0])
 		return big.NewInt(int64(len(h) / 2))
 
+	// F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+	// whenever the computed split position is outside [0, size(data)] --
+	// `left` splits at `length` directly, `right` splits at
+	// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+	// lowerRight). A negative or past-the-end `length` must panic, never
+	// return a clamped value.
+	case "left":
+		h := anfToString(args[0])
+		length := anfToBigInt(args[1]).Int64()
+		if length < 0 || length*2 > int64(len(h)) {
+			panic(&ScriptOpcodeError{Opcode: "left", Message: fmt.Sprintf(
+				"length %d is outside a %d-byte value", length, len(h)/2)})
+		}
+		return h[:length*2]
+
+	case "right":
+		h := anfToString(args[0])
+		length := anfToBigInt(args[1]).Int64()
+		if length < 0 || length*2 > int64(len(h)) {
+			panic(&ScriptOpcodeError{Opcode: "right", Message: fmt.Sprintf(
+				"length %d is outside a %d-byte value", length, len(h)/2)})
+		}
+		return h[int64(len(h))-length*2:]
+
 	// Math builtins
 	case "abs":
 		v := anfToBigInt(args[0])

@@ -1338,6 +1338,24 @@ def _eval_call(
     if func == 'len':
         hex_str = str(args[0] or '')
         return len(hex_str) // 2
+    # F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+    # whenever the computed split position is outside [0, size(data)] --
+    # `left` splits at `length` directly, `right` splits at
+    # `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+    # lowerRight). A negative or past-the-end `length` must raise, never
+    # return a clamped value.
+    if func == 'left':
+        hex_str = str(args[0] or '')
+        length = int(_to_int(args[1]))
+        if length < 0 or length * 2 > len(hex_str):
+            raise ValueError(f'left: length {length} is outside a {len(hex_str) // 2}-byte value')
+        return hex_str[:length * 2]
+    if func == 'right':
+        hex_str = str(args[0] or '')
+        length = int(_to_int(args[1]))
+        if length < 0 or length * 2 > len(hex_str):
+            raise ValueError(f'right: length {length} is outside a {len(hex_str) // 2}-byte value')
+        return hex_str[len(hex_str) - length * 2:]
 
     # Math builtins
     if func == 'abs':

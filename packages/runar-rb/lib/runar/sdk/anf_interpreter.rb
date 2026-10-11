@@ -996,6 +996,26 @@ module Runar
           hex_str = (args[0] || '').to_s
           hex_str.length / 2
 
+        # F-274: `left`/`right` compile to an OP_SPLIT-based script that
+        # ABORTS whenever the computed split position is outside
+        # [0, size(data)] -- `left` splits at `length` directly, `right`
+        # splits at `size(data) - length`. A negative or past-the-end
+        # `length` must raise, never return a clamped or whole-string value.
+        when 'left'
+          hex_str = (args[0] || '').to_s
+          length  = to_int(args[1]).to_i
+          raise "left: length #{length} is outside a #{hex_str.length / 2}-byte value" if length.negative? || length * 2 > hex_str.length
+
+          hex_str[0, length * 2]
+
+        when 'right'
+          hex_str = (args[0] || '').to_s
+          length  = to_int(args[1]).to_i
+          raise "right: length #{length} is outside a #{hex_str.length / 2}-byte value" if length.negative? || length * 2 > hex_str.length
+
+          n = length * 2
+          n.zero? ? '' : hex_str[-n..]
+
         # Math built-ins.
         when 'abs'
           to_int(args[0]).abs

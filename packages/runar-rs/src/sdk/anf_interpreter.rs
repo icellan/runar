@@ -1156,7 +1156,7 @@ fn eval_value(
             // (zero divisor, the pow exponent guard, sqrt of a negative) fails
             // the spend; surface it through the rejection channel instead of
             // letting `eval_call` invent a value (F-134).
-            if math_builtin_aborts(&func, &args) {
+            if math_builtin_aborts(&func, &args) || split_builtin_aborts(&func, &args) {
                 return Err(AssertionFailureError {
                     method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
                     binding_name: binding_name.to_string(),
@@ -1704,6 +1704,21 @@ fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
     }
 }
 
+/// F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+/// whenever the computed split position is outside `[0, size(data)]` --
+/// `left` splits at `length` directly, `right` splits at
+/// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+/// lowerRight). A negative or past-the-end `length` must fail the spend, not
+/// return a clamped value.
+fn split_builtin_aborts(func: &str, args: &[Val]) -> bool {
+    if func != "left" && func != "right" {
+        return false;
+    }
+    let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+    let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+    length < 0 || length * 2 > hex.len() as i64
+}
+
 fn eval_call(
     func: &str,
     args: &[Val],
@@ -1787,6 +1802,17 @@ fn eval_call(
         "len" => {
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
             Val::Int((hex.len() / 2) as i64)
+        }
+        // F-274: bounds already verified by `split_builtin_aborts` above.
+        "left" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            Val::Bytes(hex[..(length * 2) as usize].to_string())
+        }
+        "right" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            Val::Bytes(hex[hex.len() - (length * 2) as usize..].to_string())
         }
 
         // Math builtins

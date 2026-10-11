@@ -648,9 +648,20 @@ public final class MockCrypto {
         return new ByteString(Arrays.copyOfRange(all, s, s + l));
     }
 
+    /**
+     * F-274: {@code left}/{@code right} compile to an OP_SPLIT-based script
+     * that ABORTS whenever the split position is outside
+     * {@code [0, size(data)]}. {@code Arrays.copyOfRange} does not: a {@code
+     * to} past the array's end is silently zero-padded instead of thrown, so
+     * the bound is checked explicitly here rather than left to that method.
+     */
     public static ByteString left(ByteString bs, BigInteger length) {
         int l = length.intValueExact();
-        return new ByteString(Arrays.copyOfRange(bs.toByteArray(), 0, l));
+        byte[] all = bs.toByteArray();
+        if (l < 0 || l > all.length) {
+            throw new ArithmeticException("left: length " + l + " is outside a " + all.length + "-byte value");
+        }
+        return new ByteString(Arrays.copyOfRange(all, 0, l));
     }
 
     public static ByteString right(ByteString bs, BigInteger length) {

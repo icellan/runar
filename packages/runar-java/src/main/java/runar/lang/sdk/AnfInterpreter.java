@@ -1467,6 +1467,29 @@ public final class AnfInterpreter {
             }
             case "len":        return BigInteger.valueOf(asString(args.get(0)).length() / 2);
 
+            // F-274: `left`/`right` compile to an OP_SPLIT-based script that
+            // ABORTS whenever the computed split position is outside
+            // [0, size(data)] -- `left` splits at `length` directly, `right`
+            // splits at `size(data) - length` (05-stack-lower.ts:
+            // BUILTIN_OPCODES.left, lowerRight). A negative or past-the-end
+            // `length` must throw, never return a clamped value.
+            case "left": {
+                String h = asString(args.get(0));
+                int len = toBigInt(args.get(1)).intValueExact();
+                if (len < 0 || len * 2 > h.length()) {
+                    throw new ArithmeticException("left: length " + len + " is outside a " + h.length() / 2 + "-byte value");
+                }
+                return h.substring(0, len * 2);
+            }
+            case "right": {
+                String h = asString(args.get(0));
+                int len = toBigInt(args.get(1)).intValueExact();
+                if (len < 0 || len * 2 > h.length()) {
+                    throw new ArithmeticException("right: length " + len + " is outside a " + h.length() / 2 + "-byte value");
+                }
+                return h.substring(h.length() - len * 2);
+            }
+
             // Math built-ins (delegate to MockCrypto where possible)
             case "abs":        return MockCrypto.abs(toBigInt(args.get(0)));
             case "min":        return MockCrypto.min(toBigInt(args.get(0)), toBigInt(args.get(1)));

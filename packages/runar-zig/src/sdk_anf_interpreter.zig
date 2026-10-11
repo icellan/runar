@@ -996,6 +996,7 @@ fn evalNode(
             // the spend, like a byte-op abort; `evalCall` would otherwise
             // invent a value (F-134).
             if (mathBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
+            if (splitBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
             return evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
         },
@@ -1546,6 +1547,20 @@ fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *cons
     return false;
 }
 
+/// F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+/// whenever the computed split position is outside `[0, size(data)]` --
+/// `left` splits at `length` directly, `right` splits at
+/// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+/// lowerRight). A negative or past-the-end `length` must abort, never return
+/// a clamped value.
+fn splitBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    if (!eql(u8, func, "left") and !eql(u8, func, "right")) return false;
+    const hex = asHex(getArg(arg_names, 0, env));
+    const length = toInt(getArg(arg_names, 1, env));
+    return length < 0 or length * 2 > @as(i64, @intCast(hex.len));
+}
+
 fn evalCall(
     allocator: std.mem.Allocator,
     func: []const u8,
@@ -1744,21 +1759,17 @@ fn evalCall(
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "left")) {
+        // Bounds already verified by `splitBuiltinAborts` above.
         const hex = asHex(getArg(arg_names, 0, env));
-        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const hex_len = @min(length * 2, hex.len);
-        const result = allocator.dupe(u8, hex[0..hex_len]) catch return .{ .bytes = "" };
+        const length: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const result = allocator.dupe(u8, hex[0 .. length * 2]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "right")) {
+        // Bounds already verified by `splitBuiltinAborts` above.
         const hex = asHex(getArg(arg_names, 0, env));
-        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const hex_len = length * 2;
-        if (hex_len >= hex.len) {
-            const result = allocator.dupe(u8, hex) catch return .{ .bytes = "" };
-            return .{ .bytes = result };
-        }
-        const result = allocator.dupe(u8, hex[hex.len - hex_len ..]) catch return .{ .bytes = "" };
+        const length: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const result = allocator.dupe(u8, hex[hex.len - length * 2 ..]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "reverseBytes")) {

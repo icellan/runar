@@ -148,11 +148,25 @@ export function substr(data: ByteString, start: bigint, length: bigint): ByteStr
 }
 
 export function left(data: ByteString, length: bigint): ByteString {
-  return data.slice(0, Number(length) * 2) as ByteString;
+  const n = Number(length) * 2;
+  if (length < 0n || n > data.length) {
+    throw new Error(
+      `left: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on a ` +
+        'position below zero or past the end of the element, it does not clamp',
+    );
+  }
+  return data.slice(0, n) as ByteString;
 }
 
 export function right(data: ByteString, length: bigint): ByteString {
-  return data.slice(data.length - Number(length) * 2) as ByteString;
+  const n = Number(length) * 2;
+  if (length < 0n || n > data.length) {
+    throw new Error(
+      `right: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on a ` +
+        'position below zero or past the end of the element, it does not clamp',
+    );
+  }
+  return data.slice(data.length - n) as ByteString;
 }
 
 /**

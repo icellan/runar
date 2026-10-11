@@ -1,0 +1,20 @@
+{
+  "_doc": "F-274 (CL-BUG-163): `left(data, n)` and `right(data, n)` both compile to an OP_SPLIT-based script that ABORTS whenever the computed split position is outside `[0, size(data)]` -- `left` splits at `n` directly, `right` splits at `size(data) - n` (packages/runar-compiler/src/passes/05-stack-lower.ts: BUILTIN_OPCODES.left = ['OP_SPLIT','OP_DROP']; lowerRight). Every row here is the COMPILED SCRIPT's verdict on @bsv/sdk Spend.validate, asserted by packages/runar-testing/src/__tests__/f274-split-builtins-onchain.test.ts (accept at `expect`, reject at a flipped witness; an `abort` row rejects both the eq and ne probe). Every native runtime and SDK ANF interpreter that models `left`/`right` must replay this file and agree: a value for an in-range split, an error -- never a value -- for an out-of-range one. `data`/`expect` are hex strings; `expect: \"abort\"` is the abort marker. Covers n=0, n=len(data), n>len(data), n<0, and an empty `data` input for both builtins, plus one interior split each so the probe discriminates a real cut from a no-op.",
+  "cases": [
+    { "fn": "left", "data": "aabbccdd", "n": 0, "expect": "" },
+    { "fn": "left", "data": "aabbccdd", "n": 2, "expect": "aabb" },
+    { "fn": "left", "data": "aabbccdd", "n": 4, "expect": "aabbccdd" },
+    { "fn": "left", "data": "aabbccdd", "n": 5, "expect": "abort" },
+    { "fn": "left", "data": "aabbccdd", "n": -1, "expect": "abort" },
+    { "fn": "left", "data": "", "n": 0, "expect": "" },
+    { "fn": "left", "data": "", "n": 1, "expect": "abort" },
+
+    { "fn": "right", "data": "aabbccdd", "n": 0, "expect": "" },
+    { "fn": "right", "data": "aabbccdd", "n": 2, "expect": "ccdd" },
+    { "fn": "right", "data": "aabbccdd", "n": 4, "expect": "aabbccdd" },
+    { "fn": "right", "data": "aabbccdd", "n": 5, "expect": "abort" },
+    { "fn": "right", "data": "aabbccdd", "n": -1, "expect": "abort" },
+    { "fn": "right", "data": "", "n": 0, "expect": "" },
+    { "fn": "right", "data": "", "n": 1, "expect": "abort" }
+  ]
+}

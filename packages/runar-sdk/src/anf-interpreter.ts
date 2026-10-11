@@ -1095,6 +1095,36 @@ function evalCall(
       const hex = String(args[0] ?? '');
       return BigInt(hex.length / 2);
     }
+    // F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+    // whenever the computed split position is outside [0, size(data)] —
+    // `left` splits at `length` directly, `right` splits at
+    // `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+    // lowerRight). A negative or past-the-end `length` must throw, never
+    // return a clamped value.
+    case 'left': {
+      const data = String(args[0] ?? '');
+      const length = toBigInt(args[1]);
+      const n = Number(length) * 2;
+      if (length < 0n || n > data.length) {
+        throw new Error(
+          `left: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on ` +
+            'a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return data.slice(0, n);
+    }
+    case 'right': {
+      const data = String(args[0] ?? '');
+      const length = toBigInt(args[1]);
+      const n = Number(length) * 2;
+      if (length < 0n || n > data.length) {
+        throw new Error(
+          `right: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on ` +
+            'a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return data.slice(data.length - n);
+    }
 
     // Math builtins
     case 'abs': return toBigInt(args[0]) < 0n ? -toBigInt(args[0]) : toBigInt(args[0]);
@@ -1288,8 +1318,9 @@ function evalCall(
       // made the `try/catch` guard in `contract.ts` structurally unable to
       // fire for the 76 of runar-lang's 105 builtins this interpreter does
       // not model — every EC op, every NIST P-256/P-384 op, all six SLH-DSA
-      // verifies, Rabin, `left`/`right`/`split`, `sha256Compress`,
-      // `merkleRootSha256`. `contract.ts` then spreads the result over the
+      // verifies, Rabin, `split` (F-274 modelled `left`/`right`, its two
+      // siblings, above), `sha256Compress`, `merkleRootSha256`. `contract.ts`
+      // then spreads the result over the
       // real state and the `undefined` wins, so a `boolean` state field fed
       // by a signature verifier silently became false and the eventual error
       // pointed at the covenant instead of at this gap. Naming the builtin

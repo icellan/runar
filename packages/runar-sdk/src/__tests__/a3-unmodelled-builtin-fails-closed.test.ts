@@ -140,8 +140,14 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     }
   });
 
-  it('RED: the byte-slicing gap (left / right / split / sha256Compress) is refused too', () => {
-    for (const name of ['left', 'right', 'split', 'sha256Compress', 'sha256Finalize']) {
+  it('RED: the byte-slicing gap (split / sha256Compress) is refused too', () => {
+    // F-274 modelled `left`/`right` (CL-BUG-163: they used to fail CLOSED
+    // here, but also fail OPEN with wrong values in several native runtimes
+    // and SDK ANF interpreters for an out-of-range length — see
+    // f274-split-builtins-onchain-vectors.test.ts), so they are no longer
+    // part of this gap. `split` is the same OP_SPLIT family and is still
+    // unmodelled.
+    for (const name of ['split', 'sha256Compress', 'sha256Finalize']) {
       expect(probe(name), `${name} must be refused`).toMatchObject({ kind: 'refused' });
     }
   });
