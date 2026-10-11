@@ -348,6 +348,16 @@ export interface Scorecard {
   documentedSurvivors: MutantResult[];
   /** Mutants whose patch no longer applies — scored as neither caught nor survived. */
   stale: MutantResult[];
+  /**
+   * Mutants that were `caught` (so not an `unexpectedSurvivor`) but where at
+   * least one gate the mutant itself nominated in `expectCaughtBy` never
+   * fired. `scoreMutant` only runs the gates a mutant nominates, so "caught"
+   * means "one of the gates this mutant already believed would catch it
+   * did" — a sibling gate can go silently dead forever and `caught: true`
+   * would hide it. This bucket is what makes that visible to the exit code
+   * (F-172).
+   */
+  partiallyCaught: MutantResult[];
   results: MutantResult[];
 }
 
@@ -364,6 +374,9 @@ export function score(mutants: Mutant[]): Scorecard {
     unexpectedSurvivors: results.filter((r) => r.unexpectedSurvivor),
     documentedSurvivors: results.filter((r) => r.documentedSurvivor && !r.stale),
     stale: results.filter((r) => r.stale),
+    partiallyCaught: results.filter(
+      (r) => !r.documentedSurvivor && r.caught && r.missedExpectedGates.length > 0,
+    ),
     results,
   };
 }
@@ -418,6 +431,16 @@ function printScorecard(card: Scorecard, mutants: Mutant[]): void {
     console.log('  ✗ UNEXPECTED SURVIVORS (real holes in the net — MUST be addressed):');
     for (const r of card.unexpectedSurvivors) {
       console.log(`   • ${r.id} (${r.class} / ${r.stage}) — expected ${r.expectCaughtBy.join(', ')}`);
+    }
+    console.log('');
+  }
+  if (card.partiallyCaught.length) {
+    console.log('  ✗ PARTIALLY CAUGHT (a nominated gate never fired — MUST be addressed):');
+    for (const r of card.partiallyCaught) {
+      console.log(
+        `   • ${r.id} (${r.class} / ${r.stage}) — caught by [${r.caughtBy.join(', ')}], ` +
+          `dead gate(s): ${r.missedExpectedGates.join(', ')}`,
+      );
     }
     console.log('');
   }
@@ -491,9 +514,13 @@ function main(): void {
     console.log(serializeBaseline(card));
   }
 
-  // Fail the run if any mutant that MUST be caught survived (net weakened), or
-  // if any mutant is stale (the corpus no longer describes the code it grades).
-  if (card.unexpectedSurvivors.length > 0 || card.stale.length > 0) {
+  // Fail the run if any mutant that MUST be caught survived (net weakened), if
+  // any mutant is stale (the corpus no longer describes the code it grades),
+  // or if a caught mutant's nominated gate list contains one that never fired
+  // (F-172: `caught: true` must not hide a dead sibling gate — "caught" would
+  // otherwise mean only "one of the gates this mutant already believed would
+  // catch it did").
+  if (card.unexpectedSurvivors.length > 0 || card.stale.length > 0 || card.partiallyCaught.length > 0) {
     process.exitCode = 1;
   }
 }
