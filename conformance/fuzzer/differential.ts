@@ -1,7 +1,7 @@
 import fc from 'fast-check';
 import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -179,12 +179,93 @@ function runCompilerProcess(
   }
 }
 
+// ---------------------------------------------------------------------------
+// In-process TS compile for IR mode (F-169)
+// ---------------------------------------------------------------------------
+//
+// IR mode used to shell out to the CLI with `--ir`, but the TS CLI's `--ir`
+// means "embed the IR in the artifact JSON FILE" and prints `Compiling: ...`
+// / `Artifact written: ...` chatter to stdout — never the IR itself
+// (packages/runar-cli/src/commands/compile.ts). Every other tier's
+// `--emit-ir` has the opposite contract: stdout carries ONLY the IR (see
+// compilers/go/main.go). So `ts`'s "output" was never comparable against the
+// other six tiers in IR mode.
+//
+// `conformance/fuzzer/ir-differential.ts` already solved exactly this by
+// compiling in-process via runar-compiler's `compile()`, which hands back
+// the ANF object directly — there is no stdout contract to get wrong. This
+// mirrors that fix (`loadTsCompile` / `tsCompileRun` there).
+type RunarCompileFn = (
+  source: string,
+  options?: { fileName?: string; disableConstantFolding?: boolean },
+) => { success: boolean; anf?: unknown };
+
+let _cachedTsCompile: RunarCompileFn | null | undefined;
+
+async function loadTsCompile(): Promise<RunarCompileFn | null> {
+  if (_cachedTsCompile !== undefined) return _cachedTsCompile;
+  try {
+    const srcEntry = resolve(ROOT, 'packages/runar-compiler/src/index.ts');
+    const mod = (await import(pathToFileURL(srcEntry).href)) as Record<string, unknown>;
+    if (typeof mod.compile === 'function') {
+      _cachedTsCompile = mod.compile as RunarCompileFn;
+      return _cachedTsCompile;
+    }
+  } catch {
+    // fall through
+  }
+  _cachedTsCompile = null;
+  return _cachedTsCompile;
+}
+
+// Match Go/Rust/Python/Java's JCS bigint encoding (bare integer when safe,
+// decimal string otherwise) so canonicalize()'s string comparison compares
+// like for like against the native tiers' `--emit-ir` stdout.
+function stringifyAnfWithBigint(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => {
+    if (typeof v === 'bigint') {
+      if (v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER)) {
+        return Number(v);
+      }
+      return v.toString();
+    }
+    return v;
+  });
+}
+
 function compileTsSource(source: string, tmpDir: string, hex: boolean = false): string | null {
+  if (!hex) {
+    // IR mode: compile in-process (see note above) instead of spawning the
+    // CLI. Requires loadTsCompile() to have been awaited by the caller
+    // first; if the cache was never warmed, there is nothing to compile
+    // with and this tier reports as unavailable, same as a missing binary.
+    const compile = _cachedTsCompile;
+    if (!compile) return null;
+    try {
+      const result = compile(source, {
+        fileName: 'fuzz-test.runar.ts',
+        disableConstantFolding: true,
+      });
+      // PIPELINE-DEPTH SYMMETRY (mirrors ir-differential.ts's tsCompileRun):
+      // the native tiers' `--emit-ir` returns straight out of the frontend,
+      // before stack-lowering/emit ever run, so a `result.success` gate here
+      // would make `ts` the only tier gated on the back end -- a program
+      // that lowers fine but fails emit would silently drop `ts` out of
+      // `outputs` while the other tiers compare among themselves.
+      if (!result.anf) return null;
+      return stringifyAnfWithBigint(result.anf);
+    } catch {
+      return null;
+    }
+  }
+
   const tmpFile = join(tmpDir, 'fuzz-test.runar.ts');
   writeFileSync(tmpFile, source, 'utf-8');
-  const args = ['--import', 'tsx', resolve(ROOT, 'packages/runar-cli/src/bin.ts'), 'compile'];
-  if (!hex) args.push('--ir');
-  args.push('--disable-constant-folding', tmpFile);
+  const args = [
+    '--import', 'tsx',
+    resolve(ROOT, 'packages/runar-cli/src/bin.ts'), 'compile',
+    '--hex', '--disable-constant-folding', tmpFile,
+  ];
   return runCompilerProcess('node', args);
 }
 
@@ -351,9 +432,42 @@ const COMPILER_MAP: Record<CompilerName, CompileFn> = {
   java: compileJavaSource,
 };
 
+// Recursively sort object keys so two tiers that emit the same IR in a
+// different key order compare equal.
+//
+// The previous implementation was
+// `JSON.stringify(JSON.parse(json), Object.keys(JSON.parse(json)).sort(), 2)`.
+// An ARRAY second argument to `JSON.stringify` is not a key ordering — it is
+// a property ALLOW-LIST, applied at EVERY nesting depth. Seeded with the
+// ROOT's keys (`contractName`, `methods`, `properties`), it deleted every
+// key that did not happen to share a name with a root key, at every level:
+// each method serialized as `{}` and each binding inside it as `{}` too.
+// The comparison was therefore asserting little beyond "the tiers agree on
+// the contract name and on how many top-level keys there are" — the exact
+// same bug `conformance/fuzzer/ir-differential.ts`'s `sortKeysDeep` fixed
+// for its own (structurally identical) `canonicalizeJson`; this ports that
+// fix rather than inventing a second one.
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      // `sourceLoc` carries {file, line, column} back to the file EACH
+      // compiler was handed. Every compile*Source function above writes the
+      // shared generated source to a different per-tier filename
+      // (fuzz-test.runar.ts, fuzz-test-go.runar.ts, ...), so `file`
+      // legitimately differs across tiers and says nothing about IR parity.
+      if (k === 'sourceLoc') continue;
+      out[k] = sortKeysDeep((value as Record<string, unknown>)[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
 function canonicalize(json: string): string {
   try {
-    return JSON.stringify(JSON.parse(json), Object.keys(JSON.parse(json)).sort(), 2);
+    return JSON.stringify(sortKeysDeep(JSON.parse(json)), null, 2);
   } catch {
     return json;
   }
@@ -401,6 +515,10 @@ export async function runDifferentialFuzzing(
 
   const tmpDir = join(__dirname, '..', '.tmp', 'fuzz');
   if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+
+  // IR mode's `ts` tier compiles in-process (see compileTsSource); warm the
+  // cached compile() handle once, up front, rather than per-program.
+  if (!compareHex && compilers.includes('ts')) await loadTsCompile();
 
   const results: DifferentialResult[] = [];
   let mismatchCount = 0;
@@ -481,6 +599,10 @@ export async function runPropertyBasedDifferential(options?: FuzzerOptions): Pro
 
   const compilers = options?.compilers ?? ['ts', 'go', 'rust', 'python', 'zig', 'ruby'];
   const compareHex = options?.compareHex ?? false;
+
+  // IR mode's `ts` tier compiles in-process (see compileTsSource); warm the
+  // cached compile() handle before fc.assert's (synchronous) predicate runs.
+  if (!compareHex && compilers.includes('ts')) await loadTsCompile();
 
   fc.assert(
     fc.property(runarContractArb, (source: string) => {
