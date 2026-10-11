@@ -411,20 +411,38 @@ export class WalletProvider implements Provider {
       }],
     });
 
-    // Cache the funding tx so child txs can build EF
+    // F-248: this used to swallow both a BEEF parse failure and a funding
+    // broadcast failure (routing each through warnNonFatal — a console.warn
+    // — while still resolving normally). A method whose purpose is to
+    // *guarantee* spendable funding must not report success when the funding
+    // tx could not be parsed, or was not actually accepted onto the network;
+    // the caller would otherwise deploy against a funding UTXO that may not
+    // exist. Unlike the overlay submissions above (genuinely fire-and-forget
+    // indexing after a transaction already broadcast elsewhere), this
+    // broadcastTx call is the only attempt this method makes to get the
+    // funding tx onto the network, so its failure is fatal to the guarantee.
     if (result.tx) {
+      let tx: Transaction;
       try {
-        const tx = Transaction.fromAtomicBEEF(result.tx);
-        const rawHex = tx.toHex();
-        const txid = result.txid || '';
-        if (txid) this.txCache.set(txid, rawHex);
-
-        // Broadcast to ARC (may already be known — non-fatal)
-        await this.broadcastTx(Transaction.fromHex(rawHex)).catch((e) =>
-          warnNonFatal('funding-tx broadcast', e),
-        );
+        tx = Transaction.fromAtomicBEEF(result.tx);
       } catch (e) {
-        warnNonFatal('funding-tx parse', e);
+        throw new Error(
+          `WalletProvider.ensureFunding: funding tx BEEF returned by the wallet did not ` +
+            `parse: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      const rawHex = tx.toHex();
+      const txid = result.txid || '';
+      if (txid) this.txCache.set(txid, rawHex);
+
+      try {
+        await this.broadcastTx(Transaction.fromHex(rawHex));
+      } catch (e) {
+        throw new Error(
+          `WalletProvider.ensureFunding: funding tx broadcast failed, the funding UTXO ` +
+            `may not exist on-chain: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     }
   }
