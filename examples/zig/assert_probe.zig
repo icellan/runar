@@ -25,6 +25,8 @@ const Sha256CompressTest = @import("sha256-compress/Sha256CompressTest.runar.zig
 const Sha256FinalizeTest = @import("sha256-finalize/Sha256FinalizeTest.runar.zig").Sha256FinalizeTest;
 const sphincs_fixtures = @import("sphincs-wallet/fixtures.zig");
 const SPHINCSWallet = @import("sphincs-wallet/SPHINCSWallet.runar.zig").SPHINCSWallet;
+const StateCovenant = @import("state-covenant/StateCovenant.runar.zig").StateCovenant;
+const state_covenant_witness = @import("state-covenant/witness.zig");
 const Counter = @import("stateful-counter/Counter.runar.zig").Counter;
 const TicTacToe = @import("tic-tac-toe/TicTacToe.runar.zig").TicTacToe;
 const FungibleTokenExample = @import("token-ft/FungibleTokenExample.runar.zig").FungibleToken;
@@ -128,6 +130,11 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-wrong-slhdsa-key")) return probeSPHINCSWalletWrongSLHDSAKey();
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-invalid-slhdsa-proof")) return probeSPHINCSWalletInvalidSLHDSAProof();
     // schnorr-zkp-invalid-r-point omitted — see SchnorrZKP_test.zig (BUG-001).
+    if (std.mem.eql(u8, probe_case, "state-covenant-block-not-increasing")) return probeStateCovenantBlockNotIncreasing();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-prestate-root")) return probeStateCovenantWrongPreStateRoot();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-babybear-proof")) return probeStateCovenantWrongBabyBearProof();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-merkle-proof")) return probeStateCovenantWrongMerkleProof();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-batch-hash")) return probeStateCovenantWrongBatchHash();
     return error.UnknownProbeCase;
 }
 
@@ -730,3 +737,43 @@ fn probeSPHINCSWalletInvalidSLHDSAProof() !void {
 }
 
 // probeSchnorrZKPInvalidRPoint deleted — see SchnorrZKP_test.zig (BUG-001).
+
+// F-168: one deliberately invalid input per `advanceState` assertion, each
+// built from the same valid witness (state_covenant_witness.valid()) with
+// exactly one field corrupted, so the panic is attributable to the named
+// assertion and not an earlier one in the sequence.
+
+fn probeStateCovenantBlockNotIncreasing() !void {
+    const w = state_covenant_witness.valid();
+    // Init the covenant's blockNumber at the same value as newBlockNumber:
+    // `newBlockNumber > self.blockNumber` is false (equal, not greater).
+    var c = StateCovenant.init(w.preStateRoot, w.newBlockNumber, w.verifyingKeyHash);
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongPreStateRoot() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    const wrong_pre_state_root = "zz" ** 32;
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, wrong_pre_state_root, w.proofFieldA, w.proofFieldB, w.proofFieldC, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongBabyBearProof() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC + 1, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongMerkleProof() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    const wrong_leaf = "zz" ** 32;
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC, wrong_leaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongBatchHash() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    const wrong_batch_hash = "zz" ** 32;
+    c.advanceState(w.newStateRoot, w.newBlockNumber, wrong_batch_hash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}

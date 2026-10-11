@@ -28,18 +28,18 @@ pub const StateCovenant = struct {
         runar.assert(newBlockNumber > self.blockNumber);
 
         // Pre-state root must match current covenant state
-        runar.assert(preStateRoot == self.stateRoot);
+        runar.assert(runar.bytesEq(preStateRoot, self.stateRoot));
 
         // Verify Baby Bear field multiplication (simplified proof check)
         runar.assert(runar.bbFieldMul(proofFieldA, proofFieldB) == proofFieldC);
 
         // Verify Merkle commitment
         const computedRoot = runar.merkleRootSha256(merkleLeaf, merkleProof, merkleIndex, 4);
-        runar.assert(computedRoot == self.verifyingKeyHash);
+        runar.assert(runar.bytesEq(computedRoot, self.verifyingKeyHash));
 
         // Batch data hash binding
         const expectedBatchHash = runar.hash256(runar.cat(preStateRoot, newStateRoot));
-        runar.assert(batchDataHash == expectedBatchHash);
+        runar.assert(runar.bytesEq(batchDataHash, expectedBatchHash));
 
         // Update state
         self.stateRoot = newStateRoot;
