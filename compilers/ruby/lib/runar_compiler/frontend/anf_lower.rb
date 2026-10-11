@@ -3322,12 +3322,26 @@ module RunarCompiler
       when "load_param", "load_prop", "get_state_script"
         value
       when "load_const"
-        if value.raw_value.is_a?(String) && value.raw_value.start_with?("@ref:")
-          target = value.raw_value[5..]
+        # N-024: the alias target lives in +const_string+ (the decoded value),
+        # not +raw_value+ -- +_make_load_const_string+ JSON-encodes raw_value
+        # (so a "@ref:t15" alias is stored there as the 11-char string
+        # `"@ref:t15"`, quote marks included, which never matches a bare
+        # `start_with?("@ref:")`). const_string holds the undecorated value in
+        # BOTH construction paths (freshly made here, and loaded from --ir via
+        # IR::_decode_const_value), matching the check stack.rb's
+        # _lower_load_const uses to resolve the same alias at codegen time.
+        # Checking raw_value left every "@ref:"-aliased load_const inside a
+        # lifted branch (e.g. a reassigned local referenced by the branch's
+        # final property update) silently unremapped, pointing at a pre-lift
+        # temp name stack lowering could never find.
+        if value.const_string.is_a?(String) && value.const_string.start_with?("@ref:")
+          target = value.const_string[5..]
           remapped = map[target]
           if remapped
             new_v = _clone_anf_value(value)
-            new_v.raw_value = "@ref:#{remapped}"
+            new_ref = "@ref:#{remapped}"
+            new_v.const_string = new_ref
+            new_v.raw_value = JSON.generate(new_ref)
             return new_v
           end
         end
