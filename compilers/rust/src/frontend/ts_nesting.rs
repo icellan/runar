@@ -1200,6 +1200,18 @@ mod tests {
     use swc_ecma_parser::{StringInput, TsSyntax};
 
     /// The largest estimate the guard reaches over `source`, lexed standalone.
+    ///
+    /// CK13-FU3: unlike the production path (swc parse under
+    /// [`GuardedTokens`], which stops supplying tokens once the estimate
+    /// passes [`PRESCAN_LIMIT`]), this helper used to feed every token to
+    /// [`Model`] regardless of the running estimate. On a hostile, deeply
+    /// unbalanced source `Model.top` is an `Rc` linked list with one frame
+    /// per still-open level and no upper bound; dropping a
+    /// multi-hundred-thousand-frame chain recurses once per frame and
+    /// overflows the stack -- the very crash F-213 exists to prevent,
+    /// reached inside the guard's own test helper. Stop at the same bound
+    /// [`GuardedTokens::next`] does, so this helper can never be the thing
+    /// that overflows, whatever source it is handed.
     fn max_estimate(source: &str) -> u32 {
         let cm: Lrc<SourceMap> = Lrc::new(SourceMap::default());
         let fm = cm.new_source_file(Lrc::new(FileName::Custom("t.ts".into())), source.to_string());
@@ -1213,7 +1225,11 @@ mod tests {
         let mut max = 0;
         for t in lexer {
             model.feed(&t);
-            max = max.max(model.estimate());
+            let e = model.estimate();
+            max = max.max(e);
+            if e > PRESCAN_LIMIT {
+                break;
+            }
         }
         max
     }
@@ -1266,27 +1282,98 @@ mod tests {
         assert!(max_estimate(&wrap(&casts)) < 10, "as-casts are dropped by the Rúnar AST");
     }
 
+    /// CK13-FU3 regression: on a hostile source `max_estimate` must stop
+    /// feeding tokens to `Model` at the same bound the production
+    /// `GuardedTokens` guard does, rather than reflect the source's full,
+    /// unbounded depth. Before the fix this input (300,000 unclosed
+    /// `switch` headers, never balanced) made `Model.top` grow to a
+    /// 300,000-frame `Rc` chain and overflowed the stack when it dropped.
+    ///
+    /// What this proves: the helper itself can no longer be made to
+    /// overflow by a sufficiently deep/unbalanced source, independent of
+    /// where that source came from.
+    /// What this does not prove: that no OTHER unbounded-growth path exists
+    /// in `Model` (e.g. a construct that grows `pending`/`hi` without also
+    /// growing the `Rc` chain by the same amount would not be caught by this
+    /// bound). The production path remains the authority on refusal
+    /// semantics; this only has to avoid crashing.
+    #[test]
+    fn max_estimate_stops_at_the_prescan_limit_on_hostile_input() {
+        let hostile = "switch(a){".repeat(300_000);
+        let e = max_estimate(&hostile);
+        assert!(e > PRESCAN_LIMIT, "expected the estimate to cross the limit: {e}");
+        assert!(
+            (e as u64) <= PRESCAN_LIMIT as u64 + 10,
+            "expected the helper to stop just past the limit, not reflect the full 300000-deep input: {e}"
+        );
+    }
+
+    /// The git-tracked `.runar.ts` sources under the repo root, same scoping
+    /// rule as the walk the TS tier uses for the equivalent corpus check
+    /// (R188-FU, `git show 805a481b`): `git ls-files` rather than a
+    /// filesystem walk, so scratch adversarial fixtures and other untracked
+    /// clutter under the repo root are never part of this corpus.
+    fn corpus_runar_ts_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let output = std::process::Command::new("git")
+            .args(["ls-files", "-z", "--", "*.runar.ts"])
+            .current_dir(root)
+            .output();
+        let Ok(output) = output else { return Vec::new() };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| root.join(String::from_utf8_lossy(s).into_owned()))
+            .collect()
+    }
+
+    /// CK13-FU3 regression: a filesystem walk from the repo root also picks
+    /// up untracked files -- scratch adversarial fixtures left by other
+    /// remediation work, nested worktree copies -- that are not part of the
+    /// corpus `the_corpus_stays_far_below_the_limit` is making a claim
+    /// about. One such fixture (deeply unbalanced nesting) reproduced a
+    /// SIGABRT ("stack overflow") in that test; `git ls-files` makes the
+    /// corpus immune to it regardless of what shape the untracked file is.
+    ///
+    /// What this proves: an untracked `.runar.ts` placed directly under the
+    /// corpus root is excluded from the file list this crate's corpus test
+    /// walks.
+    /// What this does not prove: behaviour for a file that is untracked but
+    /// `.gitignore`d differently, or staged-but-uncommitted (`git ls-files`
+    /// without `--others` already excludes both, which is what we want
+    /// here, but this test only exercises the plain untracked case that
+    /// actually reproduced the crash).
+    #[test]
+    fn the_corpus_ignores_untracked_sources() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let scratch_dir = root.join("ck13fu3_untracked_scratch");
+        std::fs::create_dir_all(&scratch_dir).expect("create scratch dir");
+        let hostile = scratch_dir.join("hostile.runar.ts");
+        std::fs::write(&hostile, "switch(a){".repeat(300_000)).expect("write scratch file");
+
+        let found = corpus_runar_ts_files(&root);
+        std::fs::remove_dir_all(&scratch_dir).ok();
+
+        assert!(
+            !found.iter().any(|p| p.ends_with("hostile.runar.ts")),
+            "corpus walk must only see git-tracked .runar.ts files, found untracked {}",
+            hostile.display()
+        );
+    }
+
     /// Headroom on every git-tracked .runar.ts source: the estimate stays far
     /// below the limit (the claim in the comment on `Model`).
+    ///
+    /// What this proves: every source this crate ships (not scratch/
+    /// untracked clutter) stays far under the crash-guard bound.
+    /// What this does not prove: anything about sources outside the repo,
+    /// or about sources added after this test last ran.
     #[test]
     fn the_corpus_stays_far_below_the_limit() {
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
-            for entry in rd.flatten() {
-                let p = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if p.is_dir() {
-                    if !matches!(name.as_str(), "node_modules" | "target" | ".git" | ".worktrees" | "dist" | "zig-out" | ".zig-cache" | "build") {
-                        walk(&p, out);
-                    }
-                } else if name.ends_with(".runar.ts") {
-                    out.push(p);
-                }
-            }
-        }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut files = Vec::new();
-        walk(&root, &mut files);
+        let files = corpus_runar_ts_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
         assert!(files.len() > 100, "corpus not found ({} files)", files.len());
         let (worst, file) = files
             .iter()
