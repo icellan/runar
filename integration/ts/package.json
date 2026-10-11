@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:integration": "vitest run"
+    "test:integration": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "runar-compiler": "workspace:*",
