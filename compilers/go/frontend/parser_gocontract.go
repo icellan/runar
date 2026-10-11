@@ -71,6 +71,9 @@ func checkGoNumericLiterals(source []byte, fileName string) []Diagnostic {
 	s.Init(f, source, func(token.Position, string) {}, 0)
 	var diags []Diagnostic
 	covered := -1
+	// Converted once: a per-token string(source) made this quadratic in the
+	// number of numeric literals (minutes on a 4 MiB source of `[0]`s).
+	src := string(source)
 	for {
 		pos, tok, _ := s.Scan()
 		if tok == token.EOF {
@@ -83,7 +86,7 @@ func checkGoNumericLiterals(source []byte, fileName string) []Diagnostic {
 		if start < covered {
 			continue
 		}
-		end := scanNumberEnd(string(source), start)
+		end := scanNumberEnd(src, start)
 		// A FLOAT / IMAG token may run past the identifier characters (`1.5`).
 		for tok != token.INT && end < len(source) && (source[end] == '.' || isNumberContinue(source[end])) {
 			end++
