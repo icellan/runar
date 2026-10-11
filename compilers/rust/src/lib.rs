@@ -328,6 +328,40 @@ impl CompileResult {
     }
 }
 
+/// F-217: `parse_only` / `validate_only` / `typecheck_only` are honored only
+/// by `compile_from_source_str_with_result` (and `compile_from_source_with_result`),
+/// which collects diagnostics into a `CompileResult` and can represent
+/// "stopped successfully after an earlier pass, no artifact yet" as a value.
+///
+/// The plain `Result<RunarArtifact, String>` / `Result<ir::ANFProgram, String>`
+/// entry points below cannot represent that outcome — there is no `Ok` value
+/// to return after stopping before an artifact (or, for the IR-producing
+/// entry points, before the ANF) exists. Before this fix they silently never
+/// checked these fields and ran every later pass anyway, so whether the
+/// option did anything depended on which return type the caller happened to
+/// pick rather than on the option itself. Reject explicitly instead, before
+/// any pass runs, and name the dedicated API that does honor it.
+fn reject_unsupported_stop_after_pass_options(opts: &CompileOptions) -> Result<(), String> {
+    let set: Vec<&str> = [
+        ("parse_only", opts.parse_only),
+        ("validate_only", opts.validate_only),
+        ("typecheck_only", opts.typecheck_only),
+    ]
+    .into_iter()
+    .filter_map(|(name, v)| if v { Some(name) } else { None })
+    .collect();
+    if set.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "CompileOptions.{} is not supported by this API: it would stop before an artifact exists, \
+         and this API has no way to return a value for that. Use compile_from_source_str_with_result \
+         (or compile_from_source_with_result), which honors this option and reports partial success via \
+         CompileResult.",
+        set.join(" / ")
+    ))
+}
+
 /// Compile from an ANF IR JSON file on disk.
 pub fn compile_from_ir(path: &Path) -> Result<RunarArtifact, String> {
     compile_from_ir_with_options(path, &CompileOptions::default())
@@ -392,6 +426,8 @@ pub fn compile_from_source_str_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<RunarArtifact, String> {
+    reject_unsupported_stop_after_pass_options(opts)?;
+
     // Pass 1: Parse (auto-selects parser based on file extension)
     let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
         .map_err(|e| e.message)?;
@@ -507,6 +543,8 @@ pub fn compile_source_str_to_ir_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<ir::ANFProgram, String> {
+    reject_unsupported_stop_after_pass_options(opts)?;
+
     let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
         .map_err(|e| e.message)?;
     if !parse_result.errors.is_empty() {
@@ -734,6 +772,8 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
+    reject_unsupported_stop_after_pass_options(opts)?;
+
     // F-107: the source validator's readonly-write rule, re-asserted on every
     // program that reaches this entry point (the `--ir` path never runs the
     // validator). Same check and wording as Go F-004's checkIRFrontendRules.
