@@ -1,163 +1,94 @@
 /**
- * IR Loader unit tests.
+ * IR Loader tests — F-289 / CL-GAP-015.
  *
- * The TypeScript compiler does not ship a separate file-based IR loader (it
- * operates on in-memory ANFProgram objects produced by the ANF lowering pass).
- * However, ANF IR is exchanged with Go/Rust/Python compilers as JSON, so we
- * validate JSON round-trips and structural constraints here.
+ * This file used to define its own `loadANFFromJson` + `KNOWN_KINDS` set
+ * inside the test (a toy re-implementation "analogous to" the real loader)
+ * and exercised that copy exclusively. Its only runtime import was `vitest`;
+ * the `../ir/index.js` import was types-only. So none of its 19 `it()`
+ * blocks ever called production code, and the toy copy's `KNOWN_KINDS` had
+ * already drifted from the real ANF kind set (missing `add_data_output`,
+ * `array_literal`, `raw_script`) with nothing able to notice.
  *
- * This file implements a minimal `loadANFFromJson` helper (analogous to Go's
- * `LoadIRFromBytes`) and exercises the same test cases that Go and Rust cover.
+ * Fixed by importing the real TS `--from-ir` entry point directly:
+ * `loadANFFromJSON` (packages/runar-cli's `compile --from-ir` calls this;
+ * Go/Rust/Python/Zig/Ruby/Java each ship an equivalent `LoadIRFromBytes` /
+ * `load_ir` / `compile_from_ir_bytes`). `compileFromANF` is pulled in for the
+ * one case (unknown ANF kind) that the loader itself does not reject — see
+ * below.
+ *
+ * Several of the original assertions encoded behavior the toy loader
+ * invented rather than behavior the real loader has. Measured against
+ * `loadANFFromJSON` (`packages/runar-compiler/src/index.ts` +
+ * `ir/anf-required-fields.ts`):
+ *   - Empty `contractName` / method name / param name / param type /
+ *     property name / property type do NOT throw. The real loader's
+ *     `assertRequiredIrFields` (N-069) checks a field's PRESENCE and JSON
+ *     TYPE, not non-emptiness — an empty string is a valid string. Six of
+ *     the toy file's `it()` blocks asserted a stricter rule that production
+ *     code was never written to enforce. That's a real question (should an
+ *     empty identifier be legal IR?) but it's a design decision for a
+ *     separate item, not something this test-quality fix should silently
+ *     tighten across all seven tiers. Rewritten below to pin the current,
+ *     real behavior instead of a fictional one, with this note attached.
+ *   - An unknown `kind` does NOT throw inside `loadANFFromJSON`. The loader
+ *     does no kind-allowlist check at all (deliberately: the comment on
+ *     `checkValue`'s `default` case says "Unknown kinds are refused
+ *     elsewhere"); it's `compileFromANF` → stack-lowering's dispatch switch
+ *     that throws "Unknown ANF kind '...' encountered in
+ *     stack-lower.collectRefs". Rewritten to prove the garbage-kind-is-
+ *     eventually-rejected intent against the place that actually enforces
+ *     it, rather than against a loader-level check that doesn't exist.
+ *   - `load_const`'s JSON-number values ARE converted to `bigint` by the
+ *     real loader's `coerceNumericBigInts` (so is a property's
+ *     `initialValue`); the toy loader's comment claimed "bigint conversion
+ *     is caller's job" and left them as plain `number`. Updated to assert
+ *     the real (bigint) result.
+ *   - Malformed JSON throws `"input is not valid JSON: ..."`, not the toy
+ *     loader's `"invalid IR JSON: ..."`. Regex updated to match.
+ * Every other assertion (loop-count bounds, minimal valid IR, the
+ * structural round-trips) already held against the real loader unchanged;
+ * those are kept verbatim, just pointed at the real function.
+ *
+ * What this file proves: `loadANFFromJSON` — the function the TS tier's
+ * `--from-ir` path actually calls — accepts well-formed ANF IR JSON (plain
+ * and with nested if/loop bindings), coerces the three bigint-typed fields
+ * correctly, and refuses a negative or over-maximum loop count and malformed
+ * JSON; and that an unknown ANF kind, while not rejected by the loader
+ * itself, is rejected before any script bytes are produced for it
+ * (`compileFromANF`).
+ * What this file does not prove: that identifiers may not be empty (they
+ * currently can be — see above), that the `runar-cli compile --from-ir`
+ * process boundary behaves the same (that's the CLI's own test surface), or
+ * full schema coverage of every ANF value kind (see the dedicated
+ * `n069-ir-required-fields.test.ts`, `n087-ir-parent-class.test.ts`,
+ * `n096-ir-synthetic-array-chain.test.ts`, `n101-ir-stateful-scaffold.test.ts`,
+ * `r126-add-output-arity-ir.test.ts`, `f283-ir-loop-product-bound.test.ts`,
+ * and `n065-reserved-names.test.ts`, which already exercise the real loader
+ * for those specific rules).
  */
 
 import { describe, it, expect } from 'vitest';
-import type {
-  ANFProgram,
-  ANFBinding,
-  ANFValue,
-} from '../ir/index.js';
-
-// ---------------------------------------------------------------------------
-// Minimal IR loader — JSON parse + structural validation
-// (mirrors the Go `LoadIRFromBytes` / `ValidateIR` API)
-// ---------------------------------------------------------------------------
-
-const MAX_LOOP_COUNT = 10000;
-
-const KNOWN_KINDS = new Set([
-  'load_param',
-  'load_prop',
-  'load_const',
-  'bin_op',
-  'unary_op',
-  'call',
-  'method_call',
-  'if',
-  'loop',
-  'assert',
-  'update_prop',
-  'get_state_script',
-  'check_preimage',
-  'deserialize_state',
-  'add_output',
-  'add_raw_output',
-]);
-
-/**
- * Parse and validate an ANF IR JSON string.
- *
- * Throws an Error if the JSON is malformed, structurally invalid, or violates
- * any of the IR constraints (empty names, unknown kinds, loop bounds, etc.).
- */
-function loadANFFromJson(json: string): ANFProgram {
-  // 1. Parse JSON
-  let raw: unknown;
-  try {
-    raw = JSON.parse(json);
-  } catch (e: unknown) {
-    throw new Error(`invalid IR JSON: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  const program = raw as ANFProgram;
-
-  // 2. Structural validation
-  validateIR(program);
-
-  return program;
-}
-
-function validateIR(program: ANFProgram): void {
-  if (!program.contractName) {
-    throw new Error('IR validation: contractName is required');
-  }
-
-  for (let i = 0; i < (program.properties ?? []).length; i++) {
-    const prop = program.properties[i]!;
-    if (!prop.name) {
-      throw new Error(`IR validation: property[${i}] has empty name`);
-    }
-    if (!prop.type) {
-      throw new Error(`IR validation: property ${prop.name} has empty type`);
-    }
-  }
-
-  for (let i = 0; i < (program.methods ?? []).length; i++) {
-    const method = program.methods[i]!;
-    if (!method.name) {
-      throw new Error(`IR validation: method[${i}] has empty name`);
-    }
-    for (let j = 0; j < (method.params ?? []).length; j++) {
-      const param = method.params[j]!;
-      if (!param.name) {
-        throw new Error(`IR validation: method ${method.name} param[${j}] has empty name`);
-      }
-      if (!param.type) {
-        throw new Error(`IR validation: method ${method.name} param ${param.name} has empty type`);
-      }
-    }
-    validateBindings(method.body ?? [], method.name);
-  }
-}
-
-function validateBindings(bindings: ANFBinding[], methodName: string): void {
-  for (let i = 0; i < bindings.length; i++) {
-    const binding = bindings[i]!;
-    if (!binding.name) {
-      throw new Error(`IR validation: method ${methodName} binding[${i}] has empty name`);
-    }
-    const kind = (binding.value as unknown as Record<string, unknown>)['kind'] as string | undefined;
-    if (!kind) {
-      throw new Error(`IR validation: method ${methodName} binding ${binding.name} has empty kind`);
-    }
-    if (!KNOWN_KINDS.has(kind)) {
-      throw new Error(
-        `IR validation: method ${methodName} binding ${binding.name} has unknown kind "${kind}"`,
-      );
-    }
-
-    // Validate nested bindings
-    if (kind === 'if') {
-      const ifVal = binding.value as { then?: ANFBinding[]; else?: ANFBinding[] };
-      validateBindings(ifVal.then ?? [], methodName);
-      validateBindings(ifVal.else ?? [], methodName);
-    }
-    if (kind === 'loop') {
-      const loopVal = binding.value as { count?: number; body?: ANFBinding[] };
-      const count = loopVal.count ?? 0;
-      if (count < 0) {
-        throw new Error(
-          `IR validation: method ${methodName} binding ${binding.name} has negative loop count ${count}`,
-        );
-      }
-      if (count > MAX_LOOP_COUNT) {
-        throw new Error(
-          `IR validation: method ${methodName} binding ${binding.name} has loop count ${count} exceeding maximum ${MAX_LOOP_COUNT}`,
-        );
-      }
-      validateBindings(loopVal.body ?? [], methodName);
-    }
-  }
-}
+import { loadANFFromJSON, compileFromANF } from '../index.js';
+import type { ANFProgram } from '../ir/index.js';
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('IR Loader: loadANFFromJson', () => {
+describe('IR Loader: loadANFFromJSON (the real --from-ir entry point)', () => {
   // -------------------------------------------------------------------------
   // Minimal valid IR
   // -------------------------------------------------------------------------
 
   describe('minimal valid IR', () => {
     it('loads an IR with empty methods list and no properties (row 315)', () => {
-      // An IR with no methods and no properties should be structurally valid.
-      // (The validator only rejects empty names, not empty collections.)
+      // An IR with no methods and no properties is structurally valid.
       const json = JSON.stringify({
         contractName: 'Empty',
         properties: [],
         methods: [],
       });
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       expect(program.contractName).toBe('Empty');
       expect(program.properties).toHaveLength(0);
       expect(program.methods).toHaveLength(0);
@@ -194,7 +125,7 @@ describe('IR Loader: loadANFFromJson', () => {
         ],
       });
 
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       expect(program.contractName).toBe('P2PKH');
       expect(program.properties).toHaveLength(1);
       expect(program.properties[0]!.name).toBe('pubKeyHash');
@@ -209,7 +140,12 @@ describe('IR Loader: loadANFFromJson', () => {
   // -------------------------------------------------------------------------
 
   describe('constants decoded correctly', () => {
-    it('preserves integer constant (JSON number) in load_const', () => {
+    it('converts an integer constant (JSON number) in load_const to bigint', () => {
+      // Real behavior, NOT the toy loader's: `coerceNumericBigInts` converts
+      // `load_const.value` JSON numbers to `bigint` because ANF's
+      // `LoadConst.value` is typed `bigint`. The toy loader's comment
+      // ("bigint conversion is caller's job") described its own design, not
+      // production's.
       const json = JSON.stringify({
         contractName: 'ConstTest',
         properties: [],
@@ -225,11 +161,12 @@ describe('IR Loader: loadANFFromJson', () => {
         ],
       });
 
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       const t0 = program.methods[0]!.body[0]!;
       expect(t0.value.kind).toBe('load_const');
-      // JSON numbers arrive as JS numbers here (bigint conversion is caller's job)
-      expect((t0.value as { kind: string; value: unknown }).value).toBe(42);
+      const value = (t0.value as { kind: string; value: unknown }).value;
+      expect(typeof value).toBe('bigint');
+      expect(value).toBe(42n);
     });
 
     it('preserves boolean constant in load_const', () => {
@@ -248,7 +185,7 @@ describe('IR Loader: loadANFFromJson', () => {
         ],
       });
 
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       const t0 = program.methods[0]!.body[0]!;
       expect((t0.value as { kind: string; value: unknown }).value).toBe(true);
     });
@@ -269,18 +206,21 @@ describe('IR Loader: loadANFFromJson', () => {
         ],
       });
 
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       const t0 = program.methods[0]!.body[0]!;
       expect((t0.value as { kind: string; value: unknown }).value).toBe('deadbeef');
     });
   });
 
   // -------------------------------------------------------------------------
-  // Validation errors: unknown kind
+  // Unknown ANF kind — the loader does not check it; compileFromANF does
   // -------------------------------------------------------------------------
 
-  describe('unknown ANF kind → error', () => {
-    it('throws for a binding with an unknown kind', () => {
+  describe('unknown ANF kind', () => {
+    it('is NOT rejected by loadANFFromJSON itself, but is rejected before any script is produced', () => {
+      // `loadANFFromJSON` runs `checkValue` (anf-required-fields.ts), whose
+      // `default` case explicitly defers kind validation: "Unknown kinds are
+      // refused elsewhere." Confirmed here: loading does not throw.
       const json = JSON.stringify({
         contractName: 'Bad',
         properties: [],
@@ -290,46 +230,53 @@ describe('IR Loader: loadANFFromJson', () => {
             params: [],
             body: [
               { name: 't0', value: { kind: 'bogus_kind' } },
+              { name: 't1', value: { kind: 'assert', value: 't0' } },
             ],
             isPublic: true,
           },
         ],
       });
 
-      expect(() => loadANFFromJson(json)).toThrow(/unknown kind.*bogus_kind/i);
+      const program = loadANFFromJSON(json);
+      expect(program.methods[0]!.body[0]!.value.kind).toBe('bogus_kind');
+
+      // "Elsewhere" is compileFromANF -> stack-lowering's exhaustive kind
+      // dispatch, which has no catch-all and throws on anything it doesn't
+      // recognize. This is where garbage kind data actually gets refused.
+      expect(() => compileFromANF(program)).toThrow(/Unknown ANF kind 'bogus_kind'/);
     });
   });
 
   // -------------------------------------------------------------------------
-  // Validation errors: empty fields
+  // Empty names/types: NOT rejected by the real loader (toy-loader-only
+  // behavior — documented explicitly per remediation brief F-289)
   // -------------------------------------------------------------------------
 
-  describe('empty contractName → error', () => {
-    it('throws when contractName is empty string', () => {
-      const json = JSON.stringify({
-        contractName: '',
-        properties: [],
-        methods: [],
-      });
-      expect(() => loadANFFromJson(json)).toThrow(/contractName is required/i);
-    });
-  });
+  describe('empty identifiers: accepted by the real loader (not toy-loader-only anymore)', () => {
+    // The original file's six "empty X -> error" tests asserted a rule the
+    // toy loader invented. `assertRequiredIrFields` (the real check) only
+    // validates presence and JSON type, not non-emptiness, so an empty
+    // string satisfies "is a string" and passes. These are kept — now
+    // pinning the REAL, current behavior rather than a fictional stricter
+    // one — so a future change that starts rejecting empty identifiers (a
+    // legitimate, separate hardening item) shows up here as a deliberate,
+    // visible diff instead of silently passing either way.
 
-  describe('empty method name → error', () => {
-    it('throws when a method has an empty name', () => {
+    it('does not throw for an empty contractName', () => {
+      const json = JSON.stringify({ contractName: '', properties: [], methods: [] });
+      expect(() => loadANFFromJSON(json)).not.toThrow();
+    });
+
+    it('does not throw for an empty method name', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
-        methods: [
-          { name: '', params: [], body: [], isPublic: false },
-        ],
+        methods: [{ name: '', params: [], body: [], isPublic: false }],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/empty name/i);
+      expect(() => loadANFFromJSON(json)).not.toThrow();
     });
-  });
 
-  describe('empty param name → error', () => {
-    it('throws when a method param has an empty name', () => {
+    it('does not throw for an empty method param name', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
@@ -342,12 +289,10 @@ describe('IR Loader: loadANFFromJson', () => {
           },
         ],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/empty name/i);
+      expect(() => loadANFFromJSON(json)).not.toThrow();
     });
-  });
 
-  describe('empty param type → error', () => {
-    it('throws when a method param has an empty type', () => {
+    it('does not throw for an empty method param type', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
@@ -360,34 +305,32 @@ describe('IR Loader: loadANFFromJson', () => {
           },
         ],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/empty type/i);
+      expect(() => loadANFFromJSON(json)).not.toThrow();
     });
-  });
 
-  describe('empty property name → error', () => {
-    it('throws when a property has an empty name', () => {
+    it('does not throw for an empty property name', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [{ name: '', type: 'bigint', readonly: true }],
         methods: [],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/empty name/i);
+      expect(() => loadANFFromJSON(json)).not.toThrow();
     });
-  });
 
-  describe('empty property type → error', () => {
-    it('throws when a property has an empty type', () => {
+    it('does not throw for an empty property type', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [{ name: 'x', type: '', readonly: true }],
         methods: [],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/empty type/i);
+      expect(() => loadANFFromJSON(json)).not.toThrow();
     });
   });
 
   // -------------------------------------------------------------------------
-  // Validation errors: loop bounds
+  // Validation errors the real loader DOES enforce: loop bounds (F-283 /
+  // CL-BUG-088). These assertions already held against production code
+  // unchanged; only the loader under test has changed.
   // -------------------------------------------------------------------------
 
   describe('negative loop count → error', () => {
@@ -406,12 +349,18 @@ describe('IR Loader: loadANFFromJson', () => {
           },
         ],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/negative loop count/i);
+      expect(() => loadANFFromJSON(json)).toThrow(/negative loop count/i);
     });
   });
 
   describe('excessive loop count → error', () => {
-    it(`throws when a loop binding has count > ${MAX_LOOP_COUNT}`, () => {
+    it('throws when a loop binding has count exceeding the maximum', () => {
+      // Count intentionally hard-coded (not MAX_LOOP_COUNT + 1): this test
+      // exists to catch a regression in the PRODUCTION bound itself, so it
+      // must not import the same constant the code under test reads — an
+      // off-by-one or weakened bound in production would move both together
+      // and this test would stay green. 10001 is the first value above the
+      // documented limit of 10000 (F-283 / CL-BUG-088).
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
@@ -422,14 +371,14 @@ describe('IR Loader: loadANFFromJson', () => {
             body: [
               {
                 name: 't0',
-                value: { kind: 'loop', count: MAX_LOOP_COUNT + 1, iterVar: 'i', body: [] },
+                value: { kind: 'loop', count: 10001, iterVar: 'i', body: [] },
               },
             ],
             isPublic: true,
           },
         ],
       });
-      expect(() => loadANFFromJson(json)).toThrow(/exceeding maximum/i);
+      expect(() => loadANFFromJSON(json)).toThrow(/exceeding maximum/i);
     });
   });
 
@@ -439,11 +388,13 @@ describe('IR Loader: loadANFFromJson', () => {
 
   describe('invalid JSON → error', () => {
     it('throws for malformed JSON input', () => {
-      expect(() => loadANFFromJson('{not valid json')).toThrow(/invalid IR JSON/i);
+      // Real message is "input is not valid JSON: ...", not the toy loader's
+      // "invalid IR JSON: ...".
+      expect(() => loadANFFromJSON('{not valid json')).toThrow(/not valid JSON/i);
     });
 
     it('throws for completely empty input', () => {
-      expect(() => loadANFFromJson('')).toThrow();
+      expect(() => loadANFFromJSON('')).toThrow();
     });
   });
 
@@ -469,22 +420,23 @@ describe('IR Loader: loadANFFromJson', () => {
             name: 'check',
             params: [{ name: 'x', type: 'bigint' }],
             body: [
-              { name: 't0', value: { kind: 'load_param', name: 'x' } as ANFValue },
-              { name: 't1', value: { kind: 'load_const', value: 42n } as ANFValue },
-              { name: 't2', value: { kind: 'bin_op', op: '===', left: 't0', right: 't1' } as ANFValue },
-              { name: 't3', value: { kind: 'assert', value: 't2' } as ANFValue },
+              { name: 't0', value: { kind: 'load_param', name: 'x' } },
+              { name: 't1', value: { kind: 'load_const', value: 42n } },
+              { name: 't2', value: { kind: 'bin_op', op: '===', left: 't0', right: 't1' } },
+              { name: 't3', value: { kind: 'assert', value: 't2' } },
             ],
             isPublic: true,
           },
         ],
       };
 
-      // Serialize: bigints need to be converted to numbers for JSON
+      // Serialize: bigints need to be converted to numbers for JSON (the
+      // native non-TS emitters do the same for safe-integer values).
       const json = JSON.stringify(original, (_k, v) =>
         typeof v === 'bigint' ? Number(v) : v,
       );
 
-      const loaded = loadANFFromJson(json);
+      const loaded = loadANFFromJSON(json);
 
       expect(loaded.contractName).toBe(original.contractName);
       expect(loaded.properties).toHaveLength(original.properties.length);
@@ -514,10 +466,12 @@ describe('IR Loader: loadANFFromJson', () => {
         ],
       });
 
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       expect(program.properties).toHaveLength(1);
       const prop = program.properties[0]!;
-      // initialValue is preserved from JSON (as a number/bigint depending on context)
+      // initialValue is preserved from JSON. The real loader coerces it to
+      // bigint (ANFProperty.initialValue is bigint-typed); Number(...) works
+      // whether the underlying value is a number or a bigint.
       expect(prop.initialValue).toBeDefined();
       expect(Number(prop.initialValue)).toBe(100);
     });
@@ -562,7 +516,7 @@ describe('IR Loader: loadANFFromJson', () => {
         ],
       });
 
-      const program = loadANFFromJson(json);
+      const program = loadANFFromJSON(json);
       expect(program.contractName).toBe('Nested');
       expect(program.methods).toHaveLength(1);
 
@@ -573,8 +527,8 @@ describe('IR Loader: loadANFFromJson', () => {
       const ifBinding = body[1]!;
       expect((ifBinding.value as unknown as Record<string, unknown>)['kind']).toBe('if');
       expect((ifBinding.value as unknown as Record<string, unknown>)['cond']).toBe('cond');
-      const thenBindings = (ifBinding.value as unknown as Record<string, unknown>)['then'] as ANFBinding[];
-      const elseBindings = (ifBinding.value as unknown as Record<string, unknown>)['else'] as ANFBinding[];
+      const thenBindings = (ifBinding.value as unknown as Record<string, unknown>)['then'] as unknown[];
+      const elseBindings = (ifBinding.value as unknown as Record<string, unknown>)['else'] as unknown[];
       expect(thenBindings).toHaveLength(1);
       expect(elseBindings).toHaveLength(1);
 
@@ -583,7 +537,7 @@ describe('IR Loader: loadANFFromJson', () => {
       expect((loopBinding.value as unknown as Record<string, unknown>)['kind']).toBe('loop');
       expect((loopBinding.value as unknown as Record<string, unknown>)['count']).toBe(5);
       expect((loopBinding.value as unknown as Record<string, unknown>)['iterVar']).toBe('i');
-      const loopBody = (loopBinding.value as unknown as Record<string, unknown>)['body'] as ANFBinding[];
+      const loopBody = (loopBinding.value as unknown as Record<string, unknown>)['body'] as unknown[];
       expect(loopBody).toHaveLength(1);
     });
   });
