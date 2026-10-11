@@ -978,7 +978,27 @@ const TypeChecker = struct {
                 return .bigint;
             },
             .array_literal => |elems| {
-                for (elems) |elem| _ = self.inferExprType(elem, env);
+                // F-216: compare every element to the first, the same way
+                // the six peer tiers' generic array-literal arm does
+                // (F-063). checkMultiSig's special case (below) only
+                // validates a Sig[]/PubKey[] array when the LITERAL
+                // appears directly at the call site; binding a
+                // heterogeneous literal to a local `const` first and
+                // passing the identifier bypassed that check entirely,
+                // because this arm used to infer elements for side
+                // effects only and return `.unknown` unconditionally with
+                // no cross-element comparison.
+                if (elems.len == 0) return .unknown;
+                const elem_type = self.inferExprType(elems[0], env);
+                for (elems[1..]) |elem| {
+                    const et = self.inferExprType(elem, env);
+                    if (!isSubtype(et, elem_type) and et != .unknown) {
+                        self.addError("Array element type mismatch: expected '{s}', got '{s}'", .{
+                            types.runarTypeToString(elem_type),
+                            types.runarTypeToString(et),
+                        });
+                    }
+                }
                 return .unknown;
             },
         };
@@ -2758,4 +2778,87 @@ test "N-019: `this.board[i]++` types, because pass 3b now writes it back" {
     const result = try typeCheck(alloc, contract);
 
     try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// -----------------------------------------------------------------------
+// F-216: a heterogeneous array literal bound to a local const before
+// reaching checkMultiSig() must still be rejected.
+//
+// checkMultiSig's special case (above) validates a Sig[]/PubKey[] argument
+// element-by-element ONLY when the argument is a literal `.array_literal`
+// AT THE CALL SITE. The generic `.array_literal` arm of `inferExprType`
+// — reached for any OTHER expression position, including a `const`
+// initializer — used to just walk elements for side effects (so a call
+// nested in one still reached the unknown-function rule) and return
+// `.unknown` unconditionally, with no comparison between elements. Binding
+// `[s, 1n]` to `const sigs = ...` and passing the identifier `sigs` to
+// checkMultiSig therefore hit the special case's `else` branch (identifier,
+// not a literal), which only infers for side effects and validates nothing,
+// so the heterogeneous array sailed through untyped and compiled.
+//
+// Six peer tiers (TS, Go, Rust, Python, Ruby, Java) do not have this gap:
+// their generic array-literal arm already compares every element against
+// the first element's type (F-063), so the SAME local-binding shape is
+// caught at the `const sigs = [s, 1n]` statement itself, before
+// checkMultiSig is ever reached. This test ports that behaviour to Zig's
+// generic arm with the same diagnostic wording.
+//
+// Proves: a `const` bound to a heterogeneous array literal is rejected by
+// the typechecker with an "Array element type mismatch" diagnostic, closing
+// the one shape that bypassed checkMultiSig's own per-argument check.
+// Does not prove: cross-tier hex/byte parity, or that every OTHER consumer
+// of a local array-typed identifier (there are none yet — arrays are not
+// first-class values in this language) is covered.
+test "F-216: a heterogeneous array literal bound to a local const is rejected" {
+    const allocator = std.testing.allocator;
+
+    var sig_elems = [_]Expression{ .{ .identifier = "s" }, .{ .literal_int = 1 } };
+
+    const pk_elems = try allocator.alloc(Expression, 2);
+    defer allocator.free(pk_elems);
+    pk_elems[0] = .{ .identifier = "pk" };
+    pk_elems[1] = .{ .identifier = "pk2" };
+
+    const call_args = try allocator.alloc(Expression, 2);
+    defer allocator.free(call_args);
+    call_args[0] = .{ .identifier = "sigs" };
+    call_args[1] = .{ .array_literal = pk_elems };
+
+    const call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(call);
+    call.* = .{ .callee = "checkMultiSig", .args = call_args };
+
+    const stmts = try allocator.alloc(Statement, 2);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "sigs", .value = .{ .array_literal = &sig_elems } } };
+    stmts[1] = .{ .assert_stmt = .{ .condition = .{ .call = call } } };
+
+    const params = try allocator.alloc(types.ParamNode, 1);
+    defer allocator.free(params);
+    params[0] = .{ .name = "s", .type_info = .sig };
+
+    const props = try allocator.alloc(types.PropertyNode, 2);
+    defer allocator.free(props);
+    props[0] = .{ .name = "pk", .type_info = .pub_key, .readonly = true };
+    props[1] = .{ .name = "pk2", .type_info = .pub_key, .readonly = true };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "unlock", .is_public = true, .params = params, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "ProbeSigArray",
+        .parent_class = .smart_contract,
+        .properties = props,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "Array element type mismatch") != null) found = true;
+    }
+    try std.testing.expect(found);
 }
