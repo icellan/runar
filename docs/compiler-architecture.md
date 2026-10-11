@@ -370,7 +370,7 @@ Runs on ANF IR between Pass 4 (ANF Lower) and Pass 5 (Stack Lower). Always enabl
 
 ### Constant Folder (`constant-fold.ts`)
 
-Available between Pass 4 (ANF Lower) and Pass 5 (Stack Lower), but disabled by default to preserve ANF conformance (see whitepaper Section 4.5). When enabled, evaluates constant expressions at compile time. For example, `3n + 4n` is folded to `7n` and emitted as a single `OP_7` instead of `OP_3 OP_4 OP_ADD`.
+Runs between Pass 4 (ANF Lower) and Pass 5 (Stack Lower) and is **enabled by default**, evaluating constant expressions at compile time. For example, `3n + 4n` is folded to `7n` and emitted as a single `OP_7` instead of `OP_3 OP_4 OP_ADD`. It can be turned off with `disableConstantFolding: true`; the checked-in conformance goldens are generated with it off, to preserve byte-identical ANF across the seven compilers.
 
 ---
 

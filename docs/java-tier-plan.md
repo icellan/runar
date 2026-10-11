@@ -38,7 +38,7 @@ Every compiler must implement these passes in order; Java is no exception:
 3. Typecheck — type consistency + builtin-call enforcement
 4. Expand fixed arrays — inline `FixedArray<T,N>` to scalar properties
 5. ANF lower — AST → ANF IR (`packages/runar-ir-schema/src/anf-ir.ts`)
-6. Constant fold (optional, off by default — conformance mode disables it)
+6. Constant fold (enabled by default — conformance mode's `--disable-constant-folding` opts out)
 7. EC optimize — EC operation fusions
 8. Stack lower — ANF → Stack IR
 9. Peephole — Stack IR optimization (always on)
