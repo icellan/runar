@@ -522,7 +522,7 @@ public final class MockCrypto {
     public static ByteString blake3Hash(ByteString data) {
         byte[] msg = data.toByteArray();
         if (msg.length > 64) {
-            throw new IllegalArgumentException("blake3Hash: simulator supports messages ≤ 64 bytes, got " + msg.length);
+            throw new IllegalArgumentException("blake3Hash: message must be <= 64 bytes, got " + msg.length);
         }
         byte[] padded = new byte[64];
         System.arraycopy(msg, 0, padded, 0, msg.length);

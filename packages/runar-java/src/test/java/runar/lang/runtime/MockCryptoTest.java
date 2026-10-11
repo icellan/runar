@@ -360,6 +360,21 @@ class MockCryptoTest {
     }
 
     @Test
+    void blake3HashRejectsMessagesLongerThan64BytesWithSharedDiagnostic() {
+        // N-107: the on-chain blake3Hash script only ever handles a single 64-byte
+        // block, so every off-chain tier must refuse >64 bytes with the SAME
+        // diagnostic the TS reference interpreter throws (packages/runar-testing/
+        // src/interpreter/interpreter.ts:1610) — matched verbatim (not just
+        // "contains") across Go/Rust/Python/Ruby/TS so a caller parsing the message
+        // doesn't see a tier-specific string. This proves the Java off-chain mock's
+        // refusal text; it does not prove the on-chain script's behavior, Zig's
+        // (untestable in-process) panic text, or any other tier.
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> MockCrypto.blake3Hash(new ByteString(new byte[65])));
+        assertEquals("blake3Hash: message must be <= 64 bytes, got 65", ex.getMessage());
+    }
+
+    @Test
     void blake3CompressDeterministic() {
         ByteString out1 = MockCrypto.blake3Compress(
             new ByteString(MockCrypto.BLAKE3_IV_BYTES),
