@@ -257,6 +257,15 @@ func TestCompile_BooleanLogic(t *testing.T) {
 // Test: Script number encoding
 // ---------------------------------------------------------------------------
 
+// TestEncodeScriptNumber proves EncodePushBigInt's asm string (its second
+// return value) actually matches the wantAsm column for every case in the
+// table, including the >16/<-1 "script-number push" cases ("seventeen",
+// "minus_two") that previously discarded gotAsm via `_ = gotAsm` and never
+// compared it (F-374). It does NOT prove the asm format itself is the right
+// one to standardize on, or that any caller depends on these exact strings:
+// production callers (frontend/parser.go) discard the asm return value today,
+// so this only pins EncodePushBigInt's current, observed behavior against
+// regression.
 func TestEncodeScriptNumber(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -268,8 +277,8 @@ func TestEncodeScriptNumber(t *testing.T) {
 		{"one", big.NewInt(1), "51", "OP_1"},
 		{"sixteen", big.NewInt(16), "60", "OP_16"},
 		{"negative_one", big.NewInt(-1), "4f", "OP_1NEGATE"},
-		{"seventeen", big.NewInt(17), "0111", "OP_17_as_push"},
-		{"minus_two", big.NewInt(-2), "0182", "OP_minus2_as_push"},
+		{"seventeen", big.NewInt(17), "0111", "<11>"},
+		{"minus_two", big.NewInt(-2), "0182", "<82>"},
 	}
 
 	for _, tt := range tests {
@@ -278,7 +287,9 @@ func TestEncodeScriptNumber(t *testing.T) {
 			if gotHex != tt.wantHex {
 				t.Errorf("hex: got %s, want %s", gotHex, tt.wantHex)
 			}
-			_ = gotAsm // ASM format varies; just ensure no panic
+			if gotAsm != tt.wantAsm {
+				t.Errorf("asm: got %s, want %s", gotAsm, tt.wantAsm)
+			}
 		})
 	}
 }
