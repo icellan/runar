@@ -189,7 +189,17 @@ def main() -> None:
         print("parser ok")
         return
 
-    # Handle --emit-ir: dump ANF IR JSON and exit
+    # Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS --emit-source-map
+    # was also requested. The source map is only populated by the full
+    # compile (stack-lowering + emit), which this IR-only snapshot never
+    # runs, so an unconditional return here used to silently drop the
+    # --emit-source-map file with no diagnostic (F-255, same bug as Go's
+    # F-183). When --emit-source-map is also set we fall through — the same
+    # way --emit-ir-to already does — into the normal compile below so the
+    # source map gets populated and written; emit_ir_handled then stops us
+    # before the final hex/asm/artifact output, since --emit-ir's contract
+    # is "stdout carries only the IR".
+    emit_ir_handled = False
     if args.emit_ir:
         if not args.source:
             print("--emit-ir requires --source", file=sys.stderr)
@@ -212,7 +222,9 @@ def main() -> None:
         # Serialize the ANFProgram to camelCase JSON (matching Go/TS output)
         ir_json = json.dumps(_anf_to_camel_dict(program), indent=2, default=str)
         print(ir_json)
-        return
+        if not args.emit_source_map:
+            return
+        emit_ir_handled = True
 
     # Handle --emit-ir-to: write the SAME bytes --emit-ir would print to a
     # file, then fall through to the normal compile below. The conformance
@@ -303,6 +315,12 @@ def main() -> None:
             json.dump({"mappings": mappings}, f, indent=2)
             f.write("\n")
         print(f"Source map written to {args.emit_source_map}", file=sys.stderr)
+
+    # --emit-ir already printed the IR above; having fallen through only to
+    # populate and write the source map, stop here rather than also print
+    # the full hex/asm/artifact output.
+    if emit_ir_handled:
+        return
 
     # Write output
     if args.output:

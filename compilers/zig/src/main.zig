@@ -376,10 +376,14 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 
     // `--parse-only` stops after validate; `--emit-ir` stops after the ANF
     // optimizers — running stack lowering for either would let a later pass
-    // fail a command that never asked for its output.
+    // fail a command that never asked for its output. EXCEPT when
+    // --emit-source-map was also requested (F-255): the source map is only
+    // populated by stack-lowering + emit, so --emit-ir alone must run the
+    // full pipeline in that combination, the same way --emit-ir-to already
+    // does.
     const stop_after: compiler_api.StopAfter = if (opts.parse_only)
         .validate
-    else if (opts.emit_ir)
+    else if (opts.emit_ir and opts.emit_source_map_path == null)
         .anf
     else
         .full;
@@ -403,11 +407,22 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 
     const program = pipeline.program.?;
 
-    // --emit-ir: output canonical ANF IR JSON and stop
+    // --emit-ir: output canonical ANF IR JSON, then stop — UNLESS
+    // --emit-source-map was also requested (F-255, same bug as Go's F-183:
+    // an unconditional return here used to silently drop the
+    // --emit-source-map file with no diagnostic). When --emit-source-map is
+    // also set, `stop_after` above already chose `.full`, so we fall
+    // through into stack-lowering + emit below; `emit_ir_handled` then stops
+    // us before the final hex/artifact output, since --emit-ir's contract
+    // is "stdout carries only the IR".
+    var emit_ir_handled = false;
     if (opts.emit_ir) {
         const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
         try writeStdout(io, canonical);
-        return;
+        if (opts.emit_source_map_path == null) {
+            return;
+        }
+        emit_ir_handled = true;
     }
 
     // --emit-ir-to <path>: write the SAME bytes --emit-ir would print, then
@@ -442,6 +457,13 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // the empty {"mappings":[]} wrapper if absent) and write it to PATH.
     if (opts.emit_source_map_path) |sm_path| {
         try writeSourceMapToPath(work_allocator, io, artifact, sm_path, path);
+    }
+
+    // --emit-ir already printed the IR above; having fallen through only to
+    // populate and write the source map, stop here rather than also print
+    // the full artifact.
+    if (emit_ir_handled) {
+        return;
     }
 
     try writeStdoutLn(io, artifact);

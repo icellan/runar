@@ -159,7 +159,17 @@ fn main() {
         return;
     }
 
-    // Handle --emit-ir: dump ANF IR JSON and exit
+    // Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS --emit-source-map
+    // was also requested. The source map is only populated by the full
+    // compile (stack-lowering + emit), which this IR-only snapshot never
+    // runs, so an unconditional return here used to silently drop the
+    // --emit-source-map file with no diagnostic (F-255, same bug as Go's
+    // F-183). When --emit-source-map is also set we fall through — the same
+    // way --emit-ir-to already does — into the normal compile below so the
+    // source map gets populated and written; emit_ir_handled then stops us
+    // before the final hex/asm/artifact output, since --emit-ir's contract
+    // is "stdout carries only the IR".
+    let mut emit_ir_handled = false;
     if args.emit_ir {
         let source_path = match &args.source {
             Some(p) => p,
@@ -177,7 +187,10 @@ fn main() {
                         process::exit(1);
                     }
                 }
-                return;
+                if args.emit_source_map.is_none() {
+                    return;
+                }
+                emit_ir_handled = true;
             }
             Err(e) => {
                 eprintln!("Compilation error: {}", e);
@@ -302,6 +315,13 @@ fn main() {
                 process::exit(1);
             }
         }
+    }
+
+    // --emit-ir already printed the IR above; having fallen through only to
+    // populate and write the source map, stop here rather than also print
+    // the full hex/asm/artifact output.
+    if emit_ir_handled {
+        return;
     }
 
     // Determine output content

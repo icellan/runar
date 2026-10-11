@@ -177,7 +177,17 @@ module RunarCompiler
         return
       end
 
-      # Handle --emit-ir: dump ANF IR JSON and exit
+      # Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS
+      # --emit-source-map was also requested. The source map is only
+      # populated by the full compile (stack-lowering + emit), which this
+      # IR-only snapshot never runs, so an unconditional return here used to
+      # silently drop the --emit-source-map file with no diagnostic (F-255,
+      # same bug as Go's F-183). When --emit-source-map is also set we fall
+      # through — the same way --emit-ir-to already does — into the normal
+      # compile below so the source map gets populated and written;
+      # emit_ir_handled then stops us before the final hex/asm/artifact
+      # output, since --emit-ir's contract is "stdout carries only the IR".
+      emit_ir_handled = false
       if options[:emit_ir]
         unless options[:source]
           $stderr.puts "--emit-ir requires --source"
@@ -197,7 +207,10 @@ module RunarCompiler
         # Serialize the ANFProgram to camelCase JSON (matching Go/TS output)
         ir_json = JSON.pretty_generate(_anf_to_camel_dict(program))
         puts ir_json
-        return
+        unless options[:emit_source_map]
+          return
+        end
+        emit_ir_handled = true
       end
 
       # Handle --emit-ir-to: write the SAME bytes --emit-ir would print to a
@@ -292,6 +305,11 @@ module RunarCompiler
         File.write(sm_path, JSON.pretty_generate({ "mappings" => mappings }) + "\n")
         $stderr.puts "Source map written to #{sm_path}"
       end
+
+      # --emit-ir already printed the IR above; having fallen through only
+      # to populate and write the source map, stop here rather than also
+      # print the full hex/asm/artifact output.
+      return if emit_ir_handled
 
       # Write output
       if options[:output]

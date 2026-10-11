@@ -83,3 +83,57 @@ def test_no_input_flag_errors() -> None:
     proc = _run([])
     assert proc.returncode == 1
     assert "Usage:" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# --emit-ir + --emit-source-map (F-255)
+#
+# The --emit-ir branch printed the IR JSON and `return`ed unconditionally,
+# before the code further down that services --emit-source-map ever ran.
+# `--source X --emit-ir --emit-source-map Y` exited 0 and Y was never
+# created — the request was silently dropped, not refused. Go had the
+# identical bug (F-183) and Java was always correct ("GAP-002:
+# --emit-source-map ... runs INDEPENDENTLY of --emit-ir"); this ports Go's
+# fix (fall through into the full compile so the source map gets populated
+# and written, then stop before the hex/artifact output) to the Python tier.
+# ---------------------------------------------------------------------------
+
+
+def test_emit_ir_with_emit_source_map_writes_the_source_map_and_prints_only_ir(
+    tmp_path: Path,
+) -> None:
+    assert P2PKH_SOURCE.exists(), f"missing fixture: {P2PKH_SOURCE}"
+    sm_path = tmp_path / "source-map.json"
+    assert not sm_path.exists(), "sanity: source map path must not pre-exist"
+
+    proc = _run(
+        [
+            "--source",
+            str(P2PKH_SOURCE),
+            "--emit-ir",
+            "--emit-source-map",
+            str(sm_path),
+        ]
+    )
+    assert proc.returncode == 0, (
+        f"--emit-ir --emit-source-map must exit 0\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    )
+
+    # The finding itself: the file must actually be written.
+    assert sm_path.exists(), (
+        f"--emit-source-map file was never written (F-255 regression); stderr: {proc.stderr}"
+    )
+    import json as _json
+
+    sm_json = _json.loads(sm_path.read_text(encoding="utf-8"))
+    assert "mappings" in sm_json, f"source map JSON must carry a 'mappings' key, got: {sm_json}"
+
+    # --emit-ir's contract: stdout carries only the IR, never the full
+    # artifact (which would carry a "script" field).
+    stdout_json = _json.loads(proc.stdout)
+    assert "contractName" in stdout_json, (
+        f"stdout must be ANF IR (expected a contractName field), got: {proc.stdout}"
+    )
+    assert "script" not in stdout_json, (
+        f"stdout must carry ONLY the IR, not the compiled artifact; got: {proc.stdout}"
+    )
