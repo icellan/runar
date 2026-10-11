@@ -25,7 +25,6 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(join(__dirname, '..', '..', '..'));
-const TOOLS_DIR = join(ROOT, 'conformance', 'sdk-output', 'tools');
 
 export interface SdkTool {
   name: string;
@@ -77,10 +76,17 @@ function resolveGradle(): string {
   return 'gradle';
 }
 
-export function buildSdkTools(): SdkTool[] {
+/**
+ * `toolsDirOverride` lets tests point this at a scratch directory so the
+ * "binary not yet built" fallback branches (go build / cargo build) can be
+ * exercised deterministically, without depending on whether the real
+ * tools/ directory happens to already contain a built driver. Mirrors
+ * `sdk-output/runner/sdk-runner.ts`'s `buildSdkTools(toolsDirOverride?)`.
+ */
+export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
+  const TOOLS_DIR = toolsDirOverride ?? join(ROOT, 'conformance', 'sdk-output', 'tools');
   const tools: SdkTool[] = [
     { name: 'typescript', cmd: 'npx', args: (i) => ['tsx', join(TOOLS_DIR, 'ts-sdk-tool.ts'), i] },
-    { name: 'go', cmd: 'go', args: (i) => ['run', join(TOOLS_DIR, 'go-sdk-tool.go'), i] },
     {
       name: 'python',
       cmd: 'python3',
@@ -90,14 +96,61 @@ export function buildSdkTools(): SdkTool[] {
     { name: 'ruby', cmd: 'ruby', args: (i) => [join(TOOLS_DIR, 'rb-sdk-tool.rb'), i] },
   ];
 
+  // Go: prefer a pre-built binary; otherwise build it once via a separate
+  // `go build` step (preBuild) before ever invoking it — see the N-091 /
+  // N-174 note on the Rust tool below for why the build and the run must
+  // not share one invocation. Mirrors sdk-output/runner/sdk-runner.ts.
+  const goBin = join(TOOLS_DIR, 'go-sdk-tool-bin');
+  const goSrc = join(TOOLS_DIR, 'go-sdk-tool.go');
+  if (isExecutable(goBin)) {
+    tools.push({ name: 'go', cmd: goBin, args: (i) => [i] });
+  } else {
+    tools.push({
+      name: 'go',
+      cmd: goBin,
+      args: (i) => [i],
+      preBuild: () => {
+        execFileSync('go', ['build', '-o', goBin, goSrc], {
+          cwd: ROOT,
+          stdio: 'pipe',
+          timeout: 120_000,
+        });
+      },
+    });
+  }
+
+  // Rust: prefer pre-built binary; otherwise build it once via a separate
+  // `cargo build` step (preBuild) before ever invoking it, the same pattern
+  // the zig/java tools below already use. N-091/N-174: the previous
+  // fallback ran `cargo run`, which compiles AND runs in a single
+  // invocation, so cargo's own build log ('Compiling ...', warnings) lands
+  // in the SAME stderr stream `vertical-runner.ts` reports as
+  // `result.error` and compares tiers by — build noise can stand in for, or
+  // drown out, the driver's own diagnostic. Building separately (and
+  // discarding that output unless it fails) means the stderr the runner
+  // ever sees is the driver's own.
   const rsBin = join(TOOLS_DIR, 'rs-sdk-tool', 'target', 'release', 'rs-sdk-tool');
   if (isExecutable(rsBin)) {
     tools.push({ name: 'rust', cmd: rsBin, args: (i) => [i] });
   } else {
     tools.push({
       name: 'rust',
-      cmd: 'cargo',
-      args: (i) => ['run', '--release', '--manifest-path', join(TOOLS_DIR, 'rs-sdk-tool', 'Cargo.toml'), '--', i],
+      cmd: rsBin,
+      args: (i) => [i],
+      preBuild: () => {
+        execFileSync('cargo', [
+          'build', '--release',
+          '--manifest-path', join(TOOLS_DIR, 'rs-sdk-tool', 'Cargo.toml'),
+        ], {
+          cwd: ROOT,
+          stdio: 'pipe',
+          // A from-scratch build pulls in rs-sdk-tool's full dependency
+          // tree; CI prebuilds rs-sdk-tool in its own step before invoking
+          // this runner (see N-091), so this timeout only protects a cold
+          // local dev run.
+          timeout: 600_000,
+        });
+      },
     });
   }
 
