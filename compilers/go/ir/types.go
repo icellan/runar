@@ -55,6 +55,27 @@ type ANFProperty struct {
 	SyntheticArrayChain []ANFSyntheticArrayLevel `json:"syntheticArrayChain,omitempty"`
 }
 
+// UnmarshalJSON decodes an ANFProperty with UseNumber, so a bare-number
+// initialValue reaches DecodeConstants as its exact token rather than a
+// float64 that has already rounded away every digit past 2^53 (N-212).
+func (p *ANFProperty) UnmarshalJSON(data []byte) error {
+	type anfPropertyAlias ANFProperty
+	var a anfPropertyAlias
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&a); err != nil {
+		return err
+	}
+	*p = ANFProperty(a)
+	return nil
+}
+
+// fitsFloat64Exactly reports whether |v| <= 2^53-1, the range in which every
+// integer is exactly one float64.
+func fitsFloat64Exactly(v *big.Int) bool {
+	return new(big.Int).Abs(v).Cmp(big.NewInt(1<<53-1)) <= 0
+}
+
 // ANFMethod is a single contract method.
 type ANFMethod struct {
 	Name     string       `json:"name"`
@@ -413,6 +434,22 @@ func DecodeConstants(program *ANFProgram) error {
 // value means the same thing in both positions by construction rather than by
 // two implementations agreeing.
 func decodePropertyInitialValue(p *ANFProperty) error {
+	// N-212: ANFProperty.UnmarshalJSON keeps a bare number as its json.Number
+	// token. An integer token outside float64's exact range becomes a
+	// *big.Int with every digit; everything else stays the float64 that
+	// encoding/json has always produced, so no in-range value changes type.
+	if num, ok := p.InitialValue.(json.Number); ok {
+		if bi, ok := new(big.Int).SetString(num.String(), 10); ok && !fitsFloat64Exactly(bi) {
+			p.InitialValue = bi
+			return nil
+		}
+		f, err := num.Float64()
+		if err != nil {
+			return fmt.Errorf("initialValue %s: %w", num, err)
+		}
+		p.InitialValue = f
+		return nil
+	}
 	s, ok := p.InitialValue.(string)
 	if !ok || !isDecimalBigIntLiteral(s) {
 		return nil

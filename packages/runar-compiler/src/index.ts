@@ -839,12 +839,27 @@ export function loadANFFromJSON(json: string): ANFProgram {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(json, (_key, value) => {
+    parsed = JSON.parse(json, ((key: string, value: unknown, context?: { source?: string }) => {
       if (typeof value === 'string' && /^-?\d+n$/.test(value)) {
         return BigInt(value.slice(0, -1));
       }
+      // N-212 (R82: parse exactly everywhere): a bare integer constant past
+      // 2^53 has already been rounded in `value`, but the reviver's
+      // `context.source` (Node >= 21) still holds the token, so read the
+      // digits from there. Scoped to the two constant positions, as in the
+      // native tiers. Without `context.source` the number falls through and
+      // coerceNumericBigInts refuses it, as before.
+      if (
+        typeof value === 'number' &&
+        (key === 'value' || key === 'initialValue') &&
+        !Number.isSafeInteger(value) &&
+        typeof context?.source === 'string' &&
+        /^-?\d+$/.test(context.source)
+      ) {
+        return BigInt(context.source);
+      }
       return value;
-    }) as unknown;
+    }) as Parameters<typeof JSON.parse>[1]) as unknown;
   } catch (e) {
     throw new CanonicalJsonError(
       'invalid',

@@ -7,6 +7,7 @@ use super::{ANFBinding, ANFProgram, ANFValue};
 use super::required_fields::assert_required_ir_fields;
 use super::input_limits::{
     assert_ir_bytes_under_limit, assert_ir_nesting_under_limit, assert_no_json_floats,
+    quote_wide_integer_constants,
 };
 
 /// Load an ANF IR program from a JSON file on disk.
@@ -44,7 +45,10 @@ pub fn load_ir_from_str(json_str: &str) -> Result<ANFProgram, String> {
     assert_required_ir_fields(json_str)?;
     // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
     assert_no_reserved_ir_names(json_str)?;
-    let program: ANFProgram = serde_json::from_str(json_str)
+    // N-212: keep every digit of a wide bare integer constant (see
+    // quote_wide_integer_constants); serde would round it to an f64.
+    let quoted = quote_wide_integer_constants(json_str);
+    let program: ANFProgram = serde_json::from_str(quoted.as_deref().unwrap_or(json_str))
         .map_err(|e| describe_ir_parse_error(&e))?;
     validate_ir(&program)?;
     Ok(program)
@@ -169,7 +173,9 @@ pub fn load_ir_from_str_typed(
     assert_required_ir_fields(json_str).map_err(IRLoaderError::Other)?;
     // N-060 / N-065 — see load_ir_from_str.
     assert_no_reserved_ir_names(json_str).map_err(IRLoaderError::Other)?;
-    serde_json::from_str::<ANFProgram>(json_str)
+    // N-212 — see load_ir_from_str.
+    let quoted = quote_wide_integer_constants(json_str);
+    serde_json::from_str::<ANFProgram>(quoted.as_deref().unwrap_or(json_str))
         .map_err(|e| IRLoaderError::Other(describe_ir_parse_error(&e)))
         .and_then(|p| {
             validate_ir(&p).map_err(IRLoaderError::Other)?;

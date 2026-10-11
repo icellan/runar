@@ -248,3 +248,51 @@ fn ir_numeric_initial_value_matches_load_const_and_is_not_zero() {
         "oversize JSON number was still truncated to zero; asm = {via_initial_value}"
     );
 }
+
+/// N-212 (decision R82: parse exactly everywhere). The same bare JSON number
+/// as above, now pinned to its EXACT bytes through both consumers.
+///
+/// Before the fix both pushed `<ffffffffffffffffffffffffffffff7f>` (i128::MAX):
+/// serde_json had already turned the 78-digit token into an f64, and `f as
+/// i128` saturated. The loader now keeps the raw token of a wide bare integer
+/// in `load_const.value` / `initialValue`, so the digits reach
+/// `parse_const_value` intact.
+///
+/// Proves: Rust's `--ir` path pushes the exact secp256k1 order for a bare
+/// JSON number in either position, and the same bytes as the `"…n"` string
+/// form. Does not prove anything about the other tiers
+/// (conformance/negatives/ir-bare-big-integer.test.ts grades all seven).
+#[test]
+fn ir_numeric_secp256k1_order_is_exact_in_both_positions() {
+    const HUGE: &str =
+        "115792089237316195423570985008687907852837564279074904382605163141518161494337";
+    const EXACT: &str = "<414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff00>";
+
+    for (what, ir) in [
+        ("initialValue", ir_with_numeric_initial_value(HUGE)),
+        ("load_const", ir_with_numeric_load_const(HUGE)),
+        (
+            "initialValue string form",
+            ir_with_numeric_initial_value(&format!("\"{HUGE}n\"")),
+        ),
+    ] {
+        let asm = compile_from_ir_str(&ir)
+            .expect("compile should succeed")
+            .asm;
+        assert!(
+            asm.contains(EXACT),
+            "{what}: bare secp256k1 order was not pushed exactly; asm = {asm}"
+        );
+    }
+
+    // Wide negatives and the first value past i64 take the same path.
+    for (literal, exact) in [
+        ("-9223372036854775809", "<010000000000008080>"),
+        ("9223372036854775808", "<000000000000008000>"),
+    ] {
+        let asm = compile_from_ir_str(&ir_with_numeric_load_const(literal))
+            .expect("compile should succeed")
+            .asm;
+        assert!(asm.contains(exact), "load_const {literal}: asm = {asm}");
+    }
+}
