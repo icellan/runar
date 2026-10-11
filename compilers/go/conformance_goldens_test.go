@@ -160,6 +160,92 @@ func shortDiff(expected, actual string) string {
 	return sb.String()
 }
 
+// compareGoldens checks a single fixture's actual ANF IR / script hex
+// against its checked-in `expected-ir.json` / `expected-script.hex`.
+//
+// A missing or unreadable golden file is a failure (fixtureFailure with
+// kind "read-golden-ir" / "read-golden-hex"), never a silent pass: every
+// fixture under conformance/tests ships both goldens, so there is no
+// legitimate "golden intentionally absent" case for this sweep to tolerate.
+// Returns nil when both goldens are present, readable, and byte-identical
+// to the actual output.
+func compareGoldens(name, testDir, actualIR, actualHex string) *fixtureFailure {
+	expectedIRPath := filepath.Join(testDir, "expected-ir.json")
+	raw, err := os.ReadFile(expectedIRPath)
+	if err != nil {
+		return &fixtureFailure{name: name, kind: "read-golden-ir", actual: err.Error()}
+	}
+	expectedIR, err := canonicalizeJSON(raw)
+	if err != nil {
+		return &fixtureFailure{name: name, kind: "canonicalize-golden-ir", actual: err.Error()}
+	}
+	if actualIR != expectedIR {
+		return &fixtureFailure{name: name, kind: "ir-mismatch", expected: expectedIR, actual: actualIR}
+	}
+
+	expectedHexPath := filepath.Join(testDir, "expected-script.hex")
+	rawHex, err := os.ReadFile(expectedHexPath)
+	if err != nil {
+		return &fixtureFailure{name: name, kind: "read-golden-hex", actual: err.Error()}
+	}
+	expectedHex := strings.ToLower(strings.Join(strings.Fields(string(rawHex)), ""))
+	if actualHex != expectedHex {
+		return &fixtureFailure{name: name, kind: "script-mismatch", expected: expectedHex, actual: actualHex}
+	}
+
+	return nil
+}
+
+// TestCompareGoldens_MissingGoldenIsFailureNotSkip proves that compareGoldens
+// treats a missing/unreadable expected-ir.json or expected-script.hex as a
+// failure, not as "nothing to compare, mark it passed". This is the
+// regression guard for F-280: the inline version of this logic used to gate
+// each comparison behind `if _, err := os.Stat(path); err == nil { ... }`,
+// so an unreadable golden skipped the comparison entirely and the fixture
+// fell through to `passed` with zero bytes actually checked.
+//
+// It does NOT prove TestConformanceGoldens itself wires compareGoldens in
+// (that's asserted by TestConformanceGoldens passing after the refactor);
+// it proves the helper's missing-golden contract in isolation.
+func TestCompareGoldens_MissingGoldenIsFailureNotSkip(t *testing.T) {
+	t.Run("missing expected-ir.json", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "expected-script.hex"), []byte("deadbeef"), 0o644); err != nil {
+			t.Fatalf("write expected-script.hex: %v", err)
+		}
+		// expected-ir.json deliberately absent.
+		got := compareGoldens("fake-fixture", dir, `{"anything":true}`, "deadbeef")
+		if got == nil {
+			t.Fatalf("compareGoldens returned nil (treated missing expected-ir.json as a pass); want a failure with kind=read-golden-ir")
+		}
+		if got.kind != "read-golden-ir" {
+			t.Errorf("got failure kind %q, want %q", got.kind, "read-golden-ir")
+		}
+	})
+
+	t.Run("missing expected-script.hex", func(t *testing.T) {
+		dir := t.TempDir()
+		irJSON := `{"anything":true}`
+		if err := os.WriteFile(filepath.Join(dir, "expected-ir.json"), []byte(irJSON), 0o644); err != nil {
+			t.Fatalf("write expected-ir.json: %v", err)
+		}
+		// Make the "actual" IR match the golden exactly (after canonicalization)
+		// so the IR comparison passes and the test isolates the missing-hex path.
+		canonicalIR, err := canonicalizeJSON([]byte(irJSON))
+		if err != nil {
+			t.Fatalf("canonicalizeJSON: %v", err)
+		}
+		// expected-script.hex deliberately absent.
+		got := compareGoldens("fake-fixture", dir, canonicalIR, "deadbeef")
+		if got == nil {
+			t.Fatalf("compareGoldens returned nil (treated missing expected-script.hex as a pass); want a failure with kind=read-golden-hex")
+		}
+		if got.kind != "read-golden-hex" {
+			t.Errorf("got failure kind %q, want %q", got.kind, "read-golden-hex")
+		}
+	})
+}
+
 func TestConformanceGoldens(t *testing.T) {
 	// Resolve conformance/tests relative to this test file. `go test` runs
 	// with CWD = package directory, which is compilers/go.
@@ -219,46 +305,9 @@ func TestConformanceGoldens(t *testing.T) {
 		actualHex := strings.ToLower(strings.Join(strings.Fields(artifact.Script), ""))
 
 		// Step 3: compare against goldens
-		expectedIRPath := filepath.Join(testDir, "expected-ir.json")
-		if _, err := os.Stat(expectedIRPath); err == nil {
-			raw, err := os.ReadFile(expectedIRPath)
-			if err != nil {
-				failures = append(failures, fixtureFailure{name: name, kind: "read-golden-ir", actual: err.Error()})
-				continue
-			}
-			expectedIR, err := canonicalizeJSON(raw)
-			if err != nil {
-				failures = append(failures, fixtureFailure{name: name, kind: "canonicalize-golden-ir", actual: err.Error()})
-				continue
-			}
-			if actualIR != expectedIR {
-				failures = append(failures, fixtureFailure{
-					name:     name,
-					kind:     "ir-mismatch",
-					expected: expectedIR,
-					actual:   actualIR,
-				})
-				continue
-			}
-		}
-
-		expectedHexPath := filepath.Join(testDir, "expected-script.hex")
-		if _, err := os.Stat(expectedHexPath); err == nil {
-			raw, err := os.ReadFile(expectedHexPath)
-			if err != nil {
-				failures = append(failures, fixtureFailure{name: name, kind: "read-golden-hex", actual: err.Error()})
-				continue
-			}
-			expectedHex := strings.ToLower(strings.Join(strings.Fields(string(raw)), ""))
-			if actualHex != expectedHex {
-				failures = append(failures, fixtureFailure{
-					name:     name,
-					kind:     "script-mismatch",
-					expected: expectedHex,
-					actual:   actualHex,
-				})
-				continue
-			}
+		if fail := compareGoldens(name, testDir, actualIR, actualHex); fail != nil {
+			failures = append(failures, *fail)
+			continue
 		}
 
 		passed = append(passed, name)
