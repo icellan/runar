@@ -1042,6 +1042,7 @@ jobs:
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
           conformance/analyzer/__tests__
           conformance/ir-roundtrip
+          conformance/fuzz-regressions
       - name: Cross-tier rejection parity (programs that must NOT compile)
         # The parser-only step above proves every tier ACCEPTS what it should.
         # Nothing proved they agree on what to REFUSE, and that gap let a Go
