@@ -677,13 +677,20 @@ class _TypeChecker:
             cond_type = self._infer_expr_type(stmt.condition, env)
             if cond_type != "boolean":
                 self._add_error(f"if condition must be boolean, got '{cond_type}'")
+            # F-222: the arms are mutually exclusive, so each is checked
+            # against the consumed set as it stood before the if; afterwards a
+            # value consumed in either arm counts as consumed.
+            consumed_before = dict(self.consumed_values)
             env.push_scope()
             self._check_statements(stmt.then, env)
             env.pop_scope()
+            consumed_after_then = self.consumed_values
+            self.consumed_values = consumed_before
             if stmt.else_:
                 env.push_scope()
                 self._check_statements(stmt.else_, env)
                 env.pop_scope()
+            self.consumed_values.update(consumed_after_then)
 
         elif isinstance(stmt, ForStmt):
             loop_scope = env.depth

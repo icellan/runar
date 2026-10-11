@@ -2373,3 +2373,59 @@ class C extends SmartContract {
 		})
 	}
 }
+
+// TestTypeCheck_F222_AffineConsumptionAcrossIfElseArms: the then and else arms
+// of an if are mutually exclusive, so a Sig consumed once in each arm is
+// consumed once on every path and must typecheck. Every shape where some path
+// consumes twice (an arm plus after the if, before plus an arm, twice in one
+// arm, once per arm inside a 2-iteration loop) must still be refused. Proves
+// the type checker's verdict only; the ternary form is not an if statement and
+// is untouched.
+func TestTypeCheck_F222_AffineConsumptionAcrossIfElseArms(t *testing.T) {
+	const double = "affine value 'sig' has already been consumed"
+	cases := []struct {
+		name, body, want string
+	}{
+		{"oncePerArm", "if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""},
+		{"aliasInOneArm", "if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""},
+		{"nestedOncePerArm", "if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", ""},
+		{"thenThenAfter", "if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", double},
+		{"elseThenAfter", "if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", double},
+		{"bothThenAfter", "if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", double},
+		{"nestedThenAfter", "if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", double},
+		{"aliasThenAfter", "const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", double},
+		{"beforeThenArm", "assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", double},
+		{"twiceInThen", "if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", double},
+		{"twiceInElse", "if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", double},
+		{"oncePerArmInLoop2", "for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", double},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, assert, Sig, PubKey, checkSig } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public m(sig: Sig, flag: boolean) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}

@@ -89,6 +89,7 @@ test {
     _ = @import("tests/n059_fixed_array_write_continuation.zig");
     _ = @import("tests/r073_fixed_array_element_type.zig");
     _ = @import("tests/f110_affine_loop_consumption.zig");
+    _ = @import("tests/f222_affine_if_else_arms.zig");
     _ = @import("tests/n002_index_assign_non_fixed_array.zig");
     _ = @import("tests/n086_expansion_field_preservation.zig");
     _ = @import("tests/n086_cross_tier_sighash_fixed_array.zig");

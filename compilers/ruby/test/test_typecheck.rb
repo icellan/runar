@@ -781,4 +781,40 @@ class TestTypecheck < Minitest::Test
       end
     end
   end
+
+  # F-222: the then and else arms of an if are mutually exclusive, so a Sig
+  # consumed once in each arm is consumed once on every path and must
+  # typecheck. Every shape where some path consumes twice (an arm plus after
+  # the if, before plus an arm, twice in one arm, once per arm inside a
+  # 2-iteration loop) must still be refused. Proves the type checker's verdict
+  # only; the ternary form is not an if statement and is untouched.
+  F222_DOUBLE = "affine value 'sig' has already been consumed"
+  F222_CASES = [
+    ["if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", nil],
+    ["if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", nil],
+    ["if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", nil],
+    ["if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", F222_DOUBLE],
+    ["if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", F222_DOUBLE],
+    ["if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", F222_DOUBLE],
+    ["for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", F222_DOUBLE],
+  ].freeze
+
+  def test_f222_affine_consumption_across_if_else_arms
+    F222_CASES.each do |body, want|
+      source = "class C extends SmartContract {\n  readonly pk: PubKey;\n" \
+               "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n" \
+               "  public m(sig: Sig, flag: boolean) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
 end

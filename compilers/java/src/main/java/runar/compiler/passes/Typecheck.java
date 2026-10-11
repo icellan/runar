@@ -560,14 +560,21 @@ public final class Typecheck {
                 if (!"boolean".equals(cond)) {
                     error("if condition must be boolean, got '" + cond + "'");
                 }
+                // F-222: the arms are mutually exclusive, so each is checked
+                // against the consumed set as it stood before the if;
+                // afterwards a value consumed in either arm counts as consumed.
+                Map<String, Boolean> consumedBefore = new HashMap<>(consumed);
                 env.push();
                 checkStatements(i.thenBody(), env);
                 env.pop();
+                Map<String, Boolean> consumedAfterThen = consumed;
+                consumed = consumedBefore;
                 if (i.elseBody() != null) {
                     env.push();
                     checkStatements(i.elseBody(), env);
                     env.pop();
                 }
+                consumed.putAll(consumedAfterThen);
             } else if (s instanceof ForStatement f) {
                 int loopScope = env.depth();
                 boolean repeats = loopMayRunTwice(f);

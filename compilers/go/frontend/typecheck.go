@@ -689,13 +689,25 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		if condType != "boolean" {
 			tc.addError(fmt.Sprintf("if condition must be boolean, got '%s'", condType))
 		}
+		// F-222: the arms are mutually exclusive, so each is checked against
+		// the consumed set as it stood before the if; afterwards a value
+		// consumed in either arm counts as consumed.
+		consumedBefore := make(map[string]bool, len(tc.consumedValues))
+		for origin := range tc.consumedValues {
+			consumedBefore[origin] = true
+		}
 		env.pushScope()
 		tc.checkStatements(s.Then, env)
 		env.popScope()
+		consumedAfterThen := tc.consumedValues
+		tc.consumedValues = consumedBefore
 		if len(s.Else) > 0 {
 			env.pushScope()
 			tc.checkStatements(s.Else, env)
 			env.popScope()
+		}
+		for origin := range consumedAfterThen {
+			tc.consumedValues[origin] = true
 		}
 
 	case ForStmt:

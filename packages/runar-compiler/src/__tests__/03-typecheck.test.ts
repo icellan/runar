@@ -1033,6 +1033,105 @@ describe('Pass 3: Type-Check', () => {
         expect(result.errors).toEqual([]);
       });
     });
+
+    // F-222: the then and else arms of an if are mutually exclusive, so a Sig
+    // consumed once in each arm is consumed once on every path. The checker
+    // used to walk both arms against one shared consumed set and flag the
+    // else-arm use as a double consumption.
+    //
+    // Proves: a value consumed once per arm (directly, through an alias, or in
+    // nested ifs) typechecks clean, and every shape where SOME path consumes
+    // twice is still refused: consumed in an arm and again after the if (then
+    // arm, else arm, both arms, nested arm, via an alias), consumed before and
+    // again inside an arm, twice inside one arm, and once per arm inside a
+    // 2-iteration loop.
+    // Does not prove: the ternary expression form (`c ? checkSig(..) :
+    // checkSig(..)`), which is not an if_statement and is still refused; nor
+    // anything about the emitted script (see the F-222 execution test).
+    describe('F-222: affine consumption across mutually exclusive if/else arms', () => {
+      const wrap = (body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          public m(sig: Sig, flag: boolean) {
+            ${body}
+          }
+        }
+      `;
+      const DOUBLE = "affine value 'sig' has already been consumed";
+
+      it('allows a Sig consumed once in each of the then and else arms', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows an alias consumed in one arm and the original in the other', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows one consumption per arm across nested if/else', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('refuses a Sig consumed in the then arm and again after the if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed in the else arm and again after the if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed in both arms and again after the if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed in a nested arm and again after the outer if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses an alias consumed in an arm and the original again after the if', () => {
+        const result = typecheckSource(wrap(
+          'const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed before the if and again inside an arm', () => {
+        const result = typecheckSource(wrap(
+          'assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); } assert(true);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed twice inside the then arm', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed twice inside the else arm', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed once per arm inside a 2-iteration loop', () => {
+        const result = typecheckSource(wrap(
+          'for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } } assert(true);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------

@@ -726,14 +726,21 @@ class TypeChecker {
             stmt.sourceLocation,
           ));
         }
+        // F-222: the arms are mutually exclusive, so each is checked against
+        // the consumed set as it stood before the if; afterwards a value
+        // consumed in either arm counts as consumed.
+        const consumedBefore = new Set(this.consumedValues);
         env.pushScope();
         this.checkStatements(stmt.then, env, stmt.sourceLocation);
         env.popScope();
+        const consumedAfterThen = this.consumedValues;
+        this.consumedValues = consumedBefore;
         if (stmt.else) {
           env.pushScope();
           this.checkStatements(stmt.else, env, stmt.sourceLocation);
           env.popScope();
         }
+        for (const origin of consumedAfterThen) this.consumedValues.add(origin);
         break;
       }
 

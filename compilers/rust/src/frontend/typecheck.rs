@@ -737,14 +737,21 @@ terminal (no state mutation)",
                         cond_type
                     ));
                 }
+                // F-222: the arms are mutually exclusive, so each is checked
+                // against the consumed set as it stood before the if;
+                // afterwards a value consumed in either arm counts as consumed.
+                let consumed_before = self.consumed_values.clone();
                 env.push_scope();
                 self.check_statements(then_branch, env);
                 env.pop_scope();
+                let consumed_after_then =
+                    std::mem::replace(&mut self.consumed_values, consumed_before);
                 if let Some(else_stmts) = else_branch {
                     env.push_scope();
                     self.check_statements(else_stmts, env);
                     env.pop_scope();
                 }
+                self.consumed_values.extend(consumed_after_then);
             }
 
             Statement::ForStatement {
@@ -2528,6 +2535,43 @@ class C extends SmartContract {
             let source = format!(
                 "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
                 params, body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
+    }
+
+    /// F-222: the then and else arms of an if are mutually exclusive, so a Sig
+    /// consumed once in each arm is consumed once on every path and must
+    /// typecheck. Every shape where some path consumes twice (an arm plus after
+    /// the if, before plus an arm, twice in one arm, once per arm inside a
+    /// 2-iteration loop) must still be refused. Proves the type checker's
+    /// verdict only; the ternary form is not an if statement and is untouched.
+    #[test]
+    fn f222_affine_consumption_across_if_else_arms() {
+        const DOUBLE: &str = "affine value 'sig' has already been consumed";
+        let cases: &[(&str, &str)] = &[
+            ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""),
+            ("if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""),
+            ("if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", ""),
+            ("if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", DOUBLE),
+            ("if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", DOUBLE),
+            ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", DOUBLE),
+            ("for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", DOUBLE),
+        ];
+        for (body, want) in cases {
+            let source = format!(
+                "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  public m(sig: Sig, flag: boolean) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                body
             );
             let errs = f063_type_errors(&source);
             if want.is_empty() {

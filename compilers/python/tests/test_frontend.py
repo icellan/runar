@@ -2208,6 +2208,47 @@ def test_f110_affine_consumption_in_repeating_loop(params, body, want):
         assert any(want in m for m in msgs), msgs
 
 
+_F222_DOUBLE = "affine value 'sig' has already been consumed"
+_F222_CASES = [
+    ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", None),
+    ("if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", None),
+    ("if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", None),
+    ("if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", _F222_DOUBLE),
+    ("if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", _F222_DOUBLE),
+    ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", _F222_DOUBLE),
+    ("for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", _F222_DOUBLE),
+]
+
+
+@pytest.mark.parametrize("body,want", _F222_CASES)
+def test_f222_affine_consumption_across_if_else_arms(body, want):
+    """F-222: the then and else arms of an if are mutually exclusive, so a Sig
+    consumed once in each arm is consumed once on every path and must
+    typecheck. Every shape where some path consumes twice (an arm plus after
+    the if, before plus an arm, twice in one arm, once per arm inside a
+    2-iteration loop) must still be refused. Proves the type checker's verdict
+    only; the ternary form is not an if statement and is untouched."""
+    source = (
+        "class C extends SmartContract {\n"
+        "  readonly pk: PubKey;\n"
+        "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n"
+        f"  public m(sig: Sig, flag: boolean) {{\n    {body}\n    assert(true);\n  }}\n"
+        "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
+
+
 # ---------------------------------------------------------------------------
 # Validator — gap rows V3, V4, V6, V7, V8, V10, V11, V12, V15, V21,
 #              V23, V24, V25, V26, V27

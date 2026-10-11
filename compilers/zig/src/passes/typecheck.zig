@@ -766,13 +766,38 @@ const TypeChecker = struct {
                 if (cond_type != .boolean) {
                     self.addError("if condition must be boolean, got '{s}'", .{types.runarTypeToString(cond_type)});
                 }
-                env.pushScope() catch return;
+                // F-222: the arms are mutually exclusive, so each is checked
+                // against the consumed set as it stood before the if;
+                // afterwards a value consumed in either arm counts as consumed.
+                // An allocation failure would silently lose a consumption, so
+                // it is reported, not swallowed.
+                var consumed_before = self.consumed_values.clone(self.allocator) catch {
+                    self.addError("out of memory tracking affine consumption", .{});
+                    return;
+                };
+                env.pushScope() catch {
+                    consumed_before.deinit(self.allocator);
+                    return;
+                };
                 self.checkStatements(if_s.then_body, env);
                 env.popScope();
+                var consumed_after_then = self.consumed_values;
+                self.consumed_values = consumed_before;
+                defer consumed_after_then.deinit(self.allocator);
                 if (if_s.else_body) |else_body| {
-                    env.pushScope() catch return;
+                    env.pushScope() catch {
+                        self.addError("out of memory tracking affine consumption", .{});
+                        return;
+                    };
                     self.checkStatements(else_body, env);
                     env.popScope();
+                }
+                var it = consumed_after_then.keyIterator();
+                while (it.next()) |origin| {
+                    self.consumed_values.put(self.allocator, origin.*, true) catch {
+                        self.addError("out of memory tracking affine consumption", .{});
+                        return;
+                    };
                 }
             },
             .for_stmt => |for_s| {

@@ -845,14 +845,21 @@ module RunarCompiler
           if cond_type != "boolean"
             add_error("if condition must be boolean, got '#{cond_type}'")
           end
+          # F-222: the arms are mutually exclusive, so each is checked against
+          # the consumed set as it stood before the if; afterwards a value
+          # consumed in either arm counts as consumed.
+          consumed_before = @consumed_values.dup
           env.push_scope
           check_statements(stmt.then, env)
           env.pop_scope
+          consumed_after_then = @consumed_values
+          @consumed_values = consumed_before
           unless stmt.else_.empty?
             env.push_scope
             check_statements(stmt.else_, env)
             env.pop_scope
           end
+          @consumed_values.merge!(consumed_after_then)
 
         when ForStmt
           loop_scope = env.depth
