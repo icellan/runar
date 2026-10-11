@@ -250,7 +250,22 @@ class TestSighash < Minitest::Test
     json = RunarCompiler.artifact_to_json(single)
     # The expected sighash const 0x43 = 67, and the check_preimage carries the flag.
     assert_includes json, '"sighashFlag": 67'
-    assert_includes json, '67'
+    # F-263: the runtime preimage-type assert must compare extractSigHashType
+    # against the DECLARED mode. A bare `assert_includes json, '67'` was entailed
+    # by the line above (and by abi.sigHashType), so it could not catch the
+    # expected-const being lowered as the 0x41 default. This proves the
+    # `extractSigHashType(pre) === <const>` operand is 67; it does not prove the
+    # emitted script bytes or on-chain behaviour (see the codegen tests above).
+    bump = JSON.parse(json)['anf']['methods'].find { |m| m['name'] == 'bump' }
+    by_name = bump['body'].to_h { |b| [b['name'], b['value']] }
+    cmp = bump['body'].map { |b| b['value'] }.find do |v|
+      v['kind'] == 'bin_op' && v['op'] == '===' &&
+        by_name[v['left']]&.values_at('kind', 'func') == %w[call extractSigHashType]
+    end
+    refute_nil cmp, 'no extractSigHashType(...) === <const> preimage-type assert in bump'
+    expected = by_name[cmp['right']]
+    assert_equal 'load_const', expected['kind']
+    assert_equal 67, expected['value']
   end
 
   # The sighash_flag must survive the default-ON constant-fold pass (the Python
