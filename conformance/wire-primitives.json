@@ -364,8 +364,13 @@
         },
         {
           "kind": "cross-tier-golden",
+          "path": "packages/runar-sdk/src/__tests__/n170-bip143-localsigner-interop.test.ts",
+          "note": "N-170: pins LocalSigner.sign()'s OWN code path -- Transaction.fromHex, rebuilding TransactionSignature.format's inputs from that parse, then PrivateKey.sign() -- against generate-fixtures.ts's hand-built preimage + the low-level ECDSA.sign primitive it calls directly. Two independent code paths through @bsv/sdk, not TS-vs-TS self-grading; before this test LocalSigner had never been replayed against this fixture for any sighash mode."
+        },
+        {
+          "kind": "cross-tier-golden",
           "path": "packages/runar-go/sdk_bip143_interop_test.go",
-          "note": "Go recomputes and asserts `gotPreimage == s.PreimageHex`, then verifies the TS-produced sigHex under its own digest."
+          "note": "Go recomputes and asserts `gotPreimage == s.PreimageHex`, then verifies the TS-produced sigHex under its own digest. TestBip143Interop_LocalSignerMatchesFixtureSigHex (N-170) additionally replays LocalSigner.Sign -- a different code path via the upstream go-sdk's own tx parser and CalcInputSignatureHash -- against every scenario."
         },
         {
           "kind": "cross-tier-golden",
@@ -380,7 +385,7 @@
         {
           "kind": "cross-tier-golden",
           "path": "packages/runar-zig/src/sdk_bip143_interop_test.zig",
-          "note": "Zig side of the same fixture."
+          "note": "Zig side of the same fixture. The N-170 test additionally replays LocalSigner.sign -- a different code path via bsvz.transaction.sighash.digest, not oppushtx -- against every scenario."
         },
         {
           "kind": "cross-tier-golden",
@@ -390,7 +395,7 @@
         {
           "kind": "cross-tier-golden",
           "path": "packages/runar-java/src/test/java/runar/lang/sdk/Bip143InteropTest.java",
-          "note": "Java side of the same fixture. CI additionally greps every tier's interop test for the string `sdk-bip143` (.github/workflows/ci.yml), so deleting the fixture reference from one tier fails rather than silently narrowing the matrix."
+          "note": "Java side of the same fixture. CI additionally greps every tier's interop test for the string `sdk-bip143` (.github/workflows/ci.yml), so deleting the fixture reference from one tier fails rather than silently narrowing the matrix. localSignerDigestPathMatchesFixtureSigHex (N-170) additionally replays the off-chain SDK signing path -- RawTx.sighashBIP143's digest signed by LocalSigner.sign -- against every scenario; the method above this one only exercises OpPushTx.preimage, the on-chain codegen path."
         },
         {
           "kind": "spend-execution",

@@ -42,6 +42,7 @@ type bip143Scenario struct {
 
 type bip143Fixture struct {
 	FixtureVersion int              `json:"fixture_version"`
+	SignerPrivHex  string           `json:"signer_priv_hex"`
 	SignerPubHex   string           `json:"signer_pub_hex"`
 	Scenarios      []bip143Scenario `json:"scenarios"`
 }
@@ -113,6 +114,50 @@ func TestBip143Interop_PreimageAndSignature(t *testing.T) {
 			}
 			if !ecdsaVerify(derSig, pubkey, digestBytes) {
 				t.Fatalf("TS reference signature does not verify under this tier's digest (pubkey %s)", s.PubkeyHex)
+			}
+		})
+	}
+}
+
+// N-170: the test above only exercises ComputeOpPushTxWithSigHash (this
+// tier's hand-rolled preimage builder). LocalSigner.Sign goes through a
+// DIFFERENT code path entirely -- it is a thin wrapper over the upstream
+// github.com/bsv-blockchain/go-sdk's own transaction parser and
+// tx.CalcInputSignatureHash, not ComputeOpPushTxWithSigHash -- and was never
+// replayed against this fixture, so a divergence there (e.g. go-sdk computing
+// a different digest for a non-ALL|FORKID mode, or LocalSigner passing the
+// wrong sighash flag through) would not have been caught.
+//
+// Proves: for every fixture scenario, including all six FORKID modes
+// (0x41/42/43/c1/c2/c3) on the shared 2-in/2-out tx signing input 1,
+// LocalSigner.Sign reproduces the TS reference sigHex byte-for-byte.
+// Does not prove: that a node accepts the signature (the fixture is TS +
+// hand-rolled-preimage cross-checked above, not re-broadcast here).
+func TestBip143Interop_LocalSignerMatchesFixtureSigHex(t *testing.T) {
+	f := loadBip143Fixture(t)
+
+	signer, err := NewLocalSigner(f.SignerPrivHex)
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	gotPub, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey: %v", err)
+	}
+	if gotPub != f.SignerPubHex {
+		t.Fatalf("signer pubkey mismatch: want %s got %s", f.SignerPubHex, gotPub)
+	}
+
+	for _, s := range f.Scenarios {
+		s := s
+		t.Run(s.Scenario, func(t *testing.T) {
+			flag := s.SighashFlags
+			got, err := signer.Sign(s.UnsignedTxHex, s.InputIndex, s.PrevScriptHex, s.PrevValueSats, &flag)
+			if err != nil {
+				t.Fatalf("LocalSigner.Sign: %v", err)
+			}
+			if got != s.SigHex {
+				t.Fatalf("LocalSigner.Sign diverges from TS reference:\n  want %s\n  got  %s", s.SigHex, got)
 			}
 		})
 	}

@@ -16,6 +16,7 @@
 const std = @import("std");
 const oppushtx = @import("sdk_oppushtx.zig");
 const envelope = @import("sdk_envelope.zig");
+const signer_mod = @import("sdk_signer.zig");
 
 const FIXTURE_REL_PATH = "../../conformance/sdk-bip143/fixtures.json";
 
@@ -94,5 +95,57 @@ test "interop: BIP-143 preimage + signature for every scenario" {
             std.debug.print("\n{s}: TS reference signature does not verify under this tier's digest\n", .{name});
             return error.SignatureVerifyFailed;
         }
+    }
+}
+
+// N-170: the test above only exercises computeOpPushTxWithSigHash (this
+// tier's hand-rolled preimage builder). LocalSigner.sign goes through a
+// DIFFERENT code path entirely -- bsvz.transaction.sighash.digest, a wrapper
+// around the upstream bsvz library's own transaction parser and sighash
+// computation, not oppushtx -- and was never replayed against this fixture,
+// so a divergence there (e.g. bsvz computing a different digest for a
+// non-ALL|FORKID mode, or LocalSigner passing the wrong sighash flag through)
+// would not have been caught.
+//
+// Proves: for every fixture scenario, including all six FORKID modes
+// (0x41/42/43/c1/c2/c3) on the shared 2-in/2-out tx signing input 1,
+// LocalSigner.sign reproduces the TS reference sigHex byte-for-byte.
+// Does not prove: that a node accepts the signature (the fixture is TS +
+// hand-rolled-preimage cross-checked above, not re-broadcast here).
+test "N-170: LocalSigner matches the TS BIP-143 fixture reference" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const priv_hex = parsed.value.object.get("signer_priv_hex").?.string;
+    const pub_hex = parsed.value.object.get("signer_pub_hex").?.string;
+    const scenarios = parsed.value.object.get("scenarios").?.array;
+    try std.testing.expect(scenarios.items.len > 0);
+
+    var local = try signer_mod.LocalSigner.fromHex(priv_hex);
+    var s = local.signer();
+
+    const got_pub = try s.getPublicKey(allocator);
+    defer allocator.free(got_pub);
+    try std.testing.expectEqualStrings(pub_hex, got_pub);
+
+    for (scenarios.items) |sv| {
+        const sc = sv.object;
+        const name = sc.get("scenario").?.string;
+        const tx_hex = sc.get("unsignedTxHex").?.string;
+        const input_index: usize = @intCast(sc.get("inputIndex").?.integer);
+        const subscript = sc.get("prevScriptHex").?.string;
+        const sats: i64 = sc.get("prevValueSats").?.integer;
+        const sig_hex = sc.get("sigHex").?.string;
+        const sighash_flags: u32 = @intCast(sc.get("sighashFlags").?.integer);
+
+        const got = try s.sign(allocator, tx_hex, input_index, subscript, sats, sighash_flags);
+        defer allocator.free(got);
+        std.testing.expectEqualStrings(sig_hex, got) catch |err| {
+            std.debug.print("\n{s}: LocalSigner.sign diverges from TS reference\n", .{name});
+            return err;
+        };
     }
 }

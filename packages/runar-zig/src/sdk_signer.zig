@@ -1,7 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const state = @import("sdk_state.zig");
-const der_mod = @import("sdk_der.zig");
+const envelope_sign = @import("sdk_envelope_sign.zig");
 
 // ---------------------------------------------------------------------------
 // Signer interface
@@ -127,9 +127,18 @@ pub const LocalSigner = struct {
         // Compute BIP-143 sighash digest
         const digest = bsvz.transaction.sighash.digest(allocator, &tx, input_index, subscript, satoshis, scope) catch return error.SigningFailed;
 
-        // Sign the digest and enforce low-S (BIP 62)
-        var der = self.private_key.signDigest256(digest.bytes) catch return error.SigningFailed;
-        der = der_mod.canonicalizeDer(der);
+        // N-170: bsvz's PrivateKey.signDigest256 derives its ECDSA nonce via
+        // Zig stdlib's "Deterministic ECDSA with Additional Randomness" draft,
+        // not canonical RFC 6979 (see sdk_envelope_sign.zig's GAP-064 doc
+        // comment) -- it folds a 32-byte zero "noise" block into the HMAC-DRBG
+        // seed that classic RFC 6979 does not have. The result is a VALID but
+        // non-reproducible signature: it verifies, but never matches the
+        // RFC-6979 signature every other tier (and conformance/sdk-bip143's
+        // fixture) produces for the same (key, digest). Sign with the same
+        // canonical RFC-6979 + low-S implementation the signed-envelope wire
+        // protocol already uses instead of bsvz's signDigest256.
+        var der_buf: [72]u8 = undefined;
+        const der = envelope_sign.signDigestLowSDer(self.private_key.bytes, digest.bytes, &der_buf) catch return error.SigningFailed;
 
         // Build hex: DER bytes + sighash type byte
         const sig_total_len = der.len + 1;
@@ -137,7 +146,7 @@ pub const LocalSigner = struct {
         errdefer allocator.free(hex_result);
 
         var sig_bytes: [73]u8 = undefined; // max DER + 1
-        @memcpy(sig_bytes[0..der.len], der.asSlice());
+        @memcpy(sig_bytes[0..der.len], der);
         sig_bytes[der.len] = @truncate(scope);
 
         _ = bsvz.primitives.hex.encodeLower(sig_bytes[0..sig_total_len], hex_result) catch {
