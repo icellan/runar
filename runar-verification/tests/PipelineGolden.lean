@@ -624,15 +624,21 @@ the constants had been honest all along.
 -- live regen (`RUNAR_VERIFICATION_REGEN=1`) returned all three `.regenLive`
 -- anchors `[fresh]` and byte-exact against their expected-script.hex (none
 -- calls these builtins), so only their fingerprints move.
+-- 2026-10-11 (F-148): the model fingerprint moved to
+-- v1:63f:7182931b:eca9f759e35528bb (Stack/Lower.lean: a public method's terminal
+-- if/else with assert-ended arms lowers in TS's terminal mode). A full live
+-- regen (`RUNAR_VERIFICATION_REGEN=1`) returned all three `.regenLive` anchors
+-- `[fresh]` and byte-exact against their expected-script.hex (none ends in a
+-- terminal if), so only their fingerprints move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:63f:7174080b:1ed9436cc61db5df"⟩,
+  ⟨"babybear", .regenLive, "v1:63f:7182931b:eca9f759e35528bb"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:63f:7174080b:1ed9436cc61db5df"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:63f:7182931b:eca9f759e35528bb"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -655,7 +661,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:63f:7174080b:1ed9436cc61db5df"⟩
+  ⟨"state-covenant", .regenLive, "v1:63f:7182931b:eca9f759e35528bb"⟩
 ]
 
 /--
@@ -801,7 +807,12 @@ number. It is pinned from both sides:
 -- (unpopulated) crypto anchor in cryptoAxiomPending + cryptoAnchorGaps, with no
 -- Lean model change, so the gate does not move: 68 = baselineMatches (65) +
 -- (22 - 19).
-def expectedByteExact : Nat := 68
+--
+-- 2026-10-11 (F-148, measured): F-148 added `price-bet` (byte-exact,
+-- baselineMatches) once Stack/Lower.lean lowered a public method's terminal
+-- if/else with assert-ended arms in TS's terminal mode (`lowerTerminalBindingsP`):
+-- 69 = baselineMatches (66) + (22 - 19).
+def expectedByteExact : Nat := 69
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -817,8 +828,9 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-09-30 (N-044): 84 -> 85 for N-044's `annotated-vault` fixture.
 2026-10-05 (N-090): 85 -> 86 for N-090's `hex-to-bytes-initializer` fixture.
 2026-10-05 (F-115): 86 -> 87 for F-115's `ec-chained-rewrite` fixture.
+2026-10-11 (F-148): 87 -> 88 for F-148's `price-bet` fixture (byte-exact, in `baselineMatches`).
 -/
-def expectedFixtureTotal : Nat := 87
+def expectedFixtureTotal : Nat := 88
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -871,6 +883,7 @@ def baselineMatches : List String := [
   "param-shadow-branch-arm",
   "post-quantum-wallet",
   "post-quantum-wots",
+  "price-bet",
   "private-helper-outputs",
   "property-initializers",
   "property-shadow",
@@ -1218,7 +1231,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 87 := by rfl
+        + lowerDivergencePending.length = 88 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

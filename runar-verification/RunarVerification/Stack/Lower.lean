@@ -5559,15 +5559,118 @@ termination_by (budget, sizeOf bs, 0)
 
 end
 
-/-- Body's last binding is `.assert _`. Used by `lowerMethod` to decide
-whether to elide the terminal `OP_VERIFY` from a public method's spend
-script — Bitcoin Script treats the boolean left on top of the stack as
-the implicit return value, so a public method's terminal assert can drop
-its `OP_VERIFY`. Mirrors TS `05-stack-lower.ts:856-902`. -/
+/-! ### F-148 — a terminal `if` whose arms end in the method's assert
+
+TS `lowerBindings(bindings, terminalAssert = true)` (`05-stack-lower.ts`,
+`lowerBindings` / `lowerIf` / `lowerAssert`) treats a public method's LAST
+binding as its result in two shapes: a bare `assert` (no `OP_VERIFY`, the
+boolean stays on top), and an `if` — `terminalIfIdx` — into whose arms it
+propagates `terminalAssert`. Inside each arm the arm's own last `assert` keeps
+its boolean, and `lowerIf` then NIPs the arm down to depth 1
+(`if (terminalAssert && thenCtx.stackMap.depth > 1)`), so every arm leaves
+exactly the boolean the spend is judged on, and the method's
+`cleanupExcessStack` finds nothing left to remove.
+
+The general `lowerValueP` `.ifVal` arm lowers every arm assert with
+`OP_VERIFY` and reconciles the arms by ROLL/DROP, which for this shape leaves
+the stack EMPTY after `OP_ENDIF` — an unspendable script (price-bet:
+`OP_CHECKSIGVERIFY OP_DROP` where all seven compilers emit
+`OP_CHECKSIG OP_NIP`). `lowerTerminalBindingsP` is the terminal-mode
+`lowerBindingsP`: identical binding by binding, except that a last `assert`
+keeps its operand and a last `if` (no declared results) lowers its arms in
+terminal mode and NIPs each to depth 1.
+
+Not modelled (no fixture reaches them, documented divergences from TS):
+* TS `drainBranchPrivateResidue` runs on each arm BEFORE the depth-1 NIPs and
+  removes branch-private slots below the top with `push d ROLL DROP` at
+  d ≥ 2; here every slot below the top goes by `OP_NIP`. Byte-identical
+  whenever the arm has no branch-private residue below its top.
+* A terminal `if` with DECLARED results, one whose arms do not both end in
+  an assert, or one whose arm ends in a NESTED terminal `if` (an else-if
+  chain): `lowerMethodCore` gates this path on `bodyEndsInAssert`, which is
+  false for those, so they keep the general lowering. This function itself
+  does handle the nested shape. -/
+def lowerTerminalBindingsP (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat) (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) (localBindings : List String)
+    (constInts : List (String × Int)) (sm : StackMap)
+    (rawSlots : List String) (insideBranch : Bool)
+    (arrayElems : List (String × List String)) :
+    List ANFBinding → (List StackOp × StackMap)
+  | [] => ([], sm)
+  | [.mk name (.assert ref) _] =>
+      -- TS `lowerAssert(.., terminal = true)`: `bringToTop`, no `OP_VERIFY`.
+      let (load, sm1) := loadRefLive sm ref currentIndex lastUses outerProtected
+      (normalizeRaw (rawSlotsInScope rawSlots name) ref load, sm1)
+  | [.mk name (.ifVal cond thn els []) _] =>
+      -- Same cond load, branch map and protected set as the `.ifVal` arm of
+      -- `lowerValueP`.
+      let (condOps₀, sm1) := loadRefLive sm cond currentIndex lastUses outerProtected
+      let condOps := normalizeRaw (rawSlotsInScope rawSlots name) cond condOps₀
+      let smBranch := sm1.popN 1
+      let innerProtected := computeBranchProtected smBranch lastUses currentIndex outerProtected
+      let (thnOps, smThn) :=
+        lowerTerminalBindingsP progMethods props budget 0 (computeLastUses thn)
+          innerProtected (thn.map (fun b => b.name)) constInts smBranch rawSlots true arrayElems thn
+      let (elsOps, smEls) :=
+        lowerTerminalBindingsP progMethods props budget 0 (computeLastUses els)
+          innerProtected (els.map (fun b => b.name)) constInts smBranch rawSlots true arrayElems els
+      -- TS: `for (i < depth - 1) { emitOp(nip); removeAtDepth(1) }` per arm.
+      let thnFinal := thnOps ++ List.replicate (smThn.length - 1) StackOp.nip
+      let elsFinal := elsOps ++ List.replicate (smEls.length - 1) StackOp.nip
+      let smThnFinal : StackMap := smThn.take 1
+      -- Post-`OP_ENDIF` parent reconcile, as in the general `.ifVal` arm:
+      -- drop what THEN gave up; the if names the value THEN left.
+      let smParentReconciled := removeNames smBranch (lostNamesMulti smBranch smThnFinal)
+      let smPostIf : StackMap :=
+        if smThnFinal.length > smParentReconciled.length then
+          smParentReconciled.push name
+        else
+          smParentReconciled
+      (condOps ++ [.ifOp thnFinal (if elsFinal.isEmpty then none else some elsFinal)],
+       smPostIf)
+  | (.mk name v _) :: rest =>
+      let (ops, sm', localBindings') :=
+        lowerValueP progMethods props budget currentIndex lastUses outerProtected
+          localBindings constInts sm name v rawSlots insideBranch arrayElems
+      let (ops', sm'') :=
+        lowerTerminalBindingsP progMethods props budget (currentIndex + 1) lastUses
+          outerProtected localBindings' constInts sm' rawSlots insideBranch arrayElems rest
+      (ops ++ ops', sm'')
+termination_by bs => sizeOf bs
+
+/-- The body's last binding is `.assert _` (the pre-F-148 `bodyEndsInAssert`). -/
+def bodyEndsInDirectAssert : List ANFBinding → Bool
+  | []        => false
+  | [.mk _ (.assert _) _] => true
+  | _ :: rest => bodyEndsInDirectAssert rest
+
+/-- The body's result is decided by a terminal assert: its last binding is
+`.assert _`, or (F-148) an `if` with no declared results whose arms BOTH end
+that way. Used by `lowerMethod` to decide whether to elide the terminal
+`OP_VERIFY` from a public method's spend script — Bitcoin Script treats the
+boolean left on top of the stack as the implicit return value, so a public
+method's terminal assert can drop its `OP_VERIFY`. Mirrors TS
+`05-stack-lower.ts` `lowerBindings(.., terminalAssert)`: `lastAssertIdx` and
+`terminalIfIdx`.
+
+The arms are checked ONE level deep (`bodyEndsInDirectAssert`): recursing into
+them would make this definition well-founded instead of structural, and the
+`rfl` / `decide` proofs that reduce it on concrete bodies would stop
+reducing. A nested terminal `if` (an else-if chain) is therefore NOT gated
+onto the terminal path — a documented divergence no fixture reaches. -/
 def bodyEndsInAssert : List ANFBinding → Bool
   | []        => false
   | [.mk _ (.assert _) _] => true
+  | [.mk _ (.ifVal _ thn els []) _] => bodyEndsInDirectAssert thn && bodyEndsInDirectAssert els
   | _ :: rest => bodyEndsInAssert rest
+
+/-- The body's last binding is an `if` with no declared results (F-148: the
+terminal-`if` shape `lowerTerminalBindingsP` lowers). -/
+def bodyEndsInIf : List ANFBinding → Bool
+  | []        => false
+  | [.mk _ (.ifVal _ _ _ []) _] => true
+  | _ :: rest => bodyEndsInIf rest
 
 /--
 Whether a method body contains a `check_preimage` binding (recursing
@@ -5780,8 +5883,16 @@ def lowerMethodCore (progMethods : List ANFMethod) (props : List ANFProperty) (m
   -- R-010: contract-level flag. Threaded into every check_preimage so a
   -- later per-method CODESEPARATOR cannot re-narrow scriptCode.
   let scriptLevel := programNeedsScriptLevelCodeSeparator progMethods props m
+  -- F-148: a public body whose result is a terminal `if` with assert-ended
+  -- arms lowers in TS's terminal mode (`lowerTerminalBindingsP`): each arm
+  -- keeps its boolean and NIPs to depth 1, no `OP_VERIFY` in either arm. Its
+  -- last op is the `.ifOp`, so the elision below never fires for it, and the
+  -- if leaves depth 1, so the NIP epilogue emits nothing.
   let (rawOps, finalSm) :=
-    lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap m.body bodyRawSlots false bodyArrayElems
+    if m.isPublic && bodyEndsInAssert m.body && bodyEndsInIf m.body then
+      lowerTerminalBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap bodyRawSlots false bodyArrayElems m.body
+    else
+      lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap m.body bodyRawSlots false bodyArrayElems
   -- Terminal-assert elision:
   -- A public method whose body ends in `.assert _` drops the trailing
   -- `OP_VERIFY` — the boolean stays on top of the stack as the script's
@@ -5809,9 +5920,10 @@ def lowerMethodCore (progMethods : List ANFMethod) (props : List ANFProperty) (m
   -- The Lean gate is `isPublic && bodyEndsInAssert && depth > 1`. The
   -- extra `bodyEndsInAssert` conjunct is byte-IDENTICAL to TS on every
   -- validator-accepted program: `02-validate.ts:325-344` REQUIRES public
-  -- methods to end with `assert()` (stateful contracts auto-inject it),
-  -- so `bodyEndsInAssert = true` whenever the TS epilogue can differ
-  -- from a no-op. The conjunct exists so the `*_no_post` bridge lemmas
+  -- methods to end with `assert()` (stateful contracts auto-inject it) —
+  -- or, as price-bet shows, with an if/else whose arms do (F-148: that
+  -- shape is `bodyEndsInAssert` too) — so `bodyEndsInAssert = true`
+  -- whenever the TS epilogue can differ from a no-op. The conjunct exists so the `*_no_post` bridge lemmas
   -- (keyed on `bodyEndsInAssert = false` — shapes reachable only via
   -- hand-written `--ir` input) remain true as stated. Known residual
   -- model-vs-TS divergence: a hand-written public IR body that does NOT

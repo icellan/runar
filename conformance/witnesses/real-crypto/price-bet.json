@@ -1,0 +1,77 @@
+{
+  "fixture": "price-bet",
+  "kind": "stateless-signed",
+  "note": "F-148 / R30 route A. PriceBet is the end2end example hand-written in all nine formats (examples/end2end-example/*/PriceBet.*); this fixture holds all seven tiers to one ANF IR and one script hex for it. Every spend below executes the fixture's compiled locking script on @bsv/sdk Spend with real secp256k1 signatures over the real BIP-143 sighash. alicePubKey = alice, bobPubKey = bob, dave is a key neither party holds. The Rabin vector (price 50003, its signature and padding 0x1b under the ~2^260 oracle key) is the one witnesses/real-crypto/oracle-price.json already uses, produced by packages/runar-go RabinSign over num2bin(50003, 8), so the oracle half is not derived from this compiler's output. The winner rows hand the LOSER a dave signature: a valid signature for both parties would let an inverted price > strikePrice branch pass, so each branch has an accept where only the winner's signature is valid and a reject where only the loser's is.",
+  "goldenHashes": {
+    "expected-script.hex": "e75b3b7c190968ce59a29986557396c45746428d5aaaa70ea260b9b4a709cc16",
+    "expected-ir.json": "f83042bf715eef62c5562aafdd3fddc60c7ce7d4d0d2da8d567d6d69d52c8d0e"
+  },
+  "constructorArgs": {
+    "alicePubKey": { "$pubkey": "alice" },
+    "bobPubKey": { "$pubkey": "bob" },
+    "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
+    "strikePrice": "50000n"
+  },
+  "spends": [
+    {
+      "method": "settle",
+      "args": ["50003n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }, { "$sig": "dave" }],
+      "expect": "accept",
+      "note": "price 50003 > strike 50000: alice wins. Only alice's signature is valid (bobSig is dave's), so the accept depends on the alice arm being the one taken."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "dave" }, { "$sig": "bob" }],
+      "expect": "reject",
+      "note": "winner-inversion near-miss: price > strike but only bob's signature is valid. An inverted branch would accept this."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "alicePubKey": { "$pubkey": "alice" },
+        "bobPubKey": { "$pubkey": "bob" },
+        "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
+        "strikePrice": "50003n"
+      },
+      "args": ["50003n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "dave" }, { "$sig": "bob" }],
+      "expect": "accept",
+      "note": "price 50003 == strike 50003: not strictly greater, so bob wins. Only bob's signature is valid. Also pins the > (not >=) boundary."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "alicePubKey": { "$pubkey": "alice" },
+        "bobPubKey": { "$pubkey": "bob" },
+        "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
+        "strikePrice": "50003n"
+      },
+      "args": ["50003n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }, { "$sig": "dave" }],
+      "expect": "reject",
+      "note": "winner-inversion near-miss: price == strike (bob wins) but only alice's signature is valid. A >= comparison or an inverted branch would accept this."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0x406deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }, { "$sig": "bob" }],
+      "expect": "reject",
+      "note": "forged Rabin signature (sig + 1) with both party signatures valid: the oracle check alone must refuse it."
+    },
+    {
+      "method": "settle",
+      "args": ["50004n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }, { "$sig": "bob" }],
+      "expect": "reject",
+      "note": "the oracle's signature over 50003 presented with price 50004: the attestation must bind to the settled price."
+    },
+    {
+      "method": "cancel",
+      "args": [{ "$sig": "alice" }, { "$sig": "bob" }],
+      "expect": "accept",
+      "note": "mutual cancel: both parties sign."
+    },
+    {
+      "method": "cancel",
+      "args": [{ "$sig": "alice" }, { "$sig": "dave" }],
+      "expect": "reject",
+      "note": "cancel without bob: the second checkSig fails."
+    }
+  ]
+}

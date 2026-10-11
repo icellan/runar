@@ -793,6 +793,12 @@ theorem lowerMethod_ops_hashAssert
   have hEndsAssert : Lower.bodyEndsInAssert
       (hashAssertBody d ok anm arg expected func s1 s2 s3) = true := by
     simp [hashAssertBody, Lower.bodyEndsInAssert]
+  -- F-148: this body does not end in an `if`, so the terminal-`if` lowering
+  -- path of `lowerMethodCore` is not taken.
+  have hEndsIf : Lower.bodyEndsInIf
+      (hashAssertBody d ok anm arg expected func s1 s2 s3) = false := by
+    simp [hashAssertBody, Lower.bodyEndsInIf]
+  simp only [hEndsIf, Bool.and_false, Bool.false_eq_true, if_false]
   have hNoDeser : Lower.bindingsUseDeserializeState
       (hashAssertBody d ok anm arg expected func s1 s2 s3) = false := by
     simp [hashAssertBody, Lower.bindingsUseDeserializeState]

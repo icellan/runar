@@ -4695,6 +4695,23 @@ theorem bindingsUseDeserializeState_false_of_arithOnly :
       simp only [Lower.bindingsUseDeserializeState, Bool.false_or]
       exact bindingsUseDeserializeState_false_of_arithOnly rest h
 
+/-- `bodyEndsInDirectAssert` is `false` on an `arithOnlyBody` (F-148: the
+one-level arm check `bodyEndsInAssert` applies to a terminal `if`). -/
+theorem bodyEndsInDirectAssert_false_of_arithOnly :
+    ∀ (body : List ANFBinding), arithOnlyBody body →
+      Lower.bodyEndsInDirectAssert body = false
+  | [], _ => rfl
+  | [.mk _ (.binOp _ _ _ _) _], _ => rfl
+  | [.mk _ (.unaryOp _ _ _) _], _ => rfl
+  | (.mk _ (.binOp _ _ _ _) _) :: (b2 :: rest), h => by
+      have hTail : arithOnlyBody (b2 :: rest) := h
+      have := bodyEndsInDirectAssert_false_of_arithOnly (b2 :: rest) hTail
+      simpa only [Lower.bodyEndsInDirectAssert] using this
+  | (.mk _ (.unaryOp _ _ _) _) :: (b2 :: rest), h => by
+      have hTail : arithOnlyBody (b2 :: rest) := h
+      have := bodyEndsInDirectAssert_false_of_arithOnly (b2 :: rest) hTail
+      simpa only [Lower.bodyEndsInDirectAssert] using this
+
 /-- `bodyEndsInAssert` is `false` on an `arithOnlyBody`: the last binding
 is a `binOp` / `unaryOp`, never an `assert`. -/
 theorem bodyEndsInAssert_false_of_arithOnly :
@@ -8514,8 +8531,11 @@ private theorem ifval_consume_completion
     simp only [Lower.bindingsUseDeserializeState, Bool.or_false,
       bindingsUseDeserializeState_false_of_arithOnly thn hThnArith,
       bindingsUseDeserializeState_false_of_arithOnly els hElsArith]
+  -- F-148: a terminal `if` counts as `bodyEndsInAssert` when both arms end in
+  -- an assert; these arms are arith-only, so they do not.
   have hNoTerminalAssert : Lower.bodyEndsInAssert anfM.body = false := by
-    rw [hBodyEq]; rfl
+    rw [hBodyEq]
+    simp [Lower.bodyEndsInAssert, bodyEndsInDirectAssert_false_of_arithOnly thn hThnArith]
   -- The raw lowered op list of the single-`.ifVal` body.
   let RAW :=
       (Stack.Lower.lowerBindingsP p.methods p.properties
@@ -8712,8 +8732,13 @@ theorem compileSafe_observational_correct_ifval_consume
     p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack Γ
     hSinglePublic hName bn cond k thn els src branchTsm hBodyEq hAgrees hFrag
     hUntag hTypedEntry hTsmTyped hCoh hCondBool hCondHead hLast hIPThn hIPEls
+  -- F-148: the arms are arith chains, so neither ends in an assert and the
+  -- single `if` is not a terminal-assert body.
   have hNoTA : Lower.bodyEndsInAssert anfM.body = false := by
-    rw [hBodyEq]; simp [Lower.bodyEndsInAssert]
+    rw [hBodyEq] at hFrag ⊢
+    obtain ⟨hThnChain, _, _⟩ := hFrag
+    simp [Lower.bodyEndsInAssert, bodyEndsInDirectAssert_false_of_arithOnly thn
+      (arithOnlyBody_of_emittableArithChainReadyNoDblNeg _ thn _ 0 false hThnChain)]
   exact Stack.Eval.acceptAgrees_of_completion_of_truthy hOld (hTopTruthy hNoTA)
 
 /-- **Wave 51 Step 1 — the dispatch-level consume-`math_byte` correctness

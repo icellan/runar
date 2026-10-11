@@ -252,6 +252,12 @@ theorem lowerMethod_ops_statefulPrologue
       (StatefulBridge.gatedStatefulPrologueBody pre) = true := by
     simp [StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody,
       Lower.bodyEndsInAssert]
+  -- F-148: this body does not end in an `if`, so the terminal-`if` lowering
+  -- path of `lowerMethodCore` is not taken.
+  have hEndsIf : Lower.bodyEndsInIf
+      (StatefulBridge.gatedStatefulPrologueBody pre) = false := by
+    simp [StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody, Lower.bodyEndsInIf]
+  simp only [hEndsIf, Bool.and_false, Bool.false_eq_true, if_false]
   have hNoDeser : Lower.bindingsUseDeserializeState
       (StatefulBridge.gatedStatefulPrologueBody pre) = false := by
     simp [StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody,
