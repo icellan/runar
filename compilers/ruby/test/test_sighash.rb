@@ -141,6 +141,28 @@ class TestSighash < Minitest::Test
     assert_nil method_by_name(src, 'bump').sighash_type
   end
 
+  # F-282: a `@sighash` comment on the SAME line as the method declaration it
+  # leads (a very common one-line style) was silently dropped. The tokenizer
+  # recorded each directive comment's line only; `gather_member_directives`
+  # required `d[:line] < member_line` (strictly BEFORE the member's own line),
+  # so a directive sharing the member's line never matched, and the method
+  # silently fell back to the ALL|FORKID default — confirmed to diverge from
+  # the TS reference (ts-morph attaches this exact comment as the method's
+  # leading trivia; verified directly against ts-morph). This does not touch
+  # the already-correct "comment trails the PRECEDING member on its own line"
+  # or "comment trails THIS member's own closing brace" cases, which the
+  # existing tests above/below already cover.
+  def test_sighash_on_same_line_as_method_is_not_dropped
+    src = <<~TS
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @sighash SINGLE|FORKID */ public bump(): void { this.n = this.n + 1n; }
+      }
+    TS
+    assert_equal 0x43, method_by_name(src, 'bump').sighash_type
+  end
+
   def test_accepts_line_comment
     src = <<~TS
       class C extends StatefulSmartContract {

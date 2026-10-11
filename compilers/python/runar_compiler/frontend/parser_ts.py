@@ -169,11 +169,25 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     # it as leading trivia. Comments are otherwise discarded; the parser needs
     # the trivia to detect ``@embedAlways`` / ``@sighash`` directives.
     pending_comments: list[str] = []
+    # F-282: a comment only becomes eligible to attach as leading trivia once
+    # a line break has been crossed since the last real token (or at the very
+    # start of the file). Mirrors ts-morph/TypeScript's own leading-comment
+    # scan, which never collects a comment sharing a line with the PRECEDING
+    # token — that comment is the preceding token's trailing trivia, not the
+    # next node's leading trivia. Without this, `pending_comments` picked up
+    # ANY comment seen since the last token regardless of newlines, so a
+    # same-line trailing `@sighash` comment after one member silently leaked
+    # onto the NEXT member, and a directive sharing a line with the preceding
+    # member's own last token was wrongly honoured (both diverge from the TS
+    # reference, verified directly against ts-morph).
+    collecting = True
 
     def _add(tok: Token) -> None:
+        nonlocal collecting
         if pending_comments:
             tok.leading_comments = "\n".join(pending_comments)
             pending_comments.clear()
+        collecting = False
         tokens.append(tok)
 
     while i < n:
@@ -184,6 +198,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             i += 1
             line += 1
             col = 0
+            collecting = True
             continue
         if ch == "\r":
             i += 1
@@ -191,6 +206,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 i += 1
             line += 1
             col = 0
+            collecting = True
             continue
 
         # Whitespace
@@ -204,7 +220,8 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             _comment_start = i
             while i < n and source[i] != "\n" and source[i] != "\r":
                 i += 1
-            pending_comments.append(source[_comment_start:i])
+            if collecting:
+                pending_comments.append(source[_comment_start:i])
             continue
 
         # Multi-line comment /* ... */
@@ -226,7 +243,8 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             else:
                 if i < n:
                     i += 1
-            pending_comments.append(source[_comment_start:i])
+            if collecting:
+                pending_comments.append(source[_comment_start:i])
             continue
 
         start_col = col

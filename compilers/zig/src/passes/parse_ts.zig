@@ -451,12 +451,28 @@ const Parser = struct {
     /// `/** @embedAlways */` or `/** @sighash ... */` directive that annotates a
     /// class member lives here (the tokenizer discards comments, so this is how
     /// the parser recovers directives). Empty when `current` is the first token.
+    ///
+    /// F-282: the raw gap alone is not enough — ts-morph's leading-comment
+    /// scan only starts collecting once a line break has been crossed since
+    /// the previous token (verified directly against ts-morph). A comment
+    /// sharing a line with the PRECEDING token is that token's own trailing
+    /// trivia, never the next node's leading trivia, whether that's a
+    /// directive sharing a line with the previous member's last token, or a
+    /// trailing `// @sighash` comment on a one-line member's own line that
+    /// would otherwise leak into the NEXT member's gap. Drop everything up
+    /// to and including the gap's first line break; a gap with no line break
+    /// at all (member shares a line with the preceding token) drops to
+    /// nothing, mirroring ts-morph dropping that directive entirely.
     fn leadingTrivia(self: *const Parser) []const u8 {
         const src = self.tokenizer.source;
         const start = self.prev_token_end;
         const end = self.current.start;
         if (start >= end or end > src.len) return "";
-        return src[start..end];
+        const gap = src[start..end];
+        if (std.mem.indexOfAny(u8, gap, "\n\r")) |nl| {
+            return gap[nl + 1 ..];
+        }
+        return "";
     }
 
     /// F-213 measure (A): enter one counted nesting level — a statement, a
@@ -3169,6 +3185,48 @@ test "parse @sighash missing FORKID pushes an error" {
         if (std.mem.indexOf(u8, e, "FORKID is mandatory on BSV") != null) found = true;
     }
     try std.testing.expect(found);
+}
+
+// F-282: `leadingTrivia()` returns the raw byte gap between the previous
+// consumed token's end and the current token's start, with no line-break
+// awareness — any comment sitting in that gap scans in, even one that shares
+// a line with the PRECEDING token (that token's own trailing trivia, never
+// this member's leading trivia under ts-morph, verified directly against
+// ts-morph) or one that trails a PRIOR member's own closing brace on that
+// member's own line (also that member's trailing trivia, not the NEXT
+// member's leading trivia). Both wrongly flip the sighash flag relative to
+// the TS reference.
+test "F-282: @sighash sharing a line with the preceding member is not honoured" {
+    const source =
+        \\import { StatefulSmartContract } from 'runar-lang';
+        \\class C extends StatefulSmartContract {
+        \\  n: bigint;
+        \\  constructor(n: bigint) { super(n); this.n = n; } /** @sighash SINGLE|FORKID */ public bump() { this.n = this.n + 1n; }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseTs(arena.allocator(), source, "C.runar.ts");
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    try std.testing.expect(r.contract.?.methods[0].sighash_type == null);
+}
+
+test "F-282: a trailing same-line @sighash comment does not leak to the next method" {
+    const source =
+        \\import { SmartContract } from 'runar-lang';
+        \\class C extends SmartContract {
+        \\  readonly x: bigint;
+        \\  constructor(x: bigint) { super(x); this.x = x; }
+        \\  public bump() {} // @sighash SINGLE|FORKID
+        \\  public other() {}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseTs(arena.allocator(), source, "C.runar.ts");
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    try std.testing.expect(r.contract.?.methods[0].sighash_type == null); // bump
+    try std.testing.expect(r.contract.?.methods[1].sighash_type == null); // other
 }
 
 test "sighashType identifier does not trip the @sighash directive scan" {

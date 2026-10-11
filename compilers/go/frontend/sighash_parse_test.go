@@ -109,6 +109,23 @@ func TestSighashParse_RejectsMissingForkID(t *testing.T) {
 	}
 }
 
+// F-282: `leadingCommentText` walked `PrevSibling()` with no line check, so a
+// directive comment sharing a line with the PRECEDING member's own last
+// token was collected as a prevSibling regardless — ts-morph never attaches
+// it (verified directly against ts-morph: it is the preceding token's
+// trailing trivia, not this node's leading trivia).
+func TestSighashParse_SharedLineWithPrecedingMemberNotHonoured(t *testing.T) {
+	src := `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; } /** @sighash SINGLE|FORKID */ public bump(): void { this.n = this.n + 1n; }
+      }`
+	m := sighashMethodByName(t, src, "bump")
+	if m.SighashType != nil {
+		t.Fatalf("SighashType = %v, want nil (default) — ts-morph drops a same-line-as-preceding-token directive", *m.SighashType)
+	}
+}
+
 func anyErrContains(res *ParseResult, sub string) bool {
 	for _, e := range res.Errors {
 		if strings.Contains(e.Message, sub) {

@@ -154,6 +154,37 @@ class C extends StatefulSmartContract {
         r = parse_source(src, "X.runar.ts")
         assert any("non-public method" in e for e in r.error_strings())
 
+    # F-282: the tokenizer accumulated ANY comment seen since the last real
+    # token into `pending_comments`, with no newline check, and attached the
+    # whole pile to whichever token came next. ts-morph's leading-trivia scan
+    # only starts collecting a comment once a line break has been crossed
+    # since the preceding token (verified directly against ts-morph: both
+    # cases below come back with EMPTY leading comments / jsdocs for the
+    # second method), so a comment sharing a line with a PRECEDING token is
+    # that token's trailing trivia, never the next node's leading trivia.
+    def test_directive_sharing_line_with_preceding_member_is_not_honoured(self):
+        src = """
+class C extends StatefulSmartContract {
+  n: bigint;
+  constructor(n: bigint) { super(n); this.n = n; } /** @sighash SINGLE|FORKID */ public bump(): void { this.n = this.n + 1n; }
+}"""
+        assert _method_by_name(src, "bump").sighash_type is None
+
+    def test_trailing_comment_does_not_leak_to_next_method(self):
+        src = """
+class C extends SmartContract {
+  readonly x: bigint;
+  constructor(x: bigint) { super(x); this.x = x; }
+  public bump(): void {} // @sighash SINGLE|FORKID
+  public other(): void {}
+}"""
+        r = parse_source(src, "X.runar.ts")
+        assert not r.errors, r.error_strings()
+        bump = next(m for m in r.contract.methods if m.name == "bump")
+        other = next(m for m in r.contract.methods if m.name == "other")
+        assert bump.sighash_type is None
+        assert other.sighash_type is None
+
 
 # ---------------------------------------------------------------------------
 # Codegen (sighash-codegen.test.ts + e88f202c)

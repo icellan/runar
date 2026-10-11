@@ -237,11 +237,12 @@ module RunarCompiler
         if ch == "/" && i + 1 < n && source[i + 1] == "/"
           c_start = i
           c_line = line
+          c_col = col
           while i < n && source[i] != "\n" && source[i] != "\r"
             i += 1
           end
           ctext = source[c_start...i]
-          directives << { line: c_line, text: ctext } if ctext&.match?(DIRECTIVE_RE)
+          directives << { line: c_line, col: c_col, text: ctext } if ctext&.match?(DIRECTIVE_RE)
           next
         end
 
@@ -249,6 +250,7 @@ module RunarCompiler
         if ch == "/" && i + 1 < n && source[i + 1] == "*"
           c_start = i
           c_line = line
+          c_col = col
           i += 2
           col += 2
           found_end = false
@@ -272,7 +274,7 @@ module RunarCompiler
             i += 1 if i < n
           end
           ctext = source[c_start...i]
-          directives << { line: c_line, text: ctext } if ctext&.match?(DIRECTIVE_RE)
+          directives << { line: c_line, col: c_col, text: ctext } if ctext&.match?(DIRECTIVE_RE)
           next
         end
 
@@ -425,15 +427,11 @@ module RunarCompiler
         @tokens = []
         @pos = 0
         @errors = []
-        # Directive records ({line:, text:}) collected by the tokenizer for
-        # every @embedAlways / @sighash comment. Attached to the member each
-        # immediately precedes (see gather_member_directives). Set by parse_ts.
+        # Directive records ({line:, col:, text:}) collected by the tokenizer
+        # for every @embedAlways / @sighash comment. Attached to the member
+        # each immediately precedes (see gather_member_directives). Set by
+        # parse_ts.
         @directives = []
-        # Start line of the most recently parsed member (or the class body's
-        # opening brace). A directive attaches to a member only when it sits in
-        # the source gap AFTER the previous member and BEFORE this one, so a
-        # directive is claimed by exactly the member it immediately precedes.
-        @last_member_line = 0
       end
 
       attr_accessor :tokens, :pos, :errors, :directives
@@ -637,11 +635,7 @@ module RunarCompiler
           raise "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
         end
 
-        lbrace = expect(TOK_LBRACE)
-        # Anchor directive attribution at the class body's opening brace so a
-        # stray directive comment ABOVE the class does not attach to the first
-        # member.
-        @last_member_line = lbrace.line
+        expect(TOK_LBRACE)
 
         properties = []
         constructor = nil
@@ -698,7 +692,17 @@ module RunarCompiler
 
         # Claim any @embedAlways / @sighash directive comments sitting in the
         # source gap immediately before this member (issue #109 / #123).
-        member_directives = gather_member_directives(location.line)
+        # F-282: the lower bound is the PREVIOUS token's own line (not the
+        # previous member's start line), and the upper bound is
+        # position-aware (column-checked on the member's own line), so a
+        # directive sharing a line with the preceding token is correctly
+        # excluded (ts-morph's leading-trivia scan never collects it either —
+        # it is that preceding token's trailing trivia), while a directive
+        # sharing a NEW line with this member's own declaration is still
+        # claimed, and a comment trailing THIS member's own closing brace on
+        # that same line is excluded rather than wrongly claimed.
+        prev_token_line = @pos > 0 ? @tokens[@pos - 1].line : 0
+        member_directives = gather_member_directives(prev_token_line, location.line, location.column)
         embed_always = member_directives.any? { |d| d[:text].match?(/@embedAlways\b/) }
         # Every directive comment is kept (not just the first) so a second
         # `@sighash` on the same member is seen and refused (F-039).
@@ -808,16 +812,23 @@ module RunarCompiler
         nil
       end
 
-      # Return the directive records that attach to a member starting at
-      # +member_line+: those recorded AFTER the previous member (or the class
-      # brace) and BEFORE this member, i.e. the ones this member immediately
-      # follows. Advances +@last_member_line+ so each directive is claimed once.
-      def gather_member_directives(member_line)
-        claimed = @directives.select do |d|
-          d[:line] > @last_member_line && d[:line] < member_line
+      # Return the directive records that attach to the member whose first
+      # token starts at +(member_line, member_col)+: those strictly after the
+      # PREVIOUS token's own line (+after_line+ — a directive sharing that
+      # token's line is its trailing trivia, never claimed) and strictly
+      # before this member's own first token (on an earlier line, or on
+      # +member_line+ at a column before +member_col+ — a directive on the
+      # member's own line but AFTER its first token is instead that member's
+      # own trailing trivia). Mirrors ts-morph's position-aware leading-trivia
+      # scan (F-282); each member computes its own window from real token
+      # positions, so adjacent members' windows cannot overlap and no claimed-
+      # once cursor is needed.
+      def gather_member_directives(after_line, member_line, member_col)
+        @directives.select do |d|
+          after_prev_token = d[:line] > after_line
+          before_member = d[:line] < member_line || (d[:line] == member_line && d[:col] < member_col)
+          after_prev_token && before_member
         end
-        @last_member_line = member_line
-        claimed
       end
 
       def skip_to_next_member

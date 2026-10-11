@@ -72,6 +72,31 @@ class SighashParseTest {
         assertTrue(ex.getMessage().contains("cannot combine base types"), ex.getMessage());
     }
 
+    /**
+     * F-282: a `@sighash` comment that trails a method's OWN closing brace on
+     * that method's own declaration line is a genuine trailing comment of that
+     * method, not a leading directive for it — ts-morph's
+     * `getLeadingCommentRanges()` / `getJsDocs()` never attach it (verified
+     * directly against ts-morph: both come back empty for this exact source).
+     * TsParser's line-only `collectLeadingComments(afterLine, memberLine)`
+     * wrongly captured it because the comment's line equals `memberLine`
+     * regardless of column, silently flipping the emitted sighash flag for a
+     * method that asked for none. This test proves the over-inclusion is
+     * fixed; it does not test the (already-correct, unchanged) case of a
+     * directive sharing a line with the PRECEDING member, which ts-morph also
+     * drops and which TsParser already dropped before this fix.
+     */
+    @Test
+    void ignoresTrailingSameLineCommentAfterMethod() throws Exception {
+        String src =
+            "class C extends StatefulSmartContract {\n"
+            + "  n: bigint;\n"
+            + "  constructor(n: bigint) { super(n); this.n = n; }\n"
+            + "  public bump(): void { this.n = this.n + 1n; } // @sighash NONE|FORKID\n"
+            + "}\n";
+        assertNull(methodByName(src, "bump").sighashType());
+    }
+
     @Test
     void reportsErrorForSighashOnPrivateMethod() {
         String src =

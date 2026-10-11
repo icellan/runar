@@ -94,8 +94,14 @@ public final class TsParser {
     private static final Pattern EMBED_ALWAYS_RE = Pattern.compile("@embedAlways\\b");
     private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash\\b");
 
-    /** A source comment captured by the tokenizer, keyed by its start line. */
-    private record CommentInfo(int line, String text) {}
+    /**
+     * A source comment captured by the tokenizer, keyed by its start line and
+     * column. The column is needed (F-282) to distinguish a comment that
+     * leads a member from one that trails the PRECEDING tokens on the same
+     * line — a pure line comparison cannot tell them apart when a member's
+     * whole declaration sits on one line.
+     */
+    private record CommentInfo(int line, int col, String text) {}
 
     /** Checked exception for parse-time problems. */
     public static class ParseException extends Exception {
@@ -290,12 +296,13 @@ public final class TsParser {
             if (ch == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
                 int commentStart = i;
                 int commentLine = line;
+                int commentCol = col;
                 while (i < n && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     i++;
                 }
                 // Capture leading trivia so the parser can detect .runar.ts
                 // comment directives (#109 @embedAlways / #123 @sighash).
-                comments.add(new CommentInfo(commentLine, source.substring(commentStart, i)));
+                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, i)));
                 continue;
             }
 
@@ -303,6 +310,7 @@ public final class TsParser {
             if (ch == '/' && i + 1 < n && source.charAt(i + 1) == '*') {
                 int commentStart = i;
                 int commentLine = line;
+                int commentCol = col;
                 i += 2;
                 col += 2;
                 boolean closed = false;
@@ -324,7 +332,7 @@ public final class TsParser {
                 if (!closed && i < n) {
                     i++;
                 }
-                comments.add(new CommentInfo(commentLine, source.substring(commentStart, Math.min(i, n))));
+                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, Math.min(i, n))));
                 continue;
             }
 
@@ -533,14 +541,32 @@ public final class TsParser {
 
         /**
          * Concatenate the text of every captured comment that leads the member
-         * whose first token is on {@code memberLine} — i.e. comments strictly
-         * after the previous token's line and up to (and including) the member
-         * line. Mirrors ts-morph's leading-trivia scan used by the TS reference.
+         * whose first token starts at {@code (memberLine, memberCol)} — i.e.
+         * comments strictly after the previous token's line, and strictly
+         * before the member's own first token. Mirrors ts-morph's leading-trivia
+         * scan used by the TS reference, which has two position-sensitive
+         * properties a pure line comparison cannot reproduce (F-282):
+         *
+         * <p>(1) A comment that shares a line with the PRECEDING token (no line
+         * break yet encountered since it) is ts-morph's TRAILING trivia of that
+         * preceding token, never this member's leading trivia — `c.line() >
+         * afterLine` enforces that by requiring a strictly later line than the
+         * previous token's.
+         *
+         * <p>(2) A comment on the member's OWN line that comes AFTER the
+         * member's own first token (e.g. trailing `// @sighash ...` after a
+         * one-line method body) is this member's own trailing trivia, not its
+         * leading trivia, even though it shares `memberLine` — the column check
+         * `c.col() < memberCol` excludes it where a `c.line() <= memberLine`
+         * line-only check would wrongly include it.
          */
-        String collectLeadingComments(int afterLine, int memberLine) {
+        String collectLeadingComments(int afterLine, int memberLine, int memberCol) {
             StringBuilder sb = new StringBuilder();
             for (CommentInfo c : comments) {
-                if (c.line() > afterLine && c.line() <= memberLine) {
+                boolean afterPrevToken = c.line() > afterLine;
+                boolean beforeMember = c.line() < memberLine
+                    || (c.line() == memberLine && c.col() < memberCol);
+                if (afterPrevToken && beforeMember) {
                     if (sb.length() > 0) {
                         sb.append('\n');
                     }
@@ -809,7 +835,7 @@ public final class TsParser {
             // detect the .runar.ts comment directives (#109 @embedAlways on a
             // readonly field, #123 @sighash on a public method).
             int prevTokenLine = pos > 0 ? tokens.get(pos - 1).line : 0;
-            String leadingComments = collectLeadingComments(prevTokenLine, location.line());
+            String leadingComments = collectLeadingComments(prevTokenLine, location.line(), location.column());
 
             String visibility = "private";
             boolean isReadonly = false;

@@ -522,9 +522,32 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 // or `// @embedAlways` directive is the immediately-preceding sibling of the
 // member it annotates. Stacked comments are concatenated (mirrors the TS
 // reference's JSDoc + leading-trivia scan).
+//
+// F-282: sibling adjacency alone is not enough — ts-morph's leading-comment
+// scan never attaches a comment that shares a line with the PRECEDING
+// token (verified directly against ts-morph: that comment is the preceding
+// token's own trailing trivia, not this node's leading trivia). Find the
+// nearest non-comment previous sibling and stop collecting at (and
+// including) the first comment that starts on the same row that sibling
+// ends on.
 func (p *parseContext) leadingCommentText(node *sitter.Node) string {
+	var prevNonComment *sitter.Node
+	for s := node.PrevSibling(); s != nil; s = s.PrevSibling() {
+		if s.Type() != "comment" {
+			prevNonComment = s
+			break
+		}
+	}
+	var boundaryRow uint32
+	hasBoundary := prevNonComment != nil
+	if hasBoundary {
+		boundaryRow = prevNonComment.EndPoint().Row
+	}
 	var parts []string
 	for prev := node.PrevSibling(); prev != nil && prev.Type() == "comment"; prev = prev.PrevSibling() {
+		if hasBoundary && prev.StartPoint().Row <= boundaryRow {
+			break
+		}
 		parts = append(parts, p.nodeText(prev))
 	}
 	return strings.Join(parts, "\n")
