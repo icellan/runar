@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { resolve, extname, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadPeepholeRules, ruleNames } from '../optimizer/rule-loader.js';
 import { PEEPHOLE_RULES } from '../optimizer/peephole-rules.js';
 
@@ -103,5 +106,116 @@ describe('R-139 optimizer/peephole-rules.json matches the implemented table', ()
       (r) => shape(r.match as Op[]) === 'opcode:OP_NOT opcode:OP_NOT',
     );
     expect(unguarded.map((r) => r.name)).toEqual([]);
+  });
+});
+
+/**
+ * F-364 / CX-DOC-002 — rule-loader.ts's header said the JSON is "the canonical
+ * rule definition shared across all four compilers." The repo now has seven
+ * compiler tiers.
+ *
+ * "Loads the rules file" is itself misleading: only this TS loader reads
+ * peephole-rules.json (see the describe block above — it has no other
+ * caller). What the header actually means, and what the recommended
+ * remediation asks for, is "tiers that procedurally MIRROR the table" — each
+ * native tier reimplements the same rules in its own optimizer rather than
+ * reading this JSON at runtime. This test counts mirrors, not readers: it
+ * walks each compilers/<tier> directory for a non-test source file named
+ * "optimizer" or "peephole" (the procedural implementation), does the same
+ * for this TS tier's own optimizer directory, and checks the header's
+ * claimed count against that discovered total instead of a hardcoded
+ * number.
+ *
+ * It does NOT prove every discovered tier's rules actually match the JSON
+ * byte-for-byte — only the TS table is held to that by the describe block
+ * above (R-139). A tier could carry an optimizer file whose rules have
+ * drifted from the JSON; that is a separate, undetected gap this test does
+ * not close.
+ */
+describe('F-364 rule-loader.ts header names the actual mirrored-tier count', () => {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
+  const RULE_LOADER_SRC = resolve(REPO_ROOT, 'packages/runar-compiler/src/optimizer/rule-loader.ts');
+  const COMPILERS_DIR = resolve(REPO_ROOT, 'compilers');
+  const TS_OPTIMIZER_DIR = resolve(REPO_ROOT, 'packages/runar-compiler/src/optimizer');
+
+  const SKIP_DIRS = new Set([
+    'node_modules', '.git', 'build', '.gradle', 'target', '__pycache__',
+    '.zig-cache', 'zig-cache', 'zig-out', 'dist', 'test', 'tests',
+    '__tests__', 'spec', '.venv', 'venv', 'vendor',
+  ]);
+  const SOURCE_EXT = new Set(['.go', '.rs', '.py', '.zig', '.rb', '.java', '.ts']);
+
+  /** True if `dir` (recursively, excluding build/vendor/test dirs) contains a
+   *  non-test source file whose name matches /optimizer|peephole/i — i.e. a
+   *  procedural mirror of the peephole rule table, not a reader of the JSON. */
+  function hasOptimizerModule(dir: string): boolean {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const full = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (hasOptimizerModule(full)) return true;
+        continue;
+      }
+      if (!entry.isFile()) continue; // skip dangling symlinks etc.
+      if (!SOURCE_EXT.has(extname(entry.name))) continue;
+      if (/test/i.test(entry.name)) continue;
+      if (/optimizer|peephole/i.test(entry.name)) return true;
+    }
+    return false;
+  }
+
+  /** Native (non-TS) compiler tier directory names under compilers/* that
+   *  ship their own procedural peephole/optimizer implementation. */
+  function nativeTiersWithOptimizer(): string[] {
+    return readdirSync(COMPILERS_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .filter((tier) => hasOptimizerModule(resolve(COMPILERS_DIR, tier)));
+  }
+
+  const WORD_TO_NUMBER: Record<string, number> = {
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  };
+
+  it('discovers both the TS mirror and at least one native-tier mirror (a vacuous sweep proves nothing)', () => {
+    expect(hasOptimizerModule(TS_OPTIMIZER_DIR)).toBe(true);
+    expect(nativeTiersWithOptimizer().length).toBeGreaterThan(0);
+  });
+
+  it("the header's compiler-tier count equals the discovered mirrored-tier count, not a hardcoded figure", () => {
+    const tsHasOptimizer = hasOptimizerModule(TS_OPTIMIZER_DIR);
+    const nativeTiers = nativeTiersWithOptimizer();
+    const discoveredCount = nativeTiers.length + (tsHasOptimizer ? 1 : 0);
+
+    const rawHeader = readFileSync(RULE_LOADER_SRC, 'utf-8');
+    // Strip comment-line prefixes and collapse whitespace so a future
+    // line-wrap of "all seven compiler tiers" can't dodge the regex.
+    const header = rawHeader.replace(/^\s*\*\s?/gm, '').replace(/\s+/g, ' ');
+    const match = header.match(/shared across all (\w+) compiler/i);
+    expect(
+      match?.[1],
+      "rule-loader.ts header no longer says 'shared across all <N> compiler(s)' — update this test too",
+    ).toBeDefined();
+
+    const word = (match![1] as string).toLowerCase();
+    const claimed = WORD_TO_NUMBER[word] ?? Number(word);
+    expect(
+      claimed,
+      `rule-loader.ts claims ${word} compilers, but ${discoveredCount} tiers actually ship a ` +
+        `procedural optimizer/peephole module (TypeScript${tsHasOptimizer ? '' : ' excluded'} + ` +
+        `native tiers: ${nativeTiers.join(', ')})`,
+    ).toBe(discoveredCount);
+  });
+
+  it('the header names every discovered native tier', () => {
+    const header = readFileSync(RULE_LOADER_SRC, 'utf-8');
+    const missing = nativeTiersWithOptimizer().filter(
+      (tier) => !new RegExp(tier, 'i').test(header),
+    );
+    expect(
+      missing,
+      `rule-loader.ts header omits these discovered compiler tiers: ${missing.join(', ')}`,
+    ).toEqual([]);
   });
 });
