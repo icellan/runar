@@ -8,6 +8,7 @@ import {
   AssertionFailureError,
 } from '../../packages/runar-sdk/src/index.js';
 import type { ANFProgram } from '../../packages/runar-ir-schema/src/index.js';
+import { enforceDriverGate } from './driver-gate.js';
 
 // Real-crypto counterpart to cross-interpreter.test.ts and
 // cross-interpreter-strict.test.ts.
@@ -38,8 +39,6 @@ const CONFORMANCE_TESTS_DIR = join(__dirname, '../tests');
 const INPUTS_DIR = join(__dirname, 'inputs');
 const EXPECTED_DIR = join(__dirname, 'expected-real-crypto');
 const DRIVERS_DIR = join(__dirname, 'drivers');
-
-const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
 interface CaseInput {
   case: string;
@@ -266,15 +265,8 @@ function runDriver(cfg: DriverConfig, inputFile: string): CaseOutput {
   return JSON.parse(trimmed) as CaseOutput;
 }
 
-const requireAll = IS_CI || process.env.RUNAR_ANF_DRIVERS_STRICT === '1';
-
 const missingDrivers: DriverConfig[] = driverConfigs.filter(c => !isDriverAvailable(c));
-if (requireAll && missingDrivers.length > 0) {
-  throw new Error(
-    `ANF real-crypto-parity drivers missing in CI / strict mode: ${missingDrivers.map(c => c.name).join(', ')}.\n` +
-    missingDrivers.map(c => `  - ${c.name}: ${c.setupHint}`).join('\n'),
-  );
-}
+enforceDriverGate('ANF real-crypto-parity', missingDrivers, process.env);
 
 for (const cfg of driverConfigs) {
   describe.skipIf(!isDriverAvailable(cfg))(`ANF real-crypto parity (${cfg.name} SDK)`, () => {

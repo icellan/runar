@@ -1040,6 +1040,7 @@ jobs:
           conformance/sdk-output/runner/sdk-runner-refusal-build-isolation.test.ts
           conformance/runner/__tests__
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
+          conformance/anf-interpreter/driver-gate.test.ts
           conformance/analyzer/__tests__
           conformance/ir-roundtrip
           conformance/fuzz-regressions
