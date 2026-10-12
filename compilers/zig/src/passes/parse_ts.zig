@@ -2224,7 +2224,19 @@ const Parser = struct {
                 }
             }
             const stripped = stripped_buf[0..stripped_len];
-            const val = std.fmt.parseInt(i64, stripped, 0) catch {
+            const val = std.fmt.parseInt(i64, stripped, 0) catch |err| {
+                // A decimal literal whose magnitude overflows `i64` is still
+                // a valid Bitcoin Script number (e.g. the 256-bit secp256k1
+                // constants the schnorr-zkp fixture pushes) — defer to the
+                // arbitrary-precision decimal push encoder instead of
+                // refusing it outright. Anything else (malformed text, or a
+                // non-decimal radix prefix the decimal encoder can't read)
+                // still refuses below.
+                if (err == error.Overflow) {
+                    if (opcodes.encodeScriptNumberFromDecimal(self.allocator, writer, stripped)) |_| {
+                        return;
+                    } else |_| {}
+                }
                 self.addErrorFmt("push() argument is not a valid integer literal: '{s}'", .{tok.text});
                 return;
             };
@@ -2247,7 +2259,21 @@ const Parser = struct {
                 }
             }
             const stripped = stripped_buf[0..stripped_len];
-            const val_abs = std.fmt.parseInt(i64, stripped, 0) catch {
+            const val_abs = std.fmt.parseInt(i64, stripped, 0) catch |err| {
+                // Same oversize-magnitude fallback as the positive branch
+                // above, with a '-' prefixed onto the digits before handing
+                // them to the arbitrary-precision decimal push encoder.
+                if (err == error.Overflow) {
+                    var neg_buf: [65]u8 = undefined;
+                    if (stripped.len < neg_buf.len) {
+                        neg_buf[0] = '-';
+                        @memcpy(neg_buf[1 .. 1 + stripped.len], stripped);
+                        const neg_decimal = neg_buf[0 .. stripped.len + 1];
+                        if (opcodes.encodeScriptNumberFromDecimal(self.allocator, writer, neg_decimal)) |_| {
+                            return;
+                        } else |_| {}
+                    }
+                }
                 self.addErrorFmt("push() argument is not a valid integer literal: '{s}'", .{tok.text});
                 return;
             };

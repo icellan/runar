@@ -109,6 +109,7 @@ test {
     _ = @import("tests/n124_fixed_array_increment.zig");
     _ = @import("tests/n129_loop_start_surfaces.zig");
     _ = @import("tests/n134_oversize_hex_literal.zig");
+    _ = @import("tests/n119_asm_push_oversize_literal.zig");
     _ = @import("tests/r125_wave3_placeholders.zig");
     _ = @import("passes/int_literal.zig");
     _ = @import("tests/n098_bytestring_satoshis.zig");
