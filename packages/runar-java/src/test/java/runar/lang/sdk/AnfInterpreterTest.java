@@ -90,6 +90,44 @@ class AnfInterpreterTest {
             "increment must move count from 0 to 1; got newState=" + newState);
     }
 
+    /**
+     * N-157: {@code artifacts/stateful-counter.runar.json} used to predate
+     * issue #123's sighash-type prologue check and carried no
+     * {@code isAutoInjectedStateCheck} marker on its exit continuation-hash
+     * assert either. {@link AnfInterpreter#executeStrict} structurally
+     * detects and mocks exactly the CURRENT compiler's 8-binding prologue
+     * (see {@code detectAutoInjectedPrologueAsserts}'s doc comment) and
+     * skips the exit assert ONLY via that marker — so against the stale
+     * fixture, neither mock applied: the un-marked exit assert fell
+     * through to real evaluation and threw for a reason having nothing to
+     * do with the method logic under test (an un-computable
+     * {@code hash256(continuation) === extractOutputHash(preimage)} off
+     * -chain). {@link F164PrologueStrictTest} worked around exactly this
+     * by hand-building its own ANF instead of loading this fixture (see
+     * its class doc). Now that the fixture is regenerated from the
+     * CURRENT Java compiler (byte-identical to
+     * {@code conformance/tests/stateful-counter/expected-script.hex}),
+     * {@code executeStrict} must run the REAL fixture's prologue end to
+     * end, not a hand-built stand-in.
+     */
+    @Test
+    void executeStrictRunsTheRealPrologueShapeAgainstTheFixture() throws Exception {
+        Map<String, Object> anf = loadFixtureAnf("stateful-counter.runar.json");
+
+        AnfInterpreter.ExecutionResult result = AnfInterpreter.executeStrict(
+            anf,
+            "increment",
+            Map.of("count", BigInteger.ZERO),
+            Map.of(),
+            List.of()
+        );
+
+        assertEquals(BigInteger.ONE, asBigInt(result.newState.get("count")),
+            "executeStrict must run the fixture's real auto-injected prologue "
+                + "(checkPreimage + sighash-type + exit continuation-hash "
+                + "asserts, all mocked) and still move count from 0 to 1");
+    }
+
     @Test
     void computeNewStateIncrementsCounterFromArbitrarySeed() throws Exception {
         Map<String, Object> anf = loadFixtureAnf("stateful-counter.runar.json");
