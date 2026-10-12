@@ -1353,8 +1353,14 @@ export interface CompileCheckOptions {
 }
 
 /**
- * Run the Rúnar frontend (parse → validate → typecheck → expandFixedArrays
- * → typecheck) on a source string and throw on any error-severity diagnostic.
+ * Run the Rúnar frontend (parse → validate → typecheck → expandFixedArrays)
+ * on a source string and throw on any error-severity diagnostic.
+ *
+ * This is the same front end `compile()` uses: one typecheck pass over the
+ * source contract, then FixedArray expansion, which reports its own
+ * diagnostics (e.g. initializer length or element-type mismatches). The
+ * expanded contract is not typechecked a second time — neither is it by
+ * `compile()`.
  *
  * Returns void on success. Throws an Error whose message lists every
  * frontend diagnostic when validation fails. Mirrors the named API exposed
