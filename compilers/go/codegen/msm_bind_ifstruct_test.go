@@ -134,9 +134,10 @@ func TestMSMBind_ScalarMulZeroIsSkipped(t *testing.T) {
 // Proves: for these witnesses the on-chain accumulator equals the SDK's
 // scalars-mod-r accumulator. Does NOT prove: anything about the pairing or
 // the rest of the verifier (see compiler/groth16_wa_binding_test.go for the
-// full-artifact spend), nor that accepting a non-canonical pub_i >= r is the
-// right policy for contract bodies that read groth16PublicInput(i) — those
-// still see the raw witness value.
+// full-artifact spend), nor what the full verifier does with such
+// witnesses — since N-035 its preamble REJECTS any pub_i outside [0, r)
+// before this binding runs (compiler.TestGroth16WAMSM_RejectsNonCanonicalPublicInput),
+// so this reduction is defence in depth for the binding taken alone.
 func TestMSMBind_PublicInputIsReducedModR(t *testing.T) {
 	r := new(big.Int).Set(bn254CurveR)
 	two256 := new(big.Int).Lsh(big.NewInt(1), 256)

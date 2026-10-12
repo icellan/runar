@@ -453,28 +453,30 @@ func assertOnCurveG1(t *testing.T, p [2]*big.Int) {
 	}
 }
 
-// TestGroth16WAMSM_PublicInputAtOrderRBindsAsZero — F-036.
+// TestGroth16WAMSM_PublicInputAtOrderRRejected — F-036, policy per N-035
+// (user decision R86a: reject non-canonical public inputs).
 //
 // The attack witness: pub_0 = r (the BN254 Fr order), with a proof and a
 // prepared_inputs honestly derived — by the SDK itself,
 // bn254witness.BuildFromProofWithInputs — as if pub_0 were 0. The SDK
 // reduces pub_i mod r, so it considers pub_0 = r and pub_0 = 0 the same
 // statement and hands back the SAME prepared_inputs for both (asserted
-// below). The on-chain MSM binding must reach the same verdict: before
-// F-036 its unreduced ladder walked pub_0 = r through the non-zero branch
-// and rejected the spend, i.e. on-chain and off-chain disagreed about what
-// the witness attests to.
+// below). The MSM binding alone would bind it as 0 (F-036), but the full
+// verifier must REJECT it: pub_0 = r is not a canonical Fr element, and
+// accepting it would let a spender show groth16PublicInput(0), the
+// CompileGroth16WA pins and the txid a value other than the one the proof
+// is about (gnark: PublicInputNotInField).
 //
 // The verifier is emitted WITHOUT CompileGroth16WA's compile-time pins
-// (those refuse any value outside [0, r) and would mask the MSM binding);
-// this is the shape the Mode-3 groth16PublicInput(i) path embeds.
+// (those would refuse pub_0 = r on their own and mask the preamble's range
+// check); this is the shape the Mode-3 groth16PublicInput(i) path embeds.
 //
 // Proves: the full MSM-binding verifier, executed on the go-sdk
-// interpreter, accepts the honest spend and treats pub_0 = r exactly as the
-// SDK does (≡ 0). Does NOT prove: that a contract body reading
-// groth16PublicInput(0) sees 0 — it sees the raw witness value r, so a body
-// that needs canonical scalars must range-check them itself.
-func TestGroth16WAMSM_PublicInputAtOrderRBindsAsZero(t *testing.T) {
+// interpreter, accepts the honest spend (pub_0 = 0) and rejects the
+// non-canonical pub_0 = r even though its prepared_inputs are exactly the
+// honest ones. Does NOT prove: that the SDK refuses to build such a witness
+// (it does not; tracked as N-232).
+func TestGroth16WAMSM_PublicInputAtOrderRRejected(t *testing.T) {
 	s := newSynthGroth16(t)
 
 	honest := honestPublicInputs(t)
@@ -531,8 +533,124 @@ func TestGroth16WAMSM_PublicInputAtOrderRBindsAsZero(t *testing.T) {
 	if err := executeArtifactWithWitness(t, art, honestW); err != nil {
 		t.Fatalf("honest MSM spend rejected: %v", err)
 	}
-	// The binding must agree with the SDK: pub_0 = r ≡ 0.
-	if err := executeArtifactWithWitness(t, art, advW); err != nil {
-		t.Fatalf("on-chain MSM binding disagrees with the SDK: pub_0 = r was rejected although the SDK derived prepared_inputs for it as pub_0 = 0: %v", err)
+	// pub_0 = r binds the same accumulator but is not canonical: reject.
+	if err := executeArtifactWithWitness(t, art, advW); err == nil {
+		t.Fatal("non-canonical pub_0 = r accepted")
+	}
+}
+
+// TestGroth16WAMSM_RejectsNonCanonicalPublicInput — N-035 (GK-BUG-008),
+// user decision R86a "switch to reject".
+//
+// The MSM binding reduces each witness-supplied pub_i mod r (F-036), so
+// pub_i, pub_i + k·r and pub_i − r all bind the same prepared_inputs. If the
+// script accepted them, the contract body (groth16PublicInput(i)), the
+// CompileGroth16WA pins and the txid would see a number other than the one
+// the proof is about, and any observer could re-encode an honest spend's
+// public input. The verifier must therefore REJECT any pub_i outside
+// [0, r), as gnark (PublicInputNotInField) and SP1's Solidity verifier do.
+//
+// The contract is compiled through the real pipeline (CompileFromSource with
+// the synthetic VK). Its body is assert(groth16PublicInput(0) != 8): it
+// accepts every canonical value except 8, so a rejection of 7 + 3r or 7 − r
+// cannot come from the body — only from the binding preamble. Spends run on
+// the go-sdk interpreter:
+//
+//  1. canonical pub_0 = 7 (proof for 7) — accepted (control);
+//  2. pub_0 = 7 + 3r, same proof, SDK-derived prepared_inputs (≡ 7) —
+//     rejected;
+//  3. pub_0 = 7 − r (negative, ≡ 7), same proof — rejected;
+//  4. canonical pub_0 = 8 with a VALID proof for 8 — rejected by the body,
+//     which shows the body still reads and checks the value.
+//
+// Proves: the MSM-binding verifier refuses non-canonical representatives of
+// a public input that its MSM would otherwise bind, so the value the body
+// sees is the canonical witness value. Does NOT prove: slots 1–4 beyond
+// sharing the same per-slot loop, rejection by a real node, or that the SDK
+// witness builders refuse such inputs (they do not; they reduce).
+func TestGroth16WAMSM_RejectsNonCanonicalPublicInput(t *testing.T) {
+	s := newSynthGroth16(t)
+
+	withPub0 := func(v *big.Int) []*big.Int {
+		pubs := honestPublicInputs(t)
+		pubs[0] = v
+		return pubs
+	}
+	canonical := withPub0(big.NewInt(7))
+	proof := s.proofFor(canonical)
+	s.sanityCheck(t, proof, canonical)
+
+	src := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type MSMCanonicalBody struct {
+	runar.SmartContract
+}
+
+func (c *MSMCanonicalBody) Verify() {
+	runar.AssertGroth16WitnessAssistedWithMSM()
+	runar.Assert(runar.Groth16PublicInput(0) != 8)
+}
+`
+	srcPath := filepath.Join(t.TempDir(), "MSMCanonicalBody.runar.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	art, err := CompileFromSource(srcPath, CompileOptions{Groth16WAVKey: s.vkPath})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if len(art.ConstructorSlots) != 0 {
+		t.Fatalf("expected no constructor slots, got %+v", art.ConstructorSlots)
+	}
+
+	build := func(p bn254witness.Proof, pubs []*big.Int) *bn254witness.Witness {
+		w, err := bn254witness.BuildFromProofWithInputs(s.vk, p, pubs)
+		if err != nil {
+			t.Fatalf("BuildFromProofWithInputs: %v", err)
+		}
+		return w
+	}
+
+	// (1) Control.
+	canonW := build(proof, canonical)
+	if err := executeArtifactWithWitness(t, art, canonW); err != nil {
+		t.Fatalf("canonical spend (pub_0 = 7) rejected; harness broken: %v", err)
+	}
+
+	r := fr.Modulus()
+	nonCanonical := []struct {
+		name string
+		v    *big.Int
+	}{
+		{"7+3r", new(big.Int).Add(big.NewInt(7), new(big.Int).Mul(big.NewInt(3), r))},
+		{"7-r", new(big.Int).Sub(big.NewInt(7), r)},
+	}
+	for _, nc := range nonCanonical {
+		// (2), (3): the witness carries the raw value, and the SDK binds it
+		// exactly as it binds 7 — so only a canonicity check can refuse it.
+		w := build(proof, withPub0(nc.v))
+		if w.PublicInputs[0].Cmp(nc.v) != 0 {
+			t.Fatalf("%s: witness must carry the raw pub_0, got %s", nc.name, w.PublicInputs[0])
+		}
+		for i := 0; i < 2; i++ {
+			if w.PreparedInputs[i].Cmp(canonW.PreparedInputs[i]) != 0 {
+				t.Fatalf("%s: SDK premise broken: prepared_inputs differ from pub_0 = 7 at coord %d", nc.name, i)
+			}
+		}
+		if err := executeArtifactWithWitness(t, art, w); err == nil {
+			t.Fatalf("non-canonical public input accepted by the binding: pub_0 = %s (≡ 7 mod r) was spent; the verifier must reject pub_i outside [0, r)", nc.name)
+		}
+	}
+
+	// (4) pub_0 = 8 with a valid proof for 8: the binding accepts it, the
+	// body must not.
+	eight := withPub0(big.NewInt(8))
+	proof8 := s.proofFor(eight)
+	s.sanityCheck(t, proof8, eight)
+	if err := executeArtifactWithWitness(t, art, build(proof8, eight)); err == nil {
+		t.Fatal("pub_0 = 8 was accepted by a body asserting groth16PublicInput(0) != 8")
 	}
 }

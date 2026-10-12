@@ -1816,6 +1816,16 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 	// prover could supply any on-curve G1 point as prepared_inputs and the
 	// pairing would pass for a matching proof. Binding to config.IC pins
 	// the public-inputs to VK-specific domain values.
+	//
+	// Every pub_i is first ASSERTED canonical, 0 <= pub_i < r (N-035,
+	// user decision R86a). The MSM binding reduces mod r, so without this
+	// a spender could push pub_i + k*r (or a negative representative):
+	// the proof would still bind, but groth16PublicInput(i), the pins of
+	// CompileGroth16WA and the txid would all see a different number than
+	// the one the proof is about. Rejecting non-canonical scalars makes
+	// the witness value itself the one canonical value, as gnark
+	// (PublicInputNotInField) and SP1's Solidity verifier require.
+	emitWAGroth16PublicInputRangeCheck(t)
 	emitWAGroth16MSMBind(t, config)
 
 	// Step 3: Set up the 3 pairing pairs (identical to the raw variant).
@@ -1911,6 +1921,23 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 	// Push OP_1 as the final truthy marker (same as raw).
 	t.e(StackOp{Op: "push", Value: bigIntPush(1)})
 	t.nm = append(t.nm, "_ok")
+}
+
+// emitWAGroth16PublicInputRangeCheck asserts 0 <= _pub_i < r for each of
+// the 5 witness-supplied public-input scalars (OP_WITHIN is min-inclusive,
+// max-exclusive) and aborts the script otherwise. The slots are left in
+// place, untouched.
+func emitWAGroth16PublicInputRangeCheck(t *BN254Tracker) {
+	for i := 0; i < 5; i++ {
+		chk := "_pub_rc_" + itoa(i)
+		t.copyToTop("_pub_"+string(rune('0'+i)), chk)
+		t.pushBigInt("_pub_rc_lo", big.NewInt(0))
+		t.pushBigInt("_pub_rc_hi", bn254CurveR)
+		t.rawBlock([]string{chk, "_pub_rc_lo", "_pub_rc_hi"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
 }
 
 // emitWAGroth16MSMBind recomputes the Groth16 prepared-inputs accumulator
