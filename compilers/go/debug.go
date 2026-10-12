@@ -94,6 +94,14 @@ func runDebug() error {
 		return err
 	}
 
+	// N-235 (mirrors F-386, landed for Rust in debug_subcommand.rs):
+	// --script and --artifact are alternatives (see the usage string
+	// above), but one used to silently win over the other with no
+	// diagnostic. Refuse the ambiguous combination explicitly instead.
+	if *scriptHex != "" && *artifactPath != "" {
+		return fmt.Errorf("--script and --artifact are mutually exclusive; pass exactly one")
+	}
+
 	locking := *scriptHex
 	var resolver *sourceMapResolver
 	if locking == "" && *artifactPath != "" {

@@ -132,6 +132,52 @@ func TestCLI_Debug_Artifact(t *testing.T) {
 	}
 }
 
+// TestCLI_Debug_ConflictingFlags verifies --script and --artifact are
+// alternatives (see the usage string: "[--script <hex> | --artifact
+// <path>]"), not combinable. N-235 (mirrors F-386, landed for Rust in
+// debug_subcommand.rs): runDebug only consulted --artifact when --script
+// was empty (`if locking == "" && *artifactPath != ""`), so passing both
+// flags together silently ran --script and discarded --artifact, exiting 0.
+//
+// Proves: debug with both flags set exits non-zero with a diagnostic
+// naming both --script and --artifact.
+// Does not prove: which flag "should" win in a world where the conflict
+// becomes a documented precedence instead of a refusal — only that it is
+// refused with a diagnostic naming both, per the brief's testable
+// assertion.
+func TestCLI_Debug_ConflictingFlags(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI smoke test on -short")
+	}
+
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "runar-compiler-go")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Dir = "."
+	if buildOut, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, string(buildOut))
+	}
+
+	artifactPath := filepath.Join(tmp, "other.json")
+	if err := os.WriteFile(artifactPath, []byte(`{"script":"52"}`), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	cmd := exec.Command(binPath, "debug", "--script", "51", "--artifact", artifactPath)
+	stdout, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("debug with both --script and --artifact must exit non-zero; got success, stdout:\n%s", string(stdout))
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected an *exec.ExitError, got: %v", err)
+	}
+	stderr := string(ee.Stderr)
+	if !strings.Contains(stderr, "--script") || !strings.Contains(stderr, "--artifact") {
+		t.Fatalf("expected a diagnostic naming both --script and --artifact, got:\n%s", stderr)
+	}
+}
+
 // TestCLI_Debug_Artifact_SourceMap verifies the `debug --artifact` trace
 // annotates each covered opcode's step line with the source location
 // (file:line:column) resolved from the artifact's `sourceMap.mappings`,
