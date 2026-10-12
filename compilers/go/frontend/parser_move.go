@@ -1107,7 +1107,8 @@ func isMoveWhileStub(stmt ForStmt) bool {
 // ForStmt, reporting false when the pair is not a representable counting loop.
 func foldMoveCountingWhile(decl VariableDeclStmt, stub ForStmt) (Statement, bool) {
 	iterName := decl.Name
-	cond, ok := stub.Condition.(BinaryExpr)
+	// N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+	cond, ok := normalizeLoopCondition(stub.Condition, iterName).(BinaryExpr)
 	if !ok {
 		return nil, false
 	}

@@ -19,6 +19,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const loop_condition = @import("loop_condition.zig");
 const readonly_inference = @import("../frontend/readonly_inference.zig");
 
 const Allocator = std.mem.Allocator;
@@ -988,7 +989,7 @@ const Parser = struct {
     /// Supports common Runar patterns:
     ///   var i: i64 = 0; while (i < 10) : (i += 1) { ... }   // count up
     ///   var i: i64 = 10; while (i > 0) : (i -= 1) { ... }   // count down
-    ///   while (10 > i) : (i += 1) { ... }                    // reversed operands
+    ///   while (10 > i) : (i += 1) { ... }                    // reversed (N-115)
     ///
     /// `while (i != N)` is NOT one of them — see the `.neq` branch below.
     ///
@@ -1007,6 +1008,9 @@ const Parser = struct {
             return null;
         };
         if (has_paren) _ = self.expect(.rparen);
+        // N-115: `N > i` is `i < N` (and `N < i` is `i > N`, …), on this
+        // surface exactly as in every other tier.
+        loop_condition.normalize(cond, null);
 
         // Extract var_name and bound from condition.
         // Supported patterns:
@@ -1015,8 +1019,7 @@ const Parser = struct {
         //   ident > literal   → var_name=ident, bound=literal (countdown)
         //   ident >= literal  → var_name=ident, bound=literal (countdown)
         //   ident != literal  → var_name=ident, bound=literal (until value)
-        //   literal > ident   → var_name=ident, bound=literal (reversed)
-        //   literal >= ident  → var_name=ident, bound=literal (reversed)
+        // A reversed comparison (`literal > ident`, …) was mirrored above.
         var var_name: []const u8 = "_loop_var";
         var bound: i64 = 0;
         // R-102: `descending` was never set here, so `while (i > 1) : (i -= 1)`
@@ -1080,12 +1083,6 @@ const Parser = struct {
                         if (bop.right == .identifier) bound_ident = bop.right.identifier;
                         descending = true;
                         inclusive = bop.op == .gte;
-                    } else if (bop.left == .literal_int and bop.right == .identifier) {
-                        // N > ident or N >= ident (reversed operands → ident < N)
-                        var_name = bop.right.identifier;
-                        bound = bop.left.literal_int;
-                        if (bop.op == .gte) bound += 1;
-                        bound_is_const = true;
                     }
                 } else if (bop.op == .neq) {
                     // `i != N` is NOT a loop bound. `spec/grammar.md`'s RelOp

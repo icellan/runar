@@ -465,6 +465,10 @@ for (let i: bigint = 0n; i < 10n; i++) {
 
 - The bound (right side of the comparison) must be a compile-time constant.
 - The **left** side of the comparison must be the loop variable itself.
+  The reversed spelling is accepted and means the same loop: `10n > i` is
+  read as `i < 10n`, `10n >= i` as `i <= 10n`, `0n < i` as `i > 0n` and
+  `0n <= i` as `i >= 0n`. Every compiler rewrites it to that form before
+  checking the rules below, on every input format (N-115).
 - Only simple increment (`++`) or decrement (`--`) is allowed, and the
   comparison direction must agree with it (`<`/`<=` with `++`, `>`/`>=` with
   `--`).

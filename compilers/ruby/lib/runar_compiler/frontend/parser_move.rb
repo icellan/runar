@@ -11,6 +11,7 @@ require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
 require_relative "input_limits"
+require_relative "loop_condition"
 
 module RunarCompiler
   module Frontend
@@ -1107,7 +1108,8 @@ module RunarCompiler
       # nil when the pair is not a representable counting loop.
       def fold_counting_while(decl, stub)
         iter_name = decl.name
-        cond = stub.condition
+        # N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+        cond = LoopCondition.normalize(stub.condition, iter_name)
         return nil unless cond.is_a?(BinaryExpr)
         return nil unless cond.left.is_a?(Identifier) && cond.left.name == iter_name
 

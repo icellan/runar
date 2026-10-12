@@ -58,6 +58,7 @@ import { parseRubySource } from './01-parse-ruby.js';
 import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
 import { extractSighashDirective } from './sighash-directive.js';
+import { normalizeLoopConditions } from './loop-condition.js';
 import { OPCODES } from './06-emit.js';
 import { SourceNestingError, withNestingLimit } from './source-limits.js';
 import {
@@ -129,6 +130,13 @@ function unsupportedDirectiveError(source: string, surfaceName: string): string 
  * appropriate parser. All parsers produce the same Rúnar AST.
  */
 export function parse(source: string, fileName?: string): ParseResult {
+  const result = parseDispatch(source, fileName);
+  // N-115: `10n > i` is `i < 10n`; every later pass sees the canonical form.
+  if (result.contract) normalizeLoopConditions(result.contract);
+  return result;
+}
+
+function parseDispatch(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const file = fileName ?? 'contract.ts';
 

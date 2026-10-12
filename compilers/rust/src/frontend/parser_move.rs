@@ -2090,6 +2090,8 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
 
+    // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+    let condition = &super::loop_condition::normalize_loop_condition(condition, iter_name);
     let (cond_left, cond_op) = match condition {
         Expression::BinaryExpr { left, op, .. } => (left.as_ref(), op),
         _ => return None,

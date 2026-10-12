@@ -395,13 +395,17 @@ Block
 
 ForStatement
     = 'for' '(' 'let' Identifier ':' 'bigint' '=' Expression ';'
-                Identifier RelOp Expression ';'
+                ( Identifier RelOp Expression | Expression RelOp Identifier ) ';'
                 Identifier ( '++' | '--' ) ')' Block
     ;
 (* All three Identifiers denote the SAME variable -- the loop iterator.
    EBNF cannot express that equality, so it is a Statement Restriction
    below rather than a production. The condition's left-hand side in
-   particular is not an arbitrary Expression: see W4. *)
+   particular is not an arbitrary Expression: see W4. The second
+   condition form is the reversed spelling (`10n > i`); the parser
+   rewrites it to the first (`i < 10n`) by swapping the operands and
+   mirroring RelOp, so every restriction below applies to the rewritten
+   condition. See N-115 under Statement Restrictions. *)
 
 RelOp
     = '<' | '<=' | '>' | '>='
@@ -423,6 +427,7 @@ ReturnStatement
 - **Variable declarations**: `const` variables cannot be reassigned. `let` variables can be reassigned but not re-declared in the same scope. A declaration list declares **exactly one** variable -- `let a = 1n, b = 2n;` is an error, in statement position and in a for-initializer alike. The VariableDeclaration production above already admits only one declarator; the rule is restated here because it is enforced, not merely implied.
   - Like the for-loop left-hand-side rule, this is a spending-condition rule. Every declarator after the first used to be discarded before the AST was built, and the value is not always what is lost: a private helper carrying the contract's guard, called from a for-initializer's second declarator, compiled to byte-identical output to the same loop with the declarator deleted (`008b519c77` either way), and `@bsv/sdk` `Spend.validate()` accepted a value the guard exists to reject. The dropped name is never referenced again, so nothing downstream can catch it as an undeclared variable. (W5; `conformance/negatives/N43-multi-declarator-statement.runar.ts` and `N44-for-init-extra-declarator.runar.ts` are the seven-tier gates.)
 - **For loops**: MUST be bounded. The loop bound (the right-hand side of the comparison) MUST be a compile-time constant integer literal or `const` variable initialized to a literal. The **left**-hand side of the comparison MUST be the loop variable itself -- not a computed expression (`i + 1n < 2n`), and not a different variable (`j < 3n`). The loop variable MUST use simple increment (`++`) or decrement (`--`). Nested loops are allowed but the total unrolled iteration count must be statically determinable.
+  - The reversed spelling is accepted. When the RIGHT-hand side of a `<`, `<=`, `>` or `>=` condition is the loop variable and the left-hand side is not, the parser swaps the operands and mirrors the operator before any rule above is checked: `10n > i` is `i < 10n`, `10n >= i` is `i <= 10n`, `0n < i` is `i > 0n`, `0n <= i` is `i >= 0n`. The two spellings compile to byte-identical script in every compiler and on every input format with a loop comparison (TypeScript, Solidity-like, Move `while`, Go, Zig `while`, Java). Nothing else is rewritten, so `i + 1n < 2n` and `j < 3n` are still rejected, and a mirrored condition still has to agree with the update direction. (N-115; `conformance/negatives/n115-reversed-loop-condition-parity.test.ts` is the seven-tier gate.)
   - The left-hand-side rule is a spending-condition rule, not a style rule. The loop is unrolled at compile time as `start + k*step` and the trip count comes from the bound alone, so `for (let i = 0n; i + 1n < 2n; i++)` runs ONCE in the source language and TWICE in the emitted script. A contract whose first lap checks a signature and whose second lap overwrites the result spends on an EMPTY signature: measured through `@bsv/sdk` `Spend.validate()`, `i + 1n < 2n` accepted it and the semantically identical `i < 1n` rejected it. (W4; `conformance/negatives/N40-loop-computed-condition-left.runar.ts` and `N41-loop-condition-stray-variable.runar.ts` are the seven-tier gates.)
   - The comparison direction MUST agree with the update: `<` / `<=` with `++`, `>` / `>=` with `--`. (`conformance/negatives/N42-loop-direction-mismatch.runar.ts`.)
 - **Output intrinsics in a loop body**: `this.addOutput`, `this.addRawOutput` and `this.addDataOutput` MUST NOT be called inside a loop body, directly or through a private helper called there. A loop body lowers into its own scope whose declared outputs never reach the method's output list, so the state continuation would commit to fewer outputs than the transaction actually creates -- a covenant no shipped SDK can spend, whose successor is unspendable. Declare the outputs at the method's top level. (R-127; `conformance/negatives/N30-output-intrinsic-in-loop.runar.ts` is the seven-tier gate.)

@@ -16,6 +16,7 @@ pub mod expand_fixed_arrays;
 pub mod identifier_collision;
 pub mod input_limits;
 pub mod int_literal;
+pub mod loop_condition;
 pub mod parser;
 pub mod reserved_names;
 pub mod parser_gocontract;

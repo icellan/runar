@@ -145,6 +145,17 @@ module RunarCompiler
   #
   # Returns a ParseResult-like object (from the frontend package).
   def self._parse_source(source, file_name)
+    result = _parse_source_dispatch(source, file_name)
+    # N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+    unless result.contract.nil?
+      require_relative "frontend/loop_condition"
+      Frontend::LoopCondition.normalize_contract(result.contract)
+    end
+    result
+  end
+  private_class_method :_parse_source
+
+  def self._parse_source_dispatch(source, file_name)
     # DoS-bound size guard. Reject oversized source BEFORE any
     # format-specific parser touches the input. Raises
     # InputLimits::SourceSizeExceededError on rejection. BUG-008 follow-up.
@@ -200,7 +211,7 @@ module RunarCompiler
             "Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
     end
   end
-  private_class_method :_parse_source
+  private_class_method :_parse_source_dispatch
 
   # Detect the first unsupported author-facing comment directive in +source+,
   # or nil when the source is clean. Word-boundary matched (\b) to mirror the

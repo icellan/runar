@@ -32,6 +32,11 @@ public final class ParserDispatch {
      * {@code .runar.{ts,sol,move,py,go,rs,zig,rb,java}}.
      */
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+        return LoopCondition.normalizeContract(parseDispatch(source, filename));
+    }
+
+    private static ContractNode parseDispatch(String source, String filename) throws ParseException {
         // DoS-bound size guard. Reject oversized source BEFORE any
         // format-specific parser touches the input. Raises
         // InputLimits.SourceSizeExceededException (a ParseException

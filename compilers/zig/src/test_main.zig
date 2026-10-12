@@ -46,6 +46,7 @@ test {
     _ = @import("tests/n038_sighash_single_stateful.zig");
     _ = @import("tests/n016_property_shadow_scoping.zig");
     _ = @import("passes/parse_java.zig");
+    _ = @import("passes/loop_condition.zig");
     _ = @import("passes/validate.zig");
     _ = @import("passes/sighash_validate.zig");
     _ = @import("passes/typecheck.zig");

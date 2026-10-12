@@ -28,6 +28,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
+from runar_compiler.frontend.loop_condition import normalize_loop_condition  # N-115
 
 
 # ---------------------------------------------------------------------------
@@ -1473,7 +1474,8 @@ def _fold_move_counting_while(decl: VariableDeclStmt, stub: ForStmt) -> Statemen
     Returns ``None`` when the pair is not a representable counting loop.
     """
     iter_name = decl.name
-    cond = stub.condition
+    # N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+    cond = normalize_loop_condition(stub.condition, iter_name)
     if not isinstance(cond, BinaryExpr):
         return None
     if not (isinstance(cond.left, Identifier) and cond.left.name == iter_name):

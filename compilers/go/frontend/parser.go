@@ -50,6 +50,15 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.java -> ParseJava
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
+	result := parseSourceDispatch(source, fileName)
+	// N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+	if result != nil {
+		normalizeLoopConditions(result.Contract)
+	}
+	return result
+}
+
+func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 	// DoS-bound size guard. Reject oversized source BEFORE any
 	// format-specific parser touches the input. BUG-008 follow-up.
 	if err := assertSourceBytesUnderLimit(source); err != nil {

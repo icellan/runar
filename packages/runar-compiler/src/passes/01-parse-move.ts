@@ -21,6 +21,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
+import { normalizeLoopCondition } from './loop-condition.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
@@ -1165,7 +1166,8 @@ function foldCountingWhile(
   stub: Extract<Statement, { kind: 'for_statement' }>,
 ): Statement | null {
   const iterName = decl.name;
-  const cond = stub.condition;
+  // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+  const cond = normalizeLoopCondition(stub.condition, iterName);
   if (cond.kind !== 'binary_expr') return null;
   if (cond.left.kind !== 'identifier' || cond.left.name !== iterName) return null;
 

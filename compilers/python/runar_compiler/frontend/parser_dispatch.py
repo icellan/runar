@@ -72,6 +72,15 @@ class ParseResult:
 
 def parse_source(source: str, file_name: str) -> ParseResult:
     """Dispatch to the appropriate parser based on file extension."""
+    result = _parse_source_dispatch(source, file_name)
+    # N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+    if result.contract is not None:
+        from runar_compiler.frontend.loop_condition import normalize_loop_conditions
+        normalize_loop_conditions(result.contract)
+    return result
+
+
+def _parse_source_dispatch(source: str, file_name: str) -> ParseResult:
     # DoS-bound size guard. Reject oversized source BEFORE any
     # format-specific parser touches the input. Raises
     # :class:`SourceSizeExceededError` on rejection. BUG-008 follow-up.

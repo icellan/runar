@@ -1545,7 +1545,8 @@ public final class MoveParser {
      */
     private static Statement foldCountingWhile(VariableDeclStatement decl, ForStatement stub) {
         String iterName = decl.name();
-        if (!(stub.condition() instanceof BinaryExpr cond)) return null;
+        // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+        if (!(LoopCondition.normalize(stub.condition(), iterName) instanceof BinaryExpr cond)) return null;
         if (!(cond.left() instanceof Identifier condLeft) || !condLeft.name().equals(iterName)) {
             return null;
         }

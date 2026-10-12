@@ -2062,6 +2062,15 @@ fn bigint_to_i128(bigint_lit: &swc::BigInt) -> i128 {
 /// - `.runar.java` -> Java parser
 /// - anything else (including `.runar.ts`) -> TypeScript parser (default)
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
+    let mut result = parse_source_dispatch(source, file_name);
+    // N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+    if let Some(contract) = result.contract.as_mut() {
+        super::loop_condition::normalize_loop_conditions(contract);
+    }
+    result
+}
+
+fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
     // DoS-bound size guard. Reject oversized source BEFORE any
     // format-specific parser touches the input. BUG-008 follow-up.
     if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {

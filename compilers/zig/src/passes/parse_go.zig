@@ -27,6 +27,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const loop_condition = @import("loop_condition.zig");
 const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
@@ -1664,6 +1665,8 @@ const Parser = struct {
                 if (self.current.kind != .semicolon) {
                     const cond_expr = self.parseExpression();
                     if (cond_expr) |expr| {
+                        // N-115: `N > i` is `i < N`.
+                        loop_condition.normalize(expr, var_name);
                         switch (expr) {
                             .binary_op => |bop| {
                                 descending = bop.op == .gt or bop.op == .gte;

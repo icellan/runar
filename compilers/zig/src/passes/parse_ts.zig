@@ -21,6 +21,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const loop_condition = @import("loop_condition.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
 const input_limits = @import("../frontend/input_limits.zig");
@@ -1497,6 +1498,8 @@ const Parser = struct {
             // Try to extract bound from simple comparison: var < N
             const cond_expr = self.parseExpression();
             if (cond_expr) |expr| {
+                // N-115: `N > i` is `i < N`.
+                loop_condition.normalize(expr, var_name);
                 switch (expr) {
                     .binary_op => |bop| {
                         descending = bop.op == .gt or bop.op == .gte;

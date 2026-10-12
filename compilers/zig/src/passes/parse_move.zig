@@ -23,6 +23,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const loop_condition = @import("loop_condition.zig");
 const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
@@ -1477,6 +1478,8 @@ const Parser = struct {
 
         const has_paren = self.match(.lparen);
         const _cond = self.parseExpression();
+        // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+        if (_cond) |c| loop_condition.normalize(c, null);
         if (has_paren) {
             _ = self.expect(.rparen);
         }
