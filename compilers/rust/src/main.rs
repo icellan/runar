@@ -76,7 +76,7 @@ struct Args {
     #[arg(long)]
     parse_only: bool,
 
-    /// Disable the ANF constant folding pass
+    /// Disable the ANF constant folding pass (no-op when using --ir; constant folding is always disabled when reading pre-lowered ANF IR)
     #[arg(long)]
     disable_constant_folding: bool,
 
