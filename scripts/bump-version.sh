@@ -217,6 +217,48 @@ check_versions() {
     check_exact "$sdk_input" "${artifact_shapes[@]}"
   done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
 
+  # N-172 (R87 user decision 2026-10-12): the "frozen" version pins carried
+  # by the sdk-vertical conformance fixtures and the Go/Zig SDK pin-test
+  # fixtures. bump_version deliberately does NOT rewrite any of these — they
+  # are golden-like and move only through the golden-provenance gate, not a
+  # blind find-and-replace — but a gate that can't see them drift from a real
+  # release bump is no gate, so --check reads and flags them here.
+  # Read the file list via a here-string, not `< <(find ...)`: bash 3.2
+  # (macOS's /bin/bash) corrupts its process-substitution fd table once
+  # enough NESTED process substitutions accumulate (an outer `<(find ...)`
+  # while-loop whose body calls check_exact, itself opening more `<(sed ...)`
+  # substitutions per file) — reproduced as a deterministic SIGTRAP on this
+  # exact script once the sdk-output loop above plus ~40 more files pushed
+  # the count over the edge. A here-string reads from a temp file instead of
+  # a FIFO, which sidesteps the bug.
+  # `|| true`: under `set -e`, an assignment's status is find's status, and a
+  # missing directory makes find exit non-zero — which must not abort the
+  # whole check.
+  local sv_file sv_list
+  sv_list="$(find "$ROOT/conformance/sdk-vertical/cases" -mindepth 2 -maxdepth 2 -name 'input.json' 2>/dev/null || true)"
+  if [ -n "$sv_list" ]; then
+    while IFS= read -r sv_file; do
+      check_exact "$sv_file" "${artifact_shapes[@]}"
+    done <<< "$sv_list"
+  fi
+  sv_list="$(find "$ROOT/conformance/sdk-vertical/artifacts" -maxdepth 1 -name '*.json' 2>/dev/null || true)"
+  if [ -n "$sv_list" ]; then
+    while IFS= read -r sv_file; do
+      check_exact "$sv_file" "${artifact_shapes[@]}"
+    done <<< "$sv_list"
+  fi
+  check_exact "$ROOT/packages/runar-go/sdk_unsound_primitives_test.go" \
+    'Version:[[:space:]]*"runar-v([^"]*)"' 'CompilerVersion:[[:space:]]*"([^"]*)-go"'
+  check_exact "$ROOT/packages/runar-go/sdk_codepart_length_pin_test.go" "${artifact_shapes[@]}"
+  # sdk_contract.zig escapes its embedded JSON quotes (\"), unlike the plain
+  # Go/TS shapes above, and pins the PinFixture artifact TWICE (the function
+  # and the N-051 deploy-time constant) — both occurrences are read. The
+  # `runar-v<semver>` anchor also keeps this from ever matching the file's
+  # many UNRELATED dummy schema values ("version":"1", not escaped-quote,
+  # no "runar-v" prefix) used only to exercise the artifact-JSON parser.
+  check_exact "$ROOT/packages/runar-zig/src/sdk_contract.zig" \
+    '\\"version\\":\\"runar-v([^\\"]*)\\"' '\\"compilerVersion\\":\\"([^\\"]*)\\"'
+
   # Zig package manifest, Ruby gemspec, and the embedded compiler-version
   # strings (R-211). bump_version rewrites all eight of these files; until now
   # check_versions read none of them, so a partial bump or a bad merge that left

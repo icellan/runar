@@ -218,6 +218,44 @@ const GENERIC_FILES: Array<{ path: string; body: (v: string) => string }> = [
       `  });\n` +
       `});\n`,
   },
+  // N-172 (R87 user decision, 2026-10-12): the Go/Zig SDK unit-test fixtures
+  // that pin a "runar-v<version>" / "<version>" artifact into a test literal.
+  // Unlike the files above, bump_version does NOT rewrite these (R87: they
+  // are golden-like and move only through the golden-provenance gate) — but
+  // --check must still read and flag them, or a real release bump leaves
+  // them silently stamped with a version nothing ships anymore.
+  {
+    path: 'packages/runar-go/sdk_unsound_primitives_test.go',
+    body: (v) =>
+      `func unsoundArtifact() *RunarArtifact {\n` +
+      `\treturn &RunarArtifact{\n` +
+      `\t\tVersion:         "runar-v${v}",\n` +
+      `\t\tCompilerVersion: "${v}-go",\n` +
+      `\t}\n}\n`,
+  },
+  {
+    path: 'packages/runar-go/sdk_codepart_length_pin_test.go',
+    body: (v) =>
+      'func pinFixtureArtifactJSON() string {\n\treturn `{\n' +
+      `  "version": "runar-v${v}",\n` +
+      `  "compilerVersion": "${v}",\n` +
+      '  "contractName": "PinFixture"\n}`\n}\n',
+  },
+  {
+    // sdk_contract.zig pins the same artifact JSON TWICE (pinFixtureArtifactJson
+    // and the N-051 deploy-time constant), both as escaped-quote string
+    // literals. The real file also embeds many UNRELATED dummy schema values
+    // ("version":"1", not escaped-quote, no "runar-v" prefix) used only to
+    // exercise the artifact-JSON parser — see the dedicated test below that
+    // those are never flagged.
+    path: 'packages/runar-zig/src/sdk_contract.zig',
+    body: (v) =>
+      `fn pinFixtureArtifactJson() []const u8 {\n` +
+      `    return "{\\"contractName\\":\\"PinFixture\\",\\"version\\":\\"runar-v${v}\\",\\"compilerVersion\\":\\"${v}\\"}";\n` +
+      `}\n` +
+      `const pin_fixture_deploy_time_json =\n` +
+      `    "{\\"contractName\\":\\"PinFixture\\",\\"version\\":\\"runar-v${v}\\",\\"compilerVersion\\":\\"${v}\\"}";\n`,
+  },
 ];
 
 let repo: string;
@@ -584,5 +622,175 @@ describe('N-080: --check covers Gemfile.lock (RubyGems spelling) and test-expect
       `--check flagged the compilerVersion override fixture as drift:\n${out}`,
     ).toBe(0);
     expect(out).not.toContain('1.2.3');
+  });
+});
+
+/**
+ * N-172 (dispatcher baseline finding; R87 user decision, 2026-10-12): the
+ * live project version is also pinned, as a `"version": "runar-v<v>"` /
+ * `"compilerVersion": "<v>"` artifact field, into:
+ *
+ *   - every conformance/sdk-vertical/cases/<row>/input.json (40 at HEAD)
+ *   - every conformance/sdk-vertical/artifacts/<Contract>.json (3 at HEAD)
+ *   - packages/runar-go/sdk_unsound_primitives_test.go and
+ *     sdk_codepart_length_pin_test.go
+ *   - packages/runar-zig/src/sdk_contract.zig (the PinFixture artifact JSON,
+ *     twice)
+ *
+ * The brief asked a DESIGN question: should `bump_version` rewrite these, or
+ * are they frozen placeholders? R87 answers: frozen — they are golden-like
+ * fixtures that may only move through the golden-provenance gate, so
+ * `bump_version` must NOT blind-rewrite them (unchanged by this item). But
+ * `--check` must still read them and fail, by name, when they drift from the
+ * live version — otherwise a real release bump leaves them silently stamped
+ * with a version nothing ships anymore, with no gate to catch it.
+ *
+ * The sdk-vertical fixtures are directories of many files (not a single path
+ * like the GENERIC_FILES family above), so they get their own lay-down
+ * helper rather than reusing `layDownConsistentRepo`'s per-file loop.
+ */
+describe('N-172: --check flags stale pins in sdk-vertical fixtures and the Go/Zig SDK pin tests', () => {
+  const CASE_DIRS = ['bigint-128', 'bool-true'];
+  const ARTIFACT_NAMES = ['SlotMatrix', 'CodeSepMatrix'];
+
+  function caseInputJson(v: string): string {
+    return (
+      JSON.stringify({ artifact: { version: `runar-v${v}`, compilerVersion: v, contractName: 'SlotMatrix' } }, null, 2) +
+      '\n'
+    );
+  }
+
+  function artifactJson(v: string, contractName: string): string {
+    return JSON.stringify({ version: `runar-v${v}`, compilerVersion: v, contractName }, null, 2) + '\n';
+  }
+
+  /** Lays down the sdk-vertical fixture tree at `v`, on top of layDownConsistentRepo. */
+  function layDownSdkVertical(v: string): void {
+    for (const c of CASE_DIRS) {
+      put(`conformance/sdk-vertical/cases/${c}/input.json`, caseInputJson(v));
+    }
+    for (const name of ARTIFACT_NAMES) {
+      put(`conformance/sdk-vertical/artifacts/${name}.json`, artifactJson(v, name));
+    }
+  }
+
+  function goZigFile(path: string): { path: string; body: (v: string) => string } {
+    return GENERIC_FILES.find((g) => g.path === path)!;
+  }
+
+  it('passes when the sdk-vertical fixtures and Go/Zig pin tests are all current (control)', () => {
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    const { status, out } = runCheck();
+    expect(status, `--check rejected a consistent tree:\n${out}`).toBe(0);
+    expect(out).toContain('All versions consistent');
+  });
+
+  for (const c of CASE_DIRS) {
+    it(`catches drift in conformance/sdk-vertical/cases/${c}/input.json`, () => {
+      layDownConsistentRepo();
+      layDownSdkVertical(VERSION);
+      put(`conformance/sdk-vertical/cases/${c}/input.json`, caseInputJson('1.2.3'));
+      const { status, out } = runCheck();
+      expect(
+        status,
+        `--check passed with cases/${c}/input.json stuck at 1.2.3 while everything else is ${VERSION}:\n${out}`,
+      ).not.toBe(0);
+      expect(out).toContain(`conformance/sdk-vertical/cases/${c}/input.json`);
+    });
+  }
+
+  for (const name of ARTIFACT_NAMES) {
+    it(`catches drift in conformance/sdk-vertical/artifacts/${name}.json`, () => {
+      layDownConsistentRepo();
+      layDownSdkVertical(VERSION);
+      put(`conformance/sdk-vertical/artifacts/${name}.json`, artifactJson('1.2.3', name));
+      const { status, out } = runCheck();
+      expect(status, `--check passed with artifacts/${name}.json stuck at 1.2.3:\n${out}`).not.toBe(0);
+      expect(out).toContain(`conformance/sdk-vertical/artifacts/${name}.json`);
+    });
+  }
+
+  it('catches drift in packages/runar-go/sdk_unsound_primitives_test.go', () => {
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    const f = goZigFile('packages/runar-go/sdk_unsound_primitives_test.go');
+    put(f.path, f.body('1.2.3'));
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('packages/runar-go/sdk_unsound_primitives_test.go');
+  });
+
+  it('catches drift in packages/runar-go/sdk_codepart_length_pin_test.go', () => {
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    const f = goZigFile('packages/runar-go/sdk_codepart_length_pin_test.go');
+    put(f.path, f.body('1.2.3'));
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('packages/runar-go/sdk_codepart_length_pin_test.go');
+  });
+
+  it('catches drift in packages/runar-zig/src/sdk_contract.zig', () => {
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    const f = goZigFile('packages/runar-zig/src/sdk_contract.zig');
+    put(f.path, f.body('1.2.3'));
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('packages/runar-zig/src/sdk_contract.zig');
+  });
+
+  it('catches drift in only ONE of the two sdk_contract.zig pin occurrences', () => {
+    // pinFixtureArtifactJson() is current; the deploy-time constant is not.
+    // Both occurrences must be read, not just the first one sed happens to see.
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    put(
+      'packages/runar-zig/src/sdk_contract.zig',
+      `fn pinFixtureArtifactJson() []const u8 {\n` +
+        `    return "{\\"contractName\\":\\"PinFixture\\",\\"version\\":\\"runar-v${VERSION}\\",\\"compilerVersion\\":\\"${VERSION}\\"}";\n` +
+        `}\n` +
+        `const pin_fixture_deploy_time_json =\n` +
+        `    "{\\"contractName\\":\\"PinFixture\\",\\"version\\":\\"runar-v1.2.3\\",\\"compilerVersion\\":\\"1.2.3\\"}";\n`,
+    );
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain('packages/runar-zig/src/sdk_contract.zig');
+  });
+
+  it('does not flag the unrelated dummy schema versions ("1", "1.0") embedded in sdk_contract.zig', () => {
+    // These are plain (non-escaped-quote) JSON used only to exercise the
+    // artifact-JSON parser in unrelated tests. Neither "1" nor "1.0" can
+    // match the "runar-v<semver>" shape the gate looks for, and they don't
+    // use the PinFixture's escaped-quote style either.
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    put(
+      'packages/runar-zig/src/sdk_contract.zig',
+      `fn pinFixtureArtifactJson() []const u8 {\n` +
+        `    return "{\\"contractName\\":\\"PinFixture\\",\\"version\\":\\"runar-v${VERSION}\\",\\"compilerVersion\\":\\"${VERSION}\\"}";\n` +
+        `}\n` +
+        `const pin_fixture_deploy_time_json =\n` +
+        `    "{\\"contractName\\":\\"PinFixture\\",\\"version\\":\\"runar-v${VERSION}\\",\\"compilerVersion\\":\\"${VERSION}\\"}";\n` +
+        `test "unrelated dummy fixture" {\n` +
+        `    const json =\n` +
+        `        \\\\{"contractName":"P2PKH","version":"1","compilerVersion":"1.0","script":"76a914"};\n` +
+        `}\n`,
+    );
+    const { status, out } = runCheck();
+    expect(status, `--check flagged an unrelated dummy schema version as drift:\n${out}`).toBe(0);
+  });
+
+  it('fails when a sdk-vertical input.json no longer carries a recognisable version', () => {
+    layDownConsistentRepo();
+    layDownSdkVertical(VERSION);
+    put(
+      `conformance/sdk-vertical/cases/${CASE_DIRS[0]}/input.json`,
+      JSON.stringify({ artifact: { contractName: 'SlotMatrix' } }, null, 2) + '\n',
+    );
+    const { status, out } = runCheck();
+    expect(status, out).not.toBe(0);
+    expect(out).toContain(`conformance/sdk-vertical/cases/${CASE_DIRS[0]}/input.json`);
   });
 });
