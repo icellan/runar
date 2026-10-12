@@ -12,6 +12,8 @@ interface CompileOptions {
   ir?: boolean;
   asm?: boolean;
   disableConstantFolding?: boolean;
+  disablePeephole?: boolean;
+  disableEcOptimizer?: boolean;
   fromIr?: string;
   hex?: boolean;
   parseOnly?: boolean;
@@ -81,10 +83,23 @@ export async function compileCommand(
 
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
-  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; parseOnly?: boolean }) => unknown;
+  type CompileFn = (
+    source: string,
+    options?: {
+      fileName?: string;
+      disableConstantFolding?: boolean;
+      disablePeephole?: boolean;
+      disableEcOptimizer?: boolean;
+      parseOnly?: boolean;
+    },
+  ) => unknown;
   type CompileFromANFFn = (
     program: unknown,
-    options?: { disableConstantFolding?: boolean },
+    options?: {
+      disableConstantFolding?: boolean;
+      disablePeephole?: boolean;
+      disableEcOptimizer?: boolean;
+    },
   ) => { scriptHex: string; scriptAsm: string };
   type LoadANFFn = (json: string) => unknown;
 
@@ -174,7 +189,11 @@ export async function compileCommand(
 
     let result: { scriptHex: string; scriptAsm: string };
     try {
-      result = compileFromANF(program, { disableConstantFolding: options.disableConstantFolding });
+      result = compileFromANF(program, {
+        disableConstantFolding: options.disableConstantFolding,
+        disablePeephole: options.disablePeephole,
+        disableEcOptimizer: options.disableEcOptimizer,
+      });
     } catch (err) {
       console.error(`  Compilation error: ${(err as Error).message}`);
       process.exitCode = 1;
@@ -250,6 +269,8 @@ export async function compileCommand(
       compileResult = compile(source, {
         fileName: resolvedPath,
         disableConstantFolding: options.disableConstantFolding,
+        disablePeephole: options.disablePeephole,
+        disableEcOptimizer: options.disableEcOptimizer,
         parseOnly: options.parseOnly,
       }) as CompileResultLike;
     } catch (err) {
