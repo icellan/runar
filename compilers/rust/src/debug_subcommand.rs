@@ -43,6 +43,13 @@ struct ArtifactProbe {
 pub fn run(argv: &[String]) -> Result<bool, String> {
     let parsed = parse_args(argv)?;
 
+    // F-386: --script and --artifact are alternatives (see the usage string
+    // below), but one used to silently win over the other with no
+    // diagnostic. Refuse the ambiguous combination explicitly instead.
+    if parsed.script_hex.is_some() && parsed.artifact.is_some() {
+        return Err("--script and --artifact are mutually exclusive; pass exactly one".to_string());
+    }
+
     // Resolve the locking script hex: either --script direct, or --artifact's
     // `script` field. Mirrors the Go debug subcommand's flag surface.
     let locking_hex = if let Some(s) = parsed.script_hex.clone() {
