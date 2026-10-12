@@ -1,6 +1,6 @@
 //! Peephole optimizer for Stack IR.
 //!
-//! Runs after stack lowering but before emission. Applies 30 rewrite rules
+//! Runs after stack lowering but before emission. Applies 22 rewrite rules
 //! iteratively (fixed-point, max 100 iterations) in a single left-to-right pass.
 //! Larger windows are tried first (greedy). If-block bodies are recursively
 //! optimized before the main pass.
@@ -18,11 +18,18 @@ const max_iterations = 100;
 // Matching helpers
 // ============================================================================
 
-/// Returns true if the instruction is any push variant (push_int, push_data,
-/// push_bool, push_big_int_decimal).
+/// Returns true if the instruction is a literal push (push_int, push_data,
+/// push_bool, push_big_int_decimal) -- the TS reference's `op === 'push'`.
+///
+/// N-123: a constructor-slot `placeholder` and the emitter-filled
+/// `push_codesep_index` are deliberately NOT literal pushes here. TS, Go,
+/// Rust, Python, Ruby and Java all leave `placeholder; drop` in place
+/// (`OP_0 OP_DROP`); treating them as pushes made rule 1 delete the pair in
+/// this tier only.
 fn isPush(inst: Inst) bool {
     return switch (inst) {
-        .push_int, .push_data, .push_bool, .push_big_int_decimal, .push_codesep_index, .placeholder => true,
+        .push_int, .push_data, .push_bool, .push_big_int_decimal => true,
+        .push_codesep_index, .placeholder => false,
         // R-095: verify_code_part_len is a self-contained, stack-neutral
         // verify sequence, not a push — no rewrite window may treat it as one.
         .op, .raw_bytes, .verify_code_part_len => false,
@@ -378,7 +385,7 @@ fn runOnePass(allocator: Allocator, ops: []const Inst, out: *std.ArrayListUnmana
 }
 
 // ============================================================================
-// Window-2 rules (23 rules)
+// Window-2 rules (16 rules)
 // ============================================================================
 
 /// Optional replacement: up to 2 instructions (null = no output for that slot).
@@ -620,6 +627,34 @@ test "rule 1: push + drop eliminated" {
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
     try testing.expectEqual(@as(usize, 0), result.len);
+}
+
+// N-123: rule 1 matches only literal pushes, as in the TS reference (`isPush`
+// is `op === 'push'` there) and the Go/Rust/Python/Ruby/Java peepholes.
+// A constructor-slot `placeholder` and the emitter-filled
+// `push_codesep_index` are NOT pushes for this rule: TS keeps
+// `placeholder; drop` as `OP_0 OP_DROP`. Crafted ANF (a `load_prop` of a
+// ctor param used as a method_call object) compiles to `0075767c93009c` in
+// those six tiers; Zig deleted the pair and emitted `767c93009c`.
+// Proves: the Zig window leaves both pairs in place. Does not prove the
+// end-to-end hex matches -- that is the --ir probe in the N-123 log.
+test "N-123 rule 1: placeholder + drop is NOT eliminated (TS parity)" {
+    const alloc = testing.allocator;
+    const input = [_]Inst{
+        .{ .placeholder = .{ .param_index = 0, .param_name = "a" } },
+        .{ .op = .op_drop },
+    };
+    const result = try optimizeOps(alloc, &input);
+    defer alloc.free(result);
+    try expectOps(&input, result);
+}
+
+test "N-123 rule 1: push_codesep_index + drop is NOT eliminated (TS parity)" {
+    const alloc = testing.allocator;
+    const input = [_]Inst{ .{ .push_codesep_index = {} }, .{ .op = .op_drop } };
+    const result = try optimizeOps(alloc, &input);
+    defer alloc.free(result);
+    try expectOps(&input, result);
 }
 
 // --- Rule 2: DUP + DROP -> removed ---
