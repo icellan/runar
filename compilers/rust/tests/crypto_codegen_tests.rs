@@ -224,18 +224,20 @@ fn test_emit_verify_slh_dsa_128s_nontrivial() {
     );
 }
 
+// F-385: this test used to be a byte-for-byte copy of
+// `test_emit_verify_slh_dsa_128s_nontrivial` above (same `collect` call, same
+// threshold, same message). All six valid FIPS 205 SHA-2 parameter sets are already
+// exercised exhaustively — and more precisely — by
+// `test_emit_verify_slh_dsa_op_counts_match_go_reference` below, so a second
+// "does 128s emit something huge" check added no coverage.
+//
+// Repurposed to cover a nearby case nothing tests: `slh_params` (private to
+// `slh_dsa.rs`, invoked at the top of `emit_verify_slh_dsa`) panics on any key
+// outside the six FIPS 205 SHA-2 sets. No test exercised that guard.
 #[test]
-fn test_emit_verify_slh_dsa_128s_baseline() {
-    // SHA2_128s is the parameter set used by examples and integration tests
-    // (see PostQuantumSLHDSANaiveInsecure / SPHINCSWallet). All six FIPS 205
-    // SHA-2 parameter sets are exercised by
-    // `test_emit_verify_slh_dsa_all_param_sets` below.
-    let ops = collect(|s| emit_verify_slh_dsa(s, "SHA2_128s"));
-    assert!(
-        ops.len() > 10_000,
-        "verify_slh_dsa SHA2_128s should emit a huge program, got {}",
-        ops.len()
-    );
+#[should_panic(expected = "Unknown SLH-DSA params: SHA2_512s")]
+fn test_emit_verify_slh_dsa_unknown_param_set_panics() {
+    let _ = collect(|s| emit_verify_slh_dsa(s, "SHA2_512s"));
 }
 
 #[test]

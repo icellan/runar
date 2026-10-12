@@ -3316,16 +3316,35 @@ class Counter extends StatefulSmartContract {
 }
 
 // ---------------------------------------------------------------------------
-// A23: anfLower — stateful method has state continuation (AddOutput or UpdateProp)
+// A23: anfLower — stateful method has state continuation (GetStateScript for a
+// data-output-only method; see F-385 note below for why this no longer uses
+// AddOutput/UpdateProp)
 // The compiler injects state continuations for StatefulSmartContract methods.
 // ---------------------------------------------------------------------------
-
+//
+// F-385: this test used to share test_a20's exact Counter/`increment` fixture,
+// differing only in its `matches!` adding a third `GetStateScript {}` arm —
+// an arm that fixture never needs, since `increment`'s `this.count = ...`
+// assignment already lowers to an `UpdateProp` binding that alone satisfies
+// `has_state_continuation`. The GetStateScript arm was therefore dead: this
+// test could not tell the three-variant and two-variant predicates apart.
+//
+// The GetStateScript variant is actually reached by the OTHER single-output
+// continuation shape: a public method that declares a data output
+// (`this.addDataOutput(...)`) but never assigns a mutable property and never
+// calls `addOutput`/`addRawOutput` (see `anf_lower.rs`'s
+// `ContinuationShape::for_effects_sighash`: `needs_change` is true from
+// `has_data_output` alone, and with `add_output_refs` empty the lowering
+// takes the single-output path, which emits `GetStateScript` to build the
+// unchanged state output). That body contains neither `AddOutput` nor
+// `UpdateProp`, so this is the case that actually exercises A23's third arm
+// (verified against test_a20's narrower 2-arm predicate below).
 #[test]
 fn test_a23_anf_stateful_method_has_state_continuation() {
     use runar_compiler_rust::ir::ANFValue;
 
     let source = r#"
-import { StatefulSmartContract } from 'runar-lang';
+import { StatefulSmartContract, toByteString } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
     count: bigint;
@@ -3335,17 +3354,33 @@ class Counter extends StatefulSmartContract {
         this.count = count;
     }
 
-    public increment() {
-        this.count = this.count + 1n;
+    public note() {
+        this.addDataOutput(0n, toByteString('6a0568656c6c6f'));
     }
 }
 "#;
     let program = compile_ts_to_ir(source).expect("should lower to ANF");
-    let increment = program.methods.iter().find(|m| m.name == "increment").expect("expected increment");
+    let note = program.methods.iter().find(|m| m.name == "note").expect("expected note method");
 
-    // The compiler injects state continuation: either AddOutput (multi-output) or
-    // other state-propagation bindings (GetStateScript, computeStateOutput, etc.)
-    let has_state_continuation = increment.body.iter().any(|b| {
+    // `note` neither assigns `this.count` nor calls `addOutput`/`addRawOutput`,
+    // so A20's narrower predicate (AddOutput | UpdateProp) must NOT fire here —
+    // this is what distinguishes the two tests instead of duplicating one
+    // another.
+    let has_narrow_continuation = note.body.iter().any(|b| {
+        matches!(&b.value, ANFValue::AddOutput { .. } | ANFValue::UpdateProp { .. })
+    });
+    assert!(
+        !has_narrow_continuation,
+        "note() should contain neither AddOutput nor UpdateProp (it only declares a \
+         data output, never mutates a property); body kinds: {:?}",
+        note.body.iter().map(|b| format!("{:?}", std::mem::discriminant(&b.value))).collect::<Vec<_>>()
+    );
+
+    // The compiler still injects a state continuation: either AddOutput
+    // (multi-output) or other state-propagation bindings (GetStateScript,
+    // computeStateOutput, etc.) — and for `note`, it can only be the
+    // GetStateScript arm, since the narrow check above ruled out the other two.
+    let has_state_continuation = note.body.iter().any(|b| {
         matches!(
             &b.value,
             ANFValue::AddOutput { .. }
@@ -3355,8 +3390,9 @@ class Counter extends StatefulSmartContract {
     });
     assert!(
         has_state_continuation,
-        "stateful increment method should have state continuation bindings; body kinds: {:?}",
-        increment.body.iter().map(|b| format!("{:?}", std::mem::discriminant(&b.value))).collect::<Vec<_>>()
+        "data-output-only stateful method should have state continuation bindings \
+         (via GetStateScript); body kinds: {:?}",
+        note.body.iter().map(|b| format!("{:?}", std::mem::discriminant(&b.value))).collect::<Vec<_>>()
     );
 }
 
