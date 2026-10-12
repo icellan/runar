@@ -22,6 +22,7 @@ design principle P8).
 | `--tri-modal` | interpreter vs `ScriptVM` vs `Spend.validate()` | absolute, **stateless fragments** | Same, plus consensus wrappers, with shrinking |
 | `--spend-oracle` | real `@bsv/sdk` `Spend` over a real deploy→call, **plus an independent state model** | absolute, **full tx context + state VALUE** | The spend is really spendable **and** commits the right state |
 | `--replay` | checked-in reproducers | regression | A divergence already found cannot come back |
+| `metamorphic-fuzz.ts` (standalone driver, `pnpm fuzz:metamorphic` — not a `fuzzer/index.ts` mode) | `ScriptVM` verdict on the original vs on its `metamorphic.ts` transform | absolute, verdict-only, EMI-style | A semantics-preserving rewrite (renamed locals, swapped pure commutative operands) must not change the compiled script's accept/reject verdict |
 
 ## A skipped tier is a failure, not a smaller run (`--canonical`)
 

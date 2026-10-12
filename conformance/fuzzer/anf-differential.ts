@@ -141,17 +141,25 @@ interface AnfProgram {
 //     at a fixed seed by
 //     `packages/runar-testing/src/__tests__/fuzzer-branch-shapes.test.ts`.
 //
-//   * the six STATEFUL-only kinds — still NOT covered by any fuzzer.
-//     `contract-ir.ts` has no `addOutput` node at all, so no IR-based
-//     generator can express the multi-output intrinsic; and while
-//     `ir-differential.ts` accepts `--stateful`, no CI job passes it (the
-//     PR gate in `.github/workflows/fuzzer-nightly.yml` runs
-//     `--ir --render native` without it), so `arbGeneratedStatefulContract`
-//     never runs in CI either. Their real coverage is (a) the hand-written
-//     conformance fixtures, which do give 9-format / 7-tier parity, and
-//     (b) `conformance/fuzzer/spend-shapes.ts`, whose randomized
-//     `addOutput` shapes get an ABSOLUTE post-state oracle but are rendered
-//     to TypeScript only — one tier, not seven.
+//   * four of the six STATEFUL-only kinds ARE covered, now that
+//     `ir-differential.ts`'s `--ir --hex --stateful` PR gate
+//     (`.github/workflows/fuzzer-nightly.yml:301-314`) runs
+//     `arbGeneratedStatefulContract` in CI. `add_output` is covered
+//     directly (see the header at the top of this file: `contract-ir.ts`
+//     carries an `add_output` node and all seven renderers emit it).
+//     `check_preimage`, `deserialize_state`, and `get_state_script` are
+//     covered INDIRECTLY: the compiler auto-injects all three into every
+//     StatefulSmartContract method's lowering regardless of what the
+//     generator itself emits (`04-anf-lower.ts`), so any generated stateful
+//     contract compiled through that gate exercises them cross-tier too.
+//     `add_raw_output` and `add_data_output` remain uncovered — neither
+//     `contract-ir.ts` nor any other generator emits either kind, and
+//     nothing auto-injects them. Their real coverage is (a) the
+//     hand-written conformance fixtures, which do give 9-format / 7-tier
+//     parity, and (b) for `add_output` specifically,
+//     `conformance/fuzzer/spend-shapes.ts`, whose randomized `addOutput`
+//     shapes additionally get an ABSOLUTE post-state oracle but are
+//     rendered to TypeScript only — one tier, not seven.
 type AnfValue =
   | { kind: 'load_param'; name: string }
   | { kind: 'load_prop'; name: string }

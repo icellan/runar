@@ -35,6 +35,7 @@ harness would need a per-mutant rebuild; they do not today.)
 | `c28-state-strict` | `npx vitest run packages/runar-sdk/src/__tests__/c28-state-strict.test.ts` | `deserializeState` strictness unit pins, including a direct malformed-input case (`deserializeState(fields, '55')` must throw `/is not a push opcode/`) — the gate that actually detects a *decoder*-only OP_N regression (see Phase E1 below) |
 | `sdk-vertical-constructor-slots` | `cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter bigint-0` | TS SDK's constructor-slot splice (`buildCodeScript()` in `contract.ts`) against the independently-derived code part in `conformance/sdk-vertical` (Phase C3 / TG-016) |
 | `sdk-vertical-codeseparator` | `cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter codesep-tag-zero` | TS SDK's `codeSepIndexSlots` resolution (`_resolvedCodeSepSlotValues()` in `contract.ts`) against the independently-derived code part for the `CodeSepMatrix` fixture (Phase C4 / TG-016) |
+| `stack-frame-mutation-pins` | `npx vitest run packages/runar-testing/src/__tests__/stack-frame-mutation-pins.test.ts` | byte pins for `05-stack-lower.ts` paths the 71-fixture golden corpus never reaches: `StackMap.dup`'s name bookkeeping, the branch-private residue drain's depth-1 special case, the empty-else reconcile predicate, and the `sinkBelow` DISTANCE (2026-08-17 frame-offset family) |
 
 `execute-fuzz` (`cd conformance && npx tsx fuzzer/index.ts --execute …`) is a
 slower randomized oracle and is **not** wired into per-mutant scoring here.
@@ -51,13 +52,19 @@ mutation. (The two cases previously called out as missing goldens —
 
 ## Corpus shape
 
-`mutants.json` has 22 mutants across two groups:
+`mutants.json` has 28 mutants across three groups:
 
 - 16 covering the four original audit bug classes — **off-by-one stack
   index**, **swapped operands**, **dropped OP_VERIFY**, **if-without-else
   regression** — across the **stack-lower**, **emit**, **constant-fold**, and
   **peephole** stages. All 16 carry a non-empty `expectCaughtBy`.
 - 6 **Phase E1 / TG-007** (2026-08) Palmer-class additions — see below.
+- 6 **2026-08-17 frame-offset family** additions (`ef753a8f6`), closing holes
+  the mechanical 1169-mutant sweep over `05-stack-lower.ts` found and the
+  curated 22 did not cover: `StackMap.dup`'s name bookkeeping (two mutants),
+  the branch-private residue drain's depth-1 special case, the empty-else
+  reconcile predicate (two mutants), and the `sinkBelow` DISTANCE. All 6 are
+  caught by `stack-frame-mutation-pins` (see Gates above).
 
 Note on the peephole stage: `peephole-rules.ts` is the declarative mirror the
 bounded-exhaustive sweep executes rule-by-rule, so corrupting a rule's
@@ -197,8 +204,12 @@ Prints a scorecard (`caught N/M`, survivors listed with class + stage) and exits
 weakened) **or if any mutant is stale** (the corpus no longer describes the
 code). `baseline.json` is the stamped reference; the nightly CI job
 (`.github/workflows/fuzzer-nightly.yml`) fails if a previously-caught mutant
-becomes a survivor. Current stamped score: **22/22 caught, 0 survivors, 0
-stale** (39s wall, 2026-08-06) — the same 22/22 the previous baseline claimed,
+becomes a survivor. `baseline.json` covers only the 22 mutants that existed
+when it was last written — the six 2026-08-17 frame-offset additions (see
+Corpus shape above) have no baseline entry; F-251 makes a surviving one of
+those six still fail the run. Stamp from the last `--write-baseline`:
+**22/22 caught, 0 survivors, 0 stale** (39s wall, 2026-08-06) — the same
+22/22 the previous baseline claimed,
 except that two of those 22 were not actually being detected when it was
 stamped.
 
