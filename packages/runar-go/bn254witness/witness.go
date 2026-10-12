@@ -225,6 +225,27 @@ type Proof struct {
 // natively (0*IC = identity, the additive unit). Callers no longer need
 // to pre-filter zero values.
 func GenerateWitness(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Witness, error) {
+	return generateWitness(vk, proof, publicInputs, computePreparedInputs)
+}
+
+// generateWitnessUnchecked is GenerateWitness without the canonicity check
+// on publicInputs (it folds them into prepared_inputs via
+// computePreparedInputsUnchecked instead of computePreparedInputs). It
+// exists ONLY so that BuildFromProofWithInputsUnchecked (test-only) can
+// build the adversarial witnesses the on-chain MSM-binding preamble
+// (N-035, R86a) must reject. Do not call this outside tests.
+func generateWitnessUnchecked(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Witness, error) {
+	return generateWitness(vk, proof, publicInputs, computePreparedInputsUnchecked)
+}
+
+// generateWitness is the shared implementation behind GenerateWitness and
+// generateWitnessUnchecked; preparedInputsFn selects whether publicInputs
+// is canonicity-checked (computePreparedInputs) or not
+// (computePreparedInputsUnchecked).
+func generateWitness(
+	vk VerifyingKey, proof Proof, publicInputs []*big.Int,
+	preparedInputsFn func(ic []*[2]*big.Int, publicInputs []*big.Int) ([2]*big.Int, error),
+) (*Witness, error) {
 	if len(vk.IC) != len(publicInputs)+1 {
 		return nil, fmt.Errorf(
 			"bn254witness: VK has %d IC points but %d public inputs (expected %d IC)",
@@ -242,7 +263,7 @@ func GenerateWitness(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Wi
 	// 1. Compute prepared_inputs = IC[0] + sum(pub_j * IC[j+1]) off-chain.
 	//    Handles zero inputs naturally: 0*IC = identity, which is the
 	//    additive unit and contributes nothing to the accumulator.
-	preparedInputs, err := computePreparedInputs(vk.IC, publicInputs)
+	preparedInputs, err := preparedInputsFn(vk.IC, publicInputs)
 	if err != nil {
 		return nil, fmt.Errorf("bn254witness: prepared_inputs: %w", err)
 	}
@@ -386,6 +407,40 @@ func BuildFromProofWithInputs(vk VerifyingKey, proof Proof, publicInputs []*big.
 		)
 	}
 	w, err := GenerateWitness(vk, proof, publicInputs)
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < 5; i++ {
+		w.PublicInputs[i] = new(big.Int).Set(publicInputs[i])
+	}
+	return w, nil
+}
+
+// BuildFromProofWithInputsUnchecked is the TEST-ONLY counterpart to
+// BuildFromProofWithInputs: it skips the canonicity check on publicInputs
+// (added for N-232 per user decision R86a) and builds a witness that
+// carries the RAW, possibly non-canonical pub_i values together with a
+// prepared_inputs accumulator computed as if they had been reduced mod r.
+//
+// It exists so that tests which deliberately construct a non-canonical
+// public input (e.g. pub_0 = r, or pub_0 + k*r) can still obtain the exact
+// adversarial witness bundle the on-chain MSM-binding preamble (N-035) is
+// designed to reject, and thereby prove that the SCRIPT — not the SDK
+// builder — is what refuses it. See
+// compilers/go/compiler/groth16_wa_binding_test.go,
+// TestGroth16WAMSM_RejectsNonCanonicalPublicInput and
+// TestGroth16WAMSM_PublicInputAtOrderRRejected.
+//
+// Production code must use BuildFromProofWithInputs, which refuses
+// non-canonical inputs instead of silently reducing them.
+func BuildFromProofWithInputsUnchecked(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Witness, error) {
+	if len(publicInputs) != 5 {
+		return nil, fmt.Errorf(
+			"BuildFromProofWithInputsUnchecked: expected 5 public inputs, got %d",
+			len(publicInputs),
+		)
+	}
+	w, err := generateWitnessUnchecked(vk, proof, publicInputs)
 	if err != nil {
 		return nil, err
 	}

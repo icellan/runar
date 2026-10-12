@@ -515,9 +515,14 @@ func TestGroth16WAMSM_PublicInputAtOrderRRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildFromProofWithInputs(honest): %v", err)
 	}
-	advW, err := bn254witness.BuildFromProofWithInputs(s.vk, proof, adversarial)
+	// pub_0 = r is non-canonical; since N-232, BuildFromProofWithInputs
+	// refuses it. This test's whole point is to prove the SCRIPT rejects
+	// that witness even though its prepared_inputs matches the honest
+	// one — so it must use the test-only unchecked builder to construct
+	// the adversarial witness BuildFromProofWithInputs itself now refuses.
+	advW, err := bn254witness.BuildFromProofWithInputsUnchecked(s.vk, proof, adversarial)
 	if err != nil {
-		t.Fatalf("BuildFromProofWithInputs(pub_0 = r): %v", err)
+		t.Fatalf("BuildFromProofWithInputsUnchecked(pub_0 = r): %v", err)
 	}
 	// The SDK's view: pub_0 = r and pub_0 = 0 give the same accumulator.
 	for i := 0; i < 2; i++ {
@@ -606,10 +611,15 @@ func (c *MSMCanonicalBody) Verify() {
 		t.Fatalf("expected no constructor slots, got %+v", art.ConstructorSlots)
 	}
 
+	// build uses the TEST-ONLY unchecked constructor: since N-232,
+	// BuildFromProofWithInputs itself refuses non-canonical pub_i values
+	// (7+3r, 7-r below), so this helper — whose job is to hand the
+	// adversarial witness to the SCRIPT and prove IT rejects it — must
+	// bypass that refusal to even construct the witness.
 	build := func(p bn254witness.Proof, pubs []*big.Int) *bn254witness.Witness {
-		w, err := bn254witness.BuildFromProofWithInputs(s.vk, p, pubs)
+		w, err := bn254witness.BuildFromProofWithInputsUnchecked(s.vk, p, pubs)
 		if err != nil {
-			t.Fatalf("BuildFromProofWithInputs: %v", err)
+			t.Fatalf("BuildFromProofWithInputsUnchecked: %v", err)
 		}
 		return w
 	}
