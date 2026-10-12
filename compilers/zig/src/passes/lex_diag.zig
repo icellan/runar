@@ -68,7 +68,16 @@ pub const BARE_JAVA_PROPERTY_ASSIGNMENT_FMT = "bare assignment to property '{s}'
 /// left the method at its default `private` visibility with zero errors.
 pub const UNSUPPORTED_ANNOTATION_FMT = "unsupported annotation @{s}";
 
+/// 1-based line / 1-based column, the tokenizers' internal convention.
 pub const Pos = struct { line: u32, col: u32 };
+
+/// The printed column of a `file:line:col` diagnostic for a 1-based internal
+/// column: diagnostics print 0-based columns (N-078, R88a), the source-map
+/// convention, which codegen/emit.zig and compiler_api.zig convert to the
+/// same way. Saturating, so an unknown column 0 stays 0.
+pub fn diagCol(col: u32) u32 {
+    return if (col > 0) col - 1 else 0;
+}
 
 var fallback = [_][]const u8{UNTERMINATED_STRING_LITERAL};
 
@@ -76,7 +85,7 @@ var fallback = [_][]const u8{UNTERMINATED_STRING_LITERAL};
 /// allocation failure still refuses the source (it never drops the error).
 pub fn prepend(allocator: std.mem.Allocator, errors: [][]const u8, file_name: []const u8, msg: []const u8, at: ?Pos) [][]const u8 {
     const p = at orelse return errors;
-    const text = std.fmt.allocPrint(allocator, "{s}:{d}:{d}: {s}", .{ file_name, p.line, p.col, msg }) catch return fallback[0..];
+    const text = std.fmt.allocPrint(allocator, "{s}:{d}:{d}: {s}", .{ file_name, p.line, diagCol(p.col), msg }) catch return fallback[0..];
     const out = allocator.alloc([]const u8, errors.len + 1) catch return fallback[0..];
     out[0] = text;
     @memcpy(out[1..], errors);

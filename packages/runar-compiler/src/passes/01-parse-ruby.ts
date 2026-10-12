@@ -132,7 +132,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     while (pos < line.length) {
       const ch = line[pos]!;
-      const col = pos + 1;
+      const col = pos;
 
       // Whitespace within line
       if (ch === ' ' || ch === '\t') {
@@ -364,7 +364,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     // Emit NEWLINE at end of significant line (only if not inside parens)
     if (parenDepth === 0) {
-      add('NEWLINE', '', lineNum, line.length + 1);
+      add('NEWLINE', '', lineNum, line.length);
     }
   }
 
@@ -376,7 +376,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     ));
   }
 
-  add('eof', '', lines.length + 1, 1);
+  add('eof', '', lines.length + 1, 0);
   return tokens;
 }
 

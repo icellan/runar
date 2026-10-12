@@ -81,13 +81,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Z
   const tokens: ZigToken[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
     if (ch === '\n') {
       line++;
-      column = 1;
+      column = 0;
     } else {
       column++;
     }
@@ -317,7 +317,7 @@ class ZigParser extends ParserCore<ZigToken> {
     this.errors.push(makeDiagnostic(
       'Expected Zig contract declaration `pub const Name = struct { ... };`',
       'error',
-      { file: this.file, line: 1, column: 1 },
+      { file: this.file, line: 1, column: 0 },
     ));
 
     return {
@@ -359,7 +359,7 @@ class ZigParser extends ParserCore<ZigToken> {
     this.errors.push(makeDiagnostic(
       'Expected `const runar = @import("runar");` at the top of the file',
       'error',
-      { file: this.file, line: 1, column: 1 },
+      { file: this.file, line: 1, column: 0 },
     ));
   }
 
@@ -944,7 +944,7 @@ class ZigParser extends ParserCore<ZigToken> {
         callee: { kind: 'identifier', name: 'super' },
         args: params.map(param => ({ kind: 'identifier', name: param.name })),
       },
-      sourceLocation: { file: this.file, line: 1, column: 1 },
+      sourceLocation: { file: this.file, line: 1, column: 0 },
     };
   }
 
@@ -953,7 +953,7 @@ class ZigParser extends ParserCore<ZigToken> {
       kind: 'assignment',
       target: { kind: 'property_access', property: name },
       value,
-      sourceLocation: { file: this.file, line: 1, column: 1 },
+      sourceLocation: { file: this.file, line: 1, column: 0 },
     };
   }
 
@@ -975,7 +975,7 @@ class ZigParser extends ParserCore<ZigToken> {
         ...params.map(param => this.createPropertyAssignment(param.name, { kind: 'identifier', name: param.name })),
       ],
       visibility: 'public',
-      sourceLocation: { file: this.file, line: 1, column: 1 },
+      sourceLocation: { file: this.file, line: 1, column: 0 },
     };
   }
 

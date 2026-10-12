@@ -415,7 +415,7 @@ public final class RbParser {
             int pos = firstNonSpace;
             while (pos < line.length()) {
                 char ch = line.charAt(pos);
-                int col = pos + 1;
+                int col = pos;
 
                 if (ch == ' ' || ch == '\t') {
                     pos++;
@@ -622,7 +622,7 @@ public final class RbParser {
             }
 
             if (parenDepth == 0) {
-                tokens.add(new Token(TK.NEWLINE, "", lineNum, line.length() + 1));
+                tokens.add(new Token(TK.NEWLINE, "", lineNum, line.length()));
             }
         }
 
@@ -632,7 +632,7 @@ public final class RbParser {
             lex.add(filename + ":" + blockCommentStart + ": unterminated '=begin' block comment starting at line "
                 + blockCommentStart + ": missing '=end'");
         }
-        tokens.add(new Token(TK.EOF, "", lines.length + 1, 1));
+        tokens.add(new Token(TK.EOF, "", lines.length + 1, 0));
         return tokens;
     }
 

@@ -1639,7 +1639,7 @@ const LowerCtx = struct {
                         "has no deploy-time slot. Refusing to emit a placeholder for " ++
                         "an unrelated constructor argument (slot 0). Known " ++
                         "constructor-param properties: [{s}].",
-                    .{ prop_name, loc.file, loc.line, loc.column, known orelse "<unavailable>" },
+                    .{ prop_name, loc.file, loc.line, if (loc.column > 0) loc.column - 1 else 0, known orelse "<unavailable>" },
                 );
             } else {
                 std.log.warn(

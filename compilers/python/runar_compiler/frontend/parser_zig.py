@@ -212,7 +212,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     lex = lex if lex is not None else []
     pos = 0
     line = 1
-    col = 1
+    col = 0
     length = len(source)
 
     while pos < length:
@@ -229,7 +229,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         if ch == "\n":
             pos += 1
             line += 1
-            col = 1
+            col = 0
             continue
 
         # Line comment: //
@@ -249,7 +249,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                     break
                 if source[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
@@ -1643,7 +1643,7 @@ class _ZigParser:
     # -----------------------------------------------------------------------
 
     def _create_super_call(self, params: list[ParamNode]) -> Statement:
-        loc = SourceLocation(file=self._file, line=1, column=1)
+        loc = SourceLocation(file=self._file, line=1, column=0)
         return ExpressionStmt(
             expr=CallExpr(
                 callee=Identifier(name="super"),
@@ -1653,7 +1653,7 @@ class _ZigParser:
         )
 
     def _create_property_assignment(self, name: str, value: Expression) -> Statement:
-        loc = SourceLocation(file=self._file, line=1, column=1)
+        loc = SourceLocation(file=self._file, line=1, column=0)
         return AssignmentStmt(
             target=PropertyAccessExpr(property=name),
             value=value,
@@ -1664,7 +1664,7 @@ class _ZigParser:
         """Generate a default constructor from property declarations."""
         required_props = [p for p in self._properties if p.initializer is None]
         params = [ParamNode(name=p.name, type=p.type) for p in required_props]
-        loc = SourceLocation(file=self._file, line=1, column=1)
+        loc = SourceLocation(file=self._file, line=1, column=0)
 
         body: list[Statement] = [self._create_super_call(params)]
         body.extend(

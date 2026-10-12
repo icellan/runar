@@ -268,7 +268,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     n = len(source)
     pos = 0
     line = 1
-    col = 1
+    col = 0
 
     while pos < n:
         ch = source[pos]
@@ -281,7 +281,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         if ch == "\n":
             pos += 1
             line += 1
-            col = 1
+            col = 0
             continue
 
         # Line comments
@@ -297,7 +297,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             while pos + 1 < n and not (source[pos] == "*" and source[pos + 1] == "/"):
                 if source[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
@@ -402,7 +402,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                     continue
                 if source[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1

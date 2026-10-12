@@ -192,8 +192,9 @@ public final class JavaParser {
                 // F-026: javac's error on a malformed integer literal also
                 // gets the shared text every other tier emits for it.
                 String shared = sharedLiteralDiagnostic(source, (int) d.getPosition());
-                if (shared != null) errors.add(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + shared);
-                errors.add(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(null));
+                String where = javacDiagnosticLocation(source, filename, d);
+                if (shared != null) errors.add(where + shared);
+                errors.add(where + d.getMessage(null));
             }
         }
         if (!errors.isEmpty()) {
@@ -1214,6 +1215,20 @@ public final class JavaParser {
      * oracle treats {@code line == 0} as "untracked" rather than as a wrong
      * position, so a genuine unknown must not be reported as line 1.
      */
+    /**
+     * {@code file:line:column: } for a javac diagnostic, with the same 0-based
+     * raw character column as {@link #locationOf} (N-078, R88a): javac's own
+     * {@code getColumnNumber} is 1-based and expands tabs to 8-column stops.
+     */
+    private static String javacDiagnosticLocation(String source, String filename, Diagnostic<?> d) {
+        long pos = d.getPosition();
+        if (pos == Diagnostic.NOPOS || pos < 0 || pos > source.length()) {
+            return "";
+        }
+        int lineStart = source.lastIndexOf('\n', (int) pos - 1) + 1;
+        return filename + ":" + d.getLineNumber() + ":" + (pos - lineStart) + ": ";
+    }
+
     private static SourceLocation locationOf(Tree t, Unit cu, String filename) {
         if (t == null || cu == null) return new SourceLocation(filename, 0, 0);
         long start = cu.positions().getStartPosition(cu.cu(), t);

@@ -22,10 +22,12 @@ module RunarCompiler
         super
       end
 
-      # Format with optional file:line:column prefix.
+      # Format with optional file:line:column prefix. The column is 0-based
+      # (N-078, R88a), so column 0 is a real position and prints as `:0`;
+      # only an unknown line (0) drops the column.
       def format_message
         if loc && !loc.file.empty?
-          if loc.column > 0
+          if loc.line > 0
             return "#{loc.file}:#{loc.line}:#{loc.column}: #{message}"
           end
 

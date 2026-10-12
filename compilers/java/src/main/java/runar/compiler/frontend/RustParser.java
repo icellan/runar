@@ -355,7 +355,7 @@ public final class RustParser {
         int n = source.length();
         int pos = 0;
         int line = 1;
-        int col = 1;
+        int col = 0;
 
         while (pos < n) {
             char ch = source.charAt(pos);
@@ -364,7 +364,7 @@ public final class RustParser {
             if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
                 if (ch == '\n') {
                     line++;
-                    col = 1;
+                    col = 0;
                 } else {
                     col++;
                 }
@@ -387,7 +387,7 @@ public final class RustParser {
                 while (pos + 1 < n) {
                     if (source.charAt(pos) == '\n') {
                         line++;
-                        col = 1;
+                        col = 0;
                     }
                     if (source.charAt(pos) == '*' && source.charAt(pos + 1) == '/') {
                         pos += 2;
@@ -477,7 +477,7 @@ public final class RustParser {
                     }
                     if (source.charAt(pos) == '\n') {
                         line++;
-                        col = 1;
+                        col = 0;
                     } else {
                         col++;
                     }
@@ -867,7 +867,7 @@ public final class RustParser {
 
         if (contractName.isEmpty()) {
             s.addError("No Runar contract struct found");
-            SourceLocation loc = new SourceLocation(s.filename, 1, 1);
+            SourceLocation loc = new SourceLocation(s.filename, 1, 0);
             return new ContractNode(
                 "",
                 parentClass,
@@ -912,7 +912,7 @@ public final class RustParser {
         methods = finalMethods;
 
         // Build auto-generated constructor (only properties without initializers).
-        SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 1);
+        SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 0);
         List<PropertyNode> uninit = new ArrayList<>();
         for (PropertyNode p : properties) {
             if (p.initializer() == null) uninit.add(p);

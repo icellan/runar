@@ -22,10 +22,12 @@ func MakeDiagnostic(message string, severity Severity, loc *SourceLocation) Diag
 	return Diagnostic{Message: message, Severity: severity, Loc: loc}
 }
 
-// FormatMessage returns the diagnostic message with optional file:line:column prefix.
+// FormatMessage returns the diagnostic message with optional file:line:column
+// prefix. The column is 0-based (N-078, R88a), so column 0 is a real position
+// and prints as `:0`; only an unknown line (0) drops the column.
 func (d Diagnostic) FormatMessage() string {
 	if d.Loc != nil && d.Loc.File != "" {
-		if d.Loc.Column > 0 {
+		if d.Loc.Line > 0 {
 			return fmt.Sprintf("%s:%d:%d: %s", d.Loc.File, d.Loc.Line, d.Loc.Column, d.Message)
 		}
 		return fmt.Sprintf("%s:%d: %s", d.Loc.File, d.Loc.Line, d.Message)

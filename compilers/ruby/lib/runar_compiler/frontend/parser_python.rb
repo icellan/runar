@@ -389,11 +389,11 @@ module RunarCompiler
 
           if indent > indent_stack.last
             indent_stack.push(indent)
-            tokens << PythonToken.new(kind: PythonTokens::TOK_INDENT, value: "", line: line_num, col: 1)
+            tokens << PythonToken.new(kind: PythonTokens::TOK_INDENT, value: "", line: line_num, col: 0)
           elsif indent < indent_stack.last
             while indent_stack.length > 1 && indent_stack.last > indent
               indent_stack.pop
-              tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: line_num, col: 1)
+              tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: line_num, col: 0)
             end
           end
         end
@@ -403,7 +403,7 @@ module RunarCompiler
 
         while pos < line.length
           ch = line[pos]
-          col = pos + 1
+          col = pos
 
           # Whitespace within line
           if ch == " " || ch == "\t"
@@ -619,7 +619,7 @@ module RunarCompiler
 
         # Emit NEWLINE at end of significant line (only outside parens)
         if paren_depth == 0
-          tokens << PythonToken.new(kind: PythonTokens::TOK_NEWLINE, value: "", line: line_num, col: line.length + 1)
+          tokens << PythonToken.new(kind: PythonTokens::TOK_NEWLINE, value: "", line: line_num, col: line.length)
         end
       end
 
@@ -632,10 +632,10 @@ module RunarCompiler
       # Emit remaining DEDENTs
       while indent_stack.length > 1
         indent_stack.pop
-        tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: lines.length, col: 1)
+        tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: lines.length, col: 0)
       end
 
-      tokens << PythonToken.new(kind: PythonTokens::TOK_EOF, value: "", line: lines.length + 1, col: 1)
+      tokens << PythonToken.new(kind: PythonTokens::TOK_EOF, value: "", line: lines.length + 1, col: 0)
       tokens
     end
 

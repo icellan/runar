@@ -170,7 +170,7 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
         return super::input_limits::nesting_refusal(Some(SourceLocation {
             file: file.to_string(),
             line: at.line,
-            column: at.col_display,
+            column: at.col_display + 1,
         }));
     }
 

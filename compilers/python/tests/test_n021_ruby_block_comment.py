@@ -109,7 +109,8 @@ def test_unterminated_begin_is_refused_at_its_line() -> None:
     matches = [e for e in errs if e.message == want]
     assert matches, [e.message for e in errs]
     assert (matches[0].loc.line, matches[0].loc.column) == (BEGIN_LINE, 0)
-    assert matches[0].format_message() == f"{FILE}:{BEGIN_LINE}: {want}"
+    # Column 0 is a real 0-based position and prints (N-078, R88a).
+    assert matches[0].format_message() == f"{FILE}:{BEGIN_LINE}:0: {want}"
 
 
 def test_endx_does_not_close_a_block() -> None:

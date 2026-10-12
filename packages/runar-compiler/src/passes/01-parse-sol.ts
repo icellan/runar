@@ -61,11 +61,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
-    if (ch === '\n') { line++; column = 1; } else { column++; }
+    if (ch === '\n') { line++; column = 0; } else { column++; }
     return ch;
   }
 
@@ -292,7 +292,7 @@ class SolParser {
 
     // Build constructor if not explicitly defined
     if (!constructorNode) {
-      const loc = { file: this.file, line: 1, column: 1 };
+      const loc = { file: this.file, line: 1, column: 0 };
       // Only non-initialized properties become constructor params
       const uninitProps = properties.filter(p => !p.initializer);
       constructorNode = {

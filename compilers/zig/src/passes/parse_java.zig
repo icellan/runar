@@ -486,13 +486,13 @@ const Parser = struct {
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.allocator.free(msg);
         self.errors.append(self.allocator, f) catch {};
     }
@@ -502,7 +502,7 @@ const Parser = struct {
     /// errors are discovered to apply, e.g. an annotation's `@`).
     fn addErrorFmtAt(self: *Parser, tok: Token, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch return;
         self.allocator.free(msg);
         self.errors.append(self.allocator, f) catch {};
     }
@@ -721,7 +721,7 @@ const Parser = struct {
             const msg = std.fmt.allocPrint(p.allocator, lex_diag.BARE_JAVA_PROPERTY_ASSIGNMENT_FMT, .{ name, name }) catch return;
             const line = if (loc) |l| l.line else p.current.line;
             const col = if (loc) |l| l.column else p.current.col;
-            const f = std.fmt.allocPrint(p.allocator, "{s}:{d}:{d}: {s}", .{ p.file_name, line, col, msg }) catch return;
+            const f = std.fmt.allocPrint(p.allocator, "{s}:{d}:{d}: {s}", .{ p.file_name, line, lex_diag.diagCol(col), msg }) catch return;
             p.errors.append(p.allocator, f) catch {};
         }
 
@@ -2353,7 +2353,7 @@ const Parser = struct {
         var t = tok;
         const lit = int_literal.parse(self.allocator, "java", tok.raw) orelse {
             const msg = int_literal.invalidIntegerLiteral(self.allocator, "java", tok.raw);
-            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch msg;
             self.errors.append(self.allocator, f) catch {};
             t.text = "0";
             return t;
@@ -2373,7 +2373,7 @@ const Parser = struct {
             const ok = if (self.neg_allowed) |p| p.ptr == tok.raw.ptr else false;
             if (!ok) {
                 const msg = int_literal.invalidIntegerLiteral(self.allocator, "java", tok.raw);
-                const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+                const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch msg;
                 self.errors.append(self.allocator, f) catch {};
                 return null;
             }

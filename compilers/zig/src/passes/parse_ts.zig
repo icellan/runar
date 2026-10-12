@@ -516,13 +516,13 @@ const Parser = struct {
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.allocator.free(msg);
         self.errors.append(self.allocator, f) catch {};
     }
@@ -633,7 +633,7 @@ const Parser = struct {
             if (contract == null) break; // parseClassDecl reported why
         }
         if (!found) {
-            const f = std.fmt.allocPrint(self.allocator, "{s}:1:1: No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", .{self.file_name}) catch
+            const f = std.fmt.allocPrint(self.allocator, "{s}:1:0: No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", .{self.file_name}) catch
                 return .{ .contract = null, .errors = self.errors.items };
             self.errors.append(self.allocator, f) catch {};
         }
@@ -641,7 +641,7 @@ const Parser = struct {
     }
 
     fn addErrorAt(self: *Parser, tok: Token, msg: []const u8) void {
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
     }
 
@@ -2340,7 +2340,7 @@ const Parser = struct {
         var t = tok;
         const lit = int_literal.parse(self.allocator, "ts", tok.raw) orelse {
             const msg = int_literal.invalidIntegerLiteral(self.allocator, "ts", tok.raw);
-            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch msg;
             self.errors.append(self.allocator, f) catch {};
             t.text = "0";
             return t;

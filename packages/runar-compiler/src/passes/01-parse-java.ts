@@ -102,11 +102,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
-    if (ch === '\n') { line++; column = 1; } else { column++; }
+    if (ch === '\n') { line++; column = 0; } else { column++; }
     return ch;
   }
   function peek(): string { return source[pos] ?? ''; }
@@ -1732,7 +1732,7 @@ function checkBarePropertyAssignments(contract: ContractNode, errors: CompilerDi
 }
 
 function syntheticConstructor(properties: PropertyNode[], file: string): MethodNode {
-  const loc: SourceLocation = { file, line: 1, column: 1 };
+  const loc: SourceLocation = { file, line: 1, column: 0 };
   const params: ParamNode[] = [];
   const body: Statement[] = [];
 

@@ -210,7 +210,7 @@ module RunarCompiler
       n = source.length
       i = 0
       line = 1
-      col = 1
+      col = 0
 
       while i < n
         ch = source[i]
@@ -224,7 +224,7 @@ module RunarCompiler
         if ch == "\n"
           i += 1
           line += 1
-          col = 1
+          col = 0
           next
         end
 
@@ -243,7 +243,7 @@ module RunarCompiler
           while i + 1 < n
             if source[i] == "\n"
               line += 1
-              col = 1
+              col = 0
               i += 1
               next
             end

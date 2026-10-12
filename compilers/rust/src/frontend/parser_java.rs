@@ -327,7 +327,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 pos += 1;
                 col += 1;
             } else {
-                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c));
+                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
             continue;
@@ -338,7 +338,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
         if ch == '\'' {
             // F-011: refused exactly as the TS reference refuses it. As a
             // bare string it used to reach `ByteString.fromHex('cafe')`.
-            errors.push(lex_error(JAVA_CHAR_LITERAL, file, l, c));
+            errors.push(lex_error(JAVA_CHAR_LITERAL, file, l, c - 1));
             let mut val = String::new();
             pos += 1;
             col += 1;
@@ -452,7 +452,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                     if lit.neg_only { TokenType::NegOnlyNumber(n, text) } else { TokenType::Number(n) }
                 }
                 None => {
-                    errors.push(lex_error(&invalid_integer_literal("java", &text), file, l, c));
+                    errors.push(lex_error(&invalid_integer_literal("java", &text), file, l, c - 1));
                     TokenType::Number(0)
                 }
             };

@@ -147,8 +147,11 @@ pub const NestingCounter = struct {
 };
 
 /// `file:line:col: <SOURCE_NESTING_MESSAGE>`, in the parsers' diagnostic shape.
+/// `col` is 1-based (the AST / tokenizer convention); the printed column is
+/// 0-based (N-078, R88a).
 pub fn nestingErrorAt(allocator: std.mem.Allocator, file_name: []const u8, line: u32, col: u32) []const u8 {
-    return std.fmt.allocPrint(allocator, "{s}:{d}:{d}: {s}", .{ file_name, line, col, SOURCE_NESTING_MESSAGE }) catch SOURCE_NESTING_MESSAGE;
+    const printed = if (col > 0) col - 1 else 0;
+    return std.fmt.allocPrint(allocator, "{s}:{d}:{d}: {s}", .{ file_name, line, printed, SOURCE_NESTING_MESSAGE }) catch SOURCE_NESTING_MESSAGE;
 }
 
 fn nestingErrorAtLoc(allocator: std.mem.Allocator, file_name: []const u8, loc: ?types.SourceLocation) []const u8 {

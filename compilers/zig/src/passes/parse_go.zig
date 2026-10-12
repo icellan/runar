@@ -831,13 +831,13 @@ const Parser = struct {
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.allocator.free(msg);
         self.errors.append(self.allocator, f) catch {};
     }
@@ -950,7 +950,7 @@ const Parser = struct {
                 if (!std.mem.eql(u8, recv_type, self.contract_name)) {
                     const msg = std.fmt.allocPrint(self.allocator, go_foreign_receiver_fmt, .{ f.go_name, recv_type, self.contract_name }) catch continue;
                     const loc = f.method.source_loc orelse self.currentSourceLoc();
-                    const full = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, loc.column, msg }) catch continue;
+                    const full = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch continue;
                     self.errors.append(self.allocator, full) catch {};
                     continue;
                 }
@@ -2390,7 +2390,7 @@ const Parser = struct {
         var t = tok;
         const lit = int_literal.parse(self.allocator, "go", tok.raw) orelse {
             const msg = int_literal.invalidIntegerLiteral(self.allocator, "go", tok.raw);
-            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch msg;
             self.errors.append(self.allocator, f) catch {};
             t.text = "0";
             return t;

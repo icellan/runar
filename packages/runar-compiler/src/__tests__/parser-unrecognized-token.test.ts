@@ -288,12 +288,12 @@ const CASES: readonly FormatCase[] = [
   },
 ];
 
-/** 1-based line/column of a character offset within `source`. */
+/** 1-based line / 0-based column (N-078, R88a) of a character offset within `source`. */
 function lineColumnOf(source: string, offset: number): { line: number; column: number } {
   const before = source.slice(0, offset);
   const lines = before.split('\n');
   const lastLine = lines[lines.length - 1] ?? '';
-  return { line: lines.length, column: lastLine.length + 1 };
+  return { line: lines.length, column: lastLine.length };
 }
 
 // ---------------------------------------------------------------------------

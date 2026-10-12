@@ -1772,7 +1772,7 @@ impl LoweringContext {
                 let loc = self
                     .current_source_loc
                     .as_ref()
-                    .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column))
+                    .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column.saturating_sub(1)))
                     .unwrap_or_default();
                 let ctor_props: Vec<&str> = self
                     .properties
@@ -2264,7 +2264,7 @@ impl LoweringContext {
             let loc = self
                 .current_source_loc
                 .as_ref()
-                .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column))
+                .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column.saturating_sub(1)))
                 .unwrap_or_default();
             panic!(
                 "Stack lowering: unknown function '{}'{} — the name resolves to \

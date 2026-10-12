@@ -179,7 +179,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 Some(lit) if lit.neg_only => TokenType::NegOnlyNumber(lit.value.to_string(), text),
                 Some(lit) => TokenType::Number(lit.value.to_string()),
                 None => {
-                    errors.push(lex_error(&invalid_integer_literal("rs", &text), file, l, c));
+                    errors.push(lex_error(&invalid_integer_literal("rs", &text), file, l, c - 1));
                     TokenType::Number("0".to_string())
                 }
             };
@@ -240,7 +240,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             // F-011: Rust strings may span lines, so only end of file leaves
             // one unterminated.
             if pos < chars.len() { pos += 1; col += 1; } // skip closing quote
-            else { errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c)); }
+            else { errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1)); }
             tokens.push(Token { typ: TokenType::HexString(val), line: l, col: c });
             continue;
         }
@@ -314,7 +314,7 @@ impl RustDslParser {
 
     fn expect(&mut self, expected: &TokenType) {
         if std::mem::discriminant(&self.current().typ) != std::mem::discriminant(expected) {
-            self.errors.push(Diagnostic::error(format!("Expected {:?}, got {:?} at {}:{}", expected, self.current().typ, self.current().line, self.current().col), None));
+            self.errors.push(Diagnostic::error(format!("Expected {:?}, got {:?} at {}:{}", expected, self.current().typ, self.current().line, self.current().col.saturating_sub(1)), None));
         }
         self.advance_clone();
     }
@@ -1259,7 +1259,7 @@ impl RustDslParser {
             }
             TokenType::NegOnlyNumber(val, text) => {
                 let t = self.current().clone();
-                self.errors.push(lex_error(&invalid_integer_literal("rs", &text), &self.file.clone(), t.line, t.col));
+                self.errors.push(lex_error(&invalid_integer_literal("rs", &text), &self.file.clone(), t.line, t.col.saturating_sub(1)));
                 self.advance_clone();
                 let n = <BigInt as Num>::from_str_radix(&val, 10)
                     .unwrap_or_else(|_| BigInt::from(0));
@@ -1309,7 +1309,7 @@ impl RustDslParser {
                 self.advance_clone();
                 self.errors.push(Diagnostic::error(format!(
                     "unsupported token '{:?}' at {}:{} — not valid in Rúnar contract",
-                    tok.typ, tok.line, tok.col), None));
+                    tok.typ, tok.line, tok.col.saturating_sub(1)), None));
                 Expression::Identifier { name: "unknown".to_string() }
             }
         }

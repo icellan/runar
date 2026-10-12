@@ -76,9 +76,10 @@ committed golden:
 **Column convention: 1-based line, 0-based column.** The TypeScript tier is
 the reference (e.g. `P2PKH.runar.ts` line 43 column 4 = the `a` of `assert`,
 where `'    assert(...)'[4] === 'a'`), and `independent-oracle.ts` indexes
-`lineText[column]` directly. Tiers whose parsers/tokenizers carry 1-based
-columns for diagnostics (`file:line:column`) convert at the source-map
-emission point only, so diagnostics keep their conventional 1-based columns.
+`lineText[column]` directly. Diagnostics (`file:line:column`) print the
+same 0-based column in every tier (N-078, user decision R88a). Tiers whose
+AST carries 1-based columns internally (Rust, Zig) convert at the
+source-map emission point and at the diagnostic formatter.
 6. `opcodeIndex` values lie in `[0, opcodeCount)`.
 
 ## Independent source-anchor oracle (audit finding #22)

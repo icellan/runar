@@ -40,6 +40,27 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 	return withNestingLimit(func() *ParseResult { return parseGoContractSurface(source, fileName) })
 }
 
+// goParseErrorText renders go/parser's error with 0-based columns. go/scanner
+// formats its positions 1-based; every Rúnar diagnostic column is 0-based
+// (N-078, R88a), so each position is rebased the way locAt rebases AST ones.
+func goParseErrorText(err error) string {
+	list, ok := err.(scanner.ErrorList)
+	if !ok || len(list) == 0 {
+		return err.Error()
+	}
+	e := list[0]
+	text := e.Error()
+	if e.Pos.IsValid() && e.Pos.Column > 0 {
+		// Formatted here, not by token.Position.String, which drops a
+		// column of 0.
+		text = fmt.Sprintf("%s:%d:%d: %s", e.Pos.Filename, e.Pos.Line, e.Pos.Column-1, e.Msg)
+	}
+	if len(list) > 1 {
+		text += fmt.Sprintf(" (and %d more errors)", len(list)-1)
+	}
+	return text
+}
+
 // goParserDepthErrors are go/parser's own recursion bounds (max nesting depth
 // 100,000; max resolver scope depth 1,000). Both sit far past
 // MaxSourceNesting, so a source that trips one is over-nested by F-213's
@@ -55,7 +76,7 @@ func parseGoContractSurface(source []byte, fileName string) *ParseResult {
 				return sourceNestingResult(&SourceLocation{File: fileName, Line: 1, Column: 0})
 			}
 		}
-		return &ParseResult{Errors: []Diagnostic{{Message: fmt.Sprintf("Go parse error: %v", err), Severity: SeverityError}}}
+		return &ParseResult{Errors: []Diagnostic{{Message: fmt.Sprintf("Go parse error: %v", goParseErrorText(err)), Severity: SeverityError}}}
 	}
 
 	// F-213 measure (A), iteratively over go/ast, before the recursive
@@ -120,7 +141,7 @@ func checkGoNumericLiterals(source []byte, fileName string) []Diagnostic {
 		text := string(source[start:end])
 		if parseIntLiteral("go", text) == nil {
 			p := f.Position(pos)
-			diags = append(diags, lexDiag(invalidIntegerLiteralMsg("go", text), fileName, p.Line, p.Column))
+			diags = append(diags, lexDiag(invalidIntegerLiteralMsg("go", text), fileName, p.Line, p.Column-1))
 		}
 	}
 	return diags
@@ -173,7 +194,8 @@ func (p *goContractParser) addError(msg string) {
 // An invalid position (token.NoPos) yields Line 0 / Column 0; the clamp
 // keeps such an "unknown" location at 0 instead of producing -1.
 //
-// Diagnostic messages intentionally keep the raw 1-based pos.Column.
+// Diagnostic columns are 0-based too (N-078, R88a): messages that embed a
+// position print locAt(pos).Column, never the raw 1-based pos.Column.
 func (p *goContractParser) locAt(pos token.Position) SourceLocation {
 	col := pos.Column - 1
 	if col < 0 {
@@ -517,7 +539,7 @@ func (p *goContractParser) extractStatements(block *ast.BlockStmt) []Statement {
 			pos := p.fset.Position(stmt.Pos())
 			p.addError(fmt.Sprintf(
 				"unsupported Go statement at %s:%d:%d — not valid in Rúnar contract",
-				p.fileName, pos.Line, pos.Column))
+				p.fileName, pos.Line, p.locAt(pos).Column))
 		}
 	}
 	return stmts
@@ -570,7 +592,7 @@ func (p *goContractParser) convertStatement(stmt ast.Stmt) Statement {
 			if !ok {
 				p.addError(fmt.Sprintf(
 					"unsupported compound assignment operator %q at %s:%d:%d",
-					s.Tok.String(), p.fileName, pos.Line, pos.Column))
+					s.Tok.String(), p.fileName, pos.Line, p.locAt(pos).Column))
 				return nil
 			}
 			return AssignmentStmt{
@@ -728,7 +750,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 			pos := p.fset.Position(e.Pos())
 			p.addError(fmt.Sprintf(
 				"unsupported expression '%s.%s' at %s:%d:%d — only runar.* builtins and contract field access are allowed",
-				ident.Name, e.Sel.Name, p.fileName, pos.Line, pos.Column))
+				ident.Name, e.Sel.Name, p.fileName, pos.Line, p.locAt(pos).Column))
 			return nil
 		}
 		obj := p.convertExpression(e.X)
@@ -781,7 +803,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 				pos := p.fset.Position(e.Fun.Pos())
 				p.addError(fmt.Sprintf(
 					"unsupported call target at %s:%d:%d — not valid in Rúnar contract",
-					p.fileName, pos.Line, pos.Column))
+					p.fileName, pos.Line, p.locAt(pos).Column))
 			}
 			return nil
 		}
@@ -794,7 +816,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 					pos := p.fset.Position(arg.Pos())
 					p.addError(fmt.Sprintf(
 						"unsupported expression at %s:%d:%d — argument %d of this call is not valid in Rúnar contract",
-						p.fileName, pos.Line, pos.Column, i+1))
+						p.fileName, pos.Line, p.locAt(pos).Column, i+1))
 				}
 				return nil
 			}

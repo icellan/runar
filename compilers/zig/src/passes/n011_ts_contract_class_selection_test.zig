@@ -137,17 +137,17 @@ test "N-011 CONTRACT_FIRST: a trailing helper is ignored" {
 }
 
 test "N-011 NO_EXTENDS_ONLY is refused" {
-    try expectErrors(IMPORTS ++ DECOY, &.{F ++ ":1:1: " ++ NO_CLASS}, null);
+    try expectErrors(IMPORTS ++ DECOY, &.{F ++ ":1:0: " ++ NO_CLASS}, null);
 }
 
 test "N-011 FOREIGN_BASE_ONLY is refused" {
-    try expectErrors(IMPORTS ++ FOREIGN, &.{F ++ ":1:1: " ++ NO_CLASS}, null);
+    try expectErrors(IMPORTS ++ FOREIGN, &.{F ++ ":1:0: " ++ NO_CLASS}, null);
 }
 
 test "N-011 TWO_VALID reports the second class and keeps the last" {
-    try expectErrors(TWO_VALID, &.{F ++ ":13:1: " ++ ONLY_ONE}, "HashLock");
+    try expectErrors(TWO_VALID, &.{F ++ ":13:0: " ++ ONLY_ONE}, "HashLock");
 }
 
 test "N-011 THREE_VALID reports each extra class and keeps the last" {
-    try expectErrors(THREE_VALID, &.{ F ++ ":7:1: " ++ ONLY_ONE, F ++ ":11:1: " ++ ONLY_ONE }, "C");
+    try expectErrors(THREE_VALID, &.{ F ++ ":7:0: " ++ ONLY_ONE, F ++ ":11:0: " ++ ONLY_ONE }, "C");
 }

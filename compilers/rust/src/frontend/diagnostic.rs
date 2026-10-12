@@ -42,11 +42,16 @@ impl Diagnostic {
     }
 
     /// Format the diagnostic with optional file:line:column prefix.
+    ///
+    /// `loc.column` follows the AST's SourceLocation convention (1-based,
+    /// F-337 / F-341; 0 = untracked), but the PRINTED column is 0-based
+    /// (N-078, R88a), the same conversion codegen/emit.rs makes for source
+    /// maps. A position in the first column (internal 1) prints `:0`.
     pub fn format_message(&self) -> String {
         if let Some(ref loc) = self.loc {
             if !loc.file.is_empty() {
                 if loc.column > 0 {
-                    return format!("{}:{}:{}: {}", loc.file, loc.line, loc.column, self.message);
+                    return format!("{}:{}:{}: {}", loc.file, loc.line, loc.column - 1, self.message);
                 }
                 return format!("{}:{}: {}", loc.file, loc.line, self.message);
             }
@@ -131,10 +136,12 @@ pub fn bare_java_property_assignment_message(name: &str) -> String {
 }
 
 /// A tokenizer diagnostic at 1-based `line` / 0-based `column` of `file`.
+/// The location is stored in the AST's 1-based column convention, which
+/// `format_message` prints back 0-based (N-078).
 pub fn lex_error(message: &str, file: &str, line: usize, column: usize) -> Diagnostic {
     Diagnostic::error(
         message,
-        Some(SourceLocation { file: file.to_string(), line, column }),
+        Some(SourceLocation { file: file.to_string(), line, column: column + 1 }),
     )
 }
 

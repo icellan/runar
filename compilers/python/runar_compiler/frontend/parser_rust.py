@@ -285,7 +285,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     n = len(chars)
     pos = 0
     line = 1
-    col = 1
+    col = 0
 
     while pos < n:
         ch = chars[pos]
@@ -294,7 +294,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         if ch in (" ", "\t", "\r", "\n"):
             if ch == "\n":
                 line += 1
-                col = 1
+                col = 0
             else:
                 col += 1
             pos += 1
@@ -313,7 +313,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             while pos + 1 < n:
                 if chars[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 if chars[pos] == "*" and chars[pos + 1] == "/":
                     pos += 2
                     col += 2
@@ -415,7 +415,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                     col += 1
                 if chars[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
@@ -736,7 +736,7 @@ class _RustParser:
                 constructor=MethodNode(
                     name="constructor",
                     visibility="public",
-                    source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                    source_location=SourceLocation(file=self.file_name, line=1, column=0),
                 ),
                 methods=methods,
                 source_file=self.file_name,
@@ -759,7 +759,7 @@ class _RustParser:
 
         # Build auto-generated constructor (only non-initialized properties)
         uninit_props = [p for p in properties if p.initializer is None]
-        ctor_loc = SourceLocation(file=self.file_name, line=1, column=1)
+        ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
 
         # super(...) call as first statement
         super_args: list[Expression] = [

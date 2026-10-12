@@ -207,7 +207,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       if (closeIdx === -1) {
         // Multi-line docstring: skip until closing quote found
         inTripleQuote = quote;
-        tripleStart = { line: lineNum, column: line.length - stripped.length + 1 };
+        tripleStart = { line: lineNum, column: line.length - stripped.length };
       }
       // Either way, skip this line (it's a docstring, not code)
       continue;
@@ -224,11 +224,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
       if (indent > indentStack[indentStack.length - 1]!) {
         indentStack.push(indent);
-        add('INDENT', '', lineNum, 1);
+        add('INDENT', '', lineNum, 0);
       } else if (indent < indentStack[indentStack.length - 1]!) {
         while (indentStack.length > 1 && indentStack[indentStack.length - 1]! > indent) {
           indentStack.pop();
-          add('DEDENT', '', lineNum, 1);
+          add('DEDENT', '', lineNum, 0);
         }
       }
     }
@@ -238,7 +238,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     while (pos < line.length) {
       const ch = line[pos]!;
-      const col = pos + 1;
+      const col = pos;
 
       // Whitespace within line
       if (ch === ' ' || ch === '\t') {
@@ -436,7 +436,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     // Emit NEWLINE at end of significant line (only if not inside parens)
     if (parenDepth === 0) {
-      add('NEWLINE', '', lineNum, line.length + 1);
+      add('NEWLINE', '', lineNum, line.length);
     }
   }
 
@@ -447,10 +447,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   // Emit remaining DEDENTs
   while (indentStack.length > 1) {
     indentStack.pop();
-    add('DEDENT', '', lines.length, 1);
+    add('DEDENT', '', lines.length, 0);
   }
 
-  add('eof', '', lines.length + 1, 1);
+  add('eof', '', lines.length + 1, 0);
   return tokens;
 }
 

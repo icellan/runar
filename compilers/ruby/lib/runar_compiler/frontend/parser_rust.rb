@@ -288,7 +288,7 @@ module RunarCompiler
       n = source.length
       pos = 0
       line = 1
-      col = 1
+      col = 0
 
       while pos < n
         ch = source[pos]
@@ -297,7 +297,7 @@ module RunarCompiler
         if ch == " " || ch == "\t" || ch == "\r" || ch == "\n"
           if ch == "\n"
             line += 1
-            col = 1
+            col = 0
           else
             col += 1
           end
@@ -320,7 +320,7 @@ module RunarCompiler
           while pos + 1 < n
             if source[pos] == "\n"
               line += 1
-              col = 1
+              col = 0
             end
             if source[pos] == "*" && source[pos + 1] == "/"
               pos += 2
@@ -671,7 +671,7 @@ module RunarCompiler
         end
 
         # Build auto-generated constructor
-        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 1)
+        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
         uninit_props = properties.reject { |p| p.initializer }
 
         ctor_params = uninit_props.map { |p| ParamNode.new(name: p.name, type: p.type) }

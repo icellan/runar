@@ -263,12 +263,12 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
                 i += 1; // skip closing quote
                 col += 1;
             } else if (unterminated.* == null) {
-                unterminated.* = .{ .line = line, .col = start_col };
+                unterminated.* = .{ .line = line, .col = start_col + 1 };
             }
             // F-203: escapes decode as in CPython.
             const dec = decodePyLiteral(allocator, val, true);
             if (dec.err) |m| {
-                if (escape.* == null) escape.* = .{ .pos = .{ .line = line, .col = start_col }, .msg = m };
+                if (escape.* == null) escape.* = .{ .pos = .{ .line = line, .col = start_col + 1 }, .msg = m };
             }
             tokens.append(allocator, .{ .kind = .string_literal, .text = dec.text, .line = line, .col = start_col }) catch {};
             continue;
@@ -299,7 +299,7 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
                     col += 3;
                 } else {
                     // F-011: still open at end of file.
-                    if (unterminated.* == null) unterminated.* = .{ .line = open_line, .col = start_col };
+                    if (unterminated.* == null) unterminated.* = .{ .line = open_line, .col = start_col + 1 };
                     i = source.len;
                 }
                 continue;
@@ -325,12 +325,12 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
                 i += 1;
                 col += 1;
             } else if (unterminated.* == null) {
-                unterminated.* = .{ .line = line, .col = start_col };
+                unterminated.* = .{ .line = line, .col = start_col + 1 };
             }
             // F-203: a str literal decodes the same escapes as CPython does.
             const dec = decodePyLiteral(allocator, val, false);
             if (dec.err) |m| {
-                if (escape.* == null) escape.* = .{ .pos = .{ .line = line, .col = start_col }, .msg = m };
+                if (escape.* == null) escape.* = .{ .pos = .{ .line = line, .col = start_col + 1 }, .msg = m };
             }
             tokens.append(allocator, .{ .kind = .string_literal, .text = dec.text, .line = line, .col = start_col }) catch {};
             continue;
@@ -874,7 +874,7 @@ const Parser = struct {
     /// parse that rewinds the token stream after a refusal still ends.
     fn refuseNesting(self: *Parser) void {
         self.nest.exceeded = true;
-        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col + 1);
         self.tokenizer.pos = self.tokenizer.tokens.len;
         self.current = self.fetch();
     }

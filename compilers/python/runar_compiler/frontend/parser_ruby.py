@@ -430,7 +430,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
 
         while pos < len(line):
             ch = line[pos]
-            col = pos + 1  # 1-based column
+            col = pos
 
             # Whitespace within a line
             if ch in (" ", "\t"):
@@ -638,14 +638,14 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
 
         # Emit NEWLINE at end of significant line (only if not inside parens)
         if paren_depth == 0:
-            tokens.append(Token(TOK_NEWLINE, "", line_num, len(line) + 1))
+            tokens.append(Token(TOK_NEWLINE, "", line_num, len(line)))
 
     if block_comment_start:
         lex.append(lex_error(
             f"unterminated '=begin' block comment starting at line {block_comment_start}: missing '=end'",
             file_name, block_comment_start, 0))
 
-    tokens.append(Token(TOK_EOF, "", len(lines) + 1, 1))
+    tokens.append(Token(TOK_EOF, "", len(lines) + 1, 0))
     return tokens
 
 

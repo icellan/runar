@@ -20,9 +20,13 @@ class Diagnostic:
     loc: Optional[SourceLocation] = None
 
     def format_message(self) -> str:
-        """Format with optional file:line:column prefix."""
+        """Format with optional file:line:column prefix.
+
+        The column is 0-based (N-078, R88a), so column 0 is a real position
+        and prints as ``:0``; only an unknown line (0) drops the column.
+        """
         if self.loc and self.loc.file:
-            if self.loc.column > 0:
+            if self.loc.line > 0:
                 return f"{self.loc.file}:{self.loc.line}:{self.loc.column}: {self.message}"
             return f"{self.loc.file}:{self.loc.line}: {self.message}"
         return self.message

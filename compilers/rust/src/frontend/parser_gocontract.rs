@@ -397,7 +397,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 pos += 1;
                 col += 1;
             } else {
-                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c));
+                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
             continue;
@@ -455,7 +455,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 pos += 1;
                 col += 1;
             } else {
-                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c));
+                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
             continue;
@@ -554,7 +554,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             let n = match parse_int_literal("go", &text) {
                 Some(lit) => lit.value,
                 None => {
-                    errors.push(lex_error(&invalid_integer_literal("go", &text), file, l, c));
+                    errors.push(lex_error(&invalid_integer_literal("go", &text), file, l, c - 1));
                     BigInt::from(0)
                 }
             };
@@ -776,7 +776,7 @@ impl<'a> GoParser<'a> {
                 "Expected identifier, got {:?} at {}:{}",
                 self.current().typ,
                 self.current().line,
-                self.current().col
+                self.current().col.saturating_sub(1)
             ), None));
             String::new()
         }
@@ -790,7 +790,7 @@ impl<'a> GoParser<'a> {
                 self.current().typ,
                 self.file,
                 self.current().line,
-                self.current().col
+                self.current().col.saturating_sub(1)
             ), None));
         }
         self.advance();
@@ -1870,7 +1870,7 @@ impl<'a> GoParser<'a> {
                         text,
                         self.file,
                         self.current().line,
-                        self.current().col
+                        self.current().col.saturating_sub(1)
                     ),
                     Some(loc.clone()),
                 ));

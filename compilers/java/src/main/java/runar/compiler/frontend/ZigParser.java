@@ -240,7 +240,7 @@ public final class ZigParser {
         List<Token> out = new ArrayList<>();
         int pos = 0;
         int line = 1;
-        int col = 1;
+        int col = 0;
         int n = source.length();
 
         while (pos < n) {
@@ -256,7 +256,7 @@ public final class ZigParser {
             if (ch == '\n') {
                 pos++;
                 line++;
-                col = 1;
+                col = 0;
                 continue;
             }
 
@@ -279,7 +279,7 @@ public final class ZigParser {
                     }
                     if (source.charAt(pos) == '\n') {
                         line++;
-                        col = 1;
+                        col = 0;
                     } else {
                         col++;
                     }
@@ -1569,7 +1569,7 @@ public final class ZigParser {
         // ------------------ Helpers ------------------
 
         Statement createSuperCall(List<ParamNode> params) {
-            SourceLocation l = new SourceLocation(file, 1, 1);
+            SourceLocation l = new SourceLocation(file, 1, 0);
             List<Expression> args = new ArrayList<>(params.size());
             for (ParamNode p : params) {
                 args.add(new Identifier(p.name()));
@@ -1579,7 +1579,7 @@ public final class ZigParser {
         }
 
         Statement createPropertyAssignment(String name, Expression value) {
-            SourceLocation l = new SourceLocation(file, 1, 1);
+            SourceLocation l = new SourceLocation(file, 1, 0);
             return new AssignmentStatement(new PropertyAccessExpr(name), value, l);
         }
 
@@ -1592,7 +1592,7 @@ public final class ZigParser {
             for (PropertyNode p : required) {
                 params.add(new ParamNode(p.name(), p.type()));
             }
-            SourceLocation l = new SourceLocation(file, 1, 1);
+            SourceLocation l = new SourceLocation(file, 1, 0);
             List<Statement> body = new ArrayList<>();
             body.add(createSuperCall(params));
             for (PropertyNode p : required) {

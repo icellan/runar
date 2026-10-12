@@ -136,8 +136,10 @@ fn n021_unterminated_begin_is_refused_at_its_line() {
         .find(|e| e.message == want)
         .unwrap_or_else(|| panic!("errors = {:?}, want {:?}", r.errors, want));
     let loc = d.loc.as_ref().expect("located diagnostic");
-    assert_eq!((loc.line, loc.column), (BEGIN_LINE, 0));
-    assert_eq!(d.format_message(), format!("{}:{}: {}", FILE, BEGIN_LINE, want));
+    // N-078 (R88a): the location is stored in the AST's 1-based column
+    // convention (first column = 1) and printed 0-based, so column 0 prints.
+    assert_eq!((loc.line, loc.column), (BEGIN_LINE, 1));
+    assert_eq!(d.format_message(), format!("{}:{}:0: {}", FILE, BEGIN_LINE, want));
 }
 
 #[test]
