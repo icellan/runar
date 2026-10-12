@@ -106,20 +106,25 @@ class F005Control extends StatefulSmartContract {
 const f005Refusal = "cannot be called inside a loop body"
 
 func TestF005LoweringRefusesLoopOutputThatEscapedTheValidator(t *testing.T) {
+	// LowerToANF is exported; a caller that skips Validate must not get a
+	// continuation that omits the loop's outputs, even if the validator didn't
+	// catch the hidden output intrinsic inside the array literal.
 	result := ParseSource([]byte(f005ArrayLiteralBypass), "F005Bypass.runar.ts")
 	if len(result.Errors) > 0 || result.Contract == nil {
 		t.Fatalf("parse: %v", result.ErrorStrings())
 	}
-	if v := Validate(result.Contract); len(v.Errors) > 0 {
-		t.Skip("validator refuses the bypass; nothing reaches pass 4")
-	}
-	if tc := TypeCheck(result.Contract); len(tc.Errors) > 0 {
-		t.Fatalf("typecheck: %v", tc.ErrorStrings())
-	}
-	program, refusal := lowerOrRefuse(t, f005ArrayLiteralBypass)
+	var refusal string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				refusal = fmt.Sprint(r)
+			}
+		}()
+		LowerToANF(result.Contract)
+	}()
 	if refusal == "" {
-		t.Fatalf("ANF lowering accepted an addRawOutput inside a for body; its output "+
-			"is not in the continuation hash (methods: %d)", len(program.Methods))
+		t.Fatal("ANF lowering accepted an addRawOutput inside a for body without validation; " +
+			"its output is not in the continuation hash")
 	}
 	if !strings.Contains(refusal, f005Refusal) || !strings.Contains(refusal, "addRawOutput") {
 		t.Fatalf("refused, but not with the R-127 diagnostic naming the intrinsic: %s", refusal)
