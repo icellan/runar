@@ -16,6 +16,13 @@ final class LexDiag {
     static final String UNTERMINATED_STRING_LITERAL = "unterminated string literal";
 
     /**
+     * N-121 (user decision R85; the TS reference's OPTIONAL_CHAINING): a
+     * .runar.ts {@code ?.}, located at the {@code ?}. Only the first
+     * {@code ?.} in a file is reported.
+     */
+    static final String OPTIONAL_CHAINING = "optional chaining '?.' is not supported";
+
+    /**
      * F-203: a .runar.py string or bytes literal escape CPython does not define
      * for that literal kind, a {@code \x} not followed by two hex digits, an
      * octal escape above 0o377, or (in a plain string) a {@code \N} /

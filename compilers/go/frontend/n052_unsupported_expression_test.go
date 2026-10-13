@@ -18,8 +18,9 @@ import (
 // Proves: the Go .runar.ts surface refuses each expression kind and operator
 // outside the TS reference's parseExpression / parseBinaryExpression /
 // parsePrefixUnaryExpression tables, in the parser, with the TS reference's
-// diagnostic text; and that the supported wrappers (as, !, <T>x, ?.,
-// parentheses, comments) still parse clean. Does not prove: the other Go-tier
+// diagnostic text; and that the supported wrappers (as, !, <T>x,
+// parentheses, comments) still parse clean. (`?.` was listed here until N-121
+// made optional chaining a refusal; see TestN121_OptionalChainingRefused.) Does not prove: the other Go-tier
 // surfaces (.runar.go/.sol/.move/...), which have their own dispatchers, nor
 // byte-level codegen (covered by the conformance goldens).
 
@@ -111,7 +112,6 @@ func TestN052_SupportedWrappersStillAccepted(t *testing.T) {
 		"assert((x as bigint) === this.t);",
 		"assert(x! === this.t);",
 		"assert((<bigint>x) === this.t);",
-		"assert(this?.t === x);",
 		"assert(((x)) === this.t);",
 		"assert(min(x /* c */, y) === this.t);",
 		"assert(min(\n      x, // c\n      y) === this.t);",
@@ -124,6 +124,22 @@ func TestN052_SupportedWrappersStillAccepted(t *testing.T) {
 			t.Errorf("`%s` rejected: %v", body, res.Errors)
 		}
 	}
+}
+
+// N-121 (user decision R85): optional chaining is disallowed, so `this?.t`
+// moved out of the accepted wrappers above. It is refused in the parser with
+// the shared diagnostic, at the `?` (0-based column). Proves the Go .runar.ts
+// surface's refusal and location; the cross-tier wording parity lives in
+// conformance/negatives/n121-optional-chaining-parity.test.ts.
+func TestN121_OptionalChainingRefused(t *testing.T) {
+	res := ParseSource([]byte(n052Wrap("assert(this?.t === x);")), "Probe.runar.ts")
+	want := "Probe.runar.ts:12:15: " + OptionalChainingMsg
+	for _, e := range res.Errors {
+		if e.FormatMessage() == want {
+			return
+		}
+	}
+	t.Fatalf("`this?.t` not refused with %q; errors: %v", want, res.Errors)
 }
 
 // A comment as the first child of a parenthesized expression made

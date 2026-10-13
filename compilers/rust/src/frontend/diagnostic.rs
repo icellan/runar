@@ -73,6 +73,11 @@ impl fmt::Display for Diagnostic {
 /// backtick raw strings, which may span lines, only end of file counts.
 pub const UNTERMINATED_STRING_LITERAL: &str = "unterminated string literal";
 
+/// N-121's refusal (user decision R85; the TS reference's `OPTIONAL_CHAINING`)
+/// of a `.runar.ts` `?.`, located at the `?`. Only the first `?.` in a file is
+/// reported.
+pub const OPTIONAL_CHAINING: &str = "optional chaining '?.' is not supported";
+
 /// F-203: a .runar.py string or bytes escape CPython does not define for that
 /// literal kind, a `\x` without two hex digits, an octal escape above 0o377,
 /// or a str `\N` / `\u` / `\U` escape the surface does not support (the TS

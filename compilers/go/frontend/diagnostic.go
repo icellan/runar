@@ -42,6 +42,11 @@ func (d Diagnostic) FormatMessage() string {
 // triple-quoted strings, which may span lines, only end of file counts.
 const UnterminatedStringLiteralMsg = "unterminated string literal"
 
+// OptionalChainingMsg is N-121's refusal (user decision R85; the TS
+// reference's OPTIONAL_CHAINING) of a .runar.ts `?.`, located at the `?`.
+// Only the first `?.` in a file is reported.
+const OptionalChainingMsg = "optional chaining '?.' is not supported"
+
 // InvalidEscapeSequenceMsg is F-203's refusal of a .runar.py string or bytes
 // literal escape CPython does not define for that literal kind (or, in a plain
 // string, \N{..} / \u / \U, which the surface does not support), a \x not

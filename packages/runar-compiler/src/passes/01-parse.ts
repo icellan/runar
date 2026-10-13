@@ -46,7 +46,7 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, OPTIONAL_CHAINING, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral } from './int-literal.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
@@ -235,6 +235,11 @@ function parseTsSurface(source: string, file: string, errors: CompilerDiagnostic
   // remaining TypeScript syntax error.
   reportInvalidNumericLiterals(sourceFile.compilerNode, source, file, errors);
   reportSyntaxDiagnostics(sourceFile.compilerNode, file, errors);
+
+  // N-121: TypeScript parses `this?.t` / `this?.m()` / `this.m?.()` as an
+  // optional chain, and the conversion below reads it as a plain access, so
+  // it used to compile. Optional chaining is disallowed; refuse it.
+  reportOptionalChaining(sourceFile.compilerNode, file, errors);
 
   // Find the class that extends SmartContract, StatefulSmartContract,
   // or UnsafeSmartContract (the asm() escape hatch).
@@ -1968,6 +1973,24 @@ function reportSyntaxDiagnostics(sf: ts.SourceFile, file: string, errors: Compil
       'error',
       { file, line: line + 1, column: character },
     ));
+  }
+}
+
+/** N-121: the first `?.` (a QuestionDotToken), located at its `?`. */
+function reportOptionalChaining(sf: ts.SourceFile, file: string, errors: CompilerDiagnostic[]): void {
+  let found: ts.Node | undefined;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (node.kind === ts.SyntaxKind.QuestionDotToken) {
+      found = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  if (found) {
+    const { line, character } = sf.getLineAndCharacterOfPosition(found.getStart(sf));
+    errors.push(makeDiagnostic(OPTIONAL_CHAINING, 'error', { file, line: line + 1, column: character }));
   }
 }
 

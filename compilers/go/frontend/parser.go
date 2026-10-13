@@ -199,6 +199,11 @@ func parseTsSurface(source []byte, fileName string) *ParseResult {
 	// literal; `012`, `10_`, `0b102` are refused with the shared diagnostic.
 	p.checkNumericLiterals(root)
 
+	// N-121: the walk below ignores the `?.` of `this?.t` / `this?.m()` /
+	// `this.m?.()`, so each compiled as a plain access or call. Optional
+	// chaining is disallowed; refuse it.
+	p.checkOptionalChaining(root)
+
 	// tree-sitter is error-tolerant: malformed source still yields a tree, with
 	// the bad region marked ERROR/MISSING. Walking such a tree silently DROPS
 	// whatever failed to resolve (a statement parser returning nil is simply
@@ -267,6 +272,26 @@ func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 			if parseIntLiteral("ts", text) == nil {
 				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
 			}
+		}
+		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
+			stack = append(stack, n.Child(i))
+		}
+	}
+}
+
+// checkOptionalChaining refuses the first .runar.ts `?.`, located at its `?`
+// (N-121, the TS reference's reportOptionalChaining). tree-sitter wraps the
+// `?.` of a member or subscript access in an optional_chain node but leaves
+// an optional call's `?.` as a bare anonymous token, so both are matched.
+// Iterative and in source order, like checkNumericLiterals.
+func (p *parseContext) checkOptionalChaining(root *sitter.Node) {
+	stack := []*sitter.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n.Type() == "optional_chain" || n.Type() == "?." {
+			p.errors = append(p.errors, lexDiag(OptionalChainingMsg, p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
+			return
 		}
 		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
 			stack = append(stack, n.Child(i))

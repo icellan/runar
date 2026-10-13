@@ -266,6 +266,7 @@ public final class TsParser {
         int col = 0;
         int i = 0;
         int n = source.length();
+        boolean optionalChainSeen = false; // N-121
 
         while (i < n) {
             char ch = source.charAt(i);
@@ -420,6 +421,15 @@ public final class TsParser {
                 String word = source.substring(start, i);
                 tokens.add(new Token(TOK_IDENT, word, line, startCol));
                 continue;
+            }
+
+            // N-121: `?.` not followed by a decimal digit is optional
+            // chaining, which is disallowed. Report the first one; `?` is
+            // still lexed below.
+            if (ch == '?' && !optionalChainSeen && i + 1 < n && source.charAt(i + 1) == '.'
+                    && !(i + 2 < n && source.charAt(i + 2) >= '0' && source.charAt(i + 2) <= '9')) {
+                optionalChainSeen = true;
+                lex.add(LexDiag.at(filename, line, startCol, LexDiag.OPTIONAL_CHAINING));
             }
 
             // Three-character operators

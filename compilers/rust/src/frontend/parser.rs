@@ -22,7 +22,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, Diagnostic};
+use super::diagnostic::{lex_error, static_method_message, Diagnostic, OPTIONAL_CHAINING};
 use super::int_literal::{invalid_integer_literal, parse_int_literal};
 
 // ---------------------------------------------------------------------------
@@ -97,6 +97,42 @@ fn check_ts_numeric_literals(
     }
 }
 
+/// N-121 (the TS reference's reportOptionalChaining): scan the source with
+/// swc's own lexer and refuse the first `?.` -- a `?` token immediately
+/// followed by a `.` token (swc lexes `?.5` as `?` then a number, so a `.`
+/// token after `?` is always optional chaining) -- located at the `?`.
+fn check_ts_optional_chaining(
+    fm: &Lrc<swc_common::SourceFile>,
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) {
+    use swc_ecma_parser::token::Token as SwcToken;
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax { tsx: false, decorators: false, ..Default::default() }),
+        EsVersion::Es2022,
+        StringInput::from(&**fm),
+        None,
+    );
+    let base = fm.start_pos.0;
+    let mut question: Option<(u32, u32)> = None;
+    for t in lexer {
+        if matches!(t.token, SwcToken::Dot) {
+            if let Some((lo, hi)) = question {
+                if hi == t.span.lo.0 {
+                    let start = ((lo - base) as usize).min(source.len());
+                    let before = &source[..start];
+                    let line = 1 + before.matches('\n').count();
+                    let column = before.rsplit('\n').next().map(|s| s.chars().count()).unwrap_or(0);
+                    errors.push(lex_error(OPTIONAL_CHAINING, file, line, column));
+                    return;
+                }
+            }
+        }
+        question = if matches!(t.token, SwcToken::QuestionMark) { Some((t.span.lo.0, t.span.hi.0)) } else { None };
+    }
+}
+
 pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     // DoS-bound size guard. Reject oversized source BEFORE the tokenizer
     // touches the input. BUG-008 follow-up.
@@ -133,6 +169,11 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
     // `10_`, `1.5` and `0b102` are refused with the shared diagnostic (swc
     // would otherwise read `1.5` as 1 and `012` as 10).
     check_ts_numeric_literals(&fm, source, file, &mut errors);
+
+    // N-121: swc parses `this?.t` / `this?.m()` / `this.m?.()` as an OptChain
+    // and the conversion refused it with a Debug dump and no location.
+    // Optional chaining is disallowed; refuse it with the shared diagnostic.
+    check_ts_optional_chaining(&fm, source, file, &mut errors);
 
     let lexer = Lexer::new(
         Syntax::Typescript(TsSyntax {

@@ -23,6 +23,7 @@ from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_li
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
+    OPTIONAL_CHAINING,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     static_method_message,
@@ -181,6 +182,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     # member's own last token was wrongly honoured (both diverge from the TS
     # reference, verified directly against ts-morph).
     collecting = True
+    optional_chain_seen = False  # N-121
 
     def _add(tok: Token) -> None:
         nonlocal collecting
@@ -328,6 +330,13 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 i += 3
                 col += 3
                 continue
+
+        # N-121: `?.` not followed by a decimal digit is optional chaining,
+        # which is disallowed. Report the first one; `?` is still lexed below.
+        if (ch == "?" and not optional_chain_seen and source[i + 1:i + 2] == "."
+                and source[i + 2:i + 3] not in tuple("0123456789")):
+            optional_chain_seen = True
+            lex.append(lex_error(OPTIONAL_CHAINING, file_name, line, start_col))
 
         # Two-character operators
         if i + 1 < n:

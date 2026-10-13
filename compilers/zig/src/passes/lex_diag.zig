@@ -8,6 +8,11 @@ const std = @import("std");
 /// strings, .runar.go backtick raw strings and .runar.ts template literals).
 pub const UNTERMINATED_STRING_LITERAL = "unterminated string literal";
 
+/// N-121 (user decision R85; the TS reference's OPTIONAL_CHAINING): a
+/// .runar.ts `?.`, located at the `?`. Only the first `?.` in a file is
+/// reported.
+pub const OPTIONAL_CHAINING = "optional chaining '?.' is not supported";
+
 /// F-203: a .runar.py string or bytes literal escape CPython does not define
 /// for that literal kind, a `\x` without two hex digits, an octal escape above
 /// 0o377, or a str `\N` / `\u` / `\U` (the TS reference's

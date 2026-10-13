@@ -72,6 +72,13 @@ export class TypeError extends CompilerError {
 export const UNTERMINATED_STRING_LITERAL = 'unterminated string literal';
 
 /**
+ * N-121 (user decision R85): optional chaining is disallowed (spec/grammar.md).
+ * Every tier refuses a `.runar.ts` `?.` with this diagnostic, at the `?`.
+ * Only the first `?.` in a file is reported.
+ */
+export const OPTIONAL_CHAINING = "optional chaining '?.' is not supported";
+
+/**
  * F-026: a .runar.zig call argument list or array literal whose elements are
  * not separated by commas. Zig requires the comma (a trailing one is allowed).
  */

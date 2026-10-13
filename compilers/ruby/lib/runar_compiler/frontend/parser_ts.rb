@@ -201,6 +201,7 @@ module RunarCompiler
       def self.tokenize(source, lex = [], file_name = "")
       tokens = []
       directives = []
+      optional_chain_seen = false # N-121
       line = 1
       col = 0
       i = 0
@@ -363,6 +364,14 @@ module RunarCompiler
           word = source[start...i]
           tokens << Token.new(kind: TOK_IDENT, value: word, line: line, col: start_col)
           next
+        end
+
+        # N-121: `?.` not followed by a decimal digit is optional chaining,
+        # which is disallowed. Report the first one; `?` is still lexed below.
+        if ch == "?" && !optional_chain_seen && source[i + 1] == "." &&
+           !("0".."9").cover?(source[i + 2].to_s)
+          optional_chain_seen = true
+          lex << Frontend.lex_error(OPTIONAL_CHAINING, file_name, line, start_col)
         end
 
         # Three-character operators

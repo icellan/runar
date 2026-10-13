@@ -103,7 +103,9 @@ pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) 
     while (guard <= source.len) : (guard += 1) {
         if (t.next().kind == .eof) break;
     }
-    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    // N-121: likewise the first `?.`.
+    const oc_errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.OPTIONAL_CHAINING, t.optional_chain);
+    const errs = lex_diag.prepend(allocator, oc_errs, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
     return .{ .contract = r.contract, .errors = errs };
 }
 
@@ -188,6 +190,8 @@ const Tokenizer = struct {
     source: []const u8,
     /// F-011: the first unterminated quoted literal, if any.
     unterminated: ?lex_diag.Pos = null,
+    /// N-121: the first `?.` (optional chaining), if any.
+    optional_chain: ?lex_diag.Pos = null,
     pos: usize,
     line: u32,
     col: u32,
@@ -330,7 +334,14 @@ const Tokenizer = struct {
             ',' => .{ .kind = .comma, .text = t, .line = sl, .col = sc },
             '.' => .{ .kind = .dot, .text = t, .line = sl, .col = sc },
             ':' => .{ .kind = .colon, .text = t, .line = sl, .col = sc },
-            '?' => .{ .kind = .question, .text = t, .line = sl, .col = sc },
+            '?' => blk: {
+                // N-121: `?.` not followed by a decimal digit is optional
+                // chaining, which is disallowed. `?` is still lexed as before.
+                if (c2 == '.' and !(c3 >= '0' and c3 <= '9') and self.optional_chain == null) {
+                    self.optional_chain = .{ .line = sl, .col = sc };
+                }
+                break :blk .{ .kind = .question, .text = t, .line = sl, .col = sc };
+            },
             '~' => .{ .kind = .tilde, .text = t, .line = sl, .col = sc },
             '^' => .{ .kind = .caret, .text = t, .line = sl, .col = sc },
             '=' => if (c2 == '=') blk: {
