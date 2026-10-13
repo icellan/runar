@@ -1995,14 +1995,32 @@ class _LowerCtx:
             self.add_data_output_ref(ref)
             return ref
 
-        # this.addOutput(satoshis, val1, val2, ...) via MemberExpr
+        # this.addOutput(satoshis, val1, val2, ...) via MemberExpr. N-257: an
+        # explicit-receiver `this.addOutput(...)` / `self.add_output(...)`
+        # call reaches THIS branch in every surface parser that does not
+        # specially normalise addOutput to a bare property access --
+        # parser_ts.py's `_parse_postfix` and parser_ruby.py's
+        # `_parse_postfix_from` both build a MemberExpr callee for every
+        # `this.x(...)`/`self.x(...)` call. (Only parser_zig.py normalises
+        # addOutput/addRawOutput/addDataOutput/getStateScript to
+        # PropertyAccessExpr outright, and parser_ruby.py's
+        # `_rewrite_bare_method_calls` does the same for a BARE
+        # `add_output(...)` call with no receiver.) This branch must unwrap a
+        # trailing array-literal value list the same way the
+        # PropertyAccessExpr branch above does (and the same way TS's
+        # 04-anf-lower.ts applies `normalizedAddOutputArgs` to BOTH its
+        # property_access and member_expr addOutput branches) -- otherwise
+        # the array literal lowers as a metadata-only `array_literal` ANF
+        # binding that never reaches the stack, and `_lower_add_output`'s
+        # `bring_to_top` crashes with "value '<ref>' not found on stack".
         if isinstance(callee, MemberExpr):
             if (
                 isinstance(callee.object, Identifier)
                 and callee.object.name == "this"
                 and callee.property == "addOutput"
             ):
-                arg_refs = self._lower_args(e.args)
+                flat_args = _flatten_add_output_args(e.args)
+                arg_refs = self._lower_args(flat_args)
                 satoshis = arg_refs[0]
                 state_values = arg_refs[1:]
                 ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))
