@@ -203,7 +203,9 @@ fn is_nist_ec_builtin(name: &str) -> bool {
 }
 
 fn is_merkle_builtin(name: &str) -> bool {
-    matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
+    // merkleRootPoseidon2KB is NOT here: it is variadic (8*depth + 10 args) and
+    // has its own lowering, `lower_merkle_root_poseidon2_kb` (N-237).
+    matches!(name, "merkleRootSha256" | "merkleRootHash256")
 }
 
 /// Fixed byte width a numeric state-field type occupies in the state section,
@@ -2127,6 +2129,11 @@ impl LoweringContext {
 
         if is_merkle_builtin(func_name) {
             self.lower_merkle_root(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "merkleRootPoseidon2KB" {
+            self.lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses);
             return;
         }
 
@@ -5828,9 +5835,86 @@ impl LoweringContext {
         match func_name {
             "merkleRootSha256" => super::merkle::emit_merkle_root_sha256(emit, depth),
             "merkleRootHash256" => super::merkle::emit_merkle_root_hash256(emit, depth),
-            "merkleRootPoseidon2KB" => super::poseidon2_merkle::emit_poseidon2_merkle_root(emit, depth),
             _ => panic!("unknown Merkle builtin: {}", func_name),
         }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    /// merkleRootPoseidon2KB(leaf_0..leaf_7, sib0_0..sib(D-1)_7, index, depth).
+    /// Mirrors Go's `lowerMerkleRootPoseidon2KB` step for step (Go-only-parity
+    /// policy: a non-Go port matches Go byte for byte or refuses). N-237: this
+    /// used to fall into `lower_merkle_root`, whose 4-argument assert made the
+    /// emitter unreachable from `--ir`.
+    fn lower_merkle_root_poseidon2_kb(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        use super::poseidon2_merkle::POSEIDON2_MERKLE_MAX_DEPTH;
+        let n_args = args.len();
+        assert!(
+            n_args >= 10,
+            "merkleRootPoseidon2KB requires at least 10 arguments, got {}",
+            n_args
+        );
+
+        // depth is the LAST argument and must be a compile-time constant.
+        let depth_arg = &args[n_args - 1];
+        let depth = match self.const_values.get(depth_arg).cloned() {
+            Some(ConstValue::Int(n)) => {
+                use num_traits::ToPrimitive;
+                n.to_usize().unwrap_or_else(|| panic!(
+                    "merkleRootPoseidon2KB: depth must be between 1 and {}, got {}",
+                    POSEIDON2_MERKLE_MAX_DEPTH, n
+                ))
+            }
+            _ => panic!(
+                "merkleRootPoseidon2KB: depth (last argument) must be a compile-time constant \
+                 integer literal. Got a runtime value for '{}'.",
+                depth_arg
+            ),
+        };
+        // 32, not 64 (Go R-172): the emitter's own bound.
+        assert!(
+            depth >= 1 && depth <= POSEIDON2_MERKLE_MAX_DEPTH,
+            "merkleRootPoseidon2KB: depth must be between 1 and {}, got {}",
+            POSEIDON2_MERKLE_MAX_DEPTH, depth
+        );
+
+        // 8 leaf + depth*8 proof + index + depth
+        let expected_args = 8 + depth * 8 + 1 + 1;
+        assert!(
+            n_args == expected_args,
+            "merkleRootPoseidon2KB: expected {} arguments (8 leaf + {}*8 proof + index + depth), got {}",
+            expected_args, depth, n_args
+        );
+
+        // Remove depth from the real stack FIRST (compile-time constant, not runtime).
+        if self.sm.has(depth_arg) {
+            self.bring_to_top(depth_arg, true);
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
+
+        // Bring all runtime args (leaf*8 + proof*depth*8 + index) to the top in order.
+        let runtime_arg_count = n_args - 1;
+        for arg in &args[..runtime_arg_count] {
+            let consume = self.operand_consume(arg, args, binding_index, last_uses);
+            self.bring_to_top(arg, consume);
+        }
+        // The codegen consumes them and leaves root_0..root_7 ...
+        for _ in 0..runtime_arg_count {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
+        super::poseidon2_merkle::emit_poseidon2_merkle_root(emit, depth);
+        // ... which are packed into the single bigint the type system models.
+        super::poseidon2_merkle::emit_poseidon2_root_pack(emit);
 
         self.sm.push(binding_name);
         self.track_depth();
