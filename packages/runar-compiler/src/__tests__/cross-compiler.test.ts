@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync, mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, statSync } from 'fs';
 import { join, dirname, resolve } from 'path';
@@ -9,6 +9,18 @@ import type { ANFProgram } from '../ir/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// This file iterates conformance/example fixtures and tier binaries to
+// generate its `it()` cases, the same shape that let
+// `rust-parser-examples.test.ts` go vacuously green (see its own comment):
+// a per-fixture test body that returns early on a missing path executes
+// zero `expect()` calls and still reports PASSED. `expect.hasAssertions()`
+// makes a future reintroduction of that pattern fail loudly instead. See
+// `multi-format.test.ts`'s copy of this guard for a permanent regression
+// test proving the mechanism (F-391).
+beforeEach(() => {
+  expect.hasAssertions();
+});
 
 // ---------------------------------------------------------------------------
 // CI vs. local behavior switch.

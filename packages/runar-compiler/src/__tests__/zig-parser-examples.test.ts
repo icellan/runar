@@ -2,12 +2,23 @@
  * Zig parser: verify the Zig example tree mirrors the native example set and parses cleanly.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
 import { parse } from '../passes/01-parse.js';
 import { parseZigSource } from '../passes/01-parse-zig.js';
 import { compile } from '../index.js';
+
+// This file iterates `ZIG_EXAMPLES`/`TS_EXAMPLES` to generate its `it()`
+// cases, the same shape that let `rust-parser-examples.test.ts` go vacuously
+// green (see its own comment): a per-fixture test body that returns early
+// on a missing path executes zero `expect()` calls and still reports
+// PASSED. `expect.hasAssertions()` makes a future reintroduction of that
+// pattern fail loudly instead. See `multi-format.test.ts`'s copy of this
+// guard for a permanent regression test proving the mechanism (F-391).
+beforeEach(() => {
+  expect.hasAssertions();
+});
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 const EXAMPLES_ZIG_DIR = join(REPO_ROOT, 'examples', 'zig');

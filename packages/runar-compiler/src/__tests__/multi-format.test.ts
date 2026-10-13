@@ -6,15 +6,43 @@
  * dispatcher routes correctly based on file extension.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { compile } from '../index.js';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join, resolve, basename } from 'path';
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Vacuity guard
 // ---------------------------------------------------------------------------
+//
+// This file iterates conformance fixtures to generate its `it()` cases (see
+// "universal parser coverage" and the Zig conformance loop below). Per its
+// own comment, `rust-parser-examples.test.ts` was once bitten by exactly
+// this shape: a per-fixture test body that `return`s early when a fixture
+// path is missing executes zero `expect()` calls and still reports PASSED —
+// invisible to `scripts/lint-no-silent-skips.sh` because a bare `return` is
+// not a skip marker. `expect.hasAssertions()` makes a future reintroduction
+// of that pattern fail loudly instead of silently passing.
+beforeEach(() => {
+  expect.hasAssertions();
+});
+
+// Permanent regression test for the guard above, not for fixture content.
+// It reproduces the documented incident shape directly: a test body that
+// returns early on a missing path and asserts nothing. Without the
+// `beforeEach` guard, zero `expect()` calls is not an error to vitest — the
+// inner case reports PASSED — so this wrapping `it.fails` would itself fail
+// ("expected test to fail, but it passed"). With the guard, the inner case's
+// lack of any assertion is caught and reported as a failure, which
+// `it.fails` correctly expects, so the outer case passes.
+it.fails('a zero-assertion fixture-iteration body is caught, not silently green', () => {
+  const missingFixturePath = join(CONFORMANCE_DIR, '__f-391-does-not-exist__', 'source.json');
+  if (!existsSync(missingFixturePath)) {
+    return; // the historical incident: early return, zero assertions
+  }
+  expect(true).toBe(true);
+});
 
 const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', 'tests');
 
