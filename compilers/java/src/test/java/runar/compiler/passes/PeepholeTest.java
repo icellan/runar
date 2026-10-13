@@ -18,6 +18,7 @@ import runar.compiler.ir.stack.PushValue;
 import runar.compiler.ir.stack.RollOp;
 import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackOp;
+import runar.compiler.ir.stack.StackSourceLoc;
 import runar.compiler.ir.stack.SwapOp;
 
 class PeepholeTest {
@@ -280,6 +281,33 @@ class PeepholeTest {
         // Peephole should have killed the SWAP/SWAP and merged CHECKSIG+VERIFY.
         assertEquals(1, out.thenBranch().size(), "then-branch should reduce to a single op");
         assertTrue(out.thenBranch().get(0) instanceof OpcodeOp o && "OP_CHECKSIGVERIFY".equals(o.code()));
+    }
+
+    /**
+     * N-158. optimizeNestedIf rebuilt every IfOp with the two-argument
+     * constructor, which drops the op's sourceLoc. Emit reads that loc to map
+     * the OP_IF opcode, so every if/else lost its OP_IF mapping (if-else:
+     * opcode 11). The TS peephole keeps it (F-224), and so does Go (F-179).
+     *
+     * Proves: the rebuilt IfOp carries the original sourceLoc, with and
+     * without an else branch, and the branches are still optimised.
+     * Does not prove: anything about where the loc came from upstream
+     * (StackLower stamps it); the end-to-end map is pinned by
+     * N158IfElseSourceMapTest.
+     */
+    @Test
+    void nestedIfRebuildKeepsSourceLoc() {
+        StackSourceLoc loc = new StackSourceLoc("C.runar.java", 27, 8);
+
+        List<StackOp> thenB = List.of(new SwapOp(), new SwapOp(), new OpcodeOp("OP_ADD"));
+        List<StackOp> elseB = List.of(new OpcodeOp("OP_SUB"));
+        IfOp withElse = (IfOp) Peephole.optimize(List.of(new IfOp(thenB, elseB, loc))).get(0);
+        assertEquals(loc, withElse.sourceLoc(), "if/else rebuild must keep the IfOp sourceLoc");
+        assertEquals(1, withElse.thenBranch().size(), "then-branch is still optimised");
+
+        IfOp thenOnly = (IfOp) Peephole.optimize(List.of(new IfOp(thenB, null, loc))).get(0);
+        assertEquals(loc, thenOnly.sourceLoc(), "then-only rebuild must keep the IfOp sourceLoc");
+        assertEquals(null, thenOnly.elseBranch());
     }
 
     // ---- End-to-end: P2PKH reduces to SWAP-less form ----

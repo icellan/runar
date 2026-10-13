@@ -2248,11 +2248,11 @@
     },
     {
       "path": "conformance/source-map/if-else/java/expected-source-map.json",
-      "sha256": "1ae0d93601059f5ce7a9282bdc39fb45862e80905d088a144ed4a0613b2ed5a7",
+      "sha256": "d3bc97a433062428e14bd1c65ce518075ee5b0e89adf00d639d5cd915a808d15",
       "verified-against": "second-implementation",
-      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reason": "N-158 (R71, user decision R89/R94 2026-10-13, route B). Regenerated via `npx tsx conformance/source-map/run.ts --tier=java --fixture=if-else --update`. Delta: 17 -> 14 mappings. Removed (opcodeIndex,line,col): (15,27,8) (16,27,8) (21,27,8) (22,27,8). Added: (11,27,8). Code cause (per diff): Peephole.optimize() used to rebuild each IfOp from its optimized branches without carrying IfOp.sourceLoc forward, so OP_IF itself got no mapping; meanwhile StackLower.subContext copied the enclosing statement's currentSourceLoc into each branch context, so branch-merge/residue ops owned by no arm statement (opcodes 15,16,21,22) defaulted to the enclosing `if`'s (27,8). The fix makes Peephole pass i.sourceLoc() through (OP_IF now correctly mapped at opcode 11, (27,8)) and makes StackLower.subContext and AnfLower.appendBranchResults reset currentSourceLoc to null on entering a branch arm / before materializing merge-result bindings, so the unowned ops go unmapped instead of being misattributed to the if line. Checks: (1) second implementation = the TS reference map conformance/source-map/if-else/ts/expected-source-map.json: the new Java map equals it opcode-for-opcode (same 14 opcode indices: 9,10,11,12,13,14,18,19,20,24,25,26,27,28) under statement-ordinal relabelling, re-verified directly against the pre-restamp golden and the TS file; (2) conformance/source-map/run.ts --tier=java --fixture=if-else (no --update): byte-id/structural/anchor all OK; (3) script hex unchanged and equal to conformance/tests/if-else/expected-script.hex (re-verified via `java -jar compilers/java/build/libs/runar-java-compiler-1.0.0-rc.1.jar --source examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java --disable-constant-folding --hex`). || PREVIOUS (still describes the rest of the file): RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
       "reviewer": "siggi",
-      "date": "2026-09-17",
+      "date": "2026-10-13",
       "review-status": "reviewed"
     },
     {
@@ -2311,11 +2311,11 @@
     },
     {
       "path": "conformance/source-map/stateful-counter/java/expected-source-map.json",
-      "sha256": "25c42df47d5a33aa063815ab3d453f3b170f044f14a920f48f991442d563ef85",
+      "sha256": "a782d1ebedcba64a825c9066e29f766ae3ef130f964ad81d33e29a8ee49b8021",
       "verified-against": "second-implementation",
-      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reason": "N-158 (R71, user decision R89 2026-10-12, route B). Verified against: TS reference map equality (spancheck) + script hex unchanged. Not a codegen change: this golden was left stale by F-024 (25095825f), which added the 15-opcode `_newAmount >= input` continuation check to every stateful method and restamped the TS source map but not this one, so conformance/source-map/run.ts byte-identity was already DIFF for java/stateful-counter at HEAD and origin/main. The live Java compiler, unchanged on this fixture by N-158, emits the map stamped here. Delta: 10 -> 10 mappings, 7 MOVED (none added, none removed): opcodeIndex 324..327 -> 339..342 (line 51:8, count++ statement) and 328..330 -> 343..345 (line 52:8); 107..109 (line 42:8) unchanged. Checks: (1) second implementation = the TS reference map conformance/source-map/stateful-counter/ts/expected-source-map.json: the Java map now equals it opcode-for-opcode under statement-ordinal relabelling (F-211 spancheck.py: 0 outside-ts-span, 0 missing); (2) independent source-anchor oracle (run.ts checkSourceAnchors): byte-id/structural/anchor OK; (3) script hex unchanged and equal to conformance/tests/stateful-counter/expected-script.hex (conformance golden STRICT). || PREVIOUS (still describes the rest of the file): RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
       "reviewer": "siggi",
-      "date": "2026-09-17",
+      "date": "2026-10-12",
       "review-status": "reviewed"
     },
     {

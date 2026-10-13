@@ -1600,6 +1600,10 @@ public final class AnfLower {
          */
         private void appendBranchResults(LowerCtx branchCtx, List<String> resultNames,
                                          List<String> props) {
+            // N-158: the result-materialisation bindings are not program
+            // logic and get no location, as in TS (whose arm context has none
+            // once its last statement is lowered).
+            branchCtx.currentSourceLoc = null;
             for (int i = 0; i < resultNames.size(); i++) {
                 String name = resultNames.get(i);
                 String temp = AnfValue.MERGED_LOCAL_TEMP_PREFIX + i;

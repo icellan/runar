@@ -1280,9 +1280,11 @@ public final class StackLower {
                 c.arrayElements.put(e.getKey(), new ArrayList<>(e.getValue()));
             }
             c.arrayLengths.putAll(this.arrayLengths);
-            // GAP-002: nested branches keep the outer statement's loc by
-            // default; the inner binding loop will override on each step.
-            c.currentSourceLoc = this.currentSourceLoc;
+            // GAP-002 / N-158: an arm starts with NO loc, as in TS. Each arm
+            // binding stamps its own; ops no arm statement owns (merge
+            // results, residue drains) stay unmapped instead of being
+            // attributed to the enclosing `if` line.
+            c.currentSourceLoc = null;
             return c;
         }
 

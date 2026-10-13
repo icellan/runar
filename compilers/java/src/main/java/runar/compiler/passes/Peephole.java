@@ -59,8 +59,8 @@ public final class Peephole {
         if (op instanceof IfOp i) {
             List<StackOp> thenB = optimize(i.thenBranch());
             List<StackOp> elseB = i.elseBranch() != null ? optimize(i.elseBranch()) : null;
-            if (elseB == null) return new IfOp(thenB);
-            return new IfOp(thenB, elseB);
+            // N-158: keep the IfOp's own loc; Emit maps OP_IF from it.
+            return new IfOp(thenB, elseB, i.sourceLoc());
         }
         return op;
     }
