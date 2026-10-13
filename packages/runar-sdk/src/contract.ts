@@ -6,7 +6,7 @@ import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import { InputLimits } from 'runar-ir-schema';
 import { assertScriptHexUnderLimit, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
-import { txToTransactionData, warnNonFatal } from './providers/provider.js';
+import { txToTransactionData } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
 import type { Inscription } from './ordinals/types.js';
@@ -842,27 +842,47 @@ export class RunarContract {
     let outputIndex = 0;
     let actualSatoshis = satoshis;
     if (result.tx) {
+      // N-168: this used to swallow both a BEEF parse failure and a deploy
+      // broadcast failure (routing each through warnNonFatal — a
+      // console.warn — while still resolving normally), the same shape
+      // F-248 fixed in WalletProvider.ensureFunding. deployWithWallet's
+      // entire job is to hand back a real { txid, outputIndex } for a
+      // contract UTXO that exists on chain; it must not report success when
+      // the wallet handed back a BEEF it could not parse, or when this
+      // extra ARC push was explicitly rejected. The caller would otherwise
+      // try to spend a UTXO that was never actually broadcast.
+      let tx: BsvTransaction;
       try {
-        const tx = BsvTransaction.fromAtomicBEEF(result.tx);
-        for (let i = 0; i < tx.outputs.length; i++) {
-          const out = tx.outputs[i]!;
-          if (out.lockingScript?.toHex() === lockingScript) {
-            outputIndex = i;
-            actualSatoshis = out.satoshis != null ? out.satoshis : satoshis;
-            break;
-          }
-        }
-        // Cache raw hex for EF child tx builds
-        const txid = result.txid || '';
-        if (txid) {
-          walletProvider.cacheTx(txid, tx.toHex());
-        }
-        // Broadcast to ARC (may already be known — non-fatal)
-        await walletProvider.broadcast(tx).catch((e) =>
-          warnNonFatal('deploy-tx broadcast', e),
-        );
+        tx = BsvTransaction.fromAtomicBEEF(result.tx);
       } catch (e) {
-        warnNonFatal('deploy-tx BEEF parse', e);
+        throw new Error(
+          `${this.artifact.contractName}.deployWithWallet: deploy tx BEEF returned by ` +
+            `the wallet did not parse: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      for (let i = 0; i < tx.outputs.length; i++) {
+        const out = tx.outputs[i]!;
+        if (out.lockingScript?.toHex() === lockingScript) {
+          outputIndex = i;
+          actualSatoshis = out.satoshis != null ? out.satoshis : satoshis;
+          break;
+        }
+      }
+      // Cache raw hex for EF child tx builds
+      const cacheTxid = result.txid || '';
+      if (cacheTxid) {
+        walletProvider.cacheTx(cacheTxid, tx.toHex());
+      }
+      // Broadcast to ARC (may already be known — that is a success path,
+      // not a failure one; see checkArcAccepted).
+      try {
+        await walletProvider.broadcast(tx);
+      } catch (e) {
+        throw new Error(
+          `${this.artifact.contractName}.deployWithWallet: deploy tx broadcast failed, ` +
+            `the contract UTXO may not exist on-chain: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     }
 
