@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ALL_TIER_IDS, BrokenTier, REPO, Tier, buildSourceTiers } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-139 — artifact `abi.methods[].isTerminal` and top-level `anf` presence
@@ -159,7 +160,7 @@ describe('N-139: artifact isTerminal + anf presence follow parentClass (7 tiers)
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Tier, buildSourceTiers, compileHex } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * F-203 — .runar.py byte-literal escapes decode the way CPython does, in every
@@ -143,7 +144,7 @@ describe('F-203 .runar.py byte-literal escapes — seven-tier parity with CPytho
   it('at least two tiers are available, the TS reference among them (all seven in CI)', () => {
     expect(TS).toBeDefined();
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   // The same bytes, spelled with \xHH only: independent of escape decoding.

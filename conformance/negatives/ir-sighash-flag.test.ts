@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compileFromANF, loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildIrTiers, verdict } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-059 / F-102 — `check_preimage.sighashFlag` on the `--ir` path, all 7 tiers.
@@ -224,7 +225,7 @@ describe('N-059: --ir check_preimage sighashFlag is in the @sighash set and matc
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

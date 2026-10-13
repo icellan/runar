@@ -9,6 +9,7 @@ import {
   newConsensusSpend,
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { REPO, Tier, buildSourceTiers, compileHex } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-004 (CL-BUG-257) — stray class-level tokens on the .runar.rb surface,
@@ -166,7 +167,7 @@ describe('N-004 the indented backdoor (@bsv/sdk Spend)', () => {
 describe('N-004 .runar.rb stray class-level tokens — seven-tier parity', () => {
   it('at least two tiers are available (all seven in CI)', () => {
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   for (const [name, src, diag] of REFUSED) {

@@ -11,6 +11,7 @@ import {
   findRustBinary,
   findZigBinary,
 } from '../runner/runner.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * Cross-tier ACCEPTANCE parity. Started as the subtype-lattice gate (N-104) and
@@ -282,7 +283,7 @@ describe('cross-tier acceptance parity', () => {
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(
         missing,
         `CI=true but these tiers have no toolchain: ${missing.join(', ')}. ` +

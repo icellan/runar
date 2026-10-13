@@ -17,6 +17,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-065 / N-060 — compiler-reserved names, all seven tiers, one diagnostic.
@@ -146,7 +147,7 @@ describe('N-065 / N-060: compiler-reserved names (all 7 tiers)', () => {
   });
 
   it('every native tier is built (strict in CI, ">=2" locally)', () => {
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(SOURCE_TIERS.map((t) => t.id).sort()).toEqual(['go', 'java', 'python', 'ruby', 'rust', 'zig']);
       expect(IR_TIERS.map((t) => t.id).sort()).toEqual(['go', 'java', 'python', 'ruby', 'rust', 'zig']);
     }

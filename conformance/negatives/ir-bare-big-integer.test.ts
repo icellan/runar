@@ -10,6 +10,7 @@ import {
   compileHex,
   resolveTsxLoader,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -80,7 +81,7 @@ describe('N-212: bare JSON integers beyond 2^53 on --ir are parsed exactly', () 
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(missing, `no toolchain for: ${missing.join(', ')}`).toEqual([]);
     }
     expect(available.length).toBeGreaterThanOrEqual(2);

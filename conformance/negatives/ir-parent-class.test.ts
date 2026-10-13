@@ -18,6 +18,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-087 — on the `--ir` path the source validator's parentClass rules, and
@@ -157,7 +158,7 @@ describe('N-087: --ir parentClass and property-write rules (all 7 tiers)', () =>
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

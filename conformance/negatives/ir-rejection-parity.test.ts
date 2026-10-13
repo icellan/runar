@@ -11,6 +11,7 @@ import {
   missingTierIds,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * Cross-tier REJECTION parity on the `--ir` path.
@@ -283,7 +284,7 @@ describe('cross-tier rejection parity (--ir path)', () => {
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(
         missing,
         `CI=true but these tiers have no toolchain: ${missing.join(', ')}. ` +

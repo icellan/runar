@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ALL_TIER_IDS, REPO, Tier, buildSourceTiers } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * F-026 (user decision R15) — seven-tier POSITIVE parity for integer literals.
@@ -102,7 +103,7 @@ function hexOf(tier: Tier, source: string, file: string): string {
 
 describe('F-026 accepted integer literals: seven-tier value parity', () => {
   beforeAll(() => {
-    if (process.env.CI) expect(available.map((t) => t.id).sort()).toEqual([...ALL_TIER_IDS]);
+    if (isCiEnv(process.env)) expect(available.map((t) => t.id).sort()).toEqual([...ALL_TIER_IDS]);
   });
 
   it('the matrix names all seven tiers and at least the reference is available', () => {

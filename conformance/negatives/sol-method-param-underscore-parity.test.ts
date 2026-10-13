@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Tier, buildSourceTiers } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * F-200 — seven-tier positive parity for `.runar.sol` METHOD params whose
@@ -114,7 +115,7 @@ beforeAll(() => {
 describe('F-200 .runar.sol method param leading underscore — seven-tier positive parity', () => {
   it('at least two tiers are available (all seven in CI)', () => {
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   for (const [name, { src, sha256 }] of Object.entries(SHAPES)) {

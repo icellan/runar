@@ -17,6 +17,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-071 — on the `--ir` path every public method must END with an assert, in
@@ -154,7 +155,7 @@ describe('N-071: --ir public methods must end with an assert (all 7 tiers)', () 
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

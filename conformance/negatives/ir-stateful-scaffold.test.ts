@@ -17,6 +17,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-101 — on the `--ir` path, every public method of a StatefulSmartContract
@@ -146,7 +147,7 @@ describe('N-101: --ir re-derives the StatefulSmartContract scaffolding (all 7 ti
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

@@ -10,6 +10,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ describe('N-133: loop.start on the --ir boundary', () => {
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(missing, `no toolchain for: ${missing.join(', ')}`).toEqual([]);
     }
     expect(available.length).toBeGreaterThanOrEqual(2);

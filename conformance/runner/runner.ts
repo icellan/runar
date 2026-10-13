@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { execSync, spawn } from 'child_process';
 import os from 'os';
 import { JavaDaemon } from './java-daemon.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2189,7 +2190,7 @@ export function decideMissingCompilerAction(
   env: { CI?: string; RUNAR_CONFORMANCE_STRICT?: string },
 ): MissingCompilerAction {
   if (missing.length === 0) return 'ok';
-  if (env.CI === 'true') return 'fail';
+  if (isCiEnv(env)) return 'fail';
   const strict = env.RUNAR_CONFORMANCE_STRICT;
   if (strict === '1' || strict === 'true') return 'fail';
   return 'warn';
@@ -2247,7 +2248,7 @@ function assertAllCompilersAvailableInCi(): void {
 
   {
     const cwd = process.cwd();
-    const reason = process.env.CI === 'true' ? 'CI=true' : 'RUNAR_CONFORMANCE_STRICT set';
+    const reason = isCiEnv(process.env) ? 'CI set' : 'RUNAR_CONFORMANCE_STRICT set';
     const msg =
       `[conformance/runner] ${reason} but ${missing.length} compiler binary` +
       (missing.length === 1 ? '' : ' binaries') +

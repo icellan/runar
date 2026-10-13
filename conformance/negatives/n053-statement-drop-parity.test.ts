@@ -10,6 +10,7 @@ import {
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { compile } from '../../packages/runar-compiler/src/index.js';
 import { Tier, buildSourceTiers, compileHex } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-053 — silent statement drops, seven-tier parity and on-chain proof.
@@ -285,7 +286,7 @@ describe('N-053 statement drops — on-chain proof (@bsv/sdk Spend, t = 7)', () 
 describe('N-053 statement drops — seven-tier parity', () => {
   it('at least two tiers are available (all seven in CI)', () => {
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   for (const [mode, tiers] of [

@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Tier, buildSourceTiers, compileHex, judge } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-202 — seven-tier gate for the nested-loop PRODUCT bound on the source path.
@@ -81,7 +82,7 @@ function write(name: string, text: string): string {
 describe('N-202 seven-tier nested-loop product bound (source path)', () => {
   it('at least two tiers are available (all seven in CI)', () => {
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   it('N214 (101 x 100): every tier refuses with the shared product diagnostic', () => {

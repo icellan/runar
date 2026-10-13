@@ -9,6 +9,7 @@ import {
   compileHex,
   missingTierIds,
 } from '../negatives/tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * F-108 — dead-code elimination deleted a private helper's RETURN VALUE.
@@ -70,7 +71,7 @@ describe('F-108 DCE must not delete a private helper\'s return value', () => {
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true' || process.env.RUNAR_CONFORMANCE_STRICT) {
+    if (isCiEnv(process.env) || process.env.RUNAR_CONFORMANCE_STRICT) {
       expect(missing, `these tiers have no toolchain: ${missing.join(', ')}`).toEqual([]);
     }
     expect(available.length).toBeGreaterThanOrEqual(2);

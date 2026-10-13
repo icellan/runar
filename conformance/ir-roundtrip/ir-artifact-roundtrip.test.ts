@@ -11,6 +11,7 @@ import { MockProvider } from '../../packages/runar-sdk/src/providers/mock.js';
 import { LocalSigner } from '../../packages/runar-sdk/src/signers/local.js';
 import { buildP2PKHScript } from '../../packages/runar-sdk/src/script-utils.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildSourceTiers } from '../negatives/tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * F-038 (+ F-065, F-066, F-070, F-088) — `--emit-ir` -> `--ir` is lossless.
@@ -122,7 +123,7 @@ describe('F-038: --emit-ir -> --ir reproduces the --source artifact', () => {
   it('every --ir tier is built (strict in CI, ">=2" locally)', () => {
     // TS is excluded by design: its --from-ir artifact carries no parentClass/abi/stateFields to round-trip.
     expect([...TIERS.map((t) => t.id)].sort()).toEqual(IR_TIER_IDS.filter((id) => id !== 'ts').sort());
-    if (process.env.CI === 'true') expect(TIERS.filter((t) => t.cmd === null)).toEqual([]);
+    if (isCiEnv(process.env)) expect(TIERS.filter((t) => t.cmd === null)).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

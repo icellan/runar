@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Tier, buildSourceTiers, compileHex } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * Seven-tier byte parity for a parenthesised identifier on `.runar.java`.
@@ -69,7 +70,7 @@ function write(expr: string): string {
 describe('.runar.java parenthesised identifier: seven-tier byte parity', () => {
   it('at least two tiers are available (all seven in CI)', () => {
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   for (const [mode, tiers] of [

@@ -10,6 +10,7 @@ import {
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
 import { BrokenTier, IR_TIER_IDS, Tier, buildIrTiers, verdict } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-069 — required ANF IR fields, checked for presence AND JSON type, with ONE
@@ -137,7 +138,7 @@ describe('N-069: --ir required fields are present and correctly typed (all 7 tie
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

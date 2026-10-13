@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { buildSourceTiers, judge, ALL_TIER_IDS } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-215 -- substr() literal negative start, seven-tier SHARED-DIAGNOSTIC
@@ -42,7 +43,7 @@ describe('N-215 substr() negative-start -- seven-tier shared-diagnostic parity',
 
   it('at least two tiers are available (all seven in CI)', () => {
     expect(AVAILABLE.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(AVAILABLE.length).toBe(7);
+    if (isCiEnv(process.env)) expect(AVAILABLE.length).toBe(7);
   });
 
   for (const tier of AVAILABLE) {

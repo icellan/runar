@@ -58,6 +58,14 @@ describe('R-103 missing-tier visibility', () => {
       expect(decideMissingCompilerAction(['zig'], { CI: 'true' })).toBe('fail');
     });
 
+    it('N-236: hard-fails under CI=1 too — not only the literal CI=true GitHub sets', () => {
+      // A runner exporting CI=1 (GitLab CI and many self-hosted runners) used
+      // to fall through to 'warn' because the check compared CI directly
+      // against the literal string "true".
+      expect(decideMissingCompilerAction(['zig'], { CI: '1' })).toBe('fail');
+      expect(decideMissingCompilerAction(['zig'], { CI: 'yes' })).toBe('fail');
+    });
+
     it('hard-fails locally when strict mode is requested — R-103', () => {
       expect(decideMissingCompilerAction(['zig'], { RUNAR_CONFORMANCE_STRICT: '1' })).toBe('fail');
       expect(decideMissingCompilerAction(['zig'], { RUNAR_CONFORMANCE_STRICT: 'true' })).toBe('fail');

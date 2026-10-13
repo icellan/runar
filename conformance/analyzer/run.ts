@@ -39,6 +39,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..');
@@ -98,7 +99,7 @@ export function decideMissingTierAction(
   env: { CI?: string; RUNAR_CONFORMANCE_STRICT?: string },
 ): MissingTierAction {
   if (missing.length === 0) return 'ok';
-  if (env.CI === 'true') return 'fail';
+  if (isCiEnv(env)) return 'fail';
   const strict = env.RUNAR_CONFORMANCE_STRICT;
   if (strict === '1' || strict === 'true') return 'fail';
   return 'warn';
@@ -183,7 +184,7 @@ function main(): void {
   const missingAction = decideMissingTierAction(missingTiers, process.env);
   if (missingAction === 'fail') {
     const reason =
-      process.env.CI === 'true' ? 'CI=true' : 'RUNAR_CONFORMANCE_STRICT set';
+      isCiEnv(process.env) ? 'CI set' : 'RUNAR_CONFORMANCE_STRICT set';
     console.error('');
     console.error(
       `[conformance/analyzer] ${reason} but ${missingTiers.length} tier` +

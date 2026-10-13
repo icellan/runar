@@ -12,6 +12,7 @@ import {
   buildIrTiers,
   compileHex,
 } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-096 — one `syntheticArrayChain` validity rule on the `--ir` path, in all
@@ -272,7 +273,7 @@ describe('N-096: --ir syntheticArrayChain validity (all 7 tiers)', () => {
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 

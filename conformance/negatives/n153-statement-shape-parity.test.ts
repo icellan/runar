@@ -9,6 +9,7 @@ import {
   newConsensusSpend,
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { Tier, buildSourceTiers, compileHex } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-153 — statement-shape parity on the .sol / .move / .go / .rs surfaces.
@@ -269,7 +270,7 @@ describe('N-153 .rs bare block — the dropped statement was the only guard (@bs
 describe('N-153 statement shapes — seven-tier parity', () => {
   it('at least two tiers are available (all seven in CI)', () => {
     expect(TIERS.length).toBeGreaterThanOrEqual(2);
-    if (process.env.CI === 'true') expect(TIERS.length).toBe(7);
+    if (isCiEnv(process.env)) expect(TIERS.length).toBe(7);
   });
 
   for (const [mode, tiers] of [
