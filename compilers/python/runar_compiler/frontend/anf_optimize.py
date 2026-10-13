@@ -117,8 +117,17 @@ def _optimize_method(method: ANFMethod, properties) -> None:
             # `new_body` doubles as the prelude list: a rule that folds a new
             # constant appends its binding here, i.e. immediately BEFORE the
             # binding being rewritten (see _fresh_const_name).
+            prelude_start = len(new_body)
             optimized = _try_optimize(binding.value, value_map, new_body, used_names, binding.name)
             if optimized is not None:
+                # N-218: every helper a rewrite mints (the N-104/N-251 gate
+                # bindings, the fused-scalar helper) takes the rewritten
+                # binding's own source_loc, mirroring F-343 in the TS
+                # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
+                # because of that source expression, and stack lowering maps
+                # opcodes through binding.source_loc.
+                for helper in new_body[prelude_start:]:
+                    helper.source_loc = binding.source_loc
                 binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
                 changed = True
             value_map[binding.name] = binding.value

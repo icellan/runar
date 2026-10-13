@@ -186,9 +186,20 @@ public final class AnfOptimize {
             List<AnfBinding> next = new ArrayList<>(body.size());
             boolean changed = false;
             for (AnfBinding b : body) {
+                int preludeStart = next.size();
                 AnfValue optimized = tryOptimize(b.name(), b.value(), valueMap, next, usedNames);
                 AnfBinding rebound = b;
                 if (optimized != null) {
+                    // N-218: every helper a rewrite mints (the N-104/N-251
+                    // gate bindings, the fused-scalar helper) takes the
+                    // rewritten binding's own sourceLoc, mirroring F-343 in
+                    // the TS reference (anf-ec.ts optimizeBodyOnce) — it
+                    // exists only because of that source expression, and
+                    // stack lowering maps opcodes through binding.sourceLoc.
+                    for (int i = preludeStart; i < next.size(); i++) {
+                        AnfBinding h = next.get(i);
+                        next.set(i, new AnfBinding(h.name(), h.value(), b.sourceLoc()));
+                    }
                     rebound = new AnfBinding(b.name(), optimized, b.sourceLoc());
                     changed = true;
                 }

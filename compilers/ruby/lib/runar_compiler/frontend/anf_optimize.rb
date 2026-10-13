@@ -178,8 +178,16 @@ module RunarCompiler
             # +new_body+ doubles as the prelude list: a rule that folds a new
             # constant appends its binding here, i.e. immediately BEFORE the
             # binding being rewritten (see fresh_const_name).
+            prelude_start = new_body.length
             optimized = try_optimize(binding.value, value_map, new_body, used_names, binding.name)
             if optimized
+              # N-218: every helper a rewrite mints (the N-104/N-251 gate
+              # bindings, the fused-scalar helper) takes the rewritten
+              # binding's own source_loc, mirroring F-343 in the TS
+              # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
+              # because of that source expression, and stack lowering maps
+              # opcodes through binding.source_loc.
+              new_body[prelude_start..].each { |helper| helper.source_loc = binding.source_loc }
               binding = IR::ANFBinding.new(
                 name: binding.name,
                 value: optimized,

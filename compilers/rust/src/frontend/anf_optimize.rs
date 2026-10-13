@@ -623,10 +623,20 @@ fn optimize_method_ec_once(body: &[ANFBinding], used_names: &mut HashSet<String>
         let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings, used_names);
 
         if let Some(new_value) = rewritten {
-            // Add any new helper bindings (e.g., computed scalars)
+            // Add any new helper bindings (e.g., computed scalars).
+            // N-218: every helper a rewrite mints (the N-104/N-251 gate
+            // bindings, the fused-scalar helper) takes the rewritten
+            // binding's own source_loc, mirroring F-343 in the TS reference
+            // (anf-ec.ts optimizeBodyOnce) — it exists only because of that
+            // source expression, and stack lowering maps opcodes through
+            // binding.source_loc.
             for extra in &extra_bindings {
                 value_map.insert(extra.name.clone(), extra.value.clone());
-                result.push(extra.clone());
+                result.push(ANFBinding {
+                    name: extra.name.clone(),
+                    value: extra.value.clone(),
+                    source_loc: binding.source_loc.clone(),
+                });
             }
             // Update the value map with the rewritten value
             value_map.insert(binding.name.clone(), new_value.clone());
@@ -1448,5 +1458,137 @@ mod n104_tests {
     fn n251_ec_add_negate_cancel_reversed_keeps_y_zero_abort() {
         let neg = bnd("n", call("ecNegate", &["p"]));
         assert_eq!(run(program(neg, call("ecAdd", &["n", "p"]))), neg_cancel_expect());
+    }
+}
+
+/// N-218: port of F-343 to this tier. The TS reference's `optimizeBodyOnce`
+/// (packages/runar-compiler/src/optimizer/anf-ec.ts) keeps the rewritten
+/// binding's source location on every helper binding a rule mints — the
+/// N-104 operand gate, the N-251 neg-cancel gate, and the fused-scalar
+/// helper — because stack lowering maps opcodes through `binding.source_loc`.
+/// Before this fix, `optimize_method_ec_once` pushed every helper with
+/// `source_loc: None` regardless of the rewritten binding's own location, so
+/// none of a rewritten EC call's gate opcodes reached the source map.
+///
+/// Proves: a located ecMul(p, 0) rewrite's mul gate (5 bindings), a located
+/// ecAdd(p, ecNegate(p)) rewrite's neg-cancel gate (7 bindings), and a located
+/// nested-ecMul fusion's `_k` helper all carry the rewritten binding's
+/// `source_loc`; an unlocated rewrite mints unlocated helpers.
+///
+/// Does not prove: exact file/line/column assignment upstream in the ANF
+/// lowerer, or end-to-end script-map behavior (covered by the TS test
+/// f343-ec-optimizer-source-loc.test.ts and by conformance, which strips
+/// `sourceLoc` as debug-only and so cannot regress from this change).
+#[cfg(test)]
+mod n218_tests {
+    use super::*;
+    use crate::ir::SourceLocation;
+
+    fn loc() -> SourceLocation {
+        SourceLocation { file: "T.runar.ts".to_string(), line: 7, column: 4 }
+    }
+
+    fn same_loc(a: &Option<SourceLocation>, b: &SourceLocation) -> bool {
+        matches!(a, Some(l) if l.file == b.file && l.line == b.line && l.column == b.column)
+    }
+
+    fn located_call(name: &str, func: &str, args: &[&str]) -> ANFBinding {
+        ANFBinding {
+            name: name.to_string(),
+            value: ANFValue::Call {
+                func: func.to_string(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+            },
+            source_loc: Some(loc()),
+        }
+    }
+
+    fn unlocated(name: &str, value: ANFValue) -> ANFBinding {
+        ANFBinding { name: name.to_string(), value, source_loc: None }
+    }
+
+    fn find<'a>(body: &'a [ANFBinding], name: &str) -> &'a ANFBinding {
+        body.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("missing binding {name}"))
+    }
+
+    fn program_with(body: Vec<ANFBinding>) -> ANFProgram {
+        ANFProgram {
+            contract_name: "Test".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "test".to_string(),
+                params: vec![],
+                body,
+                is_public: true,
+                sighash_type: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn rule4_mul_gate_carries_source_loc() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("zero", ANFValue::LoadConst { value: serde_json::json!(0) }),
+            located_call("t", "ecMul", &["p", "zero"]),
+            unlocated("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        let out = &result.methods[0].body;
+        for name in ["t_inf", "t_isinf", "t_oncurve", "t_ok", "t_gate"] {
+            let b = find(out, name);
+            assert!(same_loc(&b.source_loc, &loc()), "{name}: source_loc = {:?}, want {:?}", b.source_loc, loc());
+        }
+        let t = find(out, "t");
+        assert!(same_loc(&t.source_loc, &loc()), "t: source_loc = {:?}, want {:?}", t.source_loc, loc());
+    }
+
+    #[test]
+    fn rule8_neg_cancel_gate_carries_source_loc() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("n", ANFValue::Call { func: "ecNegate".to_string(), args: vec!["p".to_string()] }),
+            located_call("t", "ecAdd", &["p", "n"]),
+            unlocated("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        let out = &result.methods[0].body;
+        for name in ["t_px", "t_py", "t_zero", "t_pxz", "t_pynz", "t_ok", "t_gate"] {
+            let b = find(out, name);
+            assert!(same_loc(&b.source_loc, &loc()), "{name}: source_loc = {:?}, want {:?}", b.source_loc, loc());
+        }
+    }
+
+    #[test]
+    fn rule9_fused_scalar_helper_carries_source_loc() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("k1", ANFValue::LoadConst { value: serde_json::json!(3) }),
+            unlocated("k2", ANFValue::LoadConst { value: serde_json::json!(5) }),
+            unlocated("inner", ANFValue::Call { func: "ecMul".to_string(), args: vec!["p".to_string(), "k1".to_string()] }),
+            located_call("outer", "ecMul", &["inner", "k2"]),
+            unlocated("a", ANFValue::Assert { value: "outer".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        let out = &result.methods[0].body;
+        let helper = find(out, "outer_k");
+        assert!(same_loc(&helper.source_loc, &loc()), "outer_k: source_loc = {:?}, want {:?}", helper.source_loc, loc());
+        let outer = find(out, "outer");
+        assert!(same_loc(&outer.source_loc, &loc()), "outer: source_loc = {:?}, want {:?}", outer.source_loc, loc());
+    }
+
+    #[test]
+    fn unlocated_rewrite_mints_unlocated_helpers() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("zero", ANFValue::LoadConst { value: serde_json::json!(0) }),
+            unlocated("t", ANFValue::Call { func: "ecMul".to_string(), args: vec!["p".to_string(), "zero".to_string()] }),
+            unlocated("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        for b in &result.methods[0].body {
+            assert!(b.source_loc.is_none(), "{}: expected no source_loc, got {:?}", b.name, b.source_loc);
+        }
     }
 }

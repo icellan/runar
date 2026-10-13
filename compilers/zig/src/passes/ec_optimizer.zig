@@ -140,7 +140,15 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
             // `new_body` doubles as the prelude list: a rule that folds a new
             // constant appends its binding here, i.e. immediately BEFORE the
             // binding being rewritten (see `freshConstName`).
+            const prelude_start = new_body.items.len;
             if (tryOptimize(allocator, binding.name, current.value, &value_map, &used_names, &new_body)) |optimized| {
+                // N-218: every helper a rewrite mints (the N-104/N-251 gate
+                // bindings, the fused-scalar helper) takes the rewritten
+                // binding's own source_loc, mirroring F-343 in the TS
+                // reference (anf-ec.ts optimizeBodyOnce) -- it exists only
+                // because of that source expression, and stack lowering maps
+                // opcodes through binding.source_loc.
+                for (new_body.items[prelude_start..]) |*helper| helper.source_loc = binding.source_loc;
                 current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
                 changed = true;
             }
@@ -1146,4 +1154,118 @@ test "N-251 ec-add-negate-cancel-reversed keeps the adder's y = 0 abort" {
         &N251_NEG_CANCEL_GATE,
         "const INFINITY",
     );
+}
+
+// --- N-218: port of F-343 to this tier ---
+//
+// The TS reference's optimizeBodyOnce
+// (packages/runar-compiler/src/optimizer/anf-ec.ts) keeps the rewritten
+// binding's source location on every helper binding a rule mints -- the
+// N-104 operand gate, the N-251 neg-cancel gate, and the fused-scalar helper
+// -- because stack lowering maps opcodes through binding.source_loc. Before
+// this fix, optimizeMethod appended every helper binding with source_loc ==
+// null regardless of the rewritten binding's own location, so none of a
+// rewritten EC call's gate opcodes reached the source map.
+//
+// Proves: a located ecMul(p, 0) rewrite's mul gate (5 bindings), a located
+// ecAdd(p, ecNegate(p)) rewrite's neg-cancel gate (7 bindings), and a located
+// nested-ecMul fusion's `_k` helper all carry the rewritten binding's
+// source_loc; an unlocated rewrite mints unlocated helpers (no source_loc
+// invented from nothing).
+//
+// Does not prove: exact file/line/column assignment upstream in the ANF
+// lowerer, or end-to-end script-map behavior -- that is covered by the TS
+// test f343-ec-optimizer-source-loc.test.ts and by conformance, which strips
+// sourceLoc as debug-only and so cannot regress from this change.
+
+const N218_LOC = types.SourceLocation{ .file = "T.runar.ts", .line = 7, .column = 4 };
+
+fn n218FindBinding(body: []const types.ANFBinding, name: []const u8) !types.ANFBinding {
+    for (body) |b| {
+        if (std.mem.eql(u8, b.name, name)) return b;
+    }
+    std.debug.print("  missing binding: {s}\n", .{name});
+    return error.TestUnexpectedResult;
+}
+
+fn n218ExpectLoc(b: types.ANFBinding) !void {
+    const loc = b.source_loc orelse {
+        std.debug.print("  {s}: source_loc is null, want {s}:{d}:{d}\n", .{ b.name, N218_LOC.file, N218_LOC.line, N218_LOC.column });
+        return error.TestUnexpectedResult;
+    };
+    try testing.expectEqualStrings(N218_LOC.file, loc.file);
+    try testing.expectEqual(N218_LOC.line, loc.line);
+    try testing.expectEqual(N218_LOC.column, loc.column);
+}
+
+test "N-218 rule 4 mul gate carries the rewritten binding's source_loc" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_param = .{ .name = "pt" } }),
+        makeBinding("zero", .{ .load_const = .{ .value = .{ .integer = 0 } } }),
+        .{ .name = "t", .value = .{ .call = .{ .func = "ecMul", .args = &.{ "p", "zero" } } }, .source_loc = N218_LOC },
+        makeBinding("a", .{ .assert = .{ .value = "t" } }),
+    };
+    const out = try optimize(a, testProgram(&.{testMethod(&body)}));
+    const got_body = out.methods[0].body;
+    for ([_][]const u8{ "t_inf", "t_isinf", "t_oncurve", "t_ok", "t_gate" }) |name| {
+        try n218ExpectLoc(try n218FindBinding(got_body, name));
+    }
+    try n218ExpectLoc(try n218FindBinding(got_body, "t"));
+}
+
+test "N-218 rule 8 neg-cancel gate carries the rewritten binding's source_loc" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_param = .{ .name = "pt" } }),
+        makeBinding("n", .{ .call = .{ .func = "ecNegate", .args = &.{"p"} } }),
+        .{ .name = "t", .value = .{ .call = .{ .func = "ecAdd", .args = &.{ "p", "n" } } }, .source_loc = N218_LOC },
+        makeBinding("a", .{ .assert = .{ .value = "t" } }),
+    };
+    const out = try optimize(a, testProgram(&.{testMethod(&body)}));
+    const got_body = out.methods[0].body;
+    for ([_][]const u8{ "t_px", "t_py", "t_zero", "t_pxz", "t_pynz", "t_ok", "t_gate" }) |name| {
+        try n218ExpectLoc(try n218FindBinding(got_body, name));
+    }
+}
+
+test "N-218 rule 9 fused-scalar helper carries the rewritten binding's source_loc" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_param = .{ .name = "pt" } }),
+        makeBinding("k1", .{ .load_const = .{ .value = .{ .integer = 3 } } }),
+        makeBinding("k2", .{ .load_const = .{ .value = .{ .integer = 5 } } }),
+        makeBinding("inner", .{ .call = .{ .func = "ecMul", .args = &.{ "p", "k1" } } }),
+        .{ .name = "outer", .value = .{ .call = .{ .func = "ecMul", .args = &.{ "inner", "k2" } } }, .source_loc = N218_LOC },
+        makeBinding("a", .{ .assert = .{ .value = "outer" } }),
+    };
+    const out = try optimize(a, testProgram(&.{testMethod(&body)}));
+    const got_body = out.methods[0].body;
+    try n218ExpectLoc(try n218FindBinding(got_body, "outer_k"));
+    try n218ExpectLoc(try n218FindBinding(got_body, "outer"));
+}
+
+test "N-218 unlocated rewrite mints unlocated helpers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_param = .{ .name = "pt" } }),
+        makeBinding("zero", .{ .load_const = .{ .value = .{ .integer = 0 } } }),
+        makeBinding("t", .{ .call = .{ .func = "ecMul", .args = &.{ "p", "zero" } } }),
+        makeBinding("a", .{ .assert = .{ .value = "t" } }),
+    };
+    const out = try optimize(a, testProgram(&.{testMethod(&body)}));
+    for (out.methods[0].body) |b| {
+        if (b.source_loc != null) {
+            std.debug.print("  {s}: expected null source_loc, got non-null\n", .{b.name});
+            return error.TestUnexpectedResult;
+        }
+    }
 }

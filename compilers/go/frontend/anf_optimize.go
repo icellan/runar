@@ -63,6 +63,15 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
 				changed = true
 				anyChanged = true
 				if len(extra) > 0 {
+					// N-218: every helper a rewrite mints (the N-104/N-251
+					// gate bindings, the fused-scalar helper) takes the
+					// rewritten binding's own SourceLoc, mirroring F-343 in
+					// the TS reference (anf-ec.ts optimizeBodyOnce) — it
+					// exists only because of that source expression, and
+					// stack lowering maps opcodes through binding.SourceLoc.
+					for j := range extra {
+						extra[j].SourceLoc = b.SourceLoc
+					}
 					insertBefore[b.Name] = extra
 					// Register new bindings in lookup map
 					for j := range extra {
