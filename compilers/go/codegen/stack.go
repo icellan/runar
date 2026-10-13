@@ -2506,6 +2506,16 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			thenCtx.sm.removeAtDepth(1)
 		}
 	}
+	// N-072: under a terminal assert the arm's one remaining slot is its
+	// VERDICT, which nothing reads by name. It must not keep the name of the
+	// parent local it asserted (`const x = a; if (c) { assert(x); } else
+	// { assert(b); }`): phase 1 below would then see "the else-arm consumed
+	// `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+	// the depth back with OP_0 -- an arm that always fails.
+	if ta && thenCtx.sm.depth() >= 1 {
+		thenCtx.sm.pop()
+		thenCtx.sm.push("")
+	}
 
 	// Lower else-branch
 	elseCtx := newLoweringContext(nil, ctx.properties)
@@ -2529,6 +2539,11 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			elseCtx.emitOp(StackOp{Op: "nip"})
 			elseCtx.sm.removeAtDepth(1)
 		}
+	}
+	// N-072, see thenCtx above
+	if ta && elseCtx.sm.depth() >= 1 {
+		elseCtx.sm.pop()
+		elseCtx.sm.push("")
 	}
 
 	// Balance stack between branches so both end at the same depth.

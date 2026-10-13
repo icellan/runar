@@ -2717,6 +2717,16 @@ class LoweringContext {
         thenCtx.stackMap.removeAtDepth(1);
       }
     }
+    // N-072: under a terminal assert the arm's one remaining slot is its
+    // VERDICT, which nothing reads by name. It must not keep the name of the
+    // parent local it asserted (`const x = a; if (c) { assert(x); } else
+    // { assert(b); }`): phase 1 below would then see "the else-arm consumed
+    // `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+    // the depth back with OP_0 — an arm that always fails.
+    if (terminalAssert && thenCtx.stackMap.depth >= 1) {
+      thenCtx.stackMap.pop();
+      thenCtx.stackMap.push(null);
+    }
 
     // Lower else-branch
     const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
@@ -2736,6 +2746,10 @@ class LoweringContext {
         elseCtx.emitOp({ op: 'nip' });
         elseCtx.stackMap.removeAtDepth(1);
       }
+    }
+    if (terminalAssert && elseCtx.stackMap.depth >= 1) { // N-072, see thenCtx
+      elseCtx.stackMap.pop();
+      elseCtx.stackMap.push(null);
     }
 
     // Balance stack between branches so both end at the same depth.

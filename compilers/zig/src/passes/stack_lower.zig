@@ -5290,6 +5290,16 @@ const LowerCtx = struct {
                 try then_ctx.stack.removeAtDepth(self.allocator, 1);
             }
         }
+        // N-072: under a terminal assert the arm's one remaining slot is its
+        // VERDICT, which nothing reads by name. It must not keep the name of the
+        // parent local it asserted (`const x = a; if (c) { assert(x); } else
+        // { assert(b); }`): phase 1 below would then see "the else-arm consumed
+        // `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+        // the depth back with OP_0 -- an arm that always fails.
+        if (terminal_assert and then_ctx.stack.depth() >= 1) {
+            _ = then_ctx.stack.pop();
+            try then_ctx.stack.push(self.allocator, null);
+        }
 
         var else_ctx = LowerCtx.init(self.allocator, self.program);
         defer else_ctx.deinit();
@@ -5313,6 +5323,11 @@ const LowerCtx = struct {
                 try else_ctx.emitOp(.op_nip);
                 try else_ctx.stack.removeAtDepth(self.allocator, 1);
             }
+        }
+        // N-072, see then_ctx above
+        if (terminal_assert and else_ctx.stack.depth() >= 1) {
+            _ = else_ctx.stack.pop();
+            try else_ctx.stack.push(self.allocator, null);
         }
 
         // Phase 1: collect consumed names from both directions.

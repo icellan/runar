@@ -2534,6 +2534,16 @@ module RunarCompiler::Codegen
           then_ctx.sm.remove_at_depth(1)
         end
       end
+      # N-072: under a terminal assert the arm's one remaining slot is its
+      # VERDICT, which nothing reads by name. It must not keep the name of the
+      # parent local it asserted (`const x = a; if (c) { assert(x); } else
+      # { assert(b); }`): phase 1 below would then see "the else-arm consumed
+      # `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+      # the depth back with OP_0 -- an arm that always fails.
+      if terminal_assert && then_ctx.sm.depth >= 1
+        then_ctx.sm.pop
+        then_ctx.sm.push("")
+      end
 
       # Lower else-branch
       else_ctx = LoweringContext.new(nil, @properties)
@@ -2555,6 +2565,11 @@ module RunarCompiler::Codegen
           else_ctx.emit_op({ op: "nip" })
           else_ctx.sm.remove_at_depth(1)
         end
+      end
+      # N-072, see then_ctx above
+      if terminal_assert && else_ctx.sm.depth >= 1
+        else_ctx.sm.pop
+        else_ctx.sm.push("")
       end
 
       # Balance stack between branches
