@@ -538,6 +538,11 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 // stop-at-first-failure semantics — the only addition is the second return
 // value.
 func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptions) (*Artifact, []frontend.Diagnostic, error) {
+	o := mergeOptions(opts)
+	if err := rejectUnsupportedStopAfterPassOptions(o); err != nil {
+		return nil, nil, err
+	}
+
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading source file: %w", err)
@@ -582,8 +587,9 @@ func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptio
 		return nil, nil, err
 	}
 
-	// Feed into existing compilation pipeline (passes 4.25+).
-	o := mergeOptions(opts)
+	// Feed into existing compilation pipeline (passes 4.25+). o was merged
+	// (and checked for ParseOnly/ValidateOnly/TypecheckOnly) at the top of
+	// this function.
 
 	// R-162 divergence (3), in the other direction: the issue-#109 embedAlways
 	// DCE notice ran ONLY in the *WithResult paths, so the API whose entire
@@ -634,6 +640,42 @@ func ParseAndValidateOnly(source []byte, sourcePath string) ParseAndValidateOnly
 	return ParseAndValidateOnlyResult{Err: nil, Warnings: validResult.Warnings}
 }
 
+// N-194: ParseOnly / ValidateOnly / TypecheckOnly are honored only by
+// CompileFromSourceStrWithResult (and CompileFromSourceWithResult), which
+// collect diagnostics into a CompileResult and can represent "stopped
+// successfully after an earlier pass, no artifact yet" as a value.
+//
+// CompileFromSourceCollectingWarnings and CompileSourceToIRCollectingWarnings
+// (and their thin wrappers CompileFromSource / CompileSourceToIR) cannot
+// represent that outcome — there is no value to put in the *Artifact /
+// *ir.ANFProgram return slot after stopping before it exists. Before this
+// fix they never checked these fields and ran every later pass anyway, so
+// whether the option did anything depended on which entry point the caller
+// happened to call rather than on the option itself (the same gap F-217
+// fixed in the Rust tier's sibling APIs). Reject explicitly instead, before
+// any pass runs, and name the dedicated API that does honor it.
+func rejectUnsupportedStopAfterPassOptions(o CompileOptions) error {
+	var set []string
+	if o.ParseOnly {
+		set = append(set, "ParseOnly")
+	}
+	if o.ValidateOnly {
+		set = append(set, "ValidateOnly")
+	}
+	if o.TypecheckOnly {
+		set = append(set, "TypecheckOnly")
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"CompileOptions.%s is not supported by this API: it would stop before an artifact "+
+			"or ANF program exists, and this API has no way to return a value for that. Use "+
+			"CompileFromSourceStrWithResult (or CompileFromSourceWithResult), which honors this "+
+			"option and reports partial success via CompileResult.",
+		strings.Join(set, " / "))
+}
+
 // diagStrings renders a diagnostic slice as a list of error messages for
 // `fmt.Errorf` consumption.
 func diagStrings(diags []frontend.Diagnostic) []string {
@@ -661,6 +703,11 @@ func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgra
 // F-220: `--emit-ir` used CompileSourceToIR, so every warning (the H2
 // locktime-bypass advisory among them) was dropped on that path.
 func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptions) (*ir.ANFProgram, []frontend.Diagnostic, error) {
+	o := mergeOptions(opts)
+	if err := rejectUnsupportedStopAfterPassOptions(o); err != nil {
+		return nil, nil, err
+	}
+
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading source file: %w", err)
@@ -697,7 +744,8 @@ func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptio
 	}
 	warnings = append(warnings, frontend.CollectEmbedAlwaysDCEWarnings(expandResult.Contract, program)...)
 
-	o := mergeOptions(opts)
+	// o was merged (and checked for ParseOnly/ValidateOnly/TypecheckOnly) at
+	// the top of this function.
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
 		program = frontend.FoldConstants(program)
