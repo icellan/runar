@@ -1216,7 +1216,22 @@ fn eval_value(
                 }
             }
             let witness = strict.and_then(|c| c.witness.as_ref());
-            eval_call(&func, &args, real_crypto, witness, script_code)
+            let result = eval_call(&func, &args, real_crypto, witness, script_code);
+            // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+            // does not verify aborts the script; only an empty one pushes
+            // false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
+            // fail takes an empty signature (EMPTY_SIG, issue #106). `Spend`
+            // has no NULLFAIL. Same rejection channel as the N-197 gate above.
+            if real_crypto.is_some() && func == "checkSig" && matches!(result, Val::Bool(false)) {
+                let sig = args.first().cloned().unwrap_or(Val::Undefined);
+                if val_to_bytes(&sig).is_some_and(|b| !b.is_empty()) {
+                    return Err(AssertionFailureError {
+                        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
+            }
+            result
         }
 
         "method_call" => {
@@ -2180,8 +2195,9 @@ fn is_strict_der_signature(der: &[u8]) -> bool {
 /// non-empty signature must be strict DER (BIP66) with a low S; the public key
 /// -- checked even when the signature is empty -- must be 33 bytes behind
 /// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
-/// signature, or a well-formed one that does not verify, is not an abort
-/// (`Spend` has no NULLFAIL; it pushes false). The signature layout is the one
+/// signature, or a well-formed one that does not verify, is not an encoding
+/// abort (`Spend` has no NULLFAIL; it pushes false); the `checkSig` call site
+/// applies NULLFAIL after verification (N-198). The signature layout is the one
 /// `verify_ecdsa_real` accepts: DER with an optional trailing sighash byte.
 /// Operands that are not bytes at all are left to `verify_ecdsa_real`.
 fn check_sig_encoding_error(sig_val: &Val, pk_val: &Val) -> Option<&'static str> {

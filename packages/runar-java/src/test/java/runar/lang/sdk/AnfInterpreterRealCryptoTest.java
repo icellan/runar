@@ -169,7 +169,10 @@ class AnfInterpreterRealCryptoTest {
         AnfInterpreter.OnChainCryptoContext ctx =
             new AnfInterpreter.OnChainCryptoContext(sighash);
 
-        assertThrows(AnfInterpreter.AssertionFailureException.class, () ->
+        // N-198: a NON-EMPTY signature that does not verify aborts the script
+        // under NULLFAIL (BIP146) on a node, so this is an opcode abort, not an
+        // assert on a pushed false.
+        AnfInterpreter.InterpreterException e = assertThrows(AnfInterpreter.InterpreterException.class, () ->
             AnfInterpreter.executeOnChainAuthoritative(
                 sigGuardAnf(), "unlock",
                 Map.of("value", BigInteger.ZERO),
@@ -178,6 +181,7 @@ class AnfInterpreterRealCryptoTest {
                 ctx
             )
         );
+        assertTrue(e.getMessage().contains("OP_CHECKSIG aborts"), e.getMessage());
     }
 
     @Test
@@ -189,7 +193,10 @@ class AnfInterpreterRealCryptoTest {
         AnfInterpreter.OnChainCryptoContext ctx =
             new AnfInterpreter.OnChainCryptoContext(sighashClaimed);
 
-        assertThrows(AnfInterpreter.AssertionFailureException.class, () ->
+        // N-198: a NON-EMPTY signature that does not verify aborts the script
+        // under NULLFAIL (BIP146) on a node, so this is an opcode abort, not an
+        // assert on a pushed false.
+        AnfInterpreter.InterpreterException e = assertThrows(AnfInterpreter.InterpreterException.class, () ->
             AnfInterpreter.executeOnChainAuthoritative(
                 sigGuardAnf(), "unlock",
                 Map.of("value", BigInteger.ZERO),
@@ -198,6 +205,7 @@ class AnfInterpreterRealCryptoTest {
                 ctx
             )
         );
+        assertTrue(e.getMessage().contains("does not verify (NULLFAIL)"), e.getMessage());
     }
 
     // ---- checkPreimage ---------------------------------------------------

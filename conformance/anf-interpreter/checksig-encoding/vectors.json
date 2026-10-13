@@ -1,5 +1,5 @@
 {
-  "_doc": "N-197. Replayed by ../checksig-encoding-abort.test.ts through every SDK ANF interpreter in on-chain mode (TS in-process, the six drivers via --mode=on-chain) and through @bsv/sdk Spend.validate() as the oracle. Program: ../programs/checksig-or-probe.anf.json, i.e. assert(checkSig(sigA, pubA) || checkSig(sigB, pubB)). sighash = sha256(\"runar-n197-checksig-encoding-abort\"); signatures are RFC 6979 low-S ECDSA over that 32-byte digest directly (no extra hash) plus a 0x41 sighash-type byte. sigB/pubB (priv 0x22..22) always verify, so a case that does not abort falls through to the B-arm and succeeds. Priv A = 0x11..11, the wrong key = 0x33..33. `aborts` and `reason` are the expected verdict; the test re-derives the abort verdict from Spend on every run.",
+  "_doc": "N-197. Replayed by ../checksig-encoding-abort.test.ts through every SDK ANF interpreter in on-chain mode (TS in-process, the six drivers via --mode=on-chain) and through @bsv/sdk Spend.validate() as the oracle. Program: ../programs/checksig-or-probe.anf.json, i.e. assert(checkSig(sigA, pubA) || checkSig(sigB, pubB)). sighash = sha256(\"runar-n197-checksig-encoding-abort\"); signatures are RFC 6979 low-S ECDSA over that 32-byte digest directly (no extra hash) plus a 0x41 sighash-type byte. sigB/pubB (priv 0x22..22) always verify, so a case that does not abort falls through to the B-arm and succeeds. Priv A = 0x11..11, the wrong key = 0x33..33. `aborts` and `reason` are the expected verdict of every SDK interpreter. For an encoding case the test re-derives that verdict from Spend on every run. A `nullfail` case (N-198) is a non-empty, well-formed signature that does not verify: a BSV node aborts there under NULLFAIL (BIP146, issue #106; ARC answers 461), but @bsv/sdk Spend has no NULLFAIL and pushes false, so for those cases Spend is NOT the oracle -- the test pins that Spend falls through to the B-arm and that every interpreter aborts as the node does.",
   "sighash": "52837ae360b96e9024cbef74d903df7ec97a4e7d628265378e6edfe03139ebd5",
   "sigB": "304402204d34efefcbee951b188b0c89f3083c436beed818b954a5e9e11c021663f48cbc02205a9ced0dcc9c3de2e237e033da6b38420aacffa8cbf57398add5e019b38638ae41",
   "pubB": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
@@ -33,10 +33,12 @@
       "reason": "the public key is not a point on secp256k1"
     },
     {
-      "name": "control: well-formed signature by the wrong key",
+      "name": "NULLFAIL: well-formed signature by the wrong key",
       "sigA": "3044022012bf447e57ccf1a7dd7a25069ddbe94278ca47e4cecfd10797a6c849dcec8c0602204f8dca046d0e2cb5ee064347ba783b769b4c09fb76323c474fe2480d32839c0141",
       "pubA": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "aborts": false
+      "aborts": true,
+      "nullfail": true,
+      "reason": "the signature is non-empty and does not verify (NULLFAIL)"
     },
     {
       "name": "control: empty signature",
@@ -45,9 +47,23 @@
       "aborts": false
     },
     {
-      "name": "control: uncompressed public key, wrong-key signature",
+      "name": "NULLFAIL: uncompressed public key, wrong-key signature",
       "sigA": "3044022012bf447e57ccf1a7dd7a25069ddbe94278ca47e4cecfd10797a6c849dcec8c0602204f8dca046d0e2cb5ee064347ba783b769b4c09fb76323c474fe2480d32839c0141",
       "pubA": "044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1",
+      "aborts": true,
+      "nullfail": true,
+      "reason": "the signature is non-empty and does not verify (NULLFAIL)"
+    },
+    {
+      "name": "control: empty signature, uncompressed public key",
+      "sigA": "",
+      "pubA": "044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1",
+      "aborts": false
+    },
+    {
+      "name": "control: sigA verifies, so the A-arm succeeds",
+      "sigA": "304402202014729e174761660db68a344e6de21ef31a83ecbd9137b62e4b0b75a074a304022053c62e76e2f5146e53ff19d88b1c134754fb93c9b9f7749ca6765d88c667c65741",
+      "pubA": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
       "aborts": false
     }
   ]

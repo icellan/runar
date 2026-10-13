@@ -182,7 +182,9 @@ pub const StrictError = error{
     /// exactly these cases; the interpreter surfaces the same failure so
     /// off-chain simulation agrees with the deployed script byte-for-byte.
     /// On-chain mode also raises it where `OP_CHECKSIG` aborts on a malformed
-    /// signature or public-key encoding (N-197, `checkSigEncodingError`).
+    /// signature or public-key encoding (N-197, `checkSigEncodingError`), and
+    /// where a node aborts it under NULLFAIL on a non-empty signature that
+    /// does not verify (N-198).
     ScriptNumberError,
 };
 
@@ -1018,7 +1020,24 @@ fn evalNode(
                     return error.ScriptNumberError;
                 }
             }
-            return evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
+            const result = evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
+            // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+            // does not verify aborts the script; only an empty one pushes
+            // false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
+            // fail takes an empty signature (EMPTY_SIG, issue #106). `Spend`
+            // has no NULLFAIL. Same rejection channel as the N-197 gate above.
+            if (real_crypto != null and std.mem.eql(u8, c.func, "checkSig")) {
+                const failed = switch (result) {
+                    .boolean => |b| !b,
+                    else => false,
+                };
+                const sig_nonempty = switch (getArg(c.args, 0, env)) {
+                    .bytes => |b| b.len > 0,
+                    else => false,
+                };
+                if (failed and sig_nonempty) return error.ScriptNumberError;
+            }
+            return result;
         },
         .method_call => |mc| {
             return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
@@ -2066,8 +2085,9 @@ fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFVa
 /// non-empty signature must be strict DER (BIP66) with a low S; the public key
 /// -- checked even when the signature is empty -- must be 33 bytes behind
 /// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
-/// signature, or a well-formed one that does not verify, is not an abort
-/// (`Spend` has no NULLFAIL; it pushes false). The signature layout is the one
+/// signature, or a well-formed one that does not verify, is not an encoding
+/// abort (`Spend` has no NULLFAIL; it pushes false); the `checkSig` call site
+/// applies NULLFAIL after verification (N-198). The signature layout is the one
 /// `verifyEcdsaReal` accepts: DER with an optional trailing sighash byte.
 /// Operands that are not hex bytes at all are left to `verifyEcdsaReal`.
 fn checkSigEncodingError(allocator: std.mem.Allocator, sig_val: ANFValue, pk_val: ANFValue) ?[]const u8 {
@@ -3694,7 +3714,10 @@ test "executeOnChainAuthoritative — checkSig fails with a corrupted signature"
         allocator, &anf, "unlock", current_state, args, &.{},
         .{ .sighash = sighash },
     );
-    try std.testing.expectError(StrictError.AssertionFailure, result);
+    // N-198: a NON-EMPTY signature that does not verify aborts the script
+    // under NULLFAIL (BIP146) on a node, so the refusal comes through the
+    // opcode-abort channel, not an assert on a pushed false.
+    try std.testing.expectError(StrictError.ScriptNumberError, result);
 }
 
 // F-242 (CL-BUG-160): strict DER (BIP66). conformance/sdk-der/vectors.json

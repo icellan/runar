@@ -1248,7 +1248,16 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 					" — OP_CHECKSIG aborts the script on a malformed signature or public key encoding, it does not push false"})
 			}
 		}
-		return anfVerifyEcdsa(sig, pk, realCrypto.Sighash[:])
+		ok := anfVerifyEcdsa(sig, pk, realCrypto.Sighash[:])
+		// N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that does
+		// not verify aborts the script; only an empty one pushes false. So the
+		// arm of `checkSig(a, A) || checkSig(b, B)` that must fail takes an
+		// empty signature (EMPTY_SIG, issue #106). Spend has no NULLFAIL.
+		if !ok && len(anfToHexBytes(sig)) > 0 {
+			panic(&ScriptOpcodeError{Opcode: "checkSig", Message: "the signature is non-empty and does not verify (NULLFAIL)" +
+				" — OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false; the arm that must fail takes an empty signature (EMPTY_SIG)"})
+		}
+		return ok
 	case "checkMultiSig":
 		if realCrypto == nil {
 			return true

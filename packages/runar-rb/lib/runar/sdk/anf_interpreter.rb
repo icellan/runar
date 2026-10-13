@@ -962,7 +962,18 @@ module Runar
               raise "checkSig: #{reason} — OP_CHECKSIG aborts the script on a malformed " \
                     'signature or public key encoding, it does not push false'
             end
-            verify_ecdsa_real(args[0], args[1], real_crypto.sighash)
+            ok = verify_ecdsa_real(args[0], args[1], real_crypto.sighash)
+            # N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+            # does not verify aborts the script; only an empty one pushes
+            # false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
+            # fail takes an empty signature (EMPTY_SIG, issue #106). Spend has
+            # no NULLFAIL.
+            if !ok && !to_hex_arg(args[0]).to_s.empty?
+              raise 'checkSig: the signature is non-empty and does not verify (NULLFAIL) — ' \
+                    'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push ' \
+                    'false; the arm that must fail takes an empty signature (EMPTY_SIG)'
+            end
+            ok
           else
             true
           end
@@ -1324,8 +1335,9 @@ module Runar
       # be strict DER (BIP66) with a low S; the public key -- checked even when
       # the signature is empty -- must be 33 bytes behind 0x02/0x03 or 65 bytes
       # behind 0x04 and decode to a curve point. An empty signature, or a
-      # well-formed one that does not verify, is not an abort (+Spend+ has no
-      # NULLFAIL; it pushes false). The signature layout is the one
+      # well-formed one that does not verify, is not an encoding abort (+Spend+
+      # has no NULLFAIL; it pushes false); the +checkSig+ call site applies
+      # NULLFAIL after verification (N-198). The signature layout is the one
       # +verify_ecdsa_real+ accepts: DER with an optional trailing sighash
       # byte. Operands that are not hex at all are left to +verify_ecdsa_real+.
       def check_sig_encoding_error(sig_val, pk_val)

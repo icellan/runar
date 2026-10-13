@@ -118,17 +118,23 @@ non-zero with a stderr message.
   - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1
     secp256k1. DER signature with optional trailing sighash type byte
     stripped. Verification is against the raw 32-byte sighash (no extra
-    SHA-256), matching the on-chain `OP_CHECKSIG` semantic. A well-formed
-    signature that does not verify (or an empty one) yields `false`. A
-    MALFORMED encoding aborts instead, as `OP_CHECKSIG` does on `@bsv/sdk`
+    SHA-256), matching the on-chain `OP_CHECKSIG` semantic. An EMPTY
+    signature that does not verify yields `false`. A NON-EMPTY, well-formed
+    signature that does not verify aborts (N-198): a node rejects it under
+    NULLFAIL (BIP146), so the arm of `checkSig(a, A) || checkSig(b, B)` that
+    must fail takes an empty signature (`EMPTY_SIG`). `@bsv/sdk` `Spend` has no
+    NULLFAIL and pushes false there. A
+    MALFORMED encoding aborts too, as `OP_CHECKSIG` does on `@bsv/sdk`
     `Spend` (N-197): a non-empty signature that is not strict DER or has a
     high S, or a public key that is not 0x02/0x03 + 33 bytes or 0x04 + 65
     bytes on the curve. Each tier raises it through its OP_SPLIT-abort
     channel — a plain error carrying `OP_CHECKSIG aborts` (TS / Go / Python /
     Ruby / Java: non-zero exit + stderr), `error.ScriptNumberError` (Zig), or
     an `AssertionFailureError` at the `checkSig` call binding (Rust). Pinned
-    by `../checksig-encoding-abort.test.ts` over `../checksig-encoding/vectors.json`.
-    `checkMultiSig` does not apply these gates.
+    by `../checksig-encoding-abort.test.ts` over `../checksig-encoding/vectors.json`
+    (the NULLFAIL abort uses the same channels; `../cross-interpreter-real-crypto.test.ts`
+    normalises them to `{ "error": "ScriptAbort", "methodName": "<m>" }`).
+    `checkMultiSig` applies neither these gates nor NULLFAIL.
   - `checkMultiSig(sigs, pks)` → iterate sigs left-to-right, consume
     pubkeys greedily.
   - `checkPreimage(preimage)` → `hash256(preimage) == sighash`

@@ -1021,7 +1021,19 @@ export class RunarInterpreter {
               'signature or public key encoding, it does not push false',
           );
         }
-        return { kind: 'boolean', value: verifyTestMessageSig(sig, pubKey) };
+        const ok = verifyTestMessageSig(sig, pubKey);
+        // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+        // does not verify aborts the script; only an empty one pushes false.
+        // So the arm of `checkSig(a, A) || checkSig(b, B)` that must fail
+        // takes an empty signature (EMPTY_SIG, issue #106).
+        if (!ok && sig.length > 0) {
+          throw new Error(
+            'checkSig: the signature is non-empty and does not verify (NULLFAIL) — ' +
+              'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false; ' +
+              'the arm that must fail takes an empty signature (EMPTY_SIG)',
+          );
+        }
+        return { kind: 'boolean', value: ok };
       }
 
       case 'checkMultiSig': {

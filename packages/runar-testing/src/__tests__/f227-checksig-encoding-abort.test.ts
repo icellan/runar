@@ -41,10 +41,19 @@
  * in BOTH engines — the interpreter's sigB is over TEST_MESSAGE and never
  * verifies on chain, the oracle's sigB is over the real sighash; (c) anything
  * about the SDK ANF interpreters' on-chain mode in any tier, or about
- * CL-BUG-098/099 (Merkle / BLAKE3), which are separate items; (d) NULLFAIL.
- * The wrong-key control pins agreement with `Spend`, which does not implement
- * NULLFAIL; a real node does (issue #106) and would abort on that non-empty
- * failing signature. The interpreter, like `Spend`, answers false there.
+ * CL-BUG-098/099 (Merkle / BLAKE3), which are separate items.
+ *
+ * N-198 (NULLFAIL, user decision R73.2): a NON-EMPTY, well-formed signature
+ * that does not verify aborts the script on a BSV node (BIP146; ARC answers
+ * 461), so the interpreter now aborts there too, and the arm that must fail
+ * takes an empty signature (`EMPTY_SIG`, issue #106). The two wrong-key cases
+ * are therefore `nullfail` cases: `Spend` has NO NULLFAIL rule and pushes
+ * false, so for them `Spend` is NOT the oracle — the consensus rule as a node
+ * enforces it is (witnessed on regtest by
+ * integration/ts/nullfail-multimethod.test.ts). The oracle test still runs
+ * them and pins that `Spend` falls through to sigB, documenting the
+ * divergence; nothing in this file checks the NULLFAIL verdict against an
+ * engine independent of the interpreter.
  */
 import { describe, it, expect } from 'vitest';
 import { PrivateKey, Signature, BigNumber } from '@bsv/sdk';
@@ -106,6 +115,8 @@ interface Case {
   pubA: string;
   /** Oracle verdict: does OP_CHECKSIG on the A-arm abort the script? */
   aborts: boolean;
+  /** N-198: aborts on a node under NULLFAIL; `Spend` (no NULLFAIL) does not. */
+  nullfail?: boolean;
   /** The Spend error the abort must carry. */
   oracleError?: RegExp;
   /** The interpreter's abort reason (the gate that fired). */
@@ -119,18 +130,25 @@ const CASES: Case[] = [
   // error — so that is the message the abort carries.
   { name: 'high-S signature', sigA: highSSig(), pubA: PUB_A, aborts: true, oracleError: /signature format is invalid/i, interpError: /low S/ },
   { name: 'public key with an unknown prefix (empty sig)', sigA: '', pubA: PUB_A_BAD_PREFIX, aborts: true, oracleError: /public key/i, interpError: /public key is not a 33-byte/ },
-  { name: 'control: well-formed signature by the wrong key', sigA: wrongKeySig(), pubA: PUB_A, aborts: false },
+  { name: 'NULLFAIL: well-formed signature by the wrong key', sigA: wrongKeySig(), pubA: PUB_A, aborts: true, nullfail: true, interpError: /non-empty and does not verify \(NULLFAIL\)/ },
   { name: 'control: empty signature', sigA: '', pubA: PUB_A, aborts: false },
-  { name: 'control: uncompressed public key', sigA: wrongKeySig(), pubA: PUB_A_UNCOMPRESSED, aborts: false },
+  { name: 'NULLFAIL: uncompressed public key, wrong-key signature', sigA: wrongKeySig(), pubA: PUB_A_UNCOMPRESSED, aborts: true, nullfail: true, interpError: /non-empty and does not verify \(NULLFAIL\)/ },
+  { name: 'control: empty signature, uncompressed public key', sigA: '', pubA: PUB_A_UNCOMPRESSED, aborts: false },
+  // Verifies over TEST_MESSAGE, so the interpreter takes the A-arm. On Spend
+  // it is a non-empty signature over the wrong digest, which (no NULLFAIL)
+  // falls through to sigB.
+  { name: 'control: sigA verifies in the interpreter', sigA: signTestMessage(PRIV_A) + SIGHASH_ALL_FORKID, pubA: PUB_A, aborts: false },
 ];
 
 describe('F-227: checkSig on a malformed encoding aborts, it does not answer false', () => {
   const script = ScriptExecutionContract.fromSource(SOURCE, {}, FILE);
 
   for (const c of CASES) {
-    it(`oracle (Spend.validate): ${c.name} → ${c.aborts ? 'abort' : 'falls through to sigB'}`, () => {
+    // A `nullfail` case is Spend's verdict, not a node's (see header).
+    const spendAborts = c.aborts && !c.nullfail;
+    it(`oracle (Spend.validate): ${c.name} → ${spendAborts ? 'abort' : 'falls through to sigB'}`, () => {
       const r = script.executeSigned('unlock', [c.sigA, c.pubA, '', PUB_B], 2, PrivateKey.fromHex(PRIV_B));
-      if (c.aborts) {
+      if (spendAborts) {
         expect(r.success).toBe(false);
         expect(r.error).toMatch(c.oracleError!);
       } else {
@@ -138,7 +156,7 @@ describe('F-227: checkSig on a malformed encoding aborts, it does not answer fal
       }
     });
 
-    it(`interpreter (TestContract): ${c.name} → ${c.aborts ? 'abort' : 'falls through to sigB'}`, () => {
+    it(`interpreter (TestContract): ${c.name} → ${c.aborts ? 'abort' : 'succeeds'}`, () => {
       const contract = TestContract.fromSource(SOURCE, {}, FILE);
       const r = contract.call('unlock', {
         sigA: c.sigA,

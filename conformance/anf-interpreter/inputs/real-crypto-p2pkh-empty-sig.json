@@ -1,0 +1,14 @@
+{
+  "case": "basic-p2pkh",
+  "methodName": "unlock",
+  "currentState": {},
+  "args": {
+    "sig": "",
+    "pubKey": "02057ffc2b5e380939f86a29693fe6561883c4cce0ec89f215ae417dcdd1fdaa41"
+  },
+  "constructorArgs": [
+    "e00abe3873ca70f0ba63dec7e8b638062b0e9d47"
+  ],
+  "sighash": "66f605fe8c48e394c387cf4e64e859926168637caeafe8e98347232a33244588",
+  "_doc": "Real-crypto failing fixture (N-198). Same pubKey and sighash as the pass fixture, but an EMPTY signature (EMPTY_SIG). OP_CHECKSIG pushes false for an empty signature even under NULLFAIL, so real-crypto mode raises AssertionFailureError at the assert(checkSig(...)) binding \u2014 the counterpart of real-crypto-p2pkh-fail.json, whose non-empty failing signature aborts instead."
+}

@@ -62,6 +62,9 @@ Every SDK ships the same three execution modes:
     or a public key that is not 0x02/0x03 + 33 / 0x04 + 65 bytes on the
     curve) ABORTS the run, as `OP_CHECKSIG` does, instead of yielding
     `false` (N-197; `conformance/anf-interpreter/checksig-encoding-abort.test.ts`).
+    So does a NON-EMPTY, well-formed signature that does not verify: a node
+    rejects it under NULLFAIL (BIP146), so an OR-CHECKSIG arm that must fail
+    takes an empty signature (`EMPTY_SIG`), which yields `false` (N-198).
   - `checkMultiSig(sigs, pks)` → left-to-right consume + greedy
     pubkey-match (Bitcoin's `OP_CHECKMULTISIG`).
   - `checkPreimage(preimage)` → `hash256(preimage) == sighash`

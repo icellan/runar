@@ -1307,7 +1307,18 @@ def _eval_call(
                 f'checkSig: {reason} — OP_CHECKSIG aborts the script on a malformed '
                 'signature or public key encoding, it does not push false'
             )
-        return _verify_ecdsa(sig, pk, real_crypto.sighash)
+        ok = _verify_ecdsa(sig, pk, real_crypto.sighash)
+        # N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that does
+        # not verify aborts the script; only an empty one pushes false. So the
+        # arm of `checkSig(a, A) or checkSig(b, B)` that must fail takes an
+        # empty signature (EMPTY_SIG, issue #106). Spend has no NULLFAIL.
+        if not ok and len(_to_byte_array(sig) or b'') > 0:
+            raise ValueError(
+                'checkSig: the signature is non-empty and does not verify (NULLFAIL) — '
+                'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push '
+                'false; the arm that must fail takes an empty signature (EMPTY_SIG)'
+            )
+        return ok
     if func == 'checkMultiSig':
         if real_crypto is None:
             return True
@@ -1992,8 +2003,9 @@ def _check_sig_encoding_error(sig_val: Any, pk_val: Any) -> Optional[str]:
     strict DER (BIP66) with a low S; the public key -- checked even when the
     signature is empty -- must be 33 bytes behind 0x02/0x03 or 65 bytes behind
     0x04 and decode to a curve point. An empty signature, or a well-formed one
-    that does not verify, is not an abort (``Spend`` has no NULLFAIL; it pushes
-    false). The signature layout is the one :func:`_verify_ecdsa` accepts: DER
+    that does not verify, is not an encoding abort (``Spend`` has no NULLFAIL;
+    it pushes false); the ``checkSig`` call site applies NULLFAIL after
+    verification (N-198). The signature layout is the one :func:`_verify_ecdsa` accepts: DER
     with an optional trailing sighash byte. Operands that are not bytes at all
     are left to :func:`_verify_ecdsa`.
     """

@@ -236,9 +236,10 @@ export function executeStrict(
  *  - verifies `checkSig(sig, pk)` by parsing `pk` as a compressed/uncompressed
  *    secp256k1 point, parsing `sig` as DER (with optional trailing sighash byte
  *    stripped), and calling `pubKey.verify(sighash, signature)` — a real
- *    ECDSA verification. A well-formed signature that does not verify
- *    returns `false`, which then trips the enclosing `assert(...)` and
- *    throws. A malformed encoding — a non-empty signature that is not strict
+ *    ECDSA verification. An EMPTY signature returns `false`, which then
+ *    trips the enclosing `assert(...)` and throws. A non-empty, well-formed
+ *    signature that does not verify throws a plain `Error`: a node aborts
+ *    the script there under NULLFAIL (BIP146, N-198). A malformed encoding — a non-empty signature that is not strict
  *    DER or has a high S, or a public key that is not 02/03+33 / 04+65 bytes
  *    on the curve — throws a plain `Error` instead, because `OP_CHECKSIG`
  *    aborts the script there rather than pushing false (N-197).
@@ -1076,7 +1077,19 @@ function evalCall(
             'signature or public key encoding, it does not push false',
         );
       }
-      return verifyEcdsa(args[0], args[1], realCrypto.sighash);
+      const ok = verifyEcdsa(args[0], args[1], realCrypto.sighash);
+      // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that does
+      // not verify aborts the script; only an empty one pushes false. So the
+      // arm of `checkSig(a, A) || checkSig(b, B)` that must fail takes an
+      // empty signature (EMPTY_SIG, issue #106). `Spend` has no NULLFAIL.
+      if (!ok && (toByteArray(args[0])?.length ?? 0) > 0) {
+        throw new Error(
+          'checkSig: the signature is non-empty and does not verify (NULLFAIL) — ' +
+            'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false; ' +
+            'the arm that must fail takes an empty signature (EMPTY_SIG)',
+        );
+      }
+      return ok;
     }
     case 'checkMultiSig': {
       if (!realCrypto) return true;
@@ -1617,8 +1630,9 @@ function parseDerSignatureMaybeWithSighashByte(bytes: number[]): InstanceType<ty
  * a non-empty signature must be strict DER (BIP66) with a low S; the public
  * key — checked even when the signature is empty — must be 33 bytes behind
  * 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
- * signature, or a well-formed one that does not verify, is not an abort
- * (`Spend` has no NULLFAIL; it pushes false). The signature layout is the one
+ * signature, or a well-formed one that does not verify, is not an ENCODING
+ * abort (`Spend` has no NULLFAIL; it pushes false) — the call site applies
+ * NULLFAIL after verification (N-198). The signature layout is the one
  * {@link verifyEcdsa} accepts: DER with an optional trailing sighash byte.
  * Operands that are not bytes at all are left to {@link verifyEcdsa}.
  */

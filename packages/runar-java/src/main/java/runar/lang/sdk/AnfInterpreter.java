@@ -1441,7 +1441,19 @@ public final class AnfInterpreter {
                     throw new InterpreterException("checkSig: " + reason
                         + " \u2014 OP_CHECKSIG aborts the script on a malformed signature or public key encoding, it does not push false");
                 }
-                return verifyEcdsaReal(args.get(0), args.get(1), realCrypto.sighash());
+                boolean ok = verifyEcdsaReal(args.get(0), args.get(1), realCrypto.sighash());
+                // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature
+                // that does not verify aborts the script; only an empty one
+                // pushes false. So the arm of `checkSig(a, A) || checkSig(b, B)`
+                // that must fail takes an empty signature (EMPTY_SIG, issue
+                // #106). Spend has no NULLFAIL.
+                byte[] sigBytes = toBytes(args.get(0));
+                if (!ok && sigBytes != null && sigBytes.length > 0) {
+                    throw new InterpreterException("checkSig: the signature is non-empty and does not verify (NULLFAIL)"
+                        + " \u2014 OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false;"
+                        + " the arm that must fail takes an empty signature (EMPTY_SIG)");
+                }
+                return ok;
             }
             case "checkMultiSig": {
                 if (realCrypto == null) return Boolean.TRUE;
@@ -1775,7 +1787,9 @@ public final class AnfInterpreter {
      * bytes behind 0x04 and decode to a curve point (the shape is checked
      * first: BouncyCastle's decodePoint also accepts 0x06/0x07 hybrid keys).
      * An empty signature, or a well-formed one that does not verify, is not an
-     * abort ({@code Spend} has no NULLFAIL; it pushes false). The signature
+     * encoding abort ({@code Spend} has no NULLFAIL; it pushes false); the
+     * {@code checkSig} call site applies NULLFAIL after verification (N-198).
+     * The signature
      * layout is the one {@link #verifyEcdsaReal} accepts: DER with an optional
      * trailing sighash byte. Operands that are not bytes at all are left to
      * {@link #verifyEcdsaReal}.

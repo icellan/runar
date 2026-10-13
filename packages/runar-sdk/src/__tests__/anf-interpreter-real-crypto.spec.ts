@@ -102,6 +102,11 @@ function makeMultisigGuardANF(): ANFProgram {
   };
 }
 
+// N-198: a NON-EMPTY signature that does not verify aborts the script under
+// NULLFAIL (BIP146) on a node, so the interpreter throws a plain Error there,
+// not an AssertionFailureError from the enclosing assert.
+const NULLFAIL_ABORT = /non-empty and does not verify \(NULLFAIL\) — OP_CHECKSIG aborts/;
+
 describe('ANF interpreter — executeOnChainAuthoritative', () => {
   const sighash = deterministicSighash();
   const sighashHex = Utils.toHex(sighash);
@@ -142,7 +147,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
       expect(result.state.value).toBe(1n);
     });
 
-    it('throws AssertionFailureError when signature is corrupted', () => {
+    it('aborts under NULLFAIL (not an assert) when signature is corrupted', () => {
       // Flip the last byte of r — invalidates the signature.
       const broken = sigDerHex.slice(0, -2) + '00';
       expect(() => executeOnChainAuthoritative(
@@ -152,10 +157,10 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
         { sig: broken, pk: pubHex },
         [],
         { sighash: sighashHex },
-      )).toThrow(AssertionFailureError);
+      )).toThrow(NULLFAIL_ABORT);
     });
 
-    it('throws AssertionFailureError when pubkey does not match the signing key', () => {
+    it('aborts under NULLFAIL (not an assert) when pubkey does not match the signing key', () => {
       const otherPub = PrivateKey.fromHex(
         '11'.repeat(32),
       ).toPublicKey().toDER('hex') as string;
@@ -166,10 +171,10 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
         { sig: sigDerHex, pk: otherPub },
         [],
         { sighash: sighashHex },
-      )).toThrow(AssertionFailureError);
+      )).toThrow(NULLFAIL_ABORT);
     });
 
-    it('throws AssertionFailureError when sighash differs from the one signed', () => {
+    it('aborts under NULLFAIL (not an assert) when sighash differs from the one signed', () => {
       const otherSighash = Hash.sha256(
         Utils.toArray('different-message', 'utf8'),
       );
@@ -180,7 +185,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
         { sig: sigDerHex, pk: pubHex },
         [],
         { sighash: otherSighash },
-      )).toThrow(AssertionFailureError);
+      )).toThrow(NULLFAIL_ABORT);
     });
   });
 

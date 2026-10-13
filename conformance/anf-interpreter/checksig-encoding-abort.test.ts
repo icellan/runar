@@ -42,20 +42,36 @@ import { enforceDriverGate } from './driver-gate.js';
 // binding (`t2`, the `checkSig(sigA, pubA)` binding — not the final assert)
 // in Rust.
 //
+// N-198 adds NULLFAIL (BIP146) to the same vectors, per user decision R73.2:
+// a NON-EMPTY, well-formed signature that does not verify aborts the script on
+// a BSV node (ARC answers 461), so every SDK interpreter now aborts there too,
+// with the reason "the signature is non-empty and does not verify
+// (NULLFAIL)". The arm that must fail takes an EMPTY signature (`EMPTY_SIG`,
+// issue #106), which still pushes false. `Spend` has NO NULLFAIL rule (it
+// pushes false for a wrong-key signature), so for the `nullfail` vectors Spend
+// is NOT the oracle: the oracle is the consensus rule as a node enforces it
+// (witnessed on regtest by integration/ts/nullfail-multimethod.test.ts and its
+// per-tier peers). The Spend describe still runs those vectors and pins that
+// Spend falls through to the B-arm — it documents the divergence, it does not
+// adjudicate it.
+//
 // What this proves: for the three F-227 malformed encodings (corrupted DER
 // length, high S, unknown pubkey prefix) plus an off-curve uncompressed key,
-// every SDK interpreter now aborts where Spend aborts; for the three controls
-// (well-formed wrong-key signature, empty signature, uncompressed key) every
-// one falls through to the B-arm and succeeds, as Spend does.
+// every SDK interpreter aborts where Spend aborts; for the two NULLFAIL
+// vectors (a wrong-key signature against a compressed and an uncompressed
+// key) every interpreter aborts where a node aborts; for the three controls
+// (empty signature against a compressed and an uncompressed key, and a sigA
+// that verifies) every one succeeds — the first two through the B-arm.
 //
 // What this does not prove: (a) bare DER with no trailing sighash-type byte —
 // Spend aborts on it, the SDK interpreters still accept it (the existing
-// real-crypto fixtures sign that way); (b) `checkMultiSig` — its encoding
-// gates are NOT applied here, because the SDKs' greedy left-to-right walk is
-// not Spend's examination order, so which pair gets gated is a separate
-// design question; (c) NULLFAIL — Spend has none (a wrong-key signature
-// pushes false), a real node does (issue #106); (d) anything about a node
-// beyond `Spend`.
+// real-crypto fixtures sign that way); (b) `checkMultiSig` — neither its
+// encoding gates nor NULLFAIL are applied (six of the seven SDK interpreters
+// do not model `array_literal`, so their on-chain checkMultiSig never sees a
+// signature list and answers false for every input);
+// (c) the NULLFAIL verdict against a node — no engine in this file enforces
+// NULLFAIL independently of the interpreters; (d) anything about a node
+// beyond `Spend` for the encoding vectors.
 // ---------------------------------------------------------------------------
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -75,6 +91,8 @@ interface Vector {
   sigA: string;
   pubA: string;
   aborts: boolean;
+  /** N-198: aborts on a node under NULLFAIL; Spend (no NULLFAIL) does not. */
+  nullfail?: boolean;
   reason?: string;
 }
 interface Vectors {
@@ -105,8 +123,18 @@ describe('N-197: the vectors and the probe are what they claim', () => {
   });
 
   it('carries both verdicts', () => {
-    expect(vectors.cases.filter(c => c.aborts).length).toBeGreaterThanOrEqual(3);
+    expect(vectors.cases.filter(c => c.aborts && !c.nullfail).length).toBeGreaterThanOrEqual(3);
+    expect(vectors.cases.filter(c => c.nullfail).length).toBeGreaterThanOrEqual(2);
     expect(vectors.cases.filter(c => !c.aborts).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('every NULLFAIL vector is a well-formed, non-empty signature (not an encoding abort)', () => {
+    for (const v of vectors.cases.filter(c => c.nullfail)) {
+      expect(v.aborts).toBe(true);
+      expect(v.sigA.length).toBeGreaterThan(0);
+    }
+    // At least one non-aborting control is the empty signature (EMPTY_SIG).
+    expect(vectors.cases.some(c => !c.aborts && c.sigA === '')).toBe(true);
   });
 });
 
@@ -115,9 +143,12 @@ describe('N-197 oracle: Spend.validate() on the compiled probe', () => {
     readFileSync(SOURCE_PATH, 'utf8'), {}, 'CheckSigOrProbe.runar.ts',
   );
   for (const v of vectors.cases) {
-    it(`${v.name} → ${v.aborts ? 'abort' : 'falls through to sigB'}`, () => {
+    // A `nullfail` vector: Spend has no NULLFAIL and pushes false, so it falls
+    // through to sigB. That is Spend's verdict, not a node's (see header).
+    const spendAborts = v.aborts && !v.nullfail;
+    it(`${v.name} → ${spendAborts ? 'abort' : 'falls through to sigB'}`, () => {
       const r = script.executeSigned('unlock', [v.sigA, v.pubA, '', vectors.pubB], 2, PrivateKey.fromHex(PRIV_B));
-      if (v.aborts) {
+      if (spendAborts) {
         expect(r.success).toBe(false);
         expect(r.error).toMatch(/signature format is invalid|public key/i);
       } else {
@@ -129,7 +160,7 @@ describe('N-197 oracle: Spend.validate() on the compiled probe', () => {
 
 describe('N-197: TS SDK executeOnChainAuthoritative', () => {
   for (const v of vectors.cases) {
-    it(`${v.name} → ${v.aborts ? 'abort' : 'falls through to sigB'}`, () => {
+    it(`${v.name} → ${v.aborts ? 'abort' : 'succeeds'}`, () => {
       const run = () => executeOnChainAuthoritative(
         anf, 'unlock', {}, argsFor(v), [], { sighash: vectors.sighash },
       );
@@ -203,7 +234,7 @@ function writeInput(v: Vector, i: number): string {
 for (const cfg of driverConfigs) {
   describe.skipIf(!isDriverAvailable(cfg))(`N-197: ${cfg.name} SDK on-chain driver`, () => {
     vectors.cases.forEach((v, i) => {
-      it(`${v.name} → ${v.aborts ? 'abort' : 'falls through to sigB'}`, () => {
+      it(`${v.name} → ${v.aborts ? 'abort' : 'succeeds'}`, () => {
         const argv = [...(cfg.prefix ?? []), cfg.binary, '--mode=on-chain', writeInput(v, i)];
         const r = spawnSync(argv[0]!, argv.slice(1), {
           cwd: REPO_ROOT, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'],

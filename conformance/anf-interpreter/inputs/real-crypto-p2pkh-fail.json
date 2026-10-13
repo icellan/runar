@@ -8,5 +8,5 @@
   },
   "constructorArgs": ["e00abe3873ca70f0ba63dec7e8b638062b0e9d47"],
   "sighash": "0000000000000000000000000000000000000000000000000000000000000000",
-  "_doc": "Real-crypto failing fixture. Same priv/pubKey/sig as the pass fixture, but sighash is all zeros, so the DER signature does NOT verify against it. Real-crypto mode raises AssertionFailureError at the assert(checkSig(...)) binding."
+  "_doc": "Real-crypto failing fixture. Same priv/pubKey/sig as the pass fixture, but sighash is all zeros, so the DER signature does NOT verify against it. The signature is non-empty, so a node ABORTS the script at that OP_CHECKSIG under NULLFAIL (BIP146) rather than pushing false (N-198): real-crypto mode reports a ScriptAbort, not an AssertionFailureError at the assert(checkSig(...)) binding."
 }

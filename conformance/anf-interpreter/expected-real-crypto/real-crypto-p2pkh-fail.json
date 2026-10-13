@@ -1,5 +1,4 @@
 {
-  "error": "AssertionFailureError",
-  "methodName": "unlock",
-  "bindingName": "t8"
+  "error": "ScriptAbort",
+  "methodName": "unlock"
 }
