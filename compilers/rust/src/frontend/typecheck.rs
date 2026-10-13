@@ -247,6 +247,22 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m
 }
 
+/// Builtins that exist (the Go tier implements them, and this tier's own
+/// codegen carries a dispatched — if unexercised — port) but are deliberately
+/// absent from `builtin_functions()`: they belong to proof-system families
+/// CLAUDE.md scopes to the Go reference compiler by policy (R-037). Their
+/// absence from the typecheck table is policy, not a gap; what would be a
+/// gap is reporting them the same way as an actual typo. Mirrors Python's
+/// `GO_ONLY_BUILTINS` (R-258/R-259). Only the one builtin F-387 is about is
+/// listed here -- the other seven Go-only builtins hit the same generic
+/// "unknown function" message in this tier and are a separate item.
+fn go_only_builtin_family(name: &str) -> Option<&'static str> {
+    match name {
+        "merkleRootPoseidon2KB" => Some("Poseidon2 Merkle"),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Subtyping
 // ---------------------------------------------------------------------------
@@ -1442,6 +1458,32 @@ terminal (no state mutation)",
                 self.add_error(format!(
                     "local variable '{}' is not callable — Rúnar has no first-class functions; only built-in functions and contract methods can be called",
                     name
+                ));
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                return "<unknown>".to_string();
+            }
+
+            // F-387 (CL-GAP-065): `merkleRootPoseidon2KB` IS a real Rúnar
+            // builtin -- `is_merkle_builtin` in codegen/stack.rs and
+            // ir/loader.rs both know its name -- but it is scoped to the Go
+            // reference compiler by project policy (CLAUDE.md, "EVM/STARK
+            // proof-system primitives are scoped to the Go tier by project
+            // policy"; conformance/go-only-parity/, R-037). `runar-lang`
+            // does not declare the symbol, so no source frontend can offer
+            // it; reporting it as "unknown function" told the author a real
+            // builtin does not exist, which sends them looking for a typo
+            // or a missing import -- the one thing that is not wrong. Same
+            // fix as Python's `GO_ONLY_BUILTINS` table (R-258/R-259).
+            if let Some(family) = go_only_builtin_family(name) {
+                self.add_error(format!(
+                    "builtin '{}' belongs to the {} family, which is scoped to the Go tier by \
+                     project policy — see CLAUDE.md (\"EVM/STARK proof-system primitives\") and \
+                     conformance/README.md (\"Per-fixture compiler allowlist\"). Compile this \
+                     contract with the Go compiler, or opt the fixture out of the Rust tier via \
+                     source.json's \"compilers\" allowlist.",
+                    name, family
                 ));
                 for arg in args {
                     self.infer_expr_type(arg, env);
