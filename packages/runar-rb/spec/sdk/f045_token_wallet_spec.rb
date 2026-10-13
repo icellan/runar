@@ -160,5 +160,48 @@ RSpec.describe 'F-045 TokenWallet signs the transaction it broadcasts' do
       expect(merged.get_state['supply']).to eq(350)
     end
   end
+
+  # N-042: the same wallet against the SHIPPED example contract
+  # examples/ts/token-wallet-naive-INSECURE/WalletToken.runar.ts, compiled by
+  # this tier's compiler. Same oracle as above (signature coverage; Ruby has no
+  # ScriptVM -- the TS and Go N-042 tests script-execute it).
+  # Proves: the shipped example compiles in the Ruby tier and TokenWallet's
+  # transfer / merge drive it, signing the tx they broadcast. Does NOT prove
+  # script execution here, or that the example is a sound token (see its header).
+  context 'with the shipped WalletToken example (N-042)' do
+    let(:artifact) do
+      compiler_lib = File.expand_path('../../../../compilers/ruby/lib', __dir__)
+      $LOAD_PATH.unshift(compiler_lib) unless $LOAD_PATH.include?(compiler_lib)
+      require 'runar_compiler'
+      path = File.expand_path('../../../../examples/ts/token-wallet-naive-INSECURE/WalletToken.runar.ts', __dir__)
+      raise "shipped TokenWallet example missing: #{path}" unless File.exist?(path)
+
+      Runar::SDK::RunarArtifact.from_json(RunarCompiler.artifact_to_json(RunarCompiler.compile_from_source(path)))
+    end
+
+    it 'transfer drives the shipped example' do
+      provider, wallet, tokens, signer = setup_wallet(recording, holder_key, [100])
+      expect(wallet.get_balance).to eq(100)
+      wallet.transfer(Runar::SDK::LocalSigner.new(other_key).get_address, 100)
+      broadcast = provider.get_broadcasted_txs.last
+      expect(outpoints(broadcast).first).to eq("#{tokens[0].txid}:0")
+      expect_token_sigs_cover(signer, tokens, broadcast)
+    end
+
+    it 'merge drives the shipped example and sums the supply' do
+      provider, wallet, tokens, signer = setup_wallet(recording, holder_key, [100, 250])
+      wallet.merge
+      broadcast = provider.get_broadcasted_txs.last
+      spent = outpoints(broadcast)
+      tokens.each { |u| expect(spent.count("#{u.txid}:0")).to eq(1), spent.inspect }
+      expect_token_sigs_cover(signer, tokens, broadcast)
+      out0 = parse(broadcast)[:outputs][0]
+      merged = Runar::SDK::RunarContract.from_utxo(
+        artifact, Runar::SDK::Utxo.new(txid: '00' * 32, output_index: 0, satoshis: out0[:satoshis],
+                                       script: out0[:script].unpack1('H*'))
+      )
+      expect(merged.get_state['supply']).to eq(350)
+    end
+  end
 end
 # rubocop:enable RSpec/MultipleExpectations, RSpec/ExampleLength

@@ -200,3 +200,51 @@ fn merge_spends_both_token_utxos_signed_over_the_broadcast_tx() {
         assert!(matches!(merged.state().get("supply"), Some(SdkValue::Int(350))), "{:?}", merged.state());
     }
 }
+
+// ---------------------------------------------------------------------------
+// N-042: the same wallet against the SHIPPED example contract
+// `examples/ts/token-wallet-naive-INSECURE/WalletToken.runar.ts`, compiled by
+// this tier's compiler. Same oracle as above (signature coverage; no Spend
+// replay in this tier — the TS and Go N-042 tests script-execute it).
+// Proves: the shipped example compiles in the Rust tier and TokenWallet's
+// transfer / merge drive it, signing the tx they broadcast. Does NOT prove
+// script execution here, or that the example is a sound token (see its header).
+// ---------------------------------------------------------------------------
+
+fn example_artifact() -> RunarArtifact {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/ts/token-wallet-naive-INSECURE/WalletToken.runar.ts");
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("shipped TokenWallet example missing ({}): {}", path, e));
+    let a = runar_compiler_rust::compile_from_source_str(&src, Some("WalletToken.runar.ts")).expect("compile");
+    serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap()
+}
+
+#[test]
+fn n042_transfer_drives_the_shipped_example() {
+    let art = example_artifact();
+    let mut f = setup(&art, &[100], 5_000, 200_000);
+    assert_eq!(f.wallet.get_balance().expect("balance"), 100);
+    let other_addr = LocalSigner::new(OTHER_KEY).unwrap().get_address().unwrap();
+    f.wallet.transfer(&other_addr, 100).expect("transfer");
+    let broadcast = f.provider.borrow().get_broadcasted_txs().last().unwrap().clone();
+    assert_eq!(outpoints(&broadcast)[0], format!("{}:0", f.tokens[0].txid));
+    assert_token_sigs_cover(&f, &broadcast);
+}
+
+#[test]
+fn n042_merge_drives_the_shipped_example() {
+    let art = example_artifact();
+    let mut f = setup(&art, &[100, 250], 5_000, 200_000);
+    f.wallet.merge().expect("merge");
+    let broadcast = f.provider.borrow().get_broadcasted_txs().last().unwrap().clone();
+    let spent = outpoints(&broadcast);
+    for u in &f.tokens {
+        assert_eq!(spent.iter().filter(|s| **s == format!("{}:0", u.txid)).count(), 1, "{:?}", spent);
+    }
+    assert_token_sigs_cover(&f, &broadcast);
+    let tx = hex_to_bsv_tx(&broadcast).unwrap();
+    let merged = RunarContract::from_utxo(art.clone(), &Utxo {
+        txid: "00".repeat(32), output_index: 0,
+        satoshis: tx.outputs[0].satoshis.unwrap() as i64, script: tx.outputs[0].locking_script.to_hex(),
+    }).unwrap();
+    assert!(matches!(merged.state().get("supply"), Some(SdkValue::Int(350))), "{:?}", merged.state());
+}

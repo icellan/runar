@@ -60,10 +60,15 @@ describe('R-195: every TypeScript-only example is documented as one', () => {
     // `@sighash` are read on the `.runar.ts` surface only — the other eight
     // parsers reject a source carrying either — so unlike the other two its
     // TS-only status is permanent rather than pending a translation.
+    //
+    // `token-wallet-naive-INSECURE` joined in N-042: it is the ABI fixture the
+    // SDKs' TokenWallet helpers are tested against, read by path from every
+    // tier's test, so a surface translation would add nothing.
     expect(tsOnlyExamples()).toEqual([
       'companion-verifier',
       'compiler-directives',
       'nested-if-multi-reassign',
+      'token-wallet-naive-INSECURE',
     ]);
   });
 });

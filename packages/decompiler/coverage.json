@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-09-30T17:00:32.959Z",
+  "generatedAt": "2026-10-12T23:27:11.426Z",
   "summary": {
-    "byte-match": 90,
+    "byte-match": 91,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 85,
+    "template": 86,
     "assert-recognizer": 1,
     "symexec": 0,
     "raw_script": 4
@@ -466,6 +466,11 @@
     },
     {
       "id": "token-nft/NFTExample",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "token-wallet-naive-INSECURE/WalletToken",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
