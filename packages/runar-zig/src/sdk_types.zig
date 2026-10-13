@@ -868,10 +868,13 @@ pub const PreparedCall = struct {
     new_satoshis: i64,
 
     // -------- stateful-only opaque plumbing (zero-sized for stateless) ---
-    /// Hex-encoded k=1 OP_PUSH_TX signature, captured after preimage
-    /// convergence so finalizeCall can rebuild the stateful unlock with
-    /// the same OP_PUSH_TX evidence.
-    op_push_tx_sig: []u8 = &.{},
+    //
+    // N-213: there is deliberately NO op_push_tx_sig field. Post-BUG-100 the
+    // OP_PUSH_TX signature is derived ON-CHAIN from preimage --
+    // buildStatefulUnlockScript's signature parameter is accepted for
+    // call-site compatibility but ignored (see its "_ = op_sig_hex" discard),
+    // so there was nothing for finalizeCall to rebuild from here. Mirrors
+    // F-369's TS fix.
     /// Hex-encoded BIP-143 preimage embedded in the stateful unlock.
     preimage: []u8 = &.{},
     /// Hex-encoded method-selector push (for multi-method stateful contracts);
@@ -909,7 +912,6 @@ pub const PreparedCall = struct {
         var u = self.contract_utxo;
         u.deinit(allocator);
         if (self.new_locking_script.len > 0) allocator.free(self.new_locking_script);
-        if (self.op_push_tx_sig.len > 0) allocator.free(self.op_push_tx_sig);
         if (self.preimage.len > 0) allocator.free(self.preimage);
         if (self.method_selector.len > 0) allocator.free(self.method_selector);
         if (self.change_pkh.len > 0) allocator.free(self.change_pkh);

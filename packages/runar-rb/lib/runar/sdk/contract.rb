@@ -1441,7 +1441,6 @@ module Runar
         PreparedCall.new(
           sighash: sighash,
           preimage: final_preimage,
-          op_push_tx_sig: final_op_push_tx_sig,
           tx_hex: term_tx,
           sig_indices: sig_indices,
           method_name: method_name,
@@ -1928,8 +1927,13 @@ module Runar
       end
 
       # rubocop:disable Metrics/ParameterLists
+      # N-213: the 3rd positional param is unused in the body -- callers still
+      # pass compute_preimage_passes' returned signature (no consumer
+      # post-BUG-100; PreparedCall.new below carries no op_push_tx_sig kwarg),
+      # so it's accepted for call-site compatibility but ignored, same as
+      # build_stateful_prefix's op_sig_hex param.
       def build_prepared_call(
-        sighash, final_preimage, final_op_push_tx_sig, signed_tx,
+        sighash, final_preimage, _final_op_push_tx_sig, signed_tx,
         sig_indices, method_name, resolved_args, method_selector_hex,
         is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
         change_amount, method_needs_new_amount, new_satoshis, preimage_index,
@@ -1949,7 +1953,6 @@ module Runar
         PreparedCall.new(
           sighash: sighash,
           preimage: final_preimage,
-          op_push_tx_sig: final_op_push_tx_sig,
           tx_hex: signed_tx,
           sig_indices: sig_indices,
           method_name: method_name,
@@ -1994,7 +1997,11 @@ module Runar
 
           new_amount_hex = prepared.method_needs_new_amount ? State.encode_script_int(prepared.new_amount) : ''
 
-          build_stateful_prefix(prepared.op_push_tx_sig, prepared.method_uses_code_part) +
+          # N-213: build_stateful_prefix's first param is accepted for
+          # call-site compatibility but ignored (post-BUG-100 no signature is
+          # pushed) -- pass '' rather than a now-nonexistent
+          # prepared.op_push_tx_sig.
+          build_stateful_prefix('', prepared.method_uses_code_part) +
             args_hex + change_hex + new_amount_hex +
             State.encode_push_data(prepared.preimage) +
             prepared.intent_witness_hex +
@@ -2003,7 +2010,7 @@ module Runar
         elsif prepared.needs_op_push_tx
           pi = prepared.preimage_index
           resolved_args[pi] = prepared.preimage if pi >= 0
-          build_stateful_prefix(prepared.op_push_tx_sig, false) +
+          build_stateful_prefix('', false) +
             build_unlocking_script(prepared.method_name, resolved_args)
 
         else

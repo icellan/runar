@@ -139,7 +139,7 @@ Python contract source uses `snake_case` identifiers. The Rúnar parser converts
 | `check_sig` | `checkSig` |
 | `release_by_seller` | `releaseBySeller` |
 
-The deployment SDK (this package) is `snake_case` throughout — `contract.get_state()`, `prepare_call`, `op_push_tx_sig`. The conversion only applies inside contract source.
+The deployment SDK (this package) is `snake_case` throughout — `contract.get_state()`, `prepare_call`, `sig_indices`. The conversion only applies inside contract source.
 
 ### Type annotations
 
@@ -1349,8 +1349,9 @@ Output of `RunarContract.prepare_call`. Public fields callers use:
 |-------|------|---------|
 | `sighash` | `str` | 64-char hex BIP-143 sighash for external signers |
 | `preimage` | `str` | Full BIP-143 preimage hex |
-| `op_push_tx_sig` | `str` | OP_PUSH_TX DER signature hex (empty if not needed) |
 | `tx_hex` | `str` | The built tx (P2PKH funding signed, primary input has placeholder Sigs) |
+
+There is no `op_push_tx_sig` field: post-BUG-100 the OP_PUSH_TX signature is derived ON-CHAIN (against the well-known `k=1` generator-point key), so there is no spender-supplied signature to expose.
 | `sig_indices` | `list[int]` | User-arg positions that need external signatures |
 
 Internal fields (consumed by `finalize_call`): `method_name`, `resolved_args`, `method_selector_hex`, `is_stateful`, `is_terminal`, `needs_op_push_tx`, `method_needs_change`, `change_pkh_hex`, `change_amount`, `method_needs_new_amount`, `new_amount`, `preimage_index`, `contract_utxo`, `new_locking_script`, `new_satoshis`, `has_multi_output`, `contract_outputs`, `code_sep_idx`.
@@ -1713,7 +1714,7 @@ You're calling on a fresh `RunarContract` instance. Either call `deploy()` first
 
 **Q. My snake_case method name doesn't match the artifact's ABI.**
 
-Python contract sources are converted to camelCase in the AST. Pass the camelCase form to `contract.call("releaseBySeller", [...])`. The SDK API on the Python side stays snake_case (`prepare_call`, `op_push_tx_sig`).
+Python contract sources are converted to camelCase in the AST. Pass the camelCase form to `contract.call("releaseBySeller", [...])`. The SDK API on the Python side stays snake_case (`prepare_call`, `sig_indices`).
 
 **Q. State doesn't update after `call()`.**
 

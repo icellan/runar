@@ -551,8 +551,10 @@ fn unlock_with_external_signer(
 
 Connected variants exist as well: `prepare_call_connected` and
 `finalize_call_connected`. The key fields on `PreparedCall` for external
-signing are `sighash`, `preimage`, `op_push_tx_sig`, `tx_hex`, and
-`sig_indices`. The remaining fields are opaque — `finalize_call` consumes them.
+signing are `sighash`, `preimage`, `tx_hex`, and `sig_indices`. There is no
+`op_push_tx_sig` field: post-BUG-100 the OP_PUSH_TX signature is derived
+ON-CHAIN, so there is no spender-supplied signature to expose. The remaining
+fields are opaque — `finalize_call` consumes them.
 
 `prepared.sighash` is `hash256(preimage)` — `sha256(sha256(preimage))`, the
 BIP-143 digest `OP_CHECKSIG` verifies against. External signers (including

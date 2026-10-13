@@ -331,14 +331,20 @@ module Runar
     # Result of +prepare_call+ — contains everything needed for external signing
     # and subsequent +finalize_call+.
     #
-    # Public fields (+sighash+, +preimage+, +op_push_tx_sig+, +tx_hex+,
-    # +sig_indices+) are for external signer coordination.  All other fields
-    # are internal state consumed by +finalize_call+.
+    # Public fields (+sighash+, +preimage+, +tx_hex+, +sig_indices+) are for
+    # external signer coordination.  All other fields are internal state
+    # consumed by +finalize_call+.
+    #
+    # N-213: there is deliberately NO +op_push_tx_sig+ field. Post-BUG-100 the
+    # OP_PUSH_TX signature is derived ON-CHAIN from +preimage+ —
+    # +build_stateful_prefix+'s signature parameter is accepted for call-site
+    # compatibility but ignored (see its leading <tt>_ = op_sig_hex</tt>
+    # discard), so there was nothing for an external signer to produce or push
+    # here. Mirrors F-369's TS fix.
     PreparedCall = Struct.new(
       # Public — callers use these to coordinate external signing.
       :sighash,             # 64-char hex — BIP-143 hash external signers sign
       :preimage,            # hex — full BIP-143 preimage
-      :op_push_tx_sig,      # hex — OP_PUSH_TX DER sig (empty if not needed)
       :tx_hex,              # hex — built TX (P2PKH funding signed, primary input uses placeholder sigs)
       :sig_indices,         # Array<Integer> — user-visible arg positions needing external Sig values
 
@@ -376,7 +382,6 @@ module Runar
       def initialize(
         sighash: '',
         preimage: '',
-        op_push_tx_sig: '',
         tx_hex: '',
         sig_indices: [],
         method_name: '',

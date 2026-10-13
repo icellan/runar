@@ -1668,12 +1668,15 @@ impl RunarContract {
             change_amount = rebuilt_change;
 
             // Second pass: recompute with final tx (preimage changes with unlock size)
-            let (final_input0_unlock, op_sig, preimage) = build_stateful_unlock(
+            // N-213: the signature build_stateful_unlock returns here has no
+            // consumer post-BUG-100 (PreparedCall has no op_push_tx_sig field
+            // to carry it to) — discard it rather than storing it into a
+            // variable with no reader.
+            let (final_input0_unlock, _op_sig, preimage) = build_stateful_unlock(
                 &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
                 signer, &sig_indices, &prevouts_indices, &mut resolved_args, &method_selector_hex,
                 change_amount,
             )?;
-            final_op_push_tx_sig = op_sig;
             final_preimage = preimage;
             signed_tx = insert_unlocking_script(&signed_tx, 0, &final_input0_unlock)?;
 
@@ -1757,7 +1760,6 @@ impl RunarContract {
         Ok(PreparedCall {
             sighash,
             preimage: final_preimage,
-            op_push_tx_sig: final_op_push_tx_sig,
             tx_hex: signed_tx,
             sig_indices,
             method_name: method_name.to_string(),
@@ -1842,7 +1844,11 @@ impl RunarContract {
             }
             format!(
                 "{}{}{}{}{}{}{}",
-                self.build_stateful_prefix(&prepared.op_push_tx_sig, prepared.method_uses_code_part),
+                // N-213: build_stateful_prefix's first param is accepted for
+                // call-site compatibility but ignored (post-BUG-100 no signature
+                // is pushed) — pass "" rather than a now-nonexistent
+                // prepared.op_push_tx_sig.
+                self.build_stateful_prefix("", prepared.method_uses_code_part),
                 args_hex,
                 change_hex,
                 new_amount_hex,
@@ -1857,7 +1863,7 @@ impl RunarContract {
             }
             format!(
                 "{}{}",
-                self.build_stateful_prefix(&prepared.op_push_tx_sig, false),
+                self.build_stateful_prefix("", false),
                 self.build_unlocking_script(&prepared.method_name, &resolved_args)?,
             )
         } else {
@@ -2066,9 +2072,9 @@ impl RunarContract {
             term_tx = build_terminal_tx(&first_unlock);
 
             // Second pass: recompute with final tx
-            let (second_unlock, op_sig, preimage) = build_unlock(&term_tx, resolved_args)?;
+            // N-213: discard the returned signature — no consumer post-BUG-100.
+            let (second_unlock, _op_sig, preimage) = build_unlock(&term_tx, resolved_args)?;
             term_tx = insert_unlocking_script(&term_tx, 0, &second_unlock)?;
-            final_op_push_tx_sig = op_sig;
             final_preimage = preimage;
         } else if needs_op_push_tx || !sig_indices.is_empty() {
             // Stateless terminal — keep placeholder sigs
@@ -2134,7 +2140,6 @@ impl RunarContract {
         Ok(PreparedCall {
             sighash,
             preimage: final_preimage,
-            op_push_tx_sig: final_op_push_tx_sig,
             tx_hex: term_tx,
             sig_indices: sig_indices.to_vec(),
             method_name: method_name.to_string(),

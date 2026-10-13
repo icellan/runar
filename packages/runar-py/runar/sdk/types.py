@@ -303,13 +303,20 @@ class CallOptions:
 
 @dataclass
 class PreparedCall:
-    """Result of prepare_call() -- contains everything needed for external signing and finalize_call()."""
+    """Result of prepare_call() -- contains everything needed for external signing and finalize_call().
+
+    N-213: there is deliberately NO op_push_tx_sig field. Post-BUG-100 the
+    OP_PUSH_TX signature is derived ON-CHAIN from preimage --
+    _build_stateful_prefix's signature parameter is accepted for call-site
+    compatibility but ignored (see its "del op_sig_hex" discard), so there
+    was nothing for an external signer to produce or push here. Mirrors
+    F-369's TS fix.
+    """
     # Public -- callers use these to coordinate external signing
     # 64-char hex -- hash256(preimage) = sha256(sha256(preimage)), the BIP-143
     # digest external signers ECDSA-sign DIRECTLY (no further hashing).
     sighash: str = ''
     preimage: str = ''          # hex -- full BIP-143 preimage
-    op_push_tx_sig: str = ''    # hex -- OP_PUSH_TX DER sig (empty if not needed)
     tx_hex: str = ''            # hex -- built TX (P2PKH funding signed, primary input uses placeholder sigs)
     sig_indices: list[int] = field(default_factory=list)  # which user-visible arg positions need external Sig values
 

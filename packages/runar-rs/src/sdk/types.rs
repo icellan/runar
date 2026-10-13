@@ -693,9 +693,16 @@ mod tests {
 /// Result of `prepare_call()` — contains everything needed for external signing
 /// and subsequent `finalize_call()`.
 ///
-/// Public fields (`sighash`, `preimage`, `op_push_tx_sig`, `tx_hex`, `sig_indices`)
-/// are for external signer coordination. Other fields are opaque
-/// internals consumed by `finalize_call()`.
+/// Public fields (`sighash`, `preimage`, `tx_hex`, `sig_indices`) are for
+/// external signer coordination. Other fields are opaque internals consumed
+/// by `finalize_call()`.
+///
+/// N-213: there is deliberately NO `op_push_tx_sig` field. Post-BUG-100 the
+/// OP_PUSH_TX signature is derived ON-CHAIN from `preimage` —
+/// `build_stateful_prefix`'s signature parameter is accepted for call-site
+/// compatibility but ignored (see its `let _ = op_sig_hex;` discard), so
+/// there was nothing for an external signer to produce or push here. Mirrors
+/// F-369's TS fix.
 #[derive(Debug, Clone)]
 pub struct PreparedCall {
     /// BIP-143 sighash digest (hex) — `hash256(preimage)`, i.e.
@@ -704,8 +711,6 @@ pub struct PreparedCall {
     pub sighash: String,
     /// Full BIP-143 preimage (hex).
     pub preimage: String,
-    /// OP_PUSH_TX DER signature + sighash byte (hex). Empty if not needed.
-    pub op_push_tx_sig: String,
     /// Built transaction hex (P2PKH funding signed, primary contract input uses placeholder sigs).
     pub tx_hex: String,
     /// User-visible arg positions that need external Sig values.

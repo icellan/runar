@@ -457,7 +457,7 @@ txid, tx = contract.finalize_call(prepared, external_signatures, provider)
 
 The `signatures` hash maps user-arg index → hex DER-with-sighash signature.
 
-`Runar::SDK::PreparedCall` is the canonical multi-signer hand-off shape — mirrors the `PreparedCall` types in the Go, Rust, Python, and Java SDKs. Public fields (`sighash`, `preimage`, `op_push_tx_sig`, `tx_hex`, `sig_indices`) are stable across SDKs; the rest are internal to `finalize_call`.
+`Runar::SDK::PreparedCall` is the canonical multi-signer hand-off shape — mirrors the `PreparedCall` types in the Go, Rust, Python, and Java SDKs. Public fields (`sighash`, `preimage`, `tx_hex`, `sig_indices`) are stable across SDKs; the rest are internal to `finalize_call`. There is no `op_push_tx_sig` field: post-BUG-100 the OP_PUSH_TX signature is derived ON-CHAIN, so there is no spender-supplied signature to expose.
 
 #### Sig parameter substitution at a glance
 
@@ -1265,7 +1265,7 @@ Keyword-init struct: `:satoshis`, `:state` (a `Hash`). Used in `CallOptions#outp
 
 #### `Runar::SDK::PreparedCall`
 
-Keyword-init struct returned by `RunarContract#prepare_call`. Public fields: `:sighash`, `:preimage`, `:op_push_tx_sig`, `:tx_hex`, `:sig_indices`. Internal fields (consumed by `finalize_call`): `:method_name`, `:resolved_args`, `:method_selector_hex`, `:is_stateful`, `:is_terminal`, `:needs_op_push_tx`, `:method_needs_change`, `:change_pkh_hex`, `:change_amount`, `:method_needs_new_amount`, `:new_amount`, `:preimage_index`, `:contract_utxo`, `:new_locking_script`, `:new_satoshis`, `:has_multi_output`, `:contract_outputs`, `:code_sep_idx`.
+Keyword-init struct returned by `RunarContract#prepare_call`. Public fields: `:sighash`, `:preimage`, `:tx_hex`, `:sig_indices`. There is no `:op_push_tx_sig` field (post-BUG-100 the OP_PUSH_TX signature is derived on-chain). Internal fields (consumed by `finalize_call`): `:method_name`, `:resolved_args`, `:method_selector_hex`, `:is_stateful`, `:is_terminal`, `:needs_op_push_tx`, `:method_needs_change`, `:change_pkh_hex`, `:change_amount`, `:method_needs_new_amount`, `:new_amount`, `:preimage_index`, `:contract_utxo`, `:new_locking_script`, `:new_satoshis`, `:has_multi_output`, `:contract_outputs`, `:code_sep_idx`.
 
 #### `Runar::SDK::Provider`
 

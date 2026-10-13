@@ -411,7 +411,6 @@ RSpec.describe 'Runar::SDK types' do
       pc = described_class.new
       expect(pc.sighash).to eq('')
       expect(pc.preimage).to eq('')
-      expect(pc.op_push_tx_sig).to eq('')
       expect(pc.tx_hex).to eq('')
       expect(pc.sig_indices).to eq([])
       expect(pc.method_name).to eq('')

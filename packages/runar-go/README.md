@@ -265,7 +265,7 @@ Important details:
 
 - `PrepareCall` already signs the **funding** P2PKH inputs and the **additional contract inputs** (when present) using the provided signer. Only the primary contract input's `Sig` parameters are left as 72-byte placeholders — those are the slots in `prepared.SigIndices`.
 - `Sighash` is `hash256(preimage)` — `sha256(sha256(preimage))`, the BIP-143 digest `OP_CHECKSIG` verifies against; `Preimage` is the full preimage. External signers ECDSA-sign `Sighash` **directly**, with no further hashing.
-- `OpPushTxSig` is the OP_PUSH_TX DER signature over the same preimage, signed with the well-known `k=1` private key. The SDK computes this for stateful contracts; it is exposed on `PreparedCall` for inspection.
+- `PreparedCall` has no `OpPushTxSig` field: post-BUG-100 the OP_PUSH_TX signature over the preimage is derived ON-CHAIN (against the well-known `k=1` generator-point key), so there is no spender-supplied signature to inspect.
 - `FinalizeCall` re-injects the real signatures, broadcasts, and returns the same `(txid, *TransactionData, error)` tuple as `Call`.
 
 ### 7.3. BRC-100 wallet signing (`WalletProvider` + `WalletSigner`)
@@ -1351,11 +1351,10 @@ type Point = ByteString
 
 ```go
 type PreparedCall struct {
-	Sighash     string  // 64-char hex; BIP-143 hash external signers sign
-	Preimage    string  // hex; full BIP-143 preimage
-	OpPushTxSig string  // hex; OP_PUSH_TX DER sig (empty if not needed)
-	TxHex       string  // hex; built TX
-	SigIndices  []int   // user-visible arg positions awaiting external Sig values
+	Sighash    string  // 64-char hex; BIP-143 hash external signers sign
+	Preimage   string  // hex; full BIP-143 preimage
+	TxHex      string  // hex; built TX
+	SigIndices []int   // user-visible arg positions awaiting external Sig values
 	// ... unexported fields consumed by FinalizeCall
 }
 ```

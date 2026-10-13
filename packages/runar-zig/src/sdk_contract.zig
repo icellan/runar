@@ -2418,7 +2418,8 @@ pub const RunarContract = struct {
         const sig_indices_owned = try self.allocator.dupe(usize, sig_idx_list.items);
         const method_name_owned = try self.allocator.dupe(u8, method_name);
         const utxo_owned = try contract_utxo.clone(self.allocator);
-        const op_push_tx_sig_owned = try self.allocator.dupe(u8, ptx_result.sig_hex);
+        // N-213: ptx_result.sig_hex has no consumer post-BUG-100 (PreparedCall
+        // has no op_push_tx_sig field to carry it to) -- don't dupe/own it.
         const preimage_owned = try self.allocator.dupe(u8, ptx_result.preimage_hex);
         const intent_witness_owned = try self.allocator.dupe(u8, witness_hex);
 
@@ -2432,7 +2433,6 @@ pub const RunarContract = struct {
             .is_stateful = true,
             .new_locking_script = new_locking_script,
             .new_satoshis = new_satoshis,
-            .op_push_tx_sig = op_push_tx_sig_owned,
             .preimage = preimage_owned,
             .method_selector = method_selector_buf,
             .needs_change = needs_change,
@@ -2573,13 +2573,17 @@ pub const RunarContract = struct {
         }
 
         // Rebuild the unlocking script. Stateful flow uses the saved
-        // OP_PUSH_TX sig + preimage (computed during prepareCall's
-        // convergence); stateless rebuilds from args alone.
+        // preimage (computed during prepareCall's convergence); stateless
+        // rebuilds from args alone.
         const final_unlock = if (prepared.is_stateful) blk: {
             const change_pkh_opt: ?[]const u8 = if (prepared.change_pkh.len > 0) prepared.change_pkh else null;
             const method_selector_opt: ?[]const u8 = if (prepared.method_selector.len > 0) prepared.method_selector else null;
+            // N-213: buildStatefulUnlockScript's first param is accepted for
+            // call-site compatibility but ignored (post-BUG-100 no signature
+            // is pushed) -- pass an empty slice rather than a now-nonexistent
+            // prepared.op_push_tx_sig.
             break :blk try self.buildStatefulUnlockScript(
-                prepared.op_push_tx_sig,
+                &[_]u8{},
                 prepared.resolved_args,
                 prepared.method_uses_code_part,
                 change_pkh_opt,
@@ -4529,8 +4533,8 @@ test "prepareCall handles stateful contract with Sig param (full OP_PUSH_TX conv
     // Continuation captured for finalizeCall to track the new UTXO.
     try std.testing.expect(prepared.new_locking_script.len > 0);
     try std.testing.expectEqual(@as(i64, 1_000), prepared.new_satoshis);
-    // OP_PUSH_TX evidence captured (sig + preimage are non-empty hex).
-    try std.testing.expect(prepared.op_push_tx_sig.len > 0);
+    // OP_PUSH_TX preimage evidence captured (non-empty hex). N-213: there is
+    // no op_push_tx_sig to assert on -- PreparedCall carries no such field.
     try std.testing.expect(prepared.preimage.len > 0);
     try std.testing.expectEqual(@as(i32, 2), prepared.code_sep_idx);
 }
@@ -4587,6 +4591,77 @@ test "prepareCall → finalizeCall round-trip on stateful Sig-bearing contract" 
     try std.testing.expectEqualStrings(txid, utxo.txid);
     try std.testing.expectEqual(@as(i32, 0), utxo.output_index);
     try std.testing.expectEqual(@as(i64, 2_000), utxo.satoshis);
+}
+
+// N-213 -- the Zig half of "remove the dead PreparedCall.opPushTxSig field
+// (and its wasted ECDSA sign per stateful call) from
+// Go/Rust/Python/Ruby/Zig SDKs, as F-369 did for TS".
+//
+// Since BUG-100 the unlocking script carries no spender-supplied OP_PUSH_TX
+// signature: buildStatefulUnlockScript's first parameter is accepted for
+// call-site compatibility but ignored (see its "_ = op_sig_hex" discard).
+// op_push_tx_sig was documented public surface on PreparedCall that backed
+// nothing a caller could use.
+//
+// This test proves (a) PreparedCall declares no op_push_tx_sig field at all
+// -- checked via @hasField at comptime, the Zig analogue of the Go sibling
+// test's JSON-key check and the TS reference test's
+// `'opPushTxSig' in prepared` -- and (b) the prepareCall -> finalizeCall
+// round-trip (reusing the fixture from the preceding
+// "prepareCall -> finalizeCall round-trip" test) still broadcasts
+// successfully with the field gone.
+//
+// It does NOT prove anything about the other four SDKs in scope for N-213
+// (Go/Rust/Python/Ruby -- each gets its own language-appropriate
+// field-absence test) or a real on-chain broadcast -- Zig has no ScriptVM
+// (see CLAUDE.md), and MockProvider does not validate scripts.
+test "PreparedCall has no op_push_tx_sig field (N-213)" {
+    try std.testing.expect(!@hasField(types.PreparedCall, "op_push_tx_sig"));
+
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try prov.addKnownOutpoint("ee" ** 32, 0, "005100", 2_000);
+    try contract.setCurrentUtxo(.{
+        .txid = "ee" ** 32,
+        .output_index = 0,
+        .satoshis = 2_000,
+        .script = "005100",
+    });
+
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+
+    const args = [_]types.StateValue{.{ .int = 0 }};
+    var prepared = try contract.prepareCall("increment", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    // Multi-signer flow: external wallet delivers a real DER sig over
+    // prepared.sighashes[0] (MockProvider does not validate scripts, so a
+    // well-shaped placeholder of the right length suffices for the
+    // splice-and-broadcast path -- same as the sibling round-trip test).
+    const fake_sig: []const u8 = "30" ++ "44" ++ "02" ++ "20" ++ ("11" ** 32) ++ "02" ++ "20" ++ ("22" ** 32) ++ "41";
+    const sigs = [_][]const u8{fake_sig};
+
+    const txid = try contract.finalizeCall(&prepared, &sigs, prov.provider());
+    defer allocator.free(txid);
+
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
 }
 
 test "finalizeCall errors on signature count mismatch" {

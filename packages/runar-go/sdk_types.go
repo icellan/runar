@@ -172,11 +172,16 @@ type OutputSpec struct {
 // are consumed by FinalizeCall().
 type PreparedCall struct {
 	// Public: callers use these to coordinate external signing
-	Sighash     string `json:"sighash"`     // 64-char hex — hash256(preimage), the BIP-143 digest external signers ECDSA-sign directly
-	Preimage    string `json:"preimage"`    // hex — full BIP-143 preimage
-	OpPushTxSig string `json:"opPushTxSig"` // hex — OP_PUSH_TX DER sig (empty if not needed)
-	TxHex       string `json:"txHex"`       // hex — built TX (for backward compat / JSON serialization)
-	SigIndices  []int  `json:"sigIndices"`  // which user-visible arg positions need external Sig values
+	//
+	// N-213: there is deliberately NO OpPushTxSig field. Post-BUG-100 the
+	// OP_PUSH_TX signature is derived ON-CHAIN from Preimage — buildStatefulPrefix's
+	// signature parameter is accepted for call-site compatibility but ignored
+	// (see its "_ = opSigHex" discard), so there was nothing for an external
+	// signer to produce or push here. Mirrors F-369's TS fix.
+	Sighash    string `json:"sighash"`    // 64-char hex — hash256(preimage), the BIP-143 digest external signers ECDSA-sign directly
+	Preimage   string `json:"preimage"`   // hex — full BIP-143 preimage
+	TxHex      string `json:"txHex"`      // hex — built TX (for backward compat / JSON serialization)
+	SigIndices []int  `json:"sigIndices"` // which user-visible arg positions need external Sig values
 
 	// Internal — consumed by FinalizeCall()
 	methodName        string

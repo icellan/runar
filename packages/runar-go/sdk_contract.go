@@ -1578,11 +1578,14 @@ func (c *RunarContract) PrepareCall(
 		signedTx = rebuildTx.Hex()
 
 		// Second pass: recompute with final tx (preimage changes with unlock size)
-		finalInput0Unlock, opSig, preim, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
+		// N-213: the signature buildStatefulUnlock returns here has no
+		// consumer post-BUG-100 (PreparedCall has no OpPushTxSig field to
+		// carry it to) — discard it rather than storing it into a variable
+		// with no reader.
+		finalInput0Unlock, _, preim, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall: %w", err)
 		}
-		finalOpPushTxSig = opSig
 		finalPreimage = preim
 		signedTx = InsertUnlockingScript(signedTx, 0, finalInput0Unlock)
 
@@ -1668,7 +1671,6 @@ func (c *RunarContract) PrepareCall(
 	return &PreparedCall{
 		Sighash:              sighash,
 		Preimage:             finalPreimage,
-		OpPushTxSig:          finalOpPushTxSig,
 		TxHex:                signedTx,
 		SigIndices:           sigIndices,
 		methodName:           methodName,
@@ -1762,7 +1764,10 @@ func (c *RunarContract) FinalizeCall(
 		// regular method body executes. See emitGroth16WAPreamble in
 		// compilers/go/codegen/stack.go.
 		primaryUnlock = prepared.groth16WAWitnessHex +
-			c.buildStatefulPrefix(prepared.OpPushTxSig, prepared.methodUsesCodePart) +
+			// N-213: buildStatefulPrefix's first param is accepted for call-site
+			// compatibility but ignored (post-BUG-100 no signature is pushed) —
+			// pass "" rather than a now-nonexistent prepared.OpPushTxSig.
+			c.buildStatefulPrefix("", prepared.methodUsesCodePart) +
 			argsHex +
 			changeHex +
 			newAmountHex +
@@ -1774,7 +1779,7 @@ func (c *RunarContract) FinalizeCall(
 			resolvedArgs[prepared.preimageIndex] = prepared.Preimage
 		}
 		primaryUnlock = prepared.groth16WAWitnessHex +
-			c.buildStatefulPrefix(prepared.OpPushTxSig, false) +
+			c.buildStatefulPrefix("", false) +
 			c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
 	} else {
 		primaryUnlock = prepared.groth16WAWitnessHex +
@@ -2699,12 +2704,12 @@ func (c *RunarContract) prepareCallTerminal(
 		termTx = buildTerminalTx(firstUnlock).Hex()
 
 		// Second pass
-		secondUnlock, opSig, preim, err := buildUnlock(termTx)
+		// N-213: discard the returned signature — no consumer post-BUG-100.
+		secondUnlock, _, preim, err := buildUnlock(termTx)
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall terminal: %w", err)
 		}
 		termTx = InsertUnlockingScript(termTx, 0, secondUnlock)
-		finalOpPushTxSig = opSig
 		finalPreimage = preim
 	} else if needsOpPushTx || len(sigIndices) > 0 {
 		// Stateless terminal — keep placeholder sigs
@@ -2766,7 +2771,6 @@ func (c *RunarContract) prepareCallTerminal(
 	return &PreparedCall{
 		Sighash:              sighash,
 		Preimage:             finalPreimage,
-		OpPushTxSig:          finalOpPushTxSig,
 		TxHex:                termTx,
 		SigIndices:           sigIndices,
 		methodName:           methodName,

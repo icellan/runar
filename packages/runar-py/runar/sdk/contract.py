@@ -1434,7 +1434,6 @@ class RunarContract:
         return PreparedCall(
             sighash=sighash,
             preimage=final_preimage,
-            op_push_tx_sig=final_op_push_tx_sig,
             tx_hex=signed_tx,
             sig_indices=sig_indices,
             method_name=method_name,
@@ -1512,7 +1511,11 @@ class RunarContract:
             if prepared.method_needs_new_amount:
                 new_amount_hex = _encode_script_number(prepared.new_amount)
             primary_unlock = (
-                self._build_stateful_prefix(prepared.op_push_tx_sig, prepared.method_uses_code_part) +
+                # N-213: _build_stateful_prefix's first param is accepted for
+                # call-site compatibility but ignored (post-BUG-100 no
+                # signature is pushed) -- pass '' rather than a
+                # now-nonexistent prepared.op_push_tx_sig.
+                self._build_stateful_prefix('', prepared.method_uses_code_part) +
                 args_hex +
                 change_hex +
                 new_amount_hex +
@@ -1523,7 +1526,7 @@ class RunarContract:
         elif prepared.needs_op_push_tx:
             if prepared.preimage_index >= 0:
                 resolved_args[prepared.preimage_index] = prepared.preimage
-            primary_unlock = self._build_stateful_prefix(prepared.op_push_tx_sig, False) + \
+            primary_unlock = self._build_stateful_prefix('', False) + \
                 self.build_unlocking_script(prepared.method_name, resolved_args)
         else:
             primary_unlock = self.build_unlocking_script(prepared.method_name, resolved_args)
@@ -1958,7 +1961,6 @@ class RunarContract:
         return PreparedCall(
             sighash=sighash,
             preimage=final_preimage,
-            op_push_tx_sig=final_op_push_tx_sig,
             tx_hex=term_tx,
             sig_indices=sig_indices,
             method_name=method_name,
