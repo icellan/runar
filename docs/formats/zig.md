@@ -135,6 +135,7 @@ Unsupported or intentionally narrow:
 |----------|-----------|
 | `i8`, `i16`, `i32`, `i64`, `i128` | `bigint` |
 | `u8`, `u16`, `u32`, `u64`, `u128` | `bigint` |
+| `runar.BigintBig` | `bigint` (native `u256`: the full 256-bit coordinate `ecPointX` / `ecPointY` return and `ecMakePoint` takes) |
 | `bool` | `boolean` |
 | `runar.ByteString` | `ByteString` |
 | `runar.PubKey` | `PubKey` |

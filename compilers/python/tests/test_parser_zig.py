@@ -290,6 +290,43 @@ class TestZigParserBasic:
 
 
 # ---------------------------------------------------------------------------
+# runar.BigintBig (N-182 / R93)
+# ---------------------------------------------------------------------------
+
+ZIG_BIGINT_BIG_SOURCE = """\
+const runar = @import("runar");
+
+pub const BigCoord = struct {
+    pub const Contract = runar.SmartContract;
+
+    x: runar.BigintBig,
+
+    pub fn init(x: runar.BigintBig) BigCoord {
+        return .{ .x = x };
+    }
+
+    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        runar.assert(self.x == y);
+    }
+};
+"""
+
+
+class TestZigParserBigintBig:
+    # Proves: the 256-bit native spelling runar.BigintBig (u256 in
+    # packages/runar-zig, used for EC coordinates) lowers to the same AST
+    # bigint as runar.Bigint, for a property and a parameter. Does NOT prove
+    # the native u256 runtime or any codegen.
+    def test_bigint_big_maps_to_bigint(self):
+        result = parse_source(ZIG_BIGINT_BIG_SOURCE, "BigCoord.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="bigint")
+        check = next(m for m in result.contract.methods if m.name == "check")
+        assert [p.type for p in check.params] == [PrimitiveType(name="bigint")]
+
+
+# ---------------------------------------------------------------------------
 # Stateful contracts
 # ---------------------------------------------------------------------------
 

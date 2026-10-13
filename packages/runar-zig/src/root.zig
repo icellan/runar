@@ -105,6 +105,7 @@ pub const bsv21Transfer = sdk_ordinals.bsv21Transfer;
 
 pub const Int = base.Int;
 pub const Bigint = builtins.SignedBigint;
+pub const BigintBig = base.BigintBig;
 pub const PubKey = base.PubKey;
 pub const Sig = base.Sig;
 pub const Addr = base.Addr;

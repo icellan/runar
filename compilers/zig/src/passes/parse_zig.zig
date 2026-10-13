@@ -682,7 +682,7 @@ const Parser = struct {
     }
 
     pub fn resolveRunarTypeNode(name: []const u8) TypeNode {
-        if (std.mem.eql(u8, name, "Bigint")) return .{ .primitive_type = .bigint };
+        if (std.mem.eql(u8, name, "Bigint") or std.mem.eql(u8, name, "BigintBig")) return .{ .primitive_type = .bigint };
         if (std.mem.eql(u8, name, "PubKey")) return .{ .primitive_type = .pub_key };
         if (std.mem.eql(u8, name, "Sig")) return .{ .primitive_type = .sig };
         if (std.mem.eql(u8, name, "Addr")) return .{ .primitive_type = .addr };
@@ -1724,6 +1724,36 @@ test "parse Counter contract (stateful)" {
     try std.testing.expectEqual(std.meta.Tag(Statement).expr_stmt, std.meta.activeTag(c.methods[0].body[0]));
     try std.testing.expectEqual(std.meta.Tag(Statement).assign, std.meta.activeTag(c.methods[0].body[1]));
     try std.testing.expectEqual(std.meta.Tag(Statement).expr_stmt, std.meta.activeTag(c.methods[0].body[2]));
+}
+
+// N-182 / R93: runar.BigintBig is the 256-bit native spelling (u256 in
+// packages/runar-zig) for EC coordinates. Proves: it lowers to the same AST
+// bigint as runar.Bigint, for a property and a parameter. Does NOT prove the
+// native u256 runtime or any codegen.
+test "parse runar.BigintBig as bigint (N-182)" {
+    const source =
+        \\const runar = @import("runar");
+        \\pub const BigCoord = struct {
+        \\    pub const Contract = runar.SmartContract;
+        \\    x: runar.BigintBig,
+        \\    pub fn init(x: runar.BigintBig) BigCoord { return .{ .x = x }; }
+        \\    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        \\        runar.assert(self.x == y);
+        \\    }
+        \\};
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseZig(arena.allocator(), source, "BigCoord.runar.zig");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const c = r.contract.?;
+    try std.testing.expectEqual(@as(usize, 1), c.properties.len);
+    try std.testing.expectEqual(RunarType.bigint, c.properties[0].type_info);
+    try std.testing.expectEqual(@as(usize, 1), c.methods.len);
+    try std.testing.expectEqual(@as(usize, 1), c.methods[0].params.len);
+    try std.testing.expectEqual(RunarType.bigint, c.methods[0].params[0].type_info);
+    try std.testing.expectEqualStrings("bigint", c.methods[0].params[0].type_name);
 }
 
 test "parse constructor struct return assignments" {

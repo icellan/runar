@@ -1225,25 +1225,25 @@ fn slhForsPkFromSig(comptime params: SlhParams, fors_sig: []const u8, md: []cons
     return slhT(params, pk_seed, &fors_pk_adrs, &roots);
 }
 
-pub fn ecMakePoint(x: base.Bigint, y: base.Bigint) base.Point {
-    var point = [_]u8{0} ** 64;
-    std.mem.writeInt(u64, point[24..32], @bitCast(x), .big);
-    std.mem.writeInt(u64, point[56..64], @bitCast(y), .big);
+pub fn ecMakePoint(x: base.BigintBig, y: base.BigintBig) base.Point {
+    var point: [64]u8 = undefined;
+    std.mem.writeInt(u256, point[0..32], x, .big);
+    std.mem.writeInt(u256, point[32..64], y, .big);
     return dupeBytes(&point);
 }
 
-pub fn ecPointX(point: base.Point) base.Bigint {
+pub fn ecPointX(point: base.Point) base.BigintBig {
     // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
     // N-173: "EC point must be 64 bytes" (with "EC") matches the shared
     // diagnostic text (runar-lang/src/runtime/builtins.ts's ecDecode).
     if (point.len != 64) lengthPanic("ecPointX: EC point must be 64 bytes", point.len);
-    return @bitCast(std.mem.readInt(u64, point[24..32], .big));
+    return std.mem.readInt(u256, point[0..32], .big);
 }
 
-pub fn ecPointY(point: base.Point) base.Bigint {
+pub fn ecPointY(point: base.Point) base.BigintBig {
     // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
     if (point.len != 64) lengthPanic("ecPointY: EC point must be 64 bytes", point.len);
-    return @bitCast(std.mem.readInt(u64, point[56..64], .big));
+    return std.mem.readInt(u256, point[32..64], .big);
 }
 
 // N-111: the compiled EC builtins gate their operands, and these mirror the
@@ -2512,12 +2512,44 @@ test "ec helpers use real secp256k1 arithmetic" {
 }
 
 test "ec small-value point helpers round trip" {
-    const p = ecMakePoint(12345, -67890);
+    // N-182: was (12345, -67890). A Point is x[32]||y[32] big-endian
+    // UNSIGNED, so a negative coordinate is not representable (u256), as in
+    // Go's EcMakePoint, which panics on one.
+    const p = ecMakePoint(12345, 67890);
     defer freeIfOwned(p);
 
-    try std.testing.expectEqual(@as(i64, 12345), ecPointX(p));
-    try std.testing.expectEqual(@as(i64, -67890), ecPointY(p));
+    try std.testing.expectEqual(@as(base.BigintBig, 12345), ecPointX(p));
+    try std.testing.expectEqual(@as(base.BigintBig, 67890), ecPointY(p));
     try std.testing.expect(!ecOnCurve(p));
+}
+
+// N-182: ecPointX / ecPointY must return the whole 32-byte big-endian
+// coordinate (BigintBig = u256), not its low 8 bytes, and ecMakePoint must
+// take the whole coordinate back.
+// Proves: for 2G (published x/y) and G, the native accessors return the full
+// coordinate and ecMakePoint(ecPointX(p), ecPointY(p)) rebuilds p byte for byte.
+// Does NOT prove: the compiled script's ecPointX/ecMakePoint (covered by the
+// conformance goldens and the N-111 on-chain vectors), or negative inputs,
+// which u256 cannot represent (Go's EcMakePoint refuses them too).
+test "N-182: ecPointX / ecPointY return the full 256-bit coordinate and round-trip through ecMakePoint" {
+    const g2 = ecMulGen(2);
+    defer freeIfOwned(g2);
+    // Widened to i512 so the comparison is against the true coordinate value.
+    try std.testing.expectEqual(
+        @as(i512, 0xC6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5),
+        @as(i512, ecPointX(g2)),
+    );
+    try std.testing.expectEqual(
+        @as(i512, 0x1AE168FEA63DC339A3C58419466CEAEEF7F632653266D0E1236431A950CFE52A),
+        @as(i512, ecPointY(g2)),
+    );
+
+    const g = ecMulGen(1);
+    defer freeIfOwned(g);
+    const rebuilt = ecMakePoint(ecPointX(g), ecPointY(g));
+    defer freeIfOwned(rebuilt);
+    try std.testing.expectEqualSlices(u8, g, rebuilt);
+    try std.testing.expect(ecOnCurve(rebuilt));
 }
 
 test "verifyWOTS accepts a valid deterministic signature" {

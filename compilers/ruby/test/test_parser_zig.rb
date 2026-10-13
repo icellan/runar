@@ -106,6 +106,46 @@ class TestParserZig < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
+  # runar.BigintBig (N-182 / R93)
+  # ---------------------------------------------------------------------------
+
+  # Proves: the 256-bit native spelling runar.BigintBig (u256 in
+  # packages/runar-zig, used for EC coordinates) lowers to the same AST bigint
+  # as runar.Bigint, for a property and a parameter. Does NOT prove the native
+  # u256 runtime or any codegen.
+  def test_bigint_big_maps_to_bigint
+    source = <<~ZIG
+      const runar = @import("runar");
+
+      pub const BigCoord = struct {
+          pub const Contract = runar.SmartContract;
+
+          x: runar.BigintBig,
+
+          pub fn init(x: runar.BigintBig) BigCoord {
+              return .{ .x = x };
+          }
+
+          pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+              runar.assert(self.x == y);
+          }
+      };
+    ZIG
+
+    result = parse(source, 'BigCoord.runar.zig')
+    assert_empty result.errors.map(&:format_message)
+
+    c = result.contract
+    refute_nil c
+    assert_instance_of PrimitiveType, c.properties[0].type
+    assert_equal 'bigint', c.properties[0].type.name
+    check = c.methods.find { |m| m.name == 'check' }
+    assert_equal 1, check.params.length
+    assert_instance_of PrimitiveType, check.params[0].type
+    assert_equal 'bigint', check.params[0].type.name
+  end
+
+  # ---------------------------------------------------------------------------
   # Public vs private visibility
   # ---------------------------------------------------------------------------
 

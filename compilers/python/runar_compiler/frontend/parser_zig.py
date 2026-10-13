@@ -168,6 +168,7 @@ _ZIG_TYPE_MAP: dict[str, str] = {
     "bool": "boolean",
     "void": "void",
     "Bigint": "bigint",
+    "BigintBig": "bigint",
     "ByteString": "ByteString",
     "PubKey": "PubKey",
     "Sig": "Sig",

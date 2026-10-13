@@ -13,11 +13,12 @@
 //! `catch @panic`.
 //!
 //! Proves: for every ecAdd / ecMul / ecMulGen / ecNegate / ecEncodeCompressed
-//! row, the on-chain value or an abort error.
-//! Does NOT prove: the ecPointX / ecPointY rows -- the Zig native `Bigint` is
-//! i64, so those accessors cannot return a 256-bit coordinate at all (a
-//! return-type limitation, not an operand gate; their width check is an
-//! untestable in-process panic); inputs outside the file; the script itself.
+//! row, the on-chain value or an abort error; for every ecPointX / ecPointY
+//! VALUE row, the full 256-bit on-chain coordinate (N-182: they return
+//! BigintBig = u256, no longer the low 8 bytes as i64).
+//! Does NOT prove: the ecPointX / ecPointY ABORT rows (width 63 / 65) -- their
+//! width check is a panic with no `*Checked` variant, untestable in-process;
+//! inputs outside the file; the script itself.
 
 const std = @import("std");
 const builtins = @import("builtins.zig");
@@ -59,8 +60,21 @@ test "N-111: native EC builtins match the on-chain operand gates for every share
     for (cases) |c| {
         const obj = c.object;
         const name = obj.get("fn").?.string;
-        if (std.mem.eql(u8, name, "ecPointX") or std.mem.eql(u8, name, "ecPointY")) continue;
         const want = obj.get("expect").?.string;
+        if (std.mem.eql(u8, name, "ecPointX") or std.mem.eql(u8, name, "ecPointY")) {
+            // Abort rows: see the module note (panic, no *Checked variant).
+            if (std.mem.eql(u8, want, "abort")) continue;
+            const point = try hexAlloc(allocator, obj.get("p").?.string);
+            defer allocator.free(point);
+            const want_coord = try std.fmt.parseInt(u256, want, 10);
+            const got_coord = if (std.mem.eql(u8, name, "ecPointX")) builtins.ecPointX(point) else builtins.ecPointY(point);
+            checked += 1;
+            if (got_coord != want_coord) {
+                mismatches += 1;
+                std.debug.print("N-111 {s} [{s}]: got {d}, want {s}\n", .{ name, obj.get("why").?.string, got_coord, want });
+            }
+            continue;
+        }
         const p = if (obj.get("p")) |v| try hexAlloc(allocator, v.string) else try allocator.alloc(u8, 0);
         defer allocator.free(p);
         const q = if (obj.get("q")) |v| try hexAlloc(allocator, v.string) else try allocator.alloc(u8, 0);

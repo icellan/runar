@@ -164,6 +164,37 @@ class ZigParserTest {
         assertEquals(BigInteger.ONE, ((BigIntLiteral) rhs.right()).value());
     }
 
+    // N-182 / R93: runar.BigintBig is the 256-bit native spelling (u256 in
+    // packages/runar-zig) for EC coordinates. Proves: it lowers to the same
+    // AST bigint as runar.Bigint, for a property and a parameter. Does NOT
+    // prove the native u256 runtime or any codegen.
+    @Test
+    void parsesBigintBigAsBigint() throws ZigParser.ParseException {
+        String src = """
+            const runar = @import("runar");
+
+            pub const BigCoord = struct {
+                pub const Contract = runar.SmartContract;
+
+                x: runar.BigintBig,
+
+                pub fn init(x: runar.BigintBig) BigCoord {
+                    return .{ .x = x };
+                }
+
+                pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+                    runar.assert(self.x == y);
+                }
+            };
+            """;
+        ContractNode c = ZigParser.parse(src, "BigCoord.runar.zig");
+        assertEquals(1, c.properties().size());
+        assertEquals(new PrimitiveType(PrimitiveTypeName.BIGINT), c.properties().get(0).type());
+        MethodNode check = c.methods().stream().filter(m -> m.name().equals("check")).findFirst().orElseThrow();
+        assertEquals(1, check.params().size());
+        assertEquals(new PrimitiveType(PrimitiveTypeName.BIGINT), check.params().get(0).type());
+    }
+
     @Test
     void parsesIfElseAndComparison() throws ZigParser.ParseException {
         String src = """

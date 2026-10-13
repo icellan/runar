@@ -110,7 +110,7 @@ fn map_zig_type(name: &str) -> &str {
         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "bigint",
         "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "bigint",
         "comptime_int" => "bigint",
-        "Bigint" => "bigint",
+        "Bigint" | "BigintBig" => "bigint",
         "bool" => "boolean",
         "void" => "void",
         "ByteString" => "ByteString",
@@ -2439,6 +2439,52 @@ mod tests {
         assert_eq!(map_zig_type("PubKey"), "PubKey");
         assert_eq!(map_zig_type("ByteString"), "ByteString");
         assert_eq!(map_zig_type("CustomType"), "CustomType");
+    }
+
+    // N-182 / R93: runar.BigintBig is the 256-bit native spelling (u256 in
+    // packages/runar-zig) for EC coordinates. Proves: it lowers to the same
+    // AST bigint as runar.Bigint, for a property and a parameter. Does NOT
+    // prove the native u256 runtime or any codegen.
+    #[test]
+    fn test_bigint_big_maps_to_bigint() {
+        assert_eq!(map_zig_type("BigintBig"), "bigint");
+        let source = r#"
+const runar = @import("runar");
+
+pub const BigCoord = struct {
+    pub const Contract = runar.SmartContract;
+
+    x: runar.BigintBig,
+
+    pub fn init(x: runar.BigintBig) BigCoord {
+        return .{ .x = x };
+    }
+
+    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        runar.assert(self.x == y);
+    }
+};
+"#;
+        let result = parse_zig(source, Some("BigCoord.runar.zig"));
+        assert!(
+            result.errors.is_empty(),
+            "Unexpected errors: {:?}",
+            result.error_strings()
+        );
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.properties.len(), 1);
+        assert!(
+            matches!(contract.properties[0].prop_type, TypeNode::Primitive(PrimitiveTypeName::Bigint)),
+            "expected bigint, got {:?}",
+            contract.properties[0].prop_type
+        );
+        assert_eq!(contract.methods.len(), 1);
+        assert_eq!(contract.methods[0].params.len(), 1);
+        assert!(
+            matches!(contract.methods[0].params[0].param_type, TypeNode::Primitive(PrimitiveTypeName::Bigint)),
+            "expected bigint, got {:?}",
+            contract.methods[0].params[0].param_type
+        );
     }
 
     #[test]

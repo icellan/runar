@@ -170,6 +170,42 @@ describe('parseZigSource bigint surface', () => {
       ]);
     }
   });
+
+  // N-182 / R93: runar.BigintBig is the 256-bit native spelling (u256 in
+  // packages/runar-zig) for EC coordinates. Proves: it lowers to the same AST
+  // bigint as runar.Bigint, for a property and a parameter. Does NOT prove the
+  // native u256 runtime (packages/runar-zig tests) or any codegen.
+  it('parses runar.BigintBig as the bigint contract type (N-182)', () => {
+    const source = `
+      const runar = @import("runar");
+
+      pub const BigCoord = struct {
+        pub const Contract = runar.SmartContract;
+
+        x: runar.BigintBig,
+
+        pub fn init(x: runar.BigintBig) BigCoord {
+          return .{ .x = x };
+        }
+
+        pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+          runar.assert(self.x == y);
+        }
+      };
+    `;
+
+    const { direct, dispatch } = parseContract(source);
+
+    for (const contract of [direct, dispatch]) {
+      expect(contract.properties.map(p => [p.name, p.type])).toEqual([
+        ['x', { kind: 'primitive_type', name: 'bigint' }],
+      ]);
+      const check = requireMethod(contract.methods.find(method => method.name === 'check'));
+      expect(check.params.map(param => [param.name, param.type])).toEqual([
+        ['y', { kind: 'primitive_type', name: 'bigint' }],
+      ]);
+    }
+  });
 });
 
 describe('parseZigSource @builtin expressions', () => {

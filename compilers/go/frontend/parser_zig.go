@@ -434,6 +434,7 @@ var zigTypeMap = map[string]string{
 	"usize":        "bigint",
 	"comptime_int": "bigint",
 	"Bigint":       "bigint",
+	"BigintBig":    "bigint",
 	"bool":         "boolean",
 	"void":         "void",
 	"ByteString":   "ByteString",

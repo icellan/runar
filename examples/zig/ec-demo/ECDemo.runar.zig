@@ -9,15 +9,15 @@ pub const ECDemo = struct {
         return .{ .pt = pt };
     }
 
-    pub fn checkX(self: *const ECDemo, expectedX: i64) void {
+    pub fn checkX(self: *const ECDemo, expectedX: runar.BigintBig) void {
         runar.assert(runar.ecPointX(self.pt) == expectedX);
     }
 
-    pub fn checkY(self: *const ECDemo, expectedY: i64) void {
+    pub fn checkY(self: *const ECDemo, expectedY: runar.BigintBig) void {
         runar.assert(runar.ecPointY(self.pt) == expectedY);
     }
 
-    pub fn checkMakePoint(self: *const ECDemo, x: i64, y: i64, expectedX: i64, expectedY: i64) void {
+    pub fn checkMakePoint(self: *const ECDemo, x: runar.BigintBig, y: runar.BigintBig, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         _ = self;
         const p = runar.ecMakePoint(x, y);
         runar.assert(runar.ecPointX(p) == expectedX);
@@ -28,26 +28,26 @@ pub const ECDemo = struct {
         runar.assert(runar.ecOnCurve(self.pt));
     }
 
-    pub fn checkAdd(self: *const ECDemo, other: runar.Point, expectedX: i64, expectedY: i64) void {
+    pub fn checkAdd(self: *const ECDemo, other: runar.Point, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         const result = runar.ecAdd(self.pt, other);
         runar.assert(runar.ecPointX(result) == expectedX);
         runar.assert(runar.ecPointY(result) == expectedY);
     }
 
-    pub fn checkMul(self: *const ECDemo, scalar: i64, expectedX: i64, expectedY: i64) void {
+    pub fn checkMul(self: *const ECDemo, scalar: i64, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         const result = runar.ecMul(self.pt, scalar);
         runar.assert(runar.ecPointX(result) == expectedX);
         runar.assert(runar.ecPointY(result) == expectedY);
     }
 
-    pub fn checkMulGen(self: *const ECDemo, scalar: i64, expectedX: i64, expectedY: i64) void {
+    pub fn checkMulGen(self: *const ECDemo, scalar: i64, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         _ = self;
         const result = runar.ecMulGen(scalar);
         runar.assert(runar.ecPointX(result) == expectedX);
         runar.assert(runar.ecPointY(result) == expectedY);
     }
 
-    pub fn checkNegate(self: *const ECDemo, expectedNegY: i64) void {
+    pub fn checkNegate(self: *const ECDemo, expectedNegY: runar.BigintBig) void {
         const neg = runar.ecNegate(self.pt);
         runar.assert(runar.ecPointY(neg) == expectedNegY);
     }

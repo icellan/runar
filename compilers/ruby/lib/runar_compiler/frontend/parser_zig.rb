@@ -112,6 +112,7 @@ module RunarCompiler
       "bool"        => "boolean",
       "void"        => "void",
       "Bigint"      => "bigint",
+      "BigintBig"   => "bigint",
       "ByteString"  => "ByteString",
       "PubKey"      => "PubKey",
       "Sig"         => "Sig",

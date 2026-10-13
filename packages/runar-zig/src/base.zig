@@ -3,6 +3,11 @@ const bsvz = @import("bsvz");
 
 pub const Int = i64;
 pub const Bigint = i64;
+/// N-182: a 256-bit unsigned integer, the native spelling for a full EC
+/// coordinate (ecPointX / ecPointY / ecMakePoint). Mirrors Go's
+/// runar.BigintBig; every .runar.zig parser maps it to the AST type bigint.
+/// Unsigned (not i256) because secp256k1 coordinates exceed 2^255.
+pub const BigintBig = u256;
 pub const PubKey = []const u8;
 pub const Sig = []const u8;
 pub const Addr = []const u8;

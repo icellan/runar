@@ -179,6 +179,7 @@ public final class ZigParser {
         ZIG_TYPE_MAP.put("bool", "boolean");
         ZIG_TYPE_MAP.put("void", "void");
         ZIG_TYPE_MAP.put("Bigint", "bigint");
+        ZIG_TYPE_MAP.put("BigintBig", "bigint");
         ZIG_TYPE_MAP.put("ByteString", "ByteString");
         ZIG_TYPE_MAP.put("PubKey", "PubKey");
         ZIG_TYPE_MAP.put("Sig", "Sig");

@@ -134,6 +134,49 @@ pub const Counter = struct {
 }
 
 // ---------------------------------------------------------------------------
+// Test: runar.BigintBig (N-182 / R93)
+// ---------------------------------------------------------------------------
+
+// Proves: the 256-bit native spelling runar.BigintBig (u256 in
+// packages/runar-zig, used for EC coordinates) lowers to the same AST bigint
+// as runar.Bigint, for a property and a parameter. Does NOT prove the native
+// u256 runtime or any codegen.
+func TestParseZig_BigintBigMapsToBigint(t *testing.T) {
+	source := []byte(`const runar = @import("runar");
+
+pub const BigCoord = struct {
+    pub const Contract = runar.SmartContract;
+
+    x: runar.BigintBig,
+
+    pub fn init(x: runar.BigintBig) BigCoord {
+        return .{ .x = x };
+    }
+
+    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        runar.assert(self.x == y);
+    }
+};
+`)
+	result := ParseSource(source, "BigCoord.runar.zig")
+	if result.Contract == nil {
+		t.Fatalf("expected contract, got nil (errors: %v)", result.ErrorStrings())
+	}
+	if len(result.Contract.Properties) != 1 {
+		t.Fatalf("expected 1 property, got %d", len(result.Contract.Properties))
+	}
+	if pt, ok := result.Contract.Properties[0].Type.(PrimitiveType); !ok || pt.Name != "bigint" {
+		t.Errorf("expected property type bigint, got %#v", result.Contract.Properties[0].Type)
+	}
+	if len(result.Contract.Methods) != 1 || len(result.Contract.Methods[0].Params) != 1 {
+		t.Fatalf("expected one method with one param, got %#v", result.Contract.Methods)
+	}
+	if pt, ok := result.Contract.Methods[0].Params[0].Type.(PrimitiveType); !ok || pt.Name != "bigint" {
+		t.Errorf("expected param type bigint, got %#v", result.Contract.Methods[0].Params[0].Type)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: Property with initializer
 // ---------------------------------------------------------------------------
 
