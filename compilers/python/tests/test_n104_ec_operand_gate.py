@@ -95,3 +95,33 @@ def _int(name: str, n: int) -> ANFBinding:
 def test_n104_rewrite_keeps_operand_gate(rule, program, gate, result):
     got = [_describe(b) for b in optimize_ec(program()).methods[0].body]
     assert got == ["p = load_param pt", *gate, f"t = {result}", "a = assert t"], rule
+
+
+# N-251: R8/R8r keep the adder's y = 0 doubling abort (N-110) as
+# assert(ecPointX(q) === 0 || ecPointY(q) !== 0), ahead of the INFINITY binding
+# (user decision R96). Pins the gate ANF only; its script semantics are executed
+# on the real Spend engine, in both optimizer modes, by
+# packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
+NEG_CANCEL_GATE = [
+    "t_px = call ecPointX p",
+    "t_py = call ecPointY p",
+    "t_zero = const 0",
+    "t_pxz = bin_op === t_px t_zero",
+    "t_pynz = bin_op !== t_py t_zero",
+    "t_ok = bin_op || t_pxz t_pynz",
+    "t_gate = assert t_ok",
+]
+
+
+def _neg() -> ANFBinding:
+    return ANFBinding(name="n", value=ANFValue(kind="call", func="ecNegate", args=["p"]))
+
+
+@pytest.mark.parametrize("rule,args", [
+    ("ec-add-negate-cancel", ["p", "n"]),
+    ("ec-add-negate-cancel-reversed", ["n", "p"]),
+])
+def test_n251_negate_cancel_keeps_y_zero_abort(rule, args):
+    got = [_describe(b) for b in optimize_ec(_program(_neg(), "ecAdd", args)).methods[0].body]
+    assert got == ["p = load_param pt", "n = call ecNegate p", *NEG_CANCEL_GATE,
+                   "t = const INFINITY", "a = assert t"], rule

@@ -277,6 +277,38 @@ fn emit_operand_gate(of_mul: bool, base: &str, q: &str, out: &mut Vec<ANFBinding
     add("_gate", ANFValue::Assert { value: ok, is_auto_injected_state_check: false }, out);
 }
 
+/// N-251 — the gate R8/R8r (`ecAdd(q, ecNegate(q)) -> O` and its mirror) must
+/// leave behind (user decision R96). Byte-for-byte the TS reference
+/// (`emitNegCancelGate` in packages/runar-compiler/src/optimizer/anf-ec.ts):
+///
+///   assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+///
+/// The replaced ecAdd doubles exactly when y(q) = 0, and N-110 made the adder
+/// abort on a doubling with px != 0 and py == 0; the px == 0 term keeps
+/// O + O = O. Width and canonicity are checked by the inner ecNegate(q) call,
+/// which is never dead-code-eliminated.
+fn emit_neg_cancel_gate(base: &str, q: &str, out: &mut Vec<ANFBinding>, used_names: &mut HashSet<String>) {
+    let mut add = |suffix: &str, value: ANFValue, out: &mut Vec<ANFBinding>| -> String {
+        let name = fresh_name(format!("{}{}", base, suffix), used_names);
+        out.push(ANFBinding { name: name.clone(), value, source_loc: None });
+        name
+    };
+    let call = |func: &str, arg: &str| ANFValue::Call { func: func.to_string(), args: vec![arg.to_string()] };
+    let bin = |op: &str, l: &str, r: &str| ANFValue::BinOp {
+        op: op.to_string(),
+        left: l.to_string(),
+        right: r.to_string(),
+        result_type: None,
+    };
+    let px = add("_px", call("ecPointX", q), out);
+    let py = add("_py", call("ecPointY", q), out);
+    let zero = add("_zero", make_load_const_int(&BigInt::from(0)), out);
+    let x_zero = add("_pxz", bin("===", &px, &zero), out);
+    let y_non_zero = add("_pynz", bin("!==", &py, &zero), out);
+    let ok = add("_ok", bin("||", &x_zero, &y_non_zero), out);
+    add("_gate", ANFValue::Assert { value: ok, is_auto_injected_state_check: false }, out);
+}
+
 /// Try to rewrite a single binding. Returns Some(new_value) if rewritten.
 /// May push extra bindings (e.g., computed scalars) into `extra_bindings`.
 fn try_rewrite(
@@ -389,10 +421,11 @@ fn try_rewrite(
                 return Some(make_alias(right_arg));
             }
 
-            // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+            // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
             if let Some(right_val) = value_map.get(right_arg.as_str()) {
                 if let Some(negate_args) = is_call_to(right_val, "ecNegate") {
                     if negate_args.len() == 1 && negate_args[0] == *left_arg {
+                        emit_neg_cancel_gate(&binding.name, left_arg, extra_bindings, used_names);
                         return Some(make_load_const_hex(INFINITY_HEX));
                     }
                 }
@@ -412,6 +445,7 @@ fn try_rewrite(
             if let Some(left_val) = value_map.get(left_arg.as_str()) {
                 if let Some(negate_args) = is_call_to(left_val, "ecNegate") {
                     if negate_args.len() == 1 && negate_args[0] == *right_arg {
+                        emit_neg_cancel_gate(&binding.name, right_arg, extra_bindings, used_names);
                         return Some(make_load_const_hex(INFINITY_HEX));
                     }
                 }
@@ -1381,5 +1415,38 @@ mod n104_tests {
     #[test]
     fn n104_ec_mul_zero_keeps_gate() {
         assert_eq!(run(program(int("zero", 0), call("ecMul", &["p", "zero"]))), expect(mul_gate(), "const INFINITY"));
+    }
+
+    /// N-251: R8/R8r keep the adder's y = 0 doubling abort (N-110) as
+    /// assert(ecPointX(q) === 0 || ecPointY(q) !== 0), ahead of the INFINITY
+    /// binding (user decision R96). Pins the gate ANF only; its script
+    /// semantics are executed on the real Spend engine, in both optimizer
+    /// modes, by packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
+    fn neg_cancel_expect() -> Vec<String> {
+        vec![
+            "p = load_param pt".to_string(),
+            "n = call ecNegate p".to_string(),
+            "t_px = call ecPointX p".to_string(),
+            "t_py = call ecPointY p".to_string(),
+            "t_zero = const 0".to_string(),
+            "t_pxz = bin_op === t_px t_zero".to_string(),
+            "t_pynz = bin_op !== t_py t_zero".to_string(),
+            "t_ok = bin_op || t_pxz t_pynz".to_string(),
+            "t_gate = assert t_ok".to_string(),
+            "t = const INFINITY".to_string(),
+            "a = assert t".to_string(),
+        ]
+    }
+
+    #[test]
+    fn n251_ec_add_negate_cancel_keeps_y_zero_abort() {
+        let neg = bnd("n", call("ecNegate", &["p"]));
+        assert_eq!(run(program(neg, call("ecAdd", &["p", "n"]))), neg_cancel_expect());
+    }
+
+    #[test]
+    fn n251_ec_add_negate_cancel_reversed_keeps_y_zero_abort() {
+        let neg = bnd("n", call("ecNegate", &["p"]));
+        assert_eq!(run(program(neg, call("ecAdd", &["n", "p"]))), neg_cancel_expect());
     }
 }

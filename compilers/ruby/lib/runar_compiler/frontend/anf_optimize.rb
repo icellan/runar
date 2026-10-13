@@ -250,11 +250,14 @@ module RunarCompiler
           end
         end
 
-        # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+        # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
         if func == "ecAdd" && args.size == 2
           neg = resolve(args[1], vm)
           if neg && neg.kind == "call" && neg.func == "ecNegate" && neg.args && neg.args.size == 1
-            return make_const_hex(INFINITY_HEX) if same_binding?(args[0], neg.args[0], vm)
+            if same_binding?(args[0], neg.args[0], vm)
+              emit_neg_cancel_gate(name, args[0], vm, prelude, used_names)
+              return make_const_hex(INFINITY_HEX)
+            end
           end
         end
 
@@ -271,7 +274,10 @@ module RunarCompiler
         if func == "ecAdd" && args.size == 2
           neg = resolve(args[0], vm)
           if neg && neg.kind == "call" && neg.func == "ecNegate" && neg.args && neg.args.size == 1
-            return make_const_hex(INFINITY_HEX) if same_binding?(args[1], neg.args[0], vm)
+            if same_binding?(args[1], neg.args[0], vm)
+              emit_neg_cancel_gate(name, args[1], vm, prelude, used_names)
+              return make_const_hex(INFINITY_HEX)
+            end
           end
         end
 
@@ -497,6 +503,47 @@ module RunarCompiler
         add.call("_gate", Frontend._make_assert(ok))
       end
       private_class_method :emit_operand_gate
+
+      # N-251 -- the gate R8/R8r (ecAdd(q, ecNegate(q)) -> O and its mirror)
+      # must leave behind (user decision R96). Byte-for-byte the TS reference
+      # (emitNegCancelGate in packages/runar-compiler/src/optimizer/anf-ec.ts):
+      #
+      #   assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+      #
+      # The replaced ecAdd doubles exactly when y(q) = 0, and N-110 made the
+      # adder abort on a doubling with px != 0 and py == 0; the px == 0 term
+      # keeps O + O = O. Width and canonicity are checked by the inner
+      # ecNegate(q) call, which is never dead-code-eliminated. Names as in
+      # emit_operand_gate.
+      def self.emit_neg_cancel_gate(base, q, vm, prelude, used_names)
+        add = lambda do |suffix, value|
+          name = "#{base}#{suffix}"
+          i = 1
+          while used_names.include?(name)
+            name = "#{base}#{suffix}_#{i}"
+            i += 1
+          end
+          used_names << name
+          vm[name] = value
+          prelude << IR::ANFBinding.new(name: name, value: value)
+          name
+        end
+        bin = lambda do |op, left, right|
+          IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = op
+            v.left = left
+            v.right = right
+          end
+        end
+        px = add.call("_px", make_call("ecPointX", [q]))
+        py = add.call("_py", make_call("ecPointY", [q]))
+        zero = add.call("_zero", make_const_int(0))
+        x_zero = add.call("_pxz", bin.call("===", px, zero))
+        y_non_zero = add.call("_pynz", bin.call("!==", py, zero))
+        ok = add.call("_ok", bin.call("||", x_zero, y_non_zero))
+        add.call("_gate", Frontend._make_assert(ok))
+      end
+      private_class_method :emit_neg_cancel_gate
 
       # Bind a freshly folded constant and return its name.
       #

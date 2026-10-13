@@ -297,11 +297,12 @@ public final class AnfOptimize {
                 return makeRef(ic.args().get(0));
             }
         }
-        // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+        // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
         if ("ecAdd".equals(func) && args.size() == 2) {
             AnfValue neg = resolveValue(args.get(1), vm);
             if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
                 if (sameBinding(args.get(0), nc.args().get(0), vm)) {
+                    emitNegCancelGate(name, args.get(0), vm, prelude, usedNames);
                     return makeConstHex(INFINITY_HEX);
                 }
             }
@@ -320,6 +321,7 @@ public final class AnfOptimize {
             AnfValue neg = resolveValue(args.get(0), vm);
             if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
                 if (sameBinding(args.get(1), nc.args().get(0), vm)) {
+                    emitNegCancelGate(name, args.get(1), vm, prelude, usedNames);
                     return makeConstHex(INFINITY_HEX);
                 }
             }
@@ -493,6 +495,41 @@ public final class AnfOptimize {
             String yOk = add.apply("_pyok", new BinOp("<", py, fp, null));
             ok = add.apply("_ok", new BinOp("&&", xOk, yOk, null));
         }
+        add.apply("_gate", new Assert(ok));
+    }
+
+    /**
+     * N-251 — the gate R8/R8r ({@code ecAdd(q, ecNegate(q)) -> O} and its
+     * mirror) must leave behind (user decision R96). Byte-for-byte the TS
+     * reference ({@code emitNegCancelGate} in
+     * packages/runar-compiler/src/optimizer/anf-ec.ts):
+     *
+     * <pre>
+     *   assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+     * </pre>
+     *
+     * <p>The replaced ecAdd doubles exactly when y(q) = 0, and N-110 made the
+     * adder abort on a doubling with px != 0 and py == 0; the px == 0 term
+     * keeps O + O = O. Width and canonicity are checked by the inner
+     * ecNegate(q) call, which is never dead-code-eliminated. Names as in
+     * {@link #emitOperandGate}.
+     */
+    private static void emitNegCancelGate(String base, String q, Map<String, AnfValue> vm,
+                                          List<AnfBinding> prelude, Set<String> usedNames) {
+        java.util.function.BiFunction<String, AnfValue, String> add = (suffix, value) -> {
+            String n = base + suffix;
+            for (int i = 1; usedNames.contains(n); i++) n = base + suffix + "_" + i;
+            usedNames.add(n);
+            vm.put(n, value);
+            prelude.add(new AnfBinding(n, value, null));
+            return n;
+        };
+        String px = add.apply("_px", new Call("ecPointX", List.of(q)));
+        String py = add.apply("_py", new Call("ecPointY", List.of(q)));
+        String zero = add.apply("_zero", new LoadConst(new BigIntConst(BigInteger.ZERO)));
+        String xZero = add.apply("_pxz", new BinOp("===", px, zero, null));
+        String yNonZero = add.apply("_pynz", new BinOp("!==", py, zero, null));
+        String ok = add.apply("_ok", new BinOp("||", xZero, yNonZero, null));
         add.apply("_gate", new Assert(ok));
     }
 

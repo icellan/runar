@@ -33,6 +33,12 @@
  *     UNFOLDED script yields x = 0 and y = 0 — exactly the constant the rule
  *     substitutes. So the rule is an optimisation, and the defect is that six
  *     tiers took the slow path while the seventh took the fast one.
+ *     EXCEPT for an off-curve p = (a, 0), a != 0: ecNegate(p) = p, the adder
+ *     doubles, and N-110 makes it abort. N-251 (user decision R96) keeps that
+ *     abort in the rewrite as a gate, `assert(ecPointX(p) === 0 ||
+ *     ecPointY(p) !== 0)`; its exact ANF is pinned below and its execution, in
+ *     both optimizer modes, by
+ *     packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
  *
  * The tests below pin all three claims.
  */
@@ -287,6 +293,41 @@ describe('ec-add-negate-cancel{,-reversed}: cross-tier parity via --ir', () => {
       // the ~26 KB one an emitted ecAdd produces.
       expect(funcs, `${order}: ecAdd survived, the rule did not fire`).not.toContain('ecAdd');
       expect(tsHex[order]!.length).toBeLessThan(8000);
+    }
+  });
+
+  // N-251: the rewrite keeps the adder's y = 0 doubling abort as a gate, built
+  // from forms no rule matches, ahead of the INFINITY binding. Every native
+  // tier pins the same bindings in its own N-251 test; the per-tier hex tests
+  // below would catch a tier that dropped it.
+  it('N-251: the rewrite emits the y = 0 gate ahead of the INFINITY binding', () => {
+    for (const order of ['forward', 'reversed'] as const) {
+      const r = compileFromANF(aliasedProgram(order), { disableConstantFolding: true });
+      const spend = r.anf.methods.find((m) => m.name === 'spend')!;
+      const shape = spend.body.map((x) => {
+        const v = x.value;
+        switch (v.kind) {
+          case 'call': return `${x.name} = call ${v.func} ${v.args.join(' ')}`;
+          case 'bin_op': return `${x.name} = bin_op ${v.op} ${v.left} ${v.right}`;
+          case 'assert': return `${x.name} = assert ${v.value}`;
+          case 'load_const': return `${x.name} = const ${v.value === '0'.repeat(128) ? 'INFINITY' : String(v.value)}`;
+          default: return `${x.name} = ${v.kind}`;
+        }
+      });
+      expect(shape, order).toEqual([
+        't0 = load_param',
+        't1 = call ecNegate t0',
+        't2_px = call ecPointX t0',
+        't2_py = call ecPointY t0',
+        't2_zero = const 0',
+        't2_pxz = bin_op === t2_px t2_zero',
+        't2_pynz = bin_op !== t2_py t2_zero',
+        't2_ok = bin_op || t2_pxz t2_pynz',
+        't2_gate = assert t2_ok',
+        't2 = const INFINITY',
+        't3 = call ecOnCurve t2',
+        't4 = assert t3',
+      ]);
     }
   });
 

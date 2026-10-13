@@ -208,6 +208,35 @@ function emitMulOperandGate(base: string, q: string, out: ANFBinding[], usedName
 }
 
 /**
+ * N-251 — the gate R8/R8r (`ecAdd(q, ecNegate(q)) → O` and its mirror) must
+ * leave behind (user decision R96).
+ *
+ * ecNegate(q) = (qx, (p - qy) mod p), so the replaced `ecAdd` sees px == qx,
+ * and it doubles exactly when qy == 0. N-110 made the adder ABORT on a
+ * doubling with px != 0 and py == 0 (the tangent has no denominator), and
+ * otherwise this sum is O. So the rewrite keeps that one abort:
+ * `assert(ecPointX(q) === 0 || ecPointY(q) !== 0)` — N-110's predicate, whose
+ * px == 0 term keeps O + O = O. Width and canonicity need no gate here: the
+ * inner `ecNegate(q)` call checks both and is never dead-code-eliminated.
+ * Built only from forms no rule matches, as the N-104 gates are.
+ */
+function emitNegCancelGate(base: string, q: string, out: ANFBinding[], usedNames: Set<string>): void {
+  const px = freshName(`${base}_px`, usedNames);
+  out.push({ name: px, value: { kind: 'call', func: 'ecPointX', args: [q] } });
+  const py = freshName(`${base}_py`, usedNames);
+  out.push({ name: py, value: { kind: 'call', func: 'ecPointY', args: [q] } });
+  const zero = freshName(`${base}_zero`, usedNames);
+  out.push({ name: zero, value: makeLoadConst(0n) });
+  const xZero = freshName(`${base}_pxz`, usedNames);
+  out.push({ name: xZero, value: { kind: 'bin_op', op: '===', left: px, right: zero } });
+  const yNonZero = freshName(`${base}_pynz`, usedNames);
+  out.push({ name: yNonZero, value: { kind: 'bin_op', op: '!==', left: py, right: zero } });
+  const ok = freshName(`${base}_ok`, usedNames);
+  out.push({ name: ok, value: { kind: 'bin_op', op: '||', left: xZero, right: yNonZero } });
+  out.push({ name: freshName(`${base}_gate`, usedNames), value: { kind: 'assert', value: ok } });
+}
+
+/**
  * Try to rewrite a single binding. Returns the new value if rewritten, or null.
  */
 function tryRewrite(
@@ -307,10 +336,11 @@ function tryRewrite(
         return { kind: 'load_const', value: `@ref:${rightArg}` } as ANFValue;
       }
 
-      // Rule 8: ecAdd(x, ecNegate(x)) → INFINITY
+      // Rule 8: ecAdd(x, ecNegate(x)) → INFINITY, keeping the adder's y = 0 abort (N-251)
       const rightVal = resolveArg(rightArg, valueMap);
       if (rightVal && isCallTo(rightVal, 'ecNegate') && rightVal.args.length === 1) {
         if (rightVal.args[0] === leftArg) {
+          emitNegCancelGate(binding.name, leftArg, newBindings, usedNames);
           return makeLoadConst(INFINITY_HEX);
         }
       }
@@ -334,6 +364,7 @@ function tryRewrite(
       // bind to the same ANF binding on both sides.
       if (leftVal && isCallTo(leftVal, 'ecNegate') && leftVal.args.length === 1) {
         if (leftVal.args[0] === rightArg) {
+          emitNegCancelGate(binding.name, rightArg, newBindings, usedNames);
           return makeLoadConst(INFINITY_HEX);
         }
       }

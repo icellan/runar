@@ -45,12 +45,16 @@
   {
     "name": "ec-add-negate-cancel",
     "match": { "func": "ecAdd", "args": ["$x", { "func": "ecNegate", "args": ["$x"] }] },
-    "replace": { "const": "INFINITY" }
+    "replace": { "const": "INFINITY" },
+    "gate": { "of": "ecAddNegCancel", "operand": "$x" },
+    "note": "N-251 GATE (user decision R96): ecNegate($x) has the same x as $x, so the replaced ecAdd doubles exactly when y($x) = 0, and N-110 made the adder ABORT on a doubling with px != 0 and py == 0. The rewrite keeps that abort, ahead of the INFINITY binding, as plain ANF built only from forms no rule here matches: <b>_px = ecPointX($x); <b>_py = ecPointY($x); <b>_zero = 0; <b>_pxz = <b>_px === <b>_zero; <b>_pynz = <b>_py !== <b>_zero; <b>_ok = <b>_pxz || <b>_pynz; <b>_gate = assert(<b>_ok), where <b> is the rewritten binding's name. The px == 0 term is N-110's own exemption: ecNegate(O) = O and O + O = O, so x = O still gives O. Width and canonicity need no gate: the inner ecNegate($x) call checks both and is never dead-code-eliminated. Pinned by packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts (execution, both modes) and each tier's N-251 optimizer test."
   },
   {
     "name": "ec-add-negate-cancel-reversed",
     "match": { "func": "ecAdd", "args": [{ "func": "ecNegate", "args": ["$x"] }, "$x"] },
-    "replace": { "const": "INFINITY" }
+    "replace": { "const": "INFINITY" },
+    "gate": { "of": "ecAddNegCancel", "operand": "$x" },
+    "note": "N-251 GATE (user decision R96): ecNegate($x) has the same x as $x, so the replaced ecAdd doubles exactly when y($x) = 0, and N-110 made the adder ABORT on a doubling with px != 0 and py == 0. The rewrite keeps that abort, ahead of the INFINITY binding, as plain ANF built only from forms no rule here matches: <b>_px = ecPointX($x); <b>_py = ecPointY($x); <b>_zero = 0; <b>_pxz = <b>_px === <b>_zero; <b>_pynz = <b>_py !== <b>_zero; <b>_ok = <b>_pxz || <b>_pynz; <b>_gate = assert(<b>_ok), where <b> is the rewritten binding's name. The px == 0 term is N-110's own exemption: ecNegate(O) = O and O + O = O, so x = O still gives O. Width and canonicity need no gate: the inner ecNegate($x) call checks both and is never dead-code-eliminated. Pinned by packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts (execution, both modes) and each tier's N-251 optimizer test."
   },
   {
     "name": "ec-mul-associative",

@@ -244,11 +244,13 @@ fn tryOptimize(
         }
     }
 
-    // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+    // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
     if (eql(func, "ecAdd") and args.len == 2) {
         if (resolveCall(args[1], vm)) |nc| {
-            if (eql(nc.func, "ecNegate") and nc.args.len == 1 and sameBinding(args[0], nc.args[0], vm))
+            if (eql(nc.func, "ecNegate") and nc.args.len == 1 and sameBinding(args[0], nc.args[0], vm)) {
+                if (!emitOperandGate(allocator, .neg_cancel, name, args[0], vm, used, prelude)) return null;
                 return makeConstHex(INFINITY_HEX);
+            }
         }
     }
 
@@ -264,8 +266,10 @@ fn tryOptimize(
     // order, which is the order the Go engine tries them in.
     if (eql(func, "ecAdd") and args.len == 2) {
         if (resolveCall(args[0], vm)) |nc| {
-            if (eql(nc.func, "ecNegate") and nc.args.len == 1 and sameBinding(args[1], nc.args[0], vm))
+            if (eql(nc.func, "ecNegate") and nc.args.len == 1 and sameBinding(args[1], nc.args[0], vm)) {
+                if (!emitOperandGate(allocator, .neg_cancel, name, args[1], vm, used, prelude)) return null;
                 return makeConstHex(INFINITY_HEX);
+            }
         }
     }
 
@@ -438,7 +442,7 @@ fn makeCall(allocator: Allocator, func: []const u8, args: []const []const u8) ?t
 /// carries (it does not fit `i128`).
 const FIELD_P_DEC = "115792089237316195423570985008687907853269984665640564039457584007908834671663";
 
-const GateOf = enum { add, mul };
+const GateOf = enum { add, mul, neg_cancel };
 
 /// N-104 -- the operand gate a rewrite must leave behind. Byte-for-byte the TS
 /// reference (`emitAddOperandGate` / `emitMulOperandGate` in
@@ -447,6 +451,14 @@ const GateOf = enum { add, mul };
 ///
 ///   ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
 ///   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+///   neg_cancel: assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+///
+/// `neg_cancel` is N-251's gate for R8/R8r (`ecAdd(q, ecNegate(q)) -> O` and
+/// its mirror; TS `emitNegCancelGate`, user decision R96): the replaced ecAdd
+/// doubles exactly when y(q) = 0, and N-110 made the adder abort on a doubling
+/// with px != 0 and py == 0; the px == 0 term keeps O + O = O. Width and
+/// canonicity are checked by the inner ecNegate(q) call, which is never
+/// dead-code-eliminated.
 ///
 /// R1-R4 replace a builtin whose first act is to validate q; without this a
 /// malformed or off-curve q was accepted by the default compile and aborted
@@ -501,6 +513,14 @@ fn emitOperandGate(
             const is_inf = push(&out, &n, Builder.name(allocator, used, base, "_isinf") orelse return false, .{ .bin_op = .{ .op = "===", .left = q, .right = inf, .result_type = "bytes" } });
             const on_curve = push(&out, &n, Builder.name(allocator, used, base, "_oncurve") orelse return false, makeCall(allocator, "ecOnCurve", &.{q}) orelse return false);
             ok_name = push(&out, &n, Builder.name(allocator, used, base, "_ok") orelse return false, .{ .bin_op = .{ .op = "||", .left = is_inf, .right = on_curve } });
+        },
+        .neg_cancel => {
+            const px = push(&out, &n, Builder.name(allocator, used, base, "_px") orelse return false, makeCall(allocator, "ecPointX", &.{q}) orelse return false);
+            const py = push(&out, &n, Builder.name(allocator, used, base, "_py") orelse return false, makeCall(allocator, "ecPointY", &.{q}) orelse return false);
+            const zero = push(&out, &n, Builder.name(allocator, used, base, "_zero") orelse return false, .{ .load_const = .{ .value = .{ .integer = 0 } } });
+            const x_zero = push(&out, &n, Builder.name(allocator, used, base, "_pxz") orelse return false, .{ .bin_op = .{ .op = "===", .left = px, .right = zero } });
+            const y_non_zero = push(&out, &n, Builder.name(allocator, used, base, "_pynz") orelse return false, .{ .bin_op = .{ .op = "!==", .left = py, .right = zero } });
+            ok_name = push(&out, &n, Builder.name(allocator, used, base, "_ok") orelse return false, .{ .bin_op = .{ .op = "||", .left = x_zero, .right = y_non_zero } });
         },
     }
     _ = push(&out, &n, Builder.name(allocator, used, base, "_gate") orelse return false, .{ .assert = .{ .value = ok_name } });
@@ -794,7 +814,11 @@ test "rule 7: ecNegate(ecNegate(x)) -> x" {
 
 // --- Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY ---
 test "rule 8: ecAdd(x, ecNegate(x)) -> INFINITY" {
-    const alloc = testing.allocator;
+    // N-251: the y = 0 gate's names and call args are not individually owned
+    // by the result, so freeOptimizeResult cannot release them.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var body = [_]types.ANFBinding{
         makeBinding("p", .{ .load_const = .{ .value = .{ .string = G_HEX } } }),
         makeBinding("neg", .{ .call = .{ .func = "ecNegate", .args = &.{"p"} } }),
@@ -802,8 +826,8 @@ test "rule 8: ecAdd(x, ecNegate(x)) -> INFINITY" {
         makeBinding("t1", .{ .assert = .{ .value = "t0" } }),
     };
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
-    defer freeOptimizeResult(alloc, result);
-    try expectConstStr(result.methods[0].body[2].value, INFINITY_HEX);
+    // N-251: the y = 0 gate now precedes t0, so find it by name.
+    try expectConstStr(try findValue(result.methods[0].body, "t0"), INFINITY_HEX);
 }
 
 // --- Rule 8r (ec-add-negate-cancel-reversed): ecAdd(ecNegate(x), x) -> INFINITY ---
@@ -811,7 +835,11 @@ test "rule 8: ecAdd(x, ecNegate(x)) -> INFINITY" {
 // both directions with no "supported" tag; only the Go tier implemented this one
 // (R-034 / CL-BUG-028).
 test "rule 8r: ecAdd(ecNegate(x), x) -> INFINITY" {
-    const alloc = testing.allocator;
+    // N-251: the y = 0 gate's names and call args are not individually owned
+    // by the result, so freeOptimizeResult cannot release them.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var body = [_]types.ANFBinding{
         makeBinding("p", .{ .load_const = .{ .value = .{ .string = G_HEX } } }),
         makeBinding("neg", .{ .call = .{ .func = "ecNegate", .args = &.{"p"} } }),
@@ -819,8 +847,8 @@ test "rule 8r: ecAdd(ecNegate(x), x) -> INFINITY" {
         makeBinding("t1", .{ .assert = .{ .value = "t0" } }),
     };
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
-    defer freeOptimizeResult(alloc, result);
-    try expectConstStr(result.methods[0].body[2].value, INFINITY_HEX);
+    // N-251: the y = 0 gate now precedes t0, so find it by name.
+    try expectConstStr(try findValue(result.methods[0].body, "t0"), INFINITY_HEX);
 }
 
 // --- CONTROL: ecAdd(ecNegate(y), x) with x != y must NOT fold ---
@@ -1078,6 +1106,44 @@ test "N-104 ec-mul-zero keeps ecMul's operand gate" {
         makeBinding("zero", .{ .load_const = .{ .value = .{ .integer = 0 } } }),
         .{ .call = .{ .func = "ecMul", .args = &.{ "p", "zero" } } },
         &N104_MUL_GATE,
+        "const INFINITY",
+    );
+}
+
+// --- N-251: R8/R8r keep the adder's y = 0 doubling abort (N-110) ---
+//
+// assert(ecPointX(q) === 0 || ecPointY(q) !== 0), ahead of the INFINITY binding
+// (user decision R96). Pins the gate ANF only; its script semantics are
+// executed on the real Spend engine, in both optimizer modes, by
+// packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
+// The ecNegate binding stays (calls are never dead-code-eliminated), so it is
+// part of the expected body ahead of the gate.
+
+const N251_NEG_CANCEL_GATE = [_][]const u8{
+    "n = call ecNegate p",
+    "t_px = call ecPointX p",
+    "t_py = call ecPointY p",
+    "t_zero = const 0",
+    "t_pxz = bin_op === t_px t_zero",
+    "t_pynz = bin_op !== t_py t_zero",
+    "t_ok = bin_op || t_pxz t_pynz",
+    "t_gate = assert t_ok",
+};
+
+test "N-251 ec-add-negate-cancel keeps the adder's y = 0 abort" {
+    try n104Check(
+        makeBinding("n", .{ .call = .{ .func = "ecNegate", .args = &.{"p"} } }),
+        .{ .call = .{ .func = "ecAdd", .args = &.{ "p", "n" } } },
+        &N251_NEG_CANCEL_GATE,
+        "const INFINITY",
+    );
+}
+
+test "N-251 ec-add-negate-cancel-reversed keeps the adder's y = 0 abort" {
+    try n104Check(
+        makeBinding("n", .{ .call = .{ .func = "ecNegate", .args = &.{"p"} } }),
+        .{ .call = .{ .func = "ecAdd", .args = &.{ "n", "p" } } },
+        &N251_NEG_CANCEL_GATE,
         "const INFINITY",
     );
 }

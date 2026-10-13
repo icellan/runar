@@ -288,7 +288,9 @@ describe('N-104 operand gate: the TS reference shape', () => {
     });
   }
 
-  it('optimizer/ec-rules.json declares a gate on exactly these four rules', () => {
+  // N-251 added the two negate-cancel rules with their own gate kind; their
+  // shape and parity are pinned by r034-ec-negate-cancel-parity.test.ts.
+  it('optimizer/ec-rules.json declares a gate on exactly these four rules plus the two N-251 negate-cancel rules', () => {
     const rules = JSON.parse(readFileSync(join(REPO_ROOT, 'optimizer', 'ec-rules.json'), 'utf-8')) as Array<{
       name: string; gate?: { of: string; operand: string };
     }>;
@@ -298,6 +300,8 @@ describe('N-104 operand gate: the TS reference shape', () => {
       'ec-add-identity-left': { of: 'ecAdd', operand: '$x' },
       'ec-mul-one': { of: 'ecMul', operand: '$x' },
       'ec-mul-zero': { of: 'ecMul', operand: '$x' },
+      'ec-add-negate-cancel': { of: 'ecAddNegCancel', operand: '$x' },
+      'ec-add-negate-cancel-reversed': { of: 'ecAddNegCancel', operand: '$x' },
     });
   });
 });

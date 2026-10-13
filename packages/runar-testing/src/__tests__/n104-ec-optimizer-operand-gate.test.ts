@@ -36,10 +36,10 @@ import { ScriptExecutionContract } from '../index.js';
  * WHAT IT DOES NOT PROVE: that the other tiers emit the same gate (the
  * conformance suite's cross-tier hex parity covers that), or anything about
  * rules R5-R12. Those were audited separately: R7 and R8/R8r keep their gate
- * because the inner `ecNegate` call is never dead-code-eliminated; R8 still
- * disagrees with the unoptimized adder on an off-curve (x, 0) point, which is
- * a defect of the adder's doubling branch rather than a dropped gate and is
- * reported, not fixed, here.
+ * because the inner `ecNegate` call is never dead-code-eliminated; R8's
+ * disagreement with the unoptimized adder on an off-curve (x, 0) point (which
+ * N-110 made abort) is closed by N-251's y = 0 gate and pinned by
+ * n251-ec-negate-cancel-y0.test.ts.
  */
 
 const P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;

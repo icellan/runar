@@ -103,4 +103,35 @@ class TestN104ECOperandGate < Minitest::Test
   def test_ec_mul_zero_keeps_gate
     assert_equal expected(MUL_GATE, "const INFINITY"), run_rule(int("zero", 0), "ecMul", %w[p zero])
   end
+
+  # N-251: R8/R8r keep the adder's y = 0 doubling abort (N-110) as
+  # assert(ecPointX(q) === 0 || ecPointY(q) !== 0), ahead of the INFINITY
+  # binding (user decision R96). Pins the gate ANF only; its script semantics
+  # are executed on the real Spend engine, in both optimizer modes, by
+  # packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
+  NEG_CANCEL_GATE = [
+    "t_px = call ecPointX p",
+    "t_py = call ecPointY p",
+    "t_zero = const 0",
+    "t_pxz = bin_op === t_px t_zero",
+    "t_pynz = bin_op !== t_py t_zero",
+    "t_ok = bin_op || t_pxz t_pynz",
+    "t_gate = assert t_ok"
+  ].freeze
+
+  def neg
+    binding("n", "call", func: "ecNegate", args: %w[p])
+  end
+
+  def neg_cancel_expected
+    ["p = load_param pt", "n = call ecNegate p", *NEG_CANCEL_GATE, "t = const INFINITY", "a = assert t"]
+  end
+
+  def test_n251_ec_add_negate_cancel_keeps_y_zero_abort
+    assert_equal neg_cancel_expected, run_rule(neg, "ecAdd", %w[p n])
+  end
+
+  def test_n251_ec_add_negate_cancel_reversed_keeps_y_zero_abort
+    assert_equal neg_cancel_expected, run_rule(neg, "ecAdd", %w[n p])
+  end
 end

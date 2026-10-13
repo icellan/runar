@@ -125,4 +125,38 @@ class N104EcOperandGateTest {
     void ecMulZeroKeepsGate() {
         assertEquals(expected(MUL_GATE, "const INFINITY"), run(integer("zero", 0), new Call("ecMul", List.of("p", "zero"))));
     }
+
+    /*
+     * N-251: R8/R8r keep the adder's y = 0 doubling abort (N-110) as
+     * assert(ecPointX(q) === 0 || ecPointY(q) !== 0), ahead of the INFINITY
+     * binding (user decision R96). Pins the gate ANF only; its script
+     * semantics are executed on the real Spend engine, in both optimizer
+     * modes, by packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
+     */
+    private static final List<String> NEG_CANCEL_EXPECTED = List.of(
+        "p = load_param pt",
+        "n = call ecNegate p",
+        "t_px = call ecPointX p",
+        "t_py = call ecPointY p",
+        "t_zero = const 0",
+        "t_pxz = bin_op === t_px t_zero",
+        "t_pynz = bin_op !== t_py t_zero",
+        "t_ok = bin_op || t_pxz t_pynz",
+        "t_gate = assert t_ok",
+        "t = const INFINITY",
+        "a = assert t");
+
+    private static AnfBinding neg() {
+        return new AnfBinding("n", new Call("ecNegate", List.of("p")), null);
+    }
+
+    @Test
+    void n251EcAddNegateCancelKeepsYZeroAbort() {
+        assertEquals(NEG_CANCEL_EXPECTED, run(neg(), new Call("ecAdd", List.of("p", "n"))));
+    }
+
+    @Test
+    void n251EcAddNegateCancelReversedKeepsYZeroAbort() {
+        assertEquals(NEG_CANCEL_EXPECTED, run(neg(), new Call("ecAdd", List.of("n", "p"))));
+    }
 }

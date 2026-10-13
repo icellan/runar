@@ -183,11 +183,12 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
         if inner is not None and inner.kind == "call" and inner.func == "ecNegate" and inner.args and len(inner.args) == 1:
             return _make_ref(inner.args[0])
 
-    # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+    # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
     if func == "ecAdd" and len(args) == 2:
         neg = _resolve(args[1], vm)
         if neg is not None and neg.kind == "call" and neg.func == "ecNegate" and neg.args and len(neg.args) == 1:
             if _same_binding(args[0], neg.args[0], vm):
+                _emit_neg_cancel_gate(name, args[0], vm, prelude, used_names)
                 return _make_const_hex(INFINITY_HEX)
 
     # Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
@@ -204,6 +205,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
         neg = _resolve(args[0], vm)
         if neg is not None and neg.kind == "call" and neg.func == "ecNegate" and neg.args and len(neg.args) == 1:
             if _same_binding(args[1], neg.args[0], vm):
+                _emit_neg_cancel_gate(name, args[1], vm, prelude, used_names)
                 return _make_const_hex(INFINITY_HEX)
 
     # Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
@@ -395,6 +397,41 @@ def _emit_operand_gate(of_mul: bool, base: str, q: str, vm: dict[str, ANFValue],
         is_inf = add("_isinf", ANFValue(kind="bin_op", op="===", left=q, right=inf, result_type="bytes"))
         on_curve = add("_oncurve", _make_call("ecOnCurve", [q]))
         ok = add("_ok", ANFValue(kind="bin_op", op="||", left=is_inf, right=on_curve))
+    add("_gate", ANFValue(kind="assert", raw_value=ok, value_ref=ok))
+
+
+def _emit_neg_cancel_gate(base: str, q: str, vm: dict[str, ANFValue],
+                          prelude: list[ANFBinding], used_names: set[str]) -> None:
+    """N-251 -- the gate R8/R8r (ecAdd(q, ecNegate(q)) -> O and its mirror)
+    must leave behind (user decision R96).
+
+    Byte-for-byte the TS reference (emitNegCancelGate in
+    packages/runar-compiler/src/optimizer/anf-ec.ts)::
+
+        assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+
+    The replaced ecAdd doubles exactly when y(q) = 0, and N-110 made the adder
+    abort on a doubling with px != 0 and py == 0; the px == 0 term keeps
+    O + O = O. Width and canonicity are checked by the inner ecNegate(q) call,
+    which is never dead-code-eliminated. Names as in _emit_operand_gate.
+    """
+    def add(suffix: str, value: ANFValue) -> str:
+        name = base + suffix
+        i = 1
+        while name in used_names:
+            name = f"{base}{suffix}_{i}"
+            i += 1
+        used_names.add(name)
+        vm[name] = value
+        prelude.append(ANFBinding(name=name, value=value))
+        return name
+
+    px = add("_px", _make_call("ecPointX", [q]))
+    py = add("_py", _make_call("ecPointY", [q]))
+    zero = add("_zero", _make_const_int(0))
+    x_zero = add("_pxz", ANFValue(kind="bin_op", op="===", left=px, right=zero))
+    y_non_zero = add("_pynz", ANFValue(kind="bin_op", op="!==", left=py, right=zero))
+    ok = add("_ok", ANFValue(kind="bin_op", op="||", left=x_zero, right=y_non_zero))
     add("_gate", ANFValue(kind="assert", raw_value=ok, value_ref=ok))
 
 

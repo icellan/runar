@@ -29,7 +29,7 @@
 //                                the curve order; otherwise emitted as a
 //                                runtime bin_op).
 //
-//   gate (optional): { "of": "ecAdd" | "ecMul", "operand": "$name" }
+//   gate (optional): { "of": "ecAdd" | "ecMul" | "ecAddNegCancel", "operand": "$name" }
 //                                N-104: the rewrite replaces a builtin that
 //                                validates the bound operand first; emit that
 //                                validation (as plain ANF, before the
@@ -76,7 +76,7 @@ type ecRule struct {
 // ecGate names the builtin whose operand validation a rewrite keeps, and the
 // pattern variable bound to that operand.
 type ecGate struct {
-	Of      string // "ecAdd" or "ecMul"
+	Of      string // "ecAdd", "ecMul" or "ecAddNegCancel"
 	Operand string // pattern variable name, without the '$'
 }
 
@@ -208,8 +208,8 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 				return nil, fmt.Errorf("rule %q: gate must be an object", name)
 			}
 			of, _ := gm["of"].(string)
-			if of != "ecAdd" && of != "ecMul" {
-				return nil, fmt.Errorf("rule %q: gate.of must be ecAdd or ecMul, got %q", name, of)
+			if of != "ecAdd" && of != "ecMul" && of != "ecAddNegCancel" {
+				return nil, fmt.Errorf("rule %q: gate.of must be ecAdd, ecMul or ecAddNegCancel, got %q", name, of)
 			}
 			operand, _ := gm["operand"].(string)
 			if len(operand) < 2 || operand[0] != '$' {
@@ -647,6 +647,9 @@ var fieldP, _ = new(big.Int).SetString("ffffffffffffffffffffffffffffffffffffffff
 //
 //	ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
 //	ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+//	ecAddNegCancel: assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+//	       the adder's y = 0 doubling abort (N-110), kept by R8/R8r (N-251,
+//	       emitNegCancelGate); the px == 0 term keeps O + O = O
 //
 // Built only from forms no rule matches, because this engine runs to a fixed
 // point and TS makes one pass: a gate a later pass could rewrite would split
@@ -666,6 +669,16 @@ func emitOperandGate(of, base, q string, lookup map[string]*ir.ANFValue, used ma
 		xOk := add("_pxok", ir.ANFValue{Kind: "bin_op", Op: "<", Left: px, Right: fp})
 		yOk := add("_pyok", ir.ANFValue{Kind: "bin_op", Op: "<", Left: py, Right: fp})
 		ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "&&", Left: xOk, Right: yOk})
+		add("_gate", makeAssert(ok))
+		return out
+	}
+	if of == "ecAddNegCancel" {
+		px := add("_px", ir.ANFValue{Kind: "call", Func: "ecPointX", Args: []string{q}})
+		py := add("_py", ir.ANFValue{Kind: "call", Func: "ecPointY", Args: []string{q}})
+		zero := add("_zero", makeLoadConstInt(big.NewInt(0)))
+		xZero := add("_pxz", ir.ANFValue{Kind: "bin_op", Op: "===", Left: px, Right: zero})
+		yNonZero := add("_pynz", ir.ANFValue{Kind: "bin_op", Op: "!==", Left: py, Right: zero})
+		ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "||", Left: xZero, Right: yNonZero})
 		add("_gate", makeAssert(ok))
 		return out
 	}
