@@ -546,19 +546,31 @@ class RunarContract:
         raw_tx = result.get('raw_tx', '')
         actual_satoshis = satoshis
         if raw_tx:
+            # N-241: this used to swallow a raw_tx parse failure (routing it
+            # through a bare `except Exception: pass`, the same shape N-168
+            # fixed for TS's deployWithWallet BEEF parse). deploy_with_wallet's
+            # whole job is to hand back a real (txid, output_index) for a
+            # contract UTXO that exists on chain; it must not report success
+            # — with output_index silently defaulted to 0 — when the wallet
+            # handed back a raw_tx it could not parse. The caller would
+            # otherwise track the wrong vout, or one that doesn't exist.
+            from runar.sdk.wallet import _parse_raw_tx_to_data
             try:
-                from runar.sdk.wallet import _parse_raw_tx_to_data
                 tx_data = _parse_raw_tx_to_data(txid, raw_tx)
-                for i, out in enumerate(tx_data.outputs):
-                    if out.script == locking_script:
-                        output_index = i
-                        actual_satoshis = out.satoshis
-                        break
-                # Cache for future EF lookups
-                if txid:
-                    wallet_provider.cache_tx(txid, raw_tx)
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(
+                    f"{self.artifact.contract_name}.deploy_with_wallet: deploy tx "
+                    f"raw_tx returned by the wallet did not parse: {e}"
+                ) from e
+
+            for i, out in enumerate(tx_data.outputs):
+                if out.script == locking_script:
+                    output_index = i
+                    actual_satoshis = out.satoshis
+                    break
+            # Cache for future EF lookups
+            if txid:
+                wallet_provider.cache_tx(txid, raw_tx)
 
         # Track the deployed UTXO
         self._current_utxo = Utxo(
