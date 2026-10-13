@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -77,6 +78,10 @@ type WalletProviderOptions struct {
 	OverlayTopics []string
 	Network       string  // "mainnet" or "testnet"
 	FeeRate       float64 // default 100
+	// ArcTimeout bounds the ARC broadcast HTTP request (N-040). Without it, a
+	// hung ARC deployment (accepts the connection, never responds) blocks
+	// Broadcast forever. Default: 30s.
+	ArcTimeout time.Duration
 }
 
 // WalletProvider implements the Provider interface using a BRC-100 WalletClient
@@ -122,6 +127,10 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 	if feeRate == 0 {
 		feeRate = 100
 	}
+	arcTimeout := opts.ArcTimeout
+	if arcTimeout == 0 {
+		arcTimeout = 30 * time.Second
+	}
 	return &WalletProvider{
 		wallet:        opts.Wallet,
 		signer:        opts.Signer,
@@ -133,7 +142,7 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 		network:       network,
 		feeRate:       feeRate,
 		txCache:       make(map[string]string),
-		client:        &http.Client{},
+		client:        &http.Client{Timeout: arcTimeout},
 	}
 }
 

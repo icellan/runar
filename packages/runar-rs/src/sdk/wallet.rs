@@ -183,6 +183,11 @@ pub struct WalletProvider<W: WalletClient> {
     /// Optional injected broadcaster (issue #107). When set, `broadcast()`
     /// delegates here instead of the hardcoded ARC URL path.
     broadcaster: Option<Box<dyn Broadcaster>>,
+    /// N-040: bounds the ARC `/v1/tx` broadcast request. Without it, a hung
+    /// ARC deployment (accepts the connection, never responds) blocks
+    /// `broadcast()` forever — ureq's default has no read timeout. Default:
+    /// 30s; override with `with_arc_timeout`.
+    arc_timeout: std::time::Duration,
 }
 
 impl<W: WalletClient> WalletProvider<W> {
@@ -224,7 +229,14 @@ impl<W: WalletClient> WalletProvider<W> {
             tx_cache: HashMap::new(),
             cached_pub_key: None,
             broadcaster: None,
+            arc_timeout: std::time::Duration::from_secs(30),
         }
+    }
+
+    /// Override the ARC broadcast request timeout (N-040). Default: 30s.
+    pub fn with_arc_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.arc_timeout = timeout;
+        self
     }
 
     /// Inject a shared broadcaster (issue #107).
@@ -359,6 +371,8 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
             ));
         }
         let raw_hex = tx.to_hex().map_err(|e| format!("WalletProvider broadcast: to_hex failed: {}", e))?;
+        let raw_bytes = hex_to_bytes(&raw_hex)?;
+        let txid = compute_txid(&raw_bytes);
 
         // Issue #107: when a broadcaster is injected, delegate to it so the SDK
         // and the calling layer share one broadcaster instance/config (avoids
@@ -367,17 +381,24 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
         // the immutable borrow of `self.broadcaster` before we mutate tx_cache.
         let injected = self.broadcaster.as_ref().map(|b| b.broadcast(tx));
         if let Some(result) = injected {
-            let txid = result?;
-            self.tx_cache.insert(txid.clone(), raw_hex);
-            return Ok(txid);
+            let reported_txid = result?;
+            // N-040: same rule as F-042's check_arc_accepted — an injected
+            // broadcaster answering with a different transaction's txid must
+            // not be treated as having broadcast THIS transaction.
+            if reported_txid.to_ascii_lowercase() != txid {
+                return Err(format!(
+                    "WalletProvider broadcast: injected broadcaster reported txid {} but the transaction sent has txid {}",
+                    reported_txid, txid
+                ));
+            }
+            self.tx_cache.insert(reported_txid.clone(), raw_hex);
+            return Ok(reported_txid);
         }
-
-        let raw_bytes = hex_to_bytes(&raw_hex)?;
-        let txid = compute_txid(&raw_bytes);
 
         // POST to ARC as application/octet-stream
         let arc_endpoint = format!("{}/v1/tx", self.arc_url);
         match ureq::post(&arc_endpoint)
+            .timeout(self.arc_timeout)
             .set("Content-Type", "application/octet-stream")
             .send_bytes(&raw_bytes)
         {
@@ -1615,6 +1636,55 @@ mod tests {
         format!("http://{}", addr)
     }
 
+    /// N-040: a mock ARC that accepts the TCP connection, fully drains the
+    /// client's request, then never writes a response — simulating a hung
+    /// ARC deployment. Returns its base URL. The server thread sleeps for a
+    /// few seconds (long enough to outlast any short client-side timeout
+    /// under test) and is never joined; the client is expected to time out
+    /// and move on well before that.
+    fn spawn_hanging_mock_arc() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 1024];
+                let mut header_end: Option<usize> = None;
+                let mut content_length: usize = 0;
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    header_end = Some(pos + 4);
+                                    let headers = String::from_utf8_lossy(&buf[..pos]);
+                                    for line in headers.lines() {
+                                        let lower = line.to_ascii_lowercase();
+                                        if let Some(v) = lower.strip_prefix("content-length:") {
+                                            content_length = v.trim().parse().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(he) = header_end {
+                                if buf.len() >= he + content_length {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // Request fully drained; now just hold the connection open
+                // without responding, like a hung ARC deployment.
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        });
+        format!("http://{}", addr)
+    }
+
     /// Bind an ephemeral port then drop the listener so any connect is refused
     /// — a deterministic, offline "ARC unreachable" URL.
     fn dead_arc_url() -> String {
@@ -1823,8 +1893,16 @@ mod tests {
         // ARC url is dead: if broadcast fell through to the hardcoded path it
         // would Err. Instead it must delegate to the injected broadcaster and
         // return that broadcaster's txid.
+        //
+        // N-040: the txid the MockBroadcaster reports must be THIS
+        // transaction's actual txid — f042_local_txid() computes it from
+        // minimal_raw_tx_hex() the same way broadcast() does internally. It
+        // used to be an arbitrary "bb"*32 value, which passed only because
+        // broadcast() never checked the injected broadcaster's txid against
+        // the transaction it was actually given (see
+        // n040_injected_broadcaster_rejects_foreign_txid for that check).
         let calls = Rc::new(RefCell::new(0u32));
-        let expected = "bb".repeat(32);
+        let expected = f042_local_txid();
         let broadcaster = Box::new(MockBroadcaster {
             txid: expected.clone(),
             calls: Rc::clone(&calls),
@@ -1848,6 +1926,66 @@ mod tests {
             provider.get_raw_transaction(&expected).unwrap(),
             minimal_raw_tx_hex(),
             "#107: delegated broadcast must still cache the raw tx by txid"
+        );
+    }
+
+    #[test]
+    fn n040_broadcast_times_out_against_a_hung_arc() {
+        // N-040: ureq's default Agent has no read timeout ("requests may
+        // block forever on reads by default" — ureq 2.12.1 docs). Against a
+        // real local server that accepts the connection and never responds,
+        // broadcast() must still return (as an Err) well within a short
+        // bound, proving `with_arc_timeout` is actually wired into the
+        // request rather than relying on ureq's absent default.
+        let mut provider = provider_with_arc(spawn_hanging_mock_arc())
+            .with_arc_timeout(std::time::Duration::from_millis(200));
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+
+        let start = std::time::Instant::now();
+        let result = provider.broadcast(&tx);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "N-040: broadcast against a hung ARC must fail (closed), got {:?}",
+            result
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "N-040: broadcast took {:?}, expected it to time out near the configured 200ms",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn n040_injected_broadcaster_rejects_foreign_txid() {
+        // N-040: an injected broadcaster that reports a txid other than the
+        // transaction actually passed to it must not be treated as having
+        // broadcast that transaction — same rule as F-042's
+        // check_arc_accepted for the hardcoded ARC path.
+        let foreign = "bb".repeat(32);
+        let calls = Rc::new(RefCell::new(0u32));
+        let broadcaster = Box::new(MockBroadcaster {
+            txid: foreign.clone(),
+            calls: Rc::clone(&calls),
+        });
+
+        let mut provider = provider_with_arc(dead_arc_url()).with_broadcaster(broadcaster);
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+        let result = provider.broadcast(&tx);
+
+        assert!(
+            result.is_err(),
+            "N-040: a foreign txid from the injected broadcaster must be rejected, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err();
+        let local = f042_local_txid();
+        assert!(msg.contains(&foreign), "error {:?} does not mention the foreign txid {:?}", msg, foreign);
+        assert!(msg.contains(&local), "error {:?} does not mention the local txid {:?}", msg, local);
+        assert!(
+            provider.get_raw_transaction(&foreign).is_err(),
+            "N-040: a rejected broadcast must not cache the raw tx under the foreign txid"
         );
     }
 

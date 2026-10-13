@@ -101,6 +101,12 @@ export interface WalletProviderOptions {
    * ARC path.
    */
   broadcaster?: Broadcaster;
+  /**
+   * N-040: timeout in milliseconds for the ARC `/v1/tx` broadcast request.
+   * Without a bound, a hung ARC deployment (accepts the connection, never
+   * responds) blocks `broadcast()` forever. Default: 30000 (30s).
+   */
+  arcTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +124,7 @@ export class WalletProvider implements Provider {
   protected readonly _network: 'mainnet' | 'testnet';
   protected readonly _feeRate: number;
   protected readonly broadcaster: Broadcaster | undefined;
+  protected readonly arcTimeoutMs: number;
   protected readonly txCache = new Map<string, string>();
 
   constructor(options: WalletProviderOptions) {
@@ -147,6 +154,7 @@ export class WalletProvider implements Provider {
     this.overlayTopics = options.overlayTopics;
     this._feeRate = options.feeRate ?? 100;
     this.broadcaster = options.broadcaster;
+    this.arcTimeoutMs = options.arcTimeoutMs ?? 30_000;
   }
 
   // -------------------------------------------------------------------------
@@ -232,6 +240,15 @@ export class WalletProvider implements Provider {
         );
       }
       const txid = result.txid;
+      // N-040: same rule as F-042's checkArcAccepted — an injected broadcaster
+      // answering with a different transaction's txid must not be treated as
+      // having broadcast THIS transaction.
+      const localTxid = tx.id('hex');
+      if (txid.toLowerCase() !== localTxid) {
+        throw new Error(
+          `WalletProvider: injected broadcaster reported txid ${txid} but the transaction sent has txid ${localTxid}`,
+        );
+      }
       this.txCache.set(txid, tx.toHex());
       if (this.overlayUrl && this.overlayTopics && this.overlayTopics.length > 0) {
         this.submitToOverlay(tx).catch((e) => warnNonFatal('overlay submission', e));
@@ -247,6 +264,10 @@ export class WalletProvider implements Provider {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: efBytes.buffer as ArrayBuffer,
+        // N-040: bound the request so a hung ARC deployment (accepts the
+        // connection, never responds) fails closed instead of blocking
+        // broadcast() forever.
+        signal: AbortSignal.timeout(this.arcTimeoutMs),
       });
     } catch (e) {
       throw new Error(
