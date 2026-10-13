@@ -253,12 +253,20 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
 /// CLAUDE.md scopes to the Go reference compiler by policy (R-037). Their
 /// absence from the typecheck table is policy, not a gap; what would be a
 /// gap is reporting them the same way as an actual typo. Mirrors Python's
-/// `GO_ONLY_BUILTINS` (R-258/R-259). Only the one builtin F-387 is about is
-/// listed here -- the other seven Go-only builtins hit the same generic
-/// "unknown function" message in this tier and are a separate item.
+/// `GO_ONLY_BUILTINS` (R-258/R-259) -- family labels match that table
+/// exactly. N-238 extended this past the single F-387 entry to the other
+/// seven Go-only builtins, which used to hit the same generic "unknown
+/// function" message in this tier.
 fn go_only_builtin_family(name: &str) -> Option<&'static str> {
     match name {
         "merkleRootPoseidon2KB" => Some("Poseidon2 Merkle"),
+        "assertGroth16WitnessAssisted" => Some("BN254 + Groth16"),
+        "assertGroth16WitnessAssistedWithMSM" => Some("BN254 + Groth16"),
+        "groth16PublicInput" => Some("BN254 + Groth16"),
+        "bn254Pairing" => Some("BN254 pairing"),
+        "bn254MultiPairing3" => Some("BN254 pairing"),
+        "bn254MultiPairing4" => Some("BN254 pairing"),
+        "verifySP1FRI" => Some("SP1 FRI"),
         _ => None,
     }
 }
