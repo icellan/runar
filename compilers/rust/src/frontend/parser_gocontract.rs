@@ -1442,7 +1442,19 @@ impl<'a> GoParser<'a> {
             if let Some(s) = self.parse_statement() {
                 stmts.push(s);
             } else {
-                // Skip unknown tokens to avoid infinite loop
+                // N-010 (CL-BUG-167): parse_statement_inner already tried every
+                // statement shape, including the expression-statement
+                // fallback; reaching here means the current token cannot
+                // start anything. Silently skipping it (as this used to do)
+                // was fail-open: the statement just vanished and the rest of
+                // the block kept parsing, so the contract compiled clean with
+                // a different, unintended program. Report it, like the
+                // `{`-token and `;`-separator recoveries above do, then skip
+                // the one token that blocked it so the loop still terminates.
+                self.errors.push(Diagnostic::error(
+                    format!("Unexpected token in expression: {:?}", self.current().typ),
+                    Some(self.loc()),
+                ));
                 self.advance();
             }
             self.skip_statement_separators();
