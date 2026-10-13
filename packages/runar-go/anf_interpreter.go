@@ -1238,6 +1238,16 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		if len(args) > 1 {
 			pk = args[1]
 		}
+		// N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+		// encoding; it does not push false. Answering false let
+		// `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+		// spend the chain aborts on.
+		if sigBytes, pkBytes := anfToHexBytes(sig), anfToHexBytes(pk); sigBytes != nil && pkBytes != nil {
+			if reason := checkSigEncodingError(sigBytes, pkBytes); reason != "" {
+				panic(&ScriptOpcodeError{Opcode: "checkSig", Message: reason +
+					" — OP_CHECKSIG aborts the script on a malformed signature or public key encoding, it does not push false"})
+			}
+		}
 		return anfVerifyEcdsa(sig, pk, realCrypto.Sighash[:])
 	case "checkMultiSig":
 		if realCrypto == nil {
@@ -1768,6 +1778,8 @@ func anfToHexBytes(v interface{}) []byte {
 // stripped — Bitcoin convention) and pkVal as a SEC1 secp256k1 public key
 // (compressed or uncompressed), then ECDSA-verifies against the supplied
 // 32-byte sighash. Returns false on any parse error or signature mismatch.
+// The checkSig call site first applies checkSigEncodingError and aborts on a
+// malformed encoding, as OP_CHECKSIG does (N-197); checkMultiSig does not.
 //
 // The digest passed to the ECDSA verify is the raw 32-byte sighash — this
 // matches the on-chain OP_CHECKSIG semantic (no extra hashing) and the TS

@@ -44,7 +44,7 @@ import type {
   ANFBinding,
   ANFValue,
 } from 'runar-ir-schema';
-import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
+import { Hash, Utils, PublicKey, Signature, BigNumber, TransactionSignature } from '@bsv/sdk';
 // `verify` from @bsv/sdk's ECDSA module performs raw ECDSA verification
 // against an already-hashed digest. We use this rather than
 // `pubKey.verify(...)` (which internally sha256s its first arg) so the
@@ -236,8 +236,12 @@ export function executeStrict(
  *  - verifies `checkSig(sig, pk)` by parsing `pk` as a compressed/uncompressed
  *    secp256k1 point, parsing `sig` as DER (with optional trailing sighash byte
  *    stripped), and calling `pubKey.verify(sighash, signature)` — a real
- *    ECDSA verification. Any mismatch returns `false`, which then trips the
- *    enclosing `assert(...)` and throws.
+ *    ECDSA verification. A well-formed signature that does not verify
+ *    returns `false`, which then trips the enclosing `assert(...)` and
+ *    throws. A malformed encoding — a non-empty signature that is not strict
+ *    DER or has a high S, or a public key that is not 02/03+33 / 04+65 bytes
+ *    on the curve — throws a plain `Error` instead, because `OP_CHECKSIG`
+ *    aborts the script there rather than pushing false (N-197).
  *  - verifies `checkMultiSig(sigs, pks)` by iterating signatures left-to-right
  *    and consuming pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`.
  *  - verifies `checkPreimage(preimage)` by computing `hash256(preimage)`
@@ -1061,6 +1065,17 @@ function evalCall(
     // Crypto — mocked unless real-crypto context is present.
     case 'checkSig': {
       if (!realCrypto) return true;
+      // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+      // encoding; it does not push false. Answering false let
+      // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+      // spend the chain aborts on.
+      const encodingError = checkSigEncodingError(args[0], args[1]);
+      if (encodingError !== null) {
+        throw new Error(
+          `checkSig: ${encodingError} — OP_CHECKSIG aborts the script on a malformed ` +
+            'signature or public key encoding, it does not push false',
+        );
+      }
       return verifyEcdsa(args[0], args[1], realCrypto.sighash);
     }
     case 'checkMultiSig': {
@@ -1593,6 +1608,43 @@ function parseDerSignatureMaybeWithSighashByte(bytes: number[]): InstanceType<ty
   } catch {
     return null;
   }
+}
+
+/**
+ * N-197: why `OP_CHECKSIG` would ABORT the whole script on these operands, or
+ * `null` when it would run and push a boolean. Mirrors `@bsv/sdk` `Spend`'s
+ * `checkSignatureEncoding` then `checkPublicKeyEncoding` (version-1 rules):
+ * a non-empty signature must be strict DER (BIP66) with a low S; the public
+ * key — checked even when the signature is empty — must be 33 bytes behind
+ * 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
+ * signature, or a well-formed one that does not verify, is not an abort
+ * (`Spend` has no NULLFAIL; it pushes false). The signature layout is the one
+ * {@link verifyEcdsa} accepts: DER with an optional trailing sighash byte.
+ * Operands that are not bytes at all are left to {@link verifyEcdsa}.
+ */
+function checkSigEncodingError(sigVal: unknown, pkVal: unknown): string | null {
+  const sigBytes = toByteArray(sigVal);
+  const pkBytes = toByteArray(pkVal);
+  if (!sigBytes || !pkBytes) return null;
+  if (sigBytes.length > 0) {
+    const der = sigBytes.length === sigBytes[1]! + 3 ? sigBytes.slice(0, -1) : sigBytes;
+    if (!isStrictDerSignature(der)) return 'the signature is not strict DER';
+    const sig = Signature.fromDER(der);
+    if (!new TransactionSignature(sig.r, sig.s, 0).hasLowS()) {
+      return 'the signature does not have a low S value';
+    }
+  }
+  const prefix = pkBytes[0];
+  const len = pkBytes.length;
+  const shapeOk =
+    ((prefix === 0x02 || prefix === 0x03) && len === 33) || (prefix === 0x04 && len === 65);
+  if (!shapeOk) return 'the public key is not a 33-byte compressed or 65-byte uncompressed key';
+  try {
+    PublicKey.fromDER(pkBytes);
+  } catch {
+    return 'the public key is not a point on secp256k1';
+  }
+  return null;
 }
 
 function verifyEcdsa(

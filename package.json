@@ -31,7 +31,7 @@
     "conformance:wire-primitives": "npx vitest run conformance/wire-primitives.test.ts",
     "conformance:anf-parity": "npx vitest run conformance/anf-interpreter/cross-interpreter.test.ts",
     "conformance:anf-parity:strict": "npx vitest run conformance/anf-interpreter/cross-interpreter-strict.test.ts",
-    "conformance:anf-parity:real-crypto": "npx vitest run conformance/anf-interpreter/cross-interpreter-real-crypto.test.ts",
+    "conformance:anf-parity:real-crypto": "npx vitest run conformance/anf-interpreter/cross-interpreter-real-crypto.test.ts conformance/anf-interpreter/checksig-encoding-abort.test.ts",
     "conformance:typecheck": "npx tsc --noEmit -p conformance/tsconfig.typecheck.json",
     "wire-format-audit": "conformance/node_modules/.bin/tsx conformance/scripts/wire-format-pr-audit.ts",
     "wire-format-audit:self-test": "npx vitest run conformance/scripts/__tests__/wire-format-pr-audit.test.ts",

@@ -1296,6 +1296,17 @@ def _eval_call(
             return True
         sig = args[0] if len(args) > 0 else None
         pk = args[1] if len(args) > 1 else None
+        # N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+        # encoding; it does not push false. Answering False let
+        # `checkSig(a, A) or checkSig(b, B)` take the other arm and accept a
+        # spend the chain aborts on. ValueError is this module's opcode-abort
+        # signal (F-134).
+        reason = _check_sig_encoding_error(sig, pk)
+        if reason is not None:
+            raise ValueError(
+                f'checkSig: {reason} — OP_CHECKSIG aborts the script on a malformed '
+                'signature or public key encoding, it does not push false'
+            )
         return _verify_ecdsa(sig, pk, real_crypto.sighash)
     if func == 'checkMultiSig':
         if real_crypto is None:
@@ -1972,6 +1983,49 @@ def _normalize_pubkey_to_compressed(pk_bytes: bytes) -> Optional[bytes]:
     return None
 
 
+def _check_sig_encoding_error(sig_val: Any, pk_val: Any) -> Optional[str]:
+    """N-197: why ``OP_CHECKSIG`` would ABORT the whole script on these
+    operands, or ``None`` when it would run and push a boolean.
+
+    Mirrors ``@bsv/sdk`` ``Spend``'s ``checkSignatureEncoding`` then
+    ``checkPublicKeyEncoding`` (version-1 rules): a non-empty signature must be
+    strict DER (BIP66) with a low S; the public key -- checked even when the
+    signature is empty -- must be 33 bytes behind 0x02/0x03 or 65 bytes behind
+    0x04 and decode to a curve point. An empty signature, or a well-formed one
+    that does not verify, is not an abort (``Spend`` has no NULLFAIL; it pushes
+    false). The signature layout is the one :func:`_verify_ecdsa` accepts: DER
+    with an optional trailing sighash byte. Operands that are not bytes at all
+    are left to :func:`_verify_ecdsa`.
+    """
+    sig_bytes = _to_byte_array(sig_val)
+    pk_bytes = _to_byte_array(pk_val)
+    if sig_bytes is None or pk_bytes is None:
+        return None
+    from runar.ec import EC_N, EC_P
+    from runar.ecdsa import _decompress_pubkey, _parse_der_signature
+    if len(sig_bytes) > 0:
+        parsed = _parse_der_signature(sig_bytes)
+        if parsed is None:
+            return 'the signature is not strict DER'
+        if not 1 <= parsed[1] <= EC_N >> 1:
+            return 'the signature does not have a low S value'
+    n = len(pk_bytes)
+    prefix = pk_bytes[0] if n > 0 else None
+    if not ((prefix in (0x02, 0x03) and n == 33) or (prefix == 0x04 and n == 65)):
+        return 'the public key is not a 33-byte compressed or 65-byte uncompressed key'
+    if n == 33:
+        try:
+            _decompress_pubkey(pk_bytes)
+        except ValueError:
+            return 'the public key is not a point on secp256k1'
+    else:
+        x = int.from_bytes(pk_bytes[1:33], 'big')
+        y = int.from_bytes(pk_bytes[33:65], 'big')
+        if x >= EC_P or y >= EC_P or (y * y - x * x * x - 7) % EC_P != 0:
+            return 'the public key is not a point on secp256k1'
+    return None
+
+
 def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
     """Real ECDSA verify against a 32-byte sighash.
 
@@ -1980,7 +2034,9 @@ def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
     or 65-byte uncompressed). The signature is verified directly against the
     raw 32-byte sighash (the on-chain ``OP_CHECKSIG`` semantic — the VM does
     NOT re-hash before verifying). Returns ``False`` on any parse error or
-    signature mismatch.
+    signature mismatch. The ``checkSig`` call site first applies
+    :func:`_check_sig_encoding_error` and aborts on a malformed encoding, as
+    ``OP_CHECKSIG`` does (N-197); ``checkMultiSig`` does not.
     """
     sig_bytes = _to_byte_array(sig_val)
     pk_bytes = _to_byte_array(pk_val)

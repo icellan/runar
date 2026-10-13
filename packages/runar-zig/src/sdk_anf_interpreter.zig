@@ -181,6 +181,8 @@ pub const StrictError = error{
     /// On-chain OP_AND/OP_OR/OP_XOR/OP_LSHIFT/OP_RSHIFT abort the script in
     /// exactly these cases; the interpreter surfaces the same failure so
     /// off-chain simulation agrees with the deployed script byte-for-byte.
+    /// On-chain mode also raises it where `OP_CHECKSIG` aborts on a malformed
+    /// signature or public-key encoding (N-197, `checkSigEncodingError`).
     ScriptNumberError,
 };
 
@@ -1006,6 +1008,16 @@ fn evalNode(
             if (mathBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             if (splitBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
+            // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+            // encoding; it does not push false. Answering false let
+            // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+            // spend the chain aborts on. Same rejection channel as the
+            // OP_SPLIT / math aborts above.
+            if (real_crypto != null and std.mem.eql(u8, c.func, "checkSig")) {
+                if (checkSigEncodingError(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env)) != null) {
+                    return error.ScriptNumberError;
+                }
+            }
             return evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
         },
         .method_call => |mc| {
@@ -2048,11 +2060,60 @@ fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFVa
 // Real ECDSA / preimage verification (used by executeOnChainAuthoritative)
 // ---------------------------------------------------------------------------
 
+/// N-197: why `OP_CHECKSIG` would ABORT the whole script on these operands, or
+/// `null` when it would run and push a boolean. Mirrors `@bsv/sdk` `Spend`'s
+/// `checkSignatureEncoding` then `checkPublicKeyEncoding` (version-1 rules): a
+/// non-empty signature must be strict DER (BIP66) with a low S; the public key
+/// -- checked even when the signature is empty -- must be 33 bytes behind
+/// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
+/// signature, or a well-formed one that does not verify, is not an abort
+/// (`Spend` has no NULLFAIL; it pushes false). The signature layout is the one
+/// `verifyEcdsaReal` accepts: DER with an optional trailing sighash byte.
+/// Operands that are not hex bytes at all are left to `verifyEcdsaReal`.
+fn checkSigEncodingError(allocator: std.mem.Allocator, sig_val: ANFValue, pk_val: ANFValue) ?[]const u8 {
+    const sig_hex = switch (sig_val) {
+        .bytes => |b| b,
+        else => return null,
+    };
+    const pk_hex = switch (pk_val) {
+        .bytes => |b| b,
+        else => return null,
+    };
+    const sig = bsvz.primitives.hex.decode(allocator, sig_hex) catch return null;
+    defer allocator.free(sig);
+    const pk = bsvz.primitives.hex.decode(allocator, pk_hex) catch return null;
+    defer allocator.free(pk);
+    if (sig.len > 0) {
+        var der = sig;
+        if (der.len >= 2 and der.len == @as(usize, der[1]) + 3) der = der[0 .. der.len - 1];
+        if (!der_mod.isStrictDerSignature(der)) return "the signature is not strict DER";
+        const r_len: usize = der[3];
+        const s_bytes = der[6 + r_len ..];
+        var i: usize = 0;
+        while (i < s_bytes.len and s_bytes[i] == 0) : (i += 1) {}
+        const s_min = s_bytes[i..];
+        const half_n = [32]u8{
+            0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+        };
+        const low_s = s_min.len > 0 and (s_min.len < 32 or
+            (s_min.len == 32 and std.mem.order(u8, s_min, &half_n) != .gt));
+        if (!low_s) return "the signature does not have a low S value";
+    }
+    const shape_ok = pk.len > 0 and (((pk[0] == 0x02 or pk[0] == 0x03) and pk.len == 33) or
+        (pk[0] == 0x04 and pk.len == 65));
+    if (!shape_ok) return "the public key is not a 33-byte compressed or 65-byte uncompressed key";
+    _ = std.crypto.ecc.Secp256k1.fromSec1(pk) catch return "the public key is not a point on secp256k1";
+    return null;
+}
+
 /// Verify an ECDSA signature against a sighash digest using bsvz's
 /// secp256k1 primitives. The pubkey must be SEC1-encoded
 /// (compressed 33 bytes or uncompressed 65 bytes); the signature is DER
 /// (with optional trailing sighash type byte stripped). Returns false on
-/// any decode error so the enclosing assert fires.
+/// any decode error so the enclosing assert fires. The `checkSig` call site
+/// first applies `checkSigEncodingError` and aborts on a malformed encoding,
+/// as `OP_CHECKSIG` does (N-197); `checkMultiSig` does not.
 fn verifyEcdsaReal(
     allocator: std.mem.Allocator,
     sig_val: ANFValue,
@@ -3688,7 +3749,9 @@ test "executeOnChainAuthoritative — checkSig applies strict DER to every sdk-d
                 return error.TestUnexpectedResult;
             }
         } else |err| {
-            if (want_ok or err != StrictError.AssertionFailure) {
+            // N-197: a non-strict-DER signature ABORTS OP_CHECKSIG, so the
+            // refusal comes through the opcode-abort channel, not an assert.
+            if (want_ok or err != StrictError.ScriptNumberError) {
                 std.debug.print("F-242: {s} -> {s}, want ok={}\n", .{ id, @errorName(err), want_ok });
                 return error.TestUnexpectedResult;
             }

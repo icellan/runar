@@ -144,7 +144,14 @@ describe('strict DER signatures (F-242)', () => {
       if (v.ok) {
         expect(run().state.value).toBe(1n);
       } else {
-        expect(run).toThrow(AssertionFailureError);
+        // N-197: a non-strict-DER signature ABORTS OP_CHECKSIG (the Spend
+        // check above refuses it on encoding), so the interpreter refuses it
+        // with the abort error, not with an assert on a pushed false.
+        let err: unknown;
+        try { run(); } catch (e) { err = e; }
+        expect(err).toBeInstanceOf(Error);
+        expect(err).not.toBeInstanceOf(AssertionFailureError);
+        expect((err as Error).message).toMatch(/not strict DER — OP_CHECKSIG aborts/);
       }
     });
   }

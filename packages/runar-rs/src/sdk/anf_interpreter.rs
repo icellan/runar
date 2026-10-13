@@ -1200,6 +1200,21 @@ fn eval_value(
                 });
             }
             let real_crypto = strict.and_then(|c| c.real_crypto.as_ref());
+            // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+            // encoding; it does not push false. Answering false let
+            // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+            // spend the chain aborts on. Surfaced through the same rejection
+            // channel as the OP_SPLIT / math aborts above.
+            if real_crypto.is_some() && func == "checkSig" {
+                let sig = args.first().cloned().unwrap_or(Val::Undefined);
+                let pk = args.get(1).cloned().unwrap_or(Val::Undefined);
+                if check_sig_encoding_error(&sig, &pk).is_some() {
+                    return Err(AssertionFailureError {
+                        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
+            }
             let witness = strict.and_then(|c| c.witness.as_ref());
             eval_call(&func, &args, real_crypto, witness, script_code)
         }
@@ -2133,12 +2148,86 @@ fn strip_sighash_byte(sig_bytes: &[u8]) -> &[u8] {
     }
 }
 
+/// secp256k1 group order n, halved (n >> 1): the BIP-62 low-S bound.
+const SECP256K1_HALF_N: [u8; 32] = [
+    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+];
+
+/// Strict DER (BIP66) for a bare ECDSA signature: the SEQUENCE length covers
+/// exactly r and s, both INTEGERs are non-empty, non-negative and minimally
+/// encoded, and nothing follows s.
+fn is_strict_der_signature(der: &[u8]) -> bool {
+    let n = der.len();
+    if !(8..=72).contains(&n) || der[0] != 0x30 || der[1] as usize != n - 2 {
+        return false;
+    }
+    let r_len = der[3] as usize;
+    if der[2] != 0x02 || r_len == 0 || 5 + r_len >= n {
+        return false;
+    }
+    let s_len = der[5 + r_len] as usize;
+    if der[4 + r_len] != 0x02 || s_len == 0 || r_len + s_len + 6 != n {
+        return false;
+    }
+    let canonical = |b: &[u8]| b[0] & 0x80 == 0 && !(b.len() > 1 && b[0] == 0x00 && b[1] & 0x80 == 0);
+    canonical(&der[4..4 + r_len]) && canonical(&der[6 + r_len..])
+}
+
+/// N-197: why `OP_CHECKSIG` would ABORT the whole script on these operands, or
+/// `None` when it would run and push a boolean. Mirrors `@bsv/sdk` `Spend`'s
+/// `checkSignatureEncoding` then `checkPublicKeyEncoding` (version-1 rules): a
+/// non-empty signature must be strict DER (BIP66) with a low S; the public key
+/// -- checked even when the signature is empty -- must be 33 bytes behind
+/// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
+/// signature, or a well-formed one that does not verify, is not an abort
+/// (`Spend` has no NULLFAIL; it pushes false). The signature layout is the one
+/// `verify_ecdsa_real` accepts: DER with an optional trailing sighash byte.
+/// Operands that are not bytes at all are left to `verify_ecdsa_real`.
+fn check_sig_encoding_error(sig_val: &Val, pk_val: &Val) -> Option<&'static str> {
+    let sig = val_to_bytes(sig_val)?;
+    let pk = val_to_bytes(pk_val)?;
+    if !sig.is_empty() {
+        let der = if sig.len() >= 2 && sig.len() == sig[1] as usize + 3 { &sig[..sig.len() - 1] } else { &sig[..] };
+        if !is_strict_der_signature(der) {
+            return Some("the signature is not strict DER");
+        }
+        let r_len = der[3] as usize;
+        let s_bytes = &der[6 + r_len..];
+        let first_nz = s_bytes.iter().position(|&b| b != 0);
+        let low_s = match first_nz {
+            None => false,
+            Some(i) => {
+                let s = &s_bytes[i..];
+                s.len() < 32 || (s.len() == 32 && s <= &SECP256K1_HALF_N[..])
+            }
+        };
+        if !low_s {
+            return Some("the signature does not have a low S value");
+        }
+    }
+    let shape_ok = match pk.first() {
+        Some(0x02) | Some(0x03) => pk.len() == 33,
+        Some(0x04) => pk.len() == 65,
+        _ => false,
+    };
+    if !shape_ok {
+        return Some("the public key is not a 33-byte compressed or 65-byte uncompressed key");
+    }
+    if VerifyingKey::from_sec1_bytes(&pk).is_err() {
+        return Some("the public key is not a point on secp256k1");
+    }
+    None
+}
+
 /// Verify an ECDSA signature against a 32-byte sighash digest using `k256`
 /// secp256k1. Pubkey is SEC1 (compressed 33 bytes or uncompressed 65 bytes);
 /// signature is DER with an optional trailing sighash type byte stripped.
 /// Returns `false` on any decode error so the enclosing assert fires (and
 /// surfaces as `AssertionFailureError`, not a verify-error propagated to
-/// the caller).
+/// the caller). The `checkSig` call site first applies
+/// `check_sig_encoding_error` and aborts on a malformed encoding, as
+/// `OP_CHECKSIG` does (N-197); `checkMultiSig` does not.
 ///
 /// Note on the digest: ECDSA-verifies against the supplied `sighash`
 /// directly, with no extra SHA-256 layer. This mirrors the on-chain

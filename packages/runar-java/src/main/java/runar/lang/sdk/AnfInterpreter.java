@@ -1432,6 +1432,15 @@ public final class AnfInterpreter {
             // Mocked crypto unless real-crypto context is supplied.
             case "checkSig": {
                 if (realCrypto == null) return Boolean.TRUE;
+                // N-197: OP_CHECKSIG ABORTS on a malformed signature or
+                // public-key encoding; it does not push false. Answering false
+                // let `checkSig(a, A) || checkSig(b, B)` take the other arm and
+                // accept a spend the chain aborts on.
+                String reason = checkSigEncodingError(args.get(0), args.get(1));
+                if (reason != null) {
+                    throw new InterpreterException("checkSig: " + reason
+                        + " \u2014 OP_CHECKSIG aborts the script on a malformed signature or public key encoding, it does not push false");
+                }
                 return verifyEcdsaReal(args.get(0), args.get(1), realCrypto.sighash());
             }
             case "checkMultiSig": {
@@ -1757,11 +1766,57 @@ public final class AnfInterpreter {
     }
 
     /**
+     * N-197: why {@code OP_CHECKSIG} would ABORT the whole script on these
+     * operands, or {@code null} when it would run and push a boolean. Mirrors
+     * {@code @bsv/sdk} {@code Spend}'s {@code checkSignatureEncoding} then
+     * {@code checkPublicKeyEncoding} (version-1 rules): a non-empty signature
+     * must be strict DER (BIP66) with a low S; the public key -- checked even
+     * when the signature is empty -- must be 33 bytes behind 0x02/0x03 or 65
+     * bytes behind 0x04 and decode to a curve point (the shape is checked
+     * first: BouncyCastle's decodePoint also accepts 0x06/0x07 hybrid keys).
+     * An empty signature, or a well-formed one that does not verify, is not an
+     * abort ({@code Spend} has no NULLFAIL; it pushes false). The signature
+     * layout is the one {@link #verifyEcdsaReal} accepts: DER with an optional
+     * trailing sighash byte. Operands that are not bytes at all are left to
+     * {@link #verifyEcdsaReal}.
+     */
+    static String checkSigEncodingError(Object sigVal, Object pkVal) {
+        byte[] sig = toBytes(sigVal);
+        byte[] pk = toBytes(pkVal);
+        if (sig == null || pk == null) return null;
+        if (sig.length > 0) {
+            byte[] der = sig;
+            if (der.length >= 2 && der.length == (der[1] & 0xff) + 3) {
+                der = Arrays.copyOf(der, der.length - 1);
+            }
+            if (!StrictDer.isStrictDerSignature(der)) return "the signature is not strict DER";
+            int rLen = der[3] & 0xff;
+            BigInteger s = new BigInteger(1, Arrays.copyOfRange(der, 6 + rLen, der.length));
+            if (s.signum() < 1 || s.compareTo(LocalSigner.DOMAIN.getN().shiftRight(1)) > 0) {
+                return "the signature does not have a low S value";
+            }
+        }
+        int prefix = pk.length > 0 ? pk[0] & 0xff : -1;
+        boolean shapeOk = ((prefix == 0x02 || prefix == 0x03) && pk.length == 33)
+            || (prefix == 0x04 && pk.length == 65);
+        if (!shapeOk) return "the public key is not a 33-byte compressed or 65-byte uncompressed key";
+        try {
+            LocalSigner.DOMAIN.getCurve().decodePoint(pk);
+        } catch (RuntimeException e) {
+            return "the public key is not a point on secp256k1";
+        }
+        return null;
+    }
+
+    /**
      * Verify an ECDSA signature against a 32-byte digest using BouncyCastle
      * (same secp256k1 curve as {@link LocalSigner}). Pubkey is SEC1
      * (compressed 33 bytes or uncompressed 65 bytes); signature is DER with
      * an optional trailing sighash type byte stripped. Returns false on any
-     * decode error so the enclosing assert fires.
+     * decode error so the enclosing assert fires. The {@code checkSig} call
+     * site first applies {@link #checkSigEncodingError} and aborts on a
+     * malformed encoding, as {@code OP_CHECKSIG} does (N-197);
+     * {@code checkMultiSig} does not.
      */
     static boolean verifyEcdsaReal(Object sigVal, Object pkVal, byte[] sighash) {
         byte[] sigBytes = toBytes(sigVal);

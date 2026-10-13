@@ -952,7 +952,20 @@ module Runar
         #     verification returns false, which trips the enclosing
         #     assert(...) and raises AssertionFailureError.
         when 'checkSig'
-          real_crypto ? verify_ecdsa_real(args[0], args[1], real_crypto.sighash) : true
+          if real_crypto
+            # N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+            # encoding; it does not push false. Answering false let
+            # `checkSig(a, A) || checkSig(b, B)` take the other arm and accept
+            # a spend the chain aborts on.
+            reason = check_sig_encoding_error(args[0], args[1])
+            if reason
+              raise "checkSig: #{reason} — OP_CHECKSIG aborts the script on a malformed " \
+                    'signature or public key encoding, it does not push false'
+            end
+            verify_ecdsa_real(args[0], args[1], real_crypto.sighash)
+          else
+            true
+          end
 
         when 'checkMultiSig'
           real_crypto ? verify_multi_sig_real(args[0], args[1], real_crypto.sighash) : true
@@ -1304,11 +1317,47 @@ module Runar
         end
       end
 
+      # N-197: why +OP_CHECKSIG+ would ABORT the whole script on these
+      # operands, or +nil+ when it would run and push a boolean. Mirrors
+      # @bsv/sdk +Spend+'s +checkSignatureEncoding+ then
+      # +checkPublicKeyEncoding+ (version-1 rules): a non-empty signature must
+      # be strict DER (BIP66) with a low S; the public key -- checked even when
+      # the signature is empty -- must be 33 bytes behind 0x02/0x03 or 65 bytes
+      # behind 0x04 and decode to a curve point. An empty signature, or a
+      # well-formed one that does not verify, is not an abort (+Spend+ has no
+      # NULLFAIL; it pushes false). The signature layout is the one
+      # +verify_ecdsa_real+ accepts: DER with an optional trailing sighash
+      # byte. Operands that are not hex at all are left to +verify_ecdsa_real+.
+      def check_sig_encoding_error(sig_val, pk_val)
+        sig_hex = to_hex_arg(sig_val)
+        pk_hex  = to_hex_arg(pk_val)
+        return nil if sig_hex.nil? || pk_hex.nil?
+
+        unless sig_hex.empty?
+          parsed = Runar::ECDSA.parse_der_signature_bytes([sig_hex].pack('H*'))
+          return 'the signature is not strict DER' if parsed.nil?
+          return 'the signature does not have a low S value' unless parsed[1].between?(1, Runar::ECDSA::CURVE_N >> 1)
+        end
+        pk = [pk_hex].pack('H*').bytes
+        shape_ok = ([0x02, 0x03].include?(pk[0]) && pk.length == 33) || (pk[0] == 0x04 && pk.length == 65)
+        return 'the public key is not a 33-byte compressed or 65-byte uncompressed key' unless shape_ok
+
+        begin
+          x, y = Runar::ECDSA.decompress_pubkey_bytes(pk.pack('C*'))
+          return 'the public key is not a point on secp256k1' if x >= Runar::ECDSA::CURVE_P || y >= Runar::ECDSA::CURVE_P
+        rescue ArgumentError
+          return 'the public key is not a point on secp256k1'
+        end
+        nil
+      end
+
       # Verify an ECDSA signature against a 32-byte sighash. Pubkey must be
       # SEC1 (33-byte compressed or 65-byte uncompressed); signature must be
       # DER with an optional trailing sighash type byte (stripped by
       # +Runar::ECDSA.parse_der_signature_bytes+). Returns +false+ on any
-      # decode error so the enclosing +assert(...)+ fires.
+      # decode error so the enclosing +assert(...)+ fires. The +checkSig+ call
+      # site first applies +check_sig_encoding_error+ and aborts on a malformed
+      # encoding, as +OP_CHECKSIG+ does (N-197); +checkMultiSig+ does not.
       #
       # The 32-byte sighash is the ECDSA digest itself (no extra hash) — this
       # mirrors the on-chain +OP_CHECKSIG+ semantic, where the script
