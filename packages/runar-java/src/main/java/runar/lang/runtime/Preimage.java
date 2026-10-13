@@ -16,8 +16,10 @@ import runar.lang.types.ByteString;
  * spending transaction the {@link ContractSimulator} call describes (and
  * throws when the call describes none), extractors return
  * sensible defaults (version = 1, sequence = 0xfffffffe, sighash =
- * SIGHASH_ALL | FORKID, etc.), and {@code extractOutputHash} echoes the
- * first 32 bytes of whatever preimage blob the test built.
+ * SIGHASH_ALL | FORKID, etc.), and {@code extractOutputHash} returns the
+ * preimage's {@code hashOutputs} field (N-188; it used to echo the first
+ * 32 bytes of the raw preimage, which is {@code nVersion} plus 28 bytes of
+ * {@code hashPrevouts}, not {@code hashOutputs}).
  *
  * <p>Mirrors {@code packages/runar-lang/src/runtime/preimage.ts}.
  *
@@ -224,13 +226,14 @@ public final class Preimage {
     }
 
     /**
-     * Returns the first 32 bytes of the raw preimage; tests that need
+     * N-188: returns {@code hashOutputs}, same as {@link #extractOutputs}
+     * (the compiler lowers both to the same byte-window opcode sequence —
+     * see {@code StackLower#lowerExtractor}). Tests that need
      * hash256(outputs) == extractOutputHash(preimage) to succeed should
      * pre-set hashOutputs = hash256(expectedOutputs) via the builder.
      */
     public static ByteString extractOutputHash(Preimage p) {
-        if (p == null || p.rawBytes.length < 32) return new ByteString(ZERO_32);
-        return new ByteString(Arrays.copyOfRange(p.rawBytes, 0, 32));
+        return new ByteString(p == null ? ZERO_32 : p.hashOutputs);
     }
 
     public static ByteString extractOutputs(Preimage p) {

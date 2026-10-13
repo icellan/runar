@@ -7,6 +7,7 @@ import runar.lang.runtime.ContractSimulator;
 import runar.lang.runtime.Preimage;
 import runar.lang.sdk.CompileCheck;
 import runar.lang.types.Bigint;
+import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
 import runar.lang.types.Sig;
 
@@ -14,6 +15,10 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static runar.lang.runtime.MockCrypto.cat;
+import static runar.lang.runtime.MockCrypto.hash160;
+import static runar.lang.runtime.MockCrypto.hash256;
+import static runar.lang.runtime.MockCrypto.num2bin;
 
 class TicTacToeTest {
 
@@ -113,6 +118,34 @@ class TicTacToeTest {
                 "rejected by join's payment rule, not by the preimage check");
             assertEquals(Bigint.ZERO, g.status);
         }
+    }
+
+    /**
+     * N-188: {@code cancelBeforeJoin} reaches {@code extractOutputHash} via
+     * the empty-field fallback -- {@code this.txPreimage} is always an
+     * empty {@code SigHashPreimage} for a stateful contract in the
+     * simulator (see {@code StatefulSmartContract}), so the call resolves
+     * through {@code Preimage.extractOutputHash(Preimage)}, not the
+     * SigHashPreimage byte-window overload N-099 fixed. Before N-188 that
+     * method echoed the first 32 raw preimage bytes (nVersion + 28 bytes of
+     * hashPrevouts) instead of hashOutputs, so a legitimate cancellation
+     * whose preimage commits to the honest payout was rejected by the
+     * contract's own {@code assertThat(hash256(payout).equals(...))} check.
+     */
+    @Test
+    void cancelBeforeJoinAcceptsTheHonestPayoutHash() {
+        TicTacToe g = freshGame();
+        ContractSimulator sim = simOf(g);
+
+        ByteString payout = cat(
+            cat(num2bin(Bigint.of(1000).value(), Bigint.of(8).value()), ByteString.fromHex("1976a914")),
+            cat(hash160(ALICE), ByteString.fromHex("88ac")));
+        ByteString changePkh = ByteString.fromHex("00".repeat(20));
+        Preimage template = Preimage.builder().hashOutputs(hash256(payout).toByteArray()).build();
+        Preimage honest = sim.preimageFor("cancelBeforeJoin", template, SIG, changePkh, Bigint.ZERO);
+
+        assertDoesNotThrow(() -> sim.callStateful("cancelBeforeJoin", honest, SIG, changePkh, Bigint.ZERO));
+        assertEquals(Bigint.ZERO, g.status);
     }
 
     /**
