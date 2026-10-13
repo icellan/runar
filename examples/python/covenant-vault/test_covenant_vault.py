@@ -5,10 +5,12 @@ The contract enforces:
     hash256(num2bin(min_amount, 8) || 1976a914 || recipient || 88ac)
         == extract_output_hash(tx_preimage)
 
-The Python mock `extract_output_hash` returns the first 32 bytes of its
-argument (`packages/runar-py/runar/builtins.py:555`). We drive adversarial
-cases by setting `tx_preimage` to `hash256(adversarial_outputs)` and assert
-that the contract raises AssertionError.
+The Python mock `extract_output_hash` returns the preimage's hashOutputs
+field: the 32 bytes ending 8 bytes before the end
+(`packages/runar-py/runar/builtins.py`, N-246). We drive adversarial cases
+by building a preimage whose hashOutputs window is
+`hash256(adversarial_outputs)` and assert that the contract raises
+AssertionError.
 """
 
 from pathlib import Path
@@ -41,10 +43,11 @@ def _p2pkh_output(amount: int, pkh: bytes) -> bytes:
 
 
 def _preimage_for(outputs: bytes) -> bytes:
-    """Build a 181-byte preimage whose first 32 bytes are hash256(outputs).
-    The mock `extract_output_hash` returns exactly those 32 bytes."""
+    """Build a 181-byte preimage whose hashOutputs window (bytes[141:173],
+    i.e. bytes[len-40:len-8]) is hash256(outputs). The mock
+    `extract_output_hash` reads exactly that end-relative window (N-246)."""
     p = bytearray(181)
-    p[:32] = _hash256(outputs)
+    p[141:173] = _hash256(outputs)
     return bytes(p)
 
 

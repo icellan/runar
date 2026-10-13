@@ -18,6 +18,14 @@ ZERO_PK = "00" * 33
 BET_AMOUNT = 1000
 
 
+def wrap_hash_outputs_n246(hash_bytes):
+    """Pads a 32-byte hash so extract_output_hash's end-relative
+    bytes[len-40:len-8] slice (N-246) reads it back, mirroring where
+    hashOutputs sits in a real BIP-143 preimage (40 bytes before the end:
+    8 trailing bytes for locktime + sighashType)."""
+    return (b'\x00' * 32) + hash_bytes + (b'\x00' * 8)
+
+
 def make_game(**overrides):
     """Create a TicTacToe contract in the initial (waiting) state."""
     player_x = overrides.pop("player_x", PLAYER_X)
@@ -148,7 +156,7 @@ class TestMove:
         total_payout = game.bet_amount * 2
         payout = cat(cat(num2bin(total_payout, 8), game.p2pkh_prefix),
                      cat(hash160(PLAYER_X), game.p2pkh_suffix))
-        game.tx_preimage = hash256(payout)
+        game.tx_preimage = wrap_hash_outputs_n246(hash256(payout))
         game.move_and_win(2, PLAYER_X, ALICE.test_sig, "00", 0)
 
     def test_all_positions(self):

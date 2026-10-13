@@ -7,6 +7,7 @@ from runar.builtins import (
     num2bin, bin2num, int_to_str, cat, substr, reverse_bytes, len_,
     safediv, safemod, clamp, sign, pow_, mul_div, percent_of, sqrt, gcd, divmod_, log2,
     mock_sig, mock_pub_key, mock_preimage,
+    extract_output_hash,
     assert_,
 )
 
@@ -249,6 +250,53 @@ class TestMockHelpers:
 
     def test_mock_preimage_length(self):
         assert len(mock_preimage()) == 181
+
+
+# ---------------------------------------------------------------------------
+# extract_output_hash (N-246)
+# ---------------------------------------------------------------------------
+
+def _build_preimage_n246(hash_prevouts_byte: bytes, hash_outputs_byte: bytes) -> bytes:
+    """Lays out a syntactically valid BIP-143 preimage with a zero-length
+    scriptCode, so every field lands at its fixed offset:
+      version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+      scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+      locktime(4) sighashType(4)
+    """
+    version = bytes.fromhex('01000000')
+    hash_prevouts = hash_prevouts_byte * 32
+    hash_sequence = b'\x00' * 32
+    outpoint = b'\x00' * 36
+    script_code_len = b'\x00'
+    amount = bytes.fromhex('1027000000000000')  # 10000 satoshis, LE int64
+    sequence = bytes.fromhex('feffffff')
+    hash_outputs = hash_outputs_byte * 32
+    locktime = b'\x00' * 4
+    sighash_type = bytes.fromhex('41000000')
+    return (version + hash_prevouts + hash_sequence + outpoint + script_code_len +
+            amount + sequence + hash_outputs + locktime + sighash_type)
+
+
+class TestExtractOutputHash:
+    def test_returns_hash_outputs_not_leading_bytes(self):
+        """N-246: extract_output_hash must return the preimage's actual
+        hashOutputs field, not the leading 32 bytes (which cover nVersion +
+        most of hashPrevouts in a real BIP-143 preimage). Mirrors the
+        landed TS fix (N-245, packages/runar-lang/src/runtime/preimage.ts)
+        and the Java fix (N-188, Preimage.extractOutputHash).
+
+        Proves: the correct end-relative hashOutputs window is read.
+        Does not prove: anything about on-chain behaviour, which this mock
+        never touches.
+        """
+        preimage = _build_preimage_n246(b'\xaa', b'\xbb')
+        result = extract_output_hash(preimage)
+        assert result == b'\xbb' * 32
+        assert result != b'\xaa' * 32
+
+    def test_falls_back_to_zero_when_too_short(self):
+        assert extract_output_hash(b'') == b'\x00' * 32
+        assert extract_output_hash(b'\xaa' * 32) == b'\x00' * 32  # 32 bytes = too short
 
 
 # ---------------------------------------------------------------------------

@@ -331,17 +331,51 @@ RSpec.describe Runar::Builtins do
   end
 
   describe 'preimage extraction' do
-    it 'extract_output_hash returns first 32 bytes when preimage is long enough' do
-      # hash256 produces 32 bytes (64 hex chars) -- long enough to extract from
-      preimage = ctx.hash256('deadbeef')
+    # N-246: extract_output_hash must return the preimage's actual
+    # hashOutputs field, not the leading 32 bytes (which cover nVersion +
+    # most of hashPrevouts in a real BIP-143 preimage). Mirrors the landed
+    # TS fix (N-245, packages/runar-lang/src/runtime/preimage.ts) and the
+    # Java fix (N-188, Preimage.extractOutputHash).
+    #
+    # build_preimage_hex_n246 lays out a syntactically valid BIP-143
+    # preimage with a zero-length scriptCode, so every field lands at its
+    # fixed offset:
+    #   version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+    #   scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+    #   locktime(4) sighashType(4)
+    def build_preimage_hex_n246(hash_prevouts_byte, hash_outputs_byte)
+      version = '01000000'
+      hash_prevouts = hash_prevouts_byte * 32
+      hash_sequence = '00' * 32
+      outpoint = '00' * 36
+      script_code_len = '00'
+      amount = '1027000000000000' # 10000 satoshis, LE int64
+      sequence = 'feffffff'
+      hash_outputs = hash_outputs_byte * 32
+      locktime = '00000000'
+      sighash_type = '41000000'
+      version + hash_prevouts + hash_sequence + outpoint + script_code_len +
+        amount + sequence + hash_outputs + locktime + sighash_type
+    end
+
+    # Proves extract_output_hash reads the end-relative hashOutputs window,
+    # matching the compiled opcode sequence (OP_SIZE 40 OP_SUB OP_SPLIT
+    # OP_NIP 32 OP_SPLIT OP_DROP), instead of echoing the leading bytes
+    # (nVersion + most of hashPrevouts). Does not prove anything about
+    # on-chain behaviour, which this mock never touches.
+    it 'extract_output_hash returns hashOutputs, not the leading bytes' do
+      preimage = build_preimage_hex_n246('aa', 'bb')
       result = ctx.extract_output_hash(preimage)
-      expect(result.length).to eq(64)
-      expect(result).to eq(preimage[0, 64])
+      expect(result).to eq('bb' * 32)
+      expect(result).not_to eq('aa' * 32)
     end
 
     it 'extract_output_hash returns 32 zero bytes when preimage is too short' do
       expect(ctx.extract_output_hash('')).to eq('00' * 32)
       expect(ctx.extract_output_hash('aabb')).to eq('00' * 32) # 2 bytes = too short
+      # 32 bytes (64 hex chars) is still too short: hashOutputs needs 40
+      # bytes to exist (it sits 40 bytes before the end of the preimage).
+      expect(ctx.extract_output_hash(ctx.hash256('deadbeef'))).to eq('00' * 32)
     end
 
     it 'extract_output_hash handles nil by treating it as empty string' do

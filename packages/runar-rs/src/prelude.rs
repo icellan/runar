@@ -566,13 +566,16 @@ pub fn extract_sequence(_p: &[u8]) -> Int {
     0xfffffffe
 }
 
-/// Returns the first 32 bytes of the preimage in test mode.
-/// Tests set `tx_preimage = hash256(expected_output_bytes)` so the assertion
-/// `hash256(outputs) == extract_output_hash(tx_preimage)` passes.
-/// Falls back to 32 zero bytes when the preimage is unset or shorter than 32 bytes.
+/// Returns the preimage's hashOutputs field in test mode: the 32 bytes
+/// ending 8 bytes before the end (end-relative, matching the compiled
+/// opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP).
+/// Falls back to 32 zero bytes when the preimage is unset or shorter than
+/// 40 bytes.
+/// N-246: this used to echo the leading 32 bytes (nVersion + most of
+/// hashPrevouts in a real preimage), ported from the TS/Java fix (N-245/N-188).
 pub fn extract_output_hash(p: &[u8]) -> ByteString {
-    if p.len() >= 32 {
-        p[..32].to_vec()
+    if p.len() >= 40 {
+        p[p.len() - 40..p.len() - 8].to_vec()
     } else {
         vec![0u8; 32]
     }
@@ -1334,6 +1337,59 @@ mod tests {
     #[test]
     fn test_check_preimage_always_true() {
         assert!(check_preimage(&mock_preimage()));
+    }
+
+    // N-246: extract_output_hash must return the preimage's actual
+    // hashOutputs field, not the leading 32 bytes (which cover nVersion +
+    // most of hashPrevouts in a real BIP-143 preimage). Mirrors the landed
+    // TS fix (N-245, packages/runar-lang/src/runtime/preimage.ts) and the
+    // Java fix (N-188, Preimage.extractOutputHash).
+    //
+    // build_preimage_hex_n246 lays out a syntactically valid BIP-143
+    // preimage with a zero-length scriptCode, so every field lands at its
+    // fixed offset:
+    //   version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+    //   scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+    //   locktime(4) sighashType(4)
+    fn build_preimage_hex_n246(hash_prevouts_byte: &str, hash_outputs_byte: &str) -> String {
+        let version = "01000000";
+        let hash_prevouts = hash_prevouts_byte.repeat(32);
+        let hash_sequence = "00".repeat(32);
+        let outpoint = "00".repeat(36);
+        let script_code_len = "00";
+        let amount = "1027000000000000"; // 10000 satoshis, LE int64
+        let sequence = "feffffff";
+        let hash_outputs = hash_outputs_byte.repeat(32);
+        let locktime = "00000000";
+        let sighash_type = "41000000";
+        format!(
+            "{version}{hash_prevouts}{hash_sequence}{outpoint}{script_code_len}{amount}{sequence}{hash_outputs}{locktime}{sighash_type}"
+        )
+    }
+
+    fn decode_hex_n246(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Proves extract_output_hash reads the end-relative hashOutputs window
+    // (bytes[len-40..len-8]), matching the compiled opcode sequence
+    // (OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP), instead of
+    // echoing bytes[0..32] (nVersion + most of hashPrevouts). Does not
+    // prove anything about on-chain behaviour, which this mock never
+    // touches.
+    #[test]
+    fn test_extract_output_hash_returns_hash_outputs_n246() {
+        let preimage = decode_hex_n246(&build_preimage_hex_n246("aa", "bb"));
+        let result = extract_output_hash(&preimage);
+        assert_eq!(result, vec![0xbbu8; 32], "want hashOutputs");
+        assert_ne!(
+            result,
+            vec![0xaau8; 32],
+            "must not echo the leading bytes (version + hashPrevouts)"
+        );
     }
 
     #[test]

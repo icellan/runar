@@ -165,12 +165,24 @@ func TestTicTacToe_FullGameFlow(t *testing.T) {
 	}
 
 	// X plays position 2 to win top row (0,1,2).
-	// Pre-compute the expected payout so we can set TxPreimage = Hash256(payout),
-	// satisfying the ExtractOutputHash assertion in MoveAndWin.
+	// Pre-compute the expected payout and wrap its hash into the
+	// ExtractOutputHash hashOutputs window (N-246: the mock reads
+	// bytes[len-40:len-8], not the leading bytes) so the assertion in
+	// MoveAndWin is satisfied.
 	totalPayout := g.BetAmount * 2
 	payout := runar.Cat(runar.Cat(runar.Num2Bin(totalPayout, 8), g.P2pkhPrefix), runar.Cat(runar.Hash160(playerXPK), g.P2pkhSuffix))
-	g.TxPreimage = runar.Hash256(payout)
+	g.TxPreimage = wrapHashOutputsN246(runar.Hash256(payout))
 	g.MoveAndWin(2, playerXPK, playerXSig, "00", 0)
+}
+
+// wrapHashOutputsN246 pads a 32-byte hash so ExtractOutputHash's
+// end-relative bytes[len-40:len-8] slice (N-246) reads it back, mirroring
+// where hashOutputs sits in a real BIP-143 preimage (40 bytes before the
+// end: 8 trailing bytes for locktime + sighashType).
+func wrapHashOutputsN246(hash runar.Sha256Digest) runar.SigHashPreimage {
+	buf := make([]byte, 72)
+	copy(buf[32:64], []byte(hash))
+	return runar.SigHashPreimage(buf)
 }
 
 func TestTicTacToe_CheckWinRow(t *testing.T) {

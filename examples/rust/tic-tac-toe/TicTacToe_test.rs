@@ -34,6 +34,16 @@ fn player_x_sig() -> Sig { ALICE.sign_test_message() }
 fn player_o_sig() -> Sig { BOB.sign_test_message() }
 fn zero_pk() -> PubKey { vec![0u8; 33] }
 
+/// Pads a 32-byte hash so `extract_output_hash`'s end-relative
+/// `bytes[len-40..len-8]` slice (N-246) reads it back, mirroring where
+/// hashOutputs sits in a real BIP-143 preimage (40 bytes before the end: 8
+/// trailing bytes for locktime + sighashType).
+fn wrap_hash_outputs_n246(hash: Sha256) -> SigHashPreimage {
+    let mut buf = vec![0u8; 72];
+    buf[32..64].copy_from_slice(&hash);
+    buf
+}
+
 /// Build a game the way the contract does: the constructor supplies only the
 /// readonly `player_x` / `bet_amount`, and `init()` — the contract's OWN
 /// property initializers — supplies everything else. Nothing here restates a
@@ -211,7 +221,7 @@ fn test_full_game_join_and_moves() {
     // Pre-compute the payout hash so extract_output_hash returns the right value.
     let total_payout = game.bet_amount * 2;
     let payout = cat(&cat(&cat(&num2bin(&total_payout, 8), &game.p2pkh_prefix), &hash160(&player_x())), &game.p2pkh_suffix);
-    game.tx_preimage = hash256(&payout);
+    game.tx_preimage = wrap_hash_outputs_n246(hash256(&payout));
     game.move_and_win(2, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
@@ -235,7 +245,7 @@ fn arm_win_payout(game: &mut TicTacToe, winner: &PubKey) {
         &cat(&num2bin(&total_payout, 8), &game.p2pkh_prefix),
         &cat(&hash160(winner), &game.p2pkh_suffix),
     );
-    game.tx_preimage = hash256(&payout);
+    game.tx_preimage = wrap_hash_outputs_n246(hash256(&payout));
 }
 
 /// Set `tx_preimage` so `extract_output_hash` returns the hash of the equal
@@ -249,7 +259,7 @@ fn arm_tie_payout(game: &mut TicTacToe) {
         &cat(&num2bin(&game.bet_amount, 8), &game.p2pkh_prefix),
         &cat(&hash160(&game.player_o), &game.p2pkh_suffix),
     );
-    game.tx_preimage = hash256(&cat(&out1, &out2));
+    game.tx_preimage = wrap_hash_outputs_n246(hash256(&cat(&out1, &out2)));
 }
 
 #[test]

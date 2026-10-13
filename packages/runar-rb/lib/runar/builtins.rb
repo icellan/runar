@@ -434,14 +434,18 @@ module Runar
       0
     end
 
-    # Returns the first 32 bytes of the preimage as a hex string.
-    # Tests set tx_preimage = hash256(expected_output_bytes) so the assertion
-    # hash256(outputs) == extract_output_hash(tx_preimage) passes.
-    # Falls back to 32 zero bytes when the preimage is shorter than 32 bytes.
+    # Returns the preimage's hashOutputs field as a hex string in test
+    # mode: the 32 bytes ending 8 bytes before the end (end-relative,
+    # matching the compiled opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT
+    # OP_NIP 32 OP_SPLIT OP_DROP). Falls back to 32 zero bytes when the
+    # preimage is shorter than 40 bytes (80 hex chars).
+    # N-246: this used to echo the leading 32 bytes (nVersion + most of
+    # hashPrevouts in a real preimage), ported from the TS/Java fix
+    # (N-245/N-188).
     def extract_output_hash(preimage)
       preimage = preimage.to_s
-      if preimage.length >= 64 # 32 bytes = 64 hex chars
-        preimage[0, 64]
+      if preimage.length >= 80 # 40 bytes = 80 hex chars
+        preimage[preimage.length - 80, 64]
       else
         '00' * 32
       end

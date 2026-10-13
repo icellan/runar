@@ -26,13 +26,16 @@ func p2pkhOutput(amount int64, pkh runar.Addr) runar.ByteString {
 	return amt + runar.ByteString("1976a914") + runar.ByteString(pkh) + runar.ByteString("88ac")
 }
 
-// preimageFromOutputs builds a fake SigHashPreimage whose first 32 bytes are
-// hash256(outputsBytes). The Go mock ExtractOutputHash returns exactly those
-// 32 bytes, so the contract's hash256(expectedOutput) == ExtractOutputHash
-// covenant check sees `outputsBytes` as the committed hashOutputs preimage.
+// preimageFromOutputs builds a fake SigHashPreimage whose hashOutputs window
+// (bytes[len-40:len-8]) is hash256(outputsBytes). The Go mock
+// ExtractOutputHash reads exactly that end-relative window (N-246), so the
+// contract's hash256(expectedOutput) == ExtractOutputHash covenant check
+// sees `outputsBytes` as the committed hashOutputs preimage.
 func preimageFromOutputs(outputs runar.ByteString) runar.SigHashPreimage {
 	h := runar.Hash256(outputs)
-	return runar.SigHashPreimage(string(h))
+	buf := make([]byte, 72)
+	copy(buf[32:64], []byte(h))
+	return runar.SigHashPreimage(buf)
 }
 
 // expectPanic invokes fn and reports a failure if it does NOT panic. Adversarial

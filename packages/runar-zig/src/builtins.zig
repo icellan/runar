@@ -2355,6 +2355,32 @@ test "mock preimage extractors round trip" {
     try std.testing.expectEqual(@as(i64, 500), extractLocktime(preimage));
 }
 
+// N-246: Go/Rust/Python/Ruby's native extractOutputHash mocks echoed
+// bytes[0:32] of the preimage instead of reading the actual hashOutputs
+// field. Zig's extractOutputHash delegates to bsvz.transaction's real
+// BIP-143 preimage parser (Preimage.parse), which already reads
+// hashOutputs by field, not by a leading-bytes echo — this test proves
+// that and is why this tier's mock is NOT touched by the N-246 fix. Does
+// not prove anything about on-chain behaviour, which this mock never
+// touches.
+test "extractOutputHash returns hashOutputs, not the leading bytes (N-246)" {
+    const prevouts_hash = hash256("prevouts-marker");
+    defer freeIfOwned(prevouts_hash);
+    const output_hash = hash256("outputs-marker");
+    defer freeIfOwned(output_hash);
+
+    const preimage = mockPreimage(.{
+        .hashPrevouts = prevouts_hash,
+        .outputHash = output_hash,
+    });
+    defer freeIfOwned(preimage);
+
+    const extracted = extractOutputHash(preimage);
+    defer freeIfOwned(extracted);
+    try std.testing.expect(std.mem.eql(u8, extracted, output_hash));
+    try std.testing.expect(!std.mem.eql(u8, extracted, prevouts_hash));
+}
+
 test "num2bin and bin2num follow signed magnitude semantics" {
     const cases = [_]struct {
         value: i64,

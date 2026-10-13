@@ -566,13 +566,15 @@ def extract_locktime(preimage: bytes) -> int:
     return 0
 
 def extract_output_hash(preimage) -> bytes:
-    """Returns the first 32 bytes of the preimage in test mode.
-    Tests set tx_preimage = hash256(expected_output_bytes) so the assertion
-    hash256(outputs) == extract_output_hash(tx_preimage) passes.
-    Falls back to 32 zero bytes when the preimage is shorter than 32 bytes."""
+    """Returns the preimage's hashOutputs field in test mode: the 32 bytes
+    ending 8 bytes before the end (end-relative, matching the compiled
+    opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP).
+    Falls back to 32 zero bytes when the preimage is shorter than 40 bytes.
+    N-246: this used to echo the leading 32 bytes (nVersion + most of
+    hashPrevouts in a real preimage), ported from the TS/Java fix (N-245/N-188)."""
     preimage = _as_bytes(preimage)
-    if len(preimage) >= 32:
-        return preimage[:32]
+    if len(preimage) >= 40:
+        return preimage[len(preimage) - 40: len(preimage) - 8]
     return b'\x00' * 32
 
 def extract_amount(preimage: bytes) -> int:

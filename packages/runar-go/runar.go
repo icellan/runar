@@ -728,14 +728,17 @@ func Sha256Finalize(state, remaining ByteString, msgBitLen int64) ByteString {
 // ExtractLocktime returns 0 in test mode.
 func ExtractLocktime(p SigHashPreimage) int64 { return 0 }
 
-// ExtractOutputHash returns the first 32 bytes of the preimage in test mode.
-// Tests set TxPreimage = Hash256(expectedOutputBytes) so the assertion
-// Hash256(outputs) == ExtractOutputHash(TxPreimage) passes.
-// Falls back to 32 zero bytes when the preimage is unset (nil/empty).
+// ExtractOutputHash returns the preimage's hashOutputs field in test mode:
+// the 32 bytes ending 8 bytes before the end (end-relative, matching the
+// compiled opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT
+// OP_DROP). Falls back to 32 zero bytes when the preimage is unset or
+// shorter than 40 bytes.
+// N-246: this used to echo the leading 32 bytes (nVersion + most of
+// hashPrevouts in a real preimage), ported from the TS/Java fix (N-245/N-188).
 func ExtractOutputHash(p SigHashPreimage) Sha256Digest {
-	if len(p) >= 32 {
+	if len(p) >= 40 {
 		result := make([]byte, 32)
-		copy(result, p[:32])
+		copy(result, p[len(p)-40:len(p)-8])
 		return Sha256Digest(result)
 	}
 	return Sha256Digest(make([]byte, 32))
