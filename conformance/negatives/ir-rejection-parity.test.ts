@@ -212,6 +212,27 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
  * step value (1) instead of an error. (I58 is F-283's.)
  */
 
+/*
+ * `I60`-`I61` (N-208) reuse the `stateful-counter` control with ONE field
+ * changed each, both inside `increment`'s compiler-injected continuation
+ * check:
+ *
+ * `I60` sets `t34`'s (the `hash256(...) === extractOutputHash(...)` bin_op)
+ * `result_type` to the number `1` instead of the string `"bytes"`. Go, Rust,
+ * Zig and TS already refuse a wrong-typed `result_type`; before this fix,
+ * Python and Ruby read it with a bare `d["result_type"]` / `d.get(...)` and
+ * no type check, so the wrong-typed value fell into the same "absent" path
+ * as a missing field, silently lowering the comparison as numeric instead
+ * of byte-equality.
+ *
+ * `I61` sets `t35`'s (the assert over that bin_op) `isAutoInjectedStateCheck`
+ * to the string `"true"` instead of the boolean `true`. Go, Rust, Zig and TS
+ * already refuse this; before this fix, Python, Ruby and Java compared the
+ * raw value against `true` (`== true` / `Boolean.TRUE.equals(...)`), which
+ * is false for every non-boolean value, so the wrong-typed marker silently
+ * became `false` -- the opposite of what it declared, with no diagnostic.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],

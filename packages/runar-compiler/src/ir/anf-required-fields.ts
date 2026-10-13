@@ -88,6 +88,22 @@ function checkBindings(obj: Obj, key: string, path: string): void {
   });
 }
 
+/** N-208: an OPTIONAL string field. Absent or JSON null is legal; a present
+ * value of any other type is refused rather than silently read as the
+ * field's "not set" behaviour (see the three callers below). */
+function optStr(obj: Obj, key: string, path: string): void {
+  const v = obj[key];
+  if (v === undefined || v === null) return;
+  if (typeof v !== 'string') throw malformed(fieldPath(path, key), 'a string', v);
+}
+
+/** N-208: an OPTIONAL boolean field, same absent/null rule as `optStr`. */
+function optBool(obj: Obj, key: string, path: string): void {
+  const v = obj[key];
+  if (v === undefined || v === null) return;
+  if (typeof v !== 'boolean') throw malformed(fieldPath(path, key), 'a boolean', v);
+}
+
 function checkValue(v: Obj, path: string): void {
   reqString(v, 'kind', path);
   switch (v.kind) {
@@ -99,6 +115,11 @@ function checkValue(v: Obj, path: string): void {
       reqString(v, 'op', path);
       reqString(v, 'left', path);
       reqString(v, 'right', path);
+      // N-208: a non-string `result_type` (e.g. a number) used to read the
+      // same as a genuinely absent field, silently discarding the "bytes"
+      // hint and lowering the comparison as numeric instead of
+      // byte-equality -- a different script with no diagnostic.
+      optStr(v, 'result_type', path);
       break;
     case 'unary_op':
       reqString(v, 'op', path);
@@ -125,6 +146,12 @@ function checkValue(v: Obj, path: string): void {
       break;
     case 'assert':
       reqString(v, 'value', path);
+      // N-208: a non-bool `isAutoInjectedStateCheck` (e.g. the string
+      // "true") used to compare unequal to `true` and silently become
+      // `false` -- the off-chain SDK interpreters that skip THIS assert
+      // based on the marker would then stop skipping it, with no
+      // diagnostic.
+      optBool(v, 'isAutoInjectedStateCheck', path);
       break;
     case 'update_prop':
       reqString(v, 'name', path);
@@ -137,6 +164,12 @@ function checkValue(v: Obj, path: string): void {
     case 'add_output':
       reqString(v, 'satoshis', path);
       reqStringArray(v, 'stateValues', path);
+      // N-208: `preimage` is deliberately NOT required here (see the module
+      // docstring -- it is one of the fields every loader defaults for
+      // older payloads), but a PRESENT value of the wrong type used to be
+      // accepted unchecked and fed into ref-collection, where a non-string
+      // ref can never match a real binding name.
+      optStr(v, 'preimage', path);
       break;
     case 'add_raw_output':
     case 'add_data_output':

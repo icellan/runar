@@ -91,11 +91,35 @@ module RunarCompiler
         end
       end
 
+      # N-208: an OPTIONAL string field. Absent or JSON null is legal; a
+      # present value of any other type is refused rather than silently
+      # read as the field's "not set" behaviour (see the three callers
+      # below).
+      def opt_str(obj, key, path)
+        v = obj[key]
+        return if v.nil?
+        raise malformed(field_path(path, key), "a string", v) unless v.is_a?(String)
+      end
+
+      # N-208: an OPTIONAL boolean field, same absent/null rule as +opt_str+.
+      def opt_bool(obj, key, path)
+        v = obj[key]
+        return if v.nil?
+        raise malformed(field_path(path, key), "a boolean", v) unless [true, false].include?(v)
+      end
+
       def check_value(v, path)
         req_str(v, path, "kind")
         case v["kind"]
         when "load_param", "load_prop" then req_str(v, path, "name")
-        when "bin_op" then req_str(v, path, "op", "left", "right")
+        when "bin_op"
+          req_str(v, path, "op", "left", "right")
+          # N-208: a non-string `result_type` (e.g. a number) used to fall
+          # through the same `d["result_type"]` as a genuinely absent
+          # field, silently discarding the "bytes" hint and lowering the
+          # comparison as numeric instead of byte-equality -- a different
+          # script with no diagnostic.
+          opt_str(v, "result_type", path)
         when "unary_op" then req_str(v, path, "op", "operand")
         when "call"
           req_str(v, path, "func")
@@ -111,12 +135,25 @@ module RunarCompiler
         when "loop"
           check_bindings(v, "body", path)
           req_str(v, path, "iterVar")
-        when "assert" then req_str(v, path, "value")
+        when "assert"
+          req_str(v, path, "value")
+          # N-208: a non-bool `isAutoInjectedStateCheck` (e.g. the string
+          # "true") used to compare unequal to `true` and silently become
+          # `false` -- the off-chain SDK interpreters that skip THIS assert
+          # based on the marker would then stop skipping it, with no
+          # diagnostic.
+          opt_bool(v, "isAutoInjectedStateCheck", path)
         when "update_prop" then req_str(v, path, "name", "value")
         when "check_preimage", "deserialize_state" then req_str(v, path, "preimage")
         when "add_output"
           req_str(v, path, "satoshis")
           req_str_list(v, "stateValues", path)
+          # N-208: `preimage` is deliberately NOT required here (see the
+          # module comment above -- it is one of the fields every loader
+          # defaults for older payloads), but a PRESENT value of the wrong
+          # type used to be accepted unchecked and fed into ref-collection,
+          # where a non-string ref can never match a real binding name.
+          opt_str(v, "preimage", path)
         when "add_raw_output", "add_data_output" then req_str(v, path, "satoshis", "scriptBytes")
         when "array_literal" then req_str_list(v, "elements", path)
         end

@@ -323,6 +323,51 @@ class AnfLoaderTest {
         assertTrue(b.value() instanceof Assert a && "cond".equals(a.value()));
     }
 
+    /**
+     * N-208: {@code isAutoInjectedStateCheck} is an OPTIONAL boolean; a JSON
+     * {@code true} is the only truthy form, and an absent key defaults to
+     * {@code false} (see {@code parsesAssertNodeDefaultsIsAutoInjectedStateCheckToFalse}).
+     */
+    @Test
+    void parsesAssertNodeWithIsAutoInjectedStateCheckTrue() {
+        AnfBinding b = firstBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"assert\",\"value\":\"cond\","
+                + "\"isAutoInjectedStateCheck\":true}}");
+        assertTrue(b.value() instanceof Assert a
+            && "cond".equals(a.value())
+            && a.isAutoInjectedStateCheck());
+    }
+
+    @Test
+    void parsesAssertNodeDefaultsIsAutoInjectedStateCheckToFalse() {
+        AnfBinding b = firstBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"assert\",\"value\":\"cond\"}}");
+        assertTrue(b.value() instanceof Assert a && !a.isAutoInjectedStateCheck());
+    }
+
+    /**
+     * N-208: before this fix, {@code Boolean.TRUE.equals(obj.get(key))} was
+     * {@code false} for EVERY non-{@code Boolean.TRUE} value, including a
+     * wrong-typed one (the JSON STRING {@code "true"}), so a malformed
+     * marker silently read the same as a genuinely absent one. Off-chain SDK
+     * interpreters key off this exact marker to skip the compiler-injected
+     * stateful-continuation assert, so a flipped marker is a silent
+     * behaviour change, not a crash.
+     */
+    @Test
+    void rejectsAssertWithNonBooleanIsAutoInjectedStateCheck() {
+        RuntimeException ex = assertThrows(
+            RuntimeException.class,
+            () -> firstBinding(
+                "{\"name\":\"t0\",\"value\":{\"kind\":\"assert\",\"value\":\"cond\","
+                    + "\"isAutoInjectedStateCheck\":\"true\"}}")
+        );
+        assertTrue(
+            ex.getMessage().contains("isAutoInjectedStateCheck")
+                && ex.getMessage().contains("must be a boolean"),
+            "Expected a boolean-type diagnostic naming the field, got: " + ex.getMessage());
+    }
+
     @Test
     void parsesUpdatePropNode() {
         // N-087: the loader refuses a write to an undeclared property, so the

@@ -97,6 +97,26 @@ def _check_bindings(obj: dict, key: str, path: str) -> None:
         _check_value(_as_obj(binding.get("value"), f"{bp}.value"), f"{bp}.value")
 
 
+def _opt_str(obj: dict, key: str, path: str) -> None:
+    """N-208: an OPTIONAL string field. Absent or JSON null is legal; a
+    present value of any other type is refused rather than silently read as
+    the field's "not set" behaviour (see the three callers below)."""
+    v = obj.get(key)
+    if v is None:
+        return
+    if not isinstance(v, str):
+        raise _malformed(_path(path, key), "a string", v)
+
+
+def _opt_bool(obj: dict, key: str, path: str) -> None:
+    """N-208: an OPTIONAL boolean field, same absent/null rule as ``_opt_str``."""
+    v = obj.get(key)
+    if v is None:
+        return
+    if not isinstance(v, bool):
+        raise _malformed(_path(path, key), "a boolean", v)
+
+
 def _check_value(v: dict, path: str) -> None:
     _req_str(v, "kind", path)
     kind = v["kind"]
@@ -104,6 +124,12 @@ def _check_value(v: dict, path: str) -> None:
         _req_strs(v, path, "name")
     elif kind == "bin_op":
         _req_strs(v, path, "op", "left", "right")
+        # N-208: a non-string ``result_type`` (e.g. a number) used to fall
+        # through the same ``d.get("result_type")`` as a genuinely absent
+        # field, silently discarding the "bytes" hint and lowering the
+        # comparison as numeric instead of byte-equality -- a different
+        # script with no diagnostic.
+        _opt_str(v, "result_type", path)
     elif kind == "unary_op":
         _req_strs(v, path, "op", "operand")
     elif kind == "call":
@@ -123,6 +149,12 @@ def _check_value(v: dict, path: str) -> None:
         _req_str(v, "iterVar", path)
     elif kind == "assert":
         _req_strs(v, path, "value")
+        # N-208: a non-bool ``isAutoInjectedStateCheck`` (e.g. the string
+        # "true") used to compare unequal to ``True`` and silently become
+        # ``False`` -- the off-chain SDK interpreters that skip THIS assert
+        # based on the marker would then stop skipping it, with no
+        # diagnostic.
+        _opt_bool(v, "isAutoInjectedStateCheck", path)
     elif kind == "update_prop":
         _req_strs(v, path, "name", "value")
     elif kind in ("check_preimage", "deserialize_state"):
@@ -130,6 +162,12 @@ def _check_value(v: dict, path: str) -> None:
     elif kind == "add_output":
         _req_str(v, "satoshis", path)
         _req_str_list(v, "stateValues", path)
+        # N-208: ``preimage`` is deliberately NOT required here (see the
+        # module docstring -- it is one of the fields every loader defaults
+        # for older payloads), but a PRESENT value of the wrong type used to
+        # be accepted unchecked and fed into ref-collection, where a
+        # non-string ref can never match a real binding name.
+        _opt_str(v, "preimage", path)
     elif kind in ("add_raw_output", "add_data_output"):
         _req_strs(v, path, "satoshis", "scriptBytes")
     elif kind == "array_literal":

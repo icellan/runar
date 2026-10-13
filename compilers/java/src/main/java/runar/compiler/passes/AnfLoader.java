@@ -860,10 +860,14 @@ public final class AnfLoader {
                 obj.containsKey("start") ? loopStart(obj.get("start")) : BigInteger.ZERO,
                 obj.containsKey("step") ? asInt(obj.get("step"), "loop step") : 1
             );
+            // N-208: a non-boolean `isAutoInjectedStateCheck` (e.g. the
+            // string "true") used to satisfy neither branch of
+            // `Boolean.TRUE.equals(...)` and silently become `false` -- the
+            // off-chain SDK interpreters that skip THIS assert based on the
+            // marker would then stop skipping it, with no diagnostic.
             case "assert" -> new Assert(
                 reqString(obj, "value", path),
-                obj.containsKey("isAutoInjectedStateCheck")
-                    && Boolean.TRUE.equals(obj.get("isAutoInjectedStateCheck"))
+                Boolean.TRUE.equals(optBool(obj, "isAutoInjectedStateCheck", path))
             );
             case "update_prop" -> new UpdateProp(reqString(obj, "name", path), reqString(obj, "value", path));
             case "get_state_script" -> new GetStateScript();
@@ -1144,6 +1148,23 @@ public final class AnfLoader {
     private static String asOptString(Object v) {
         if (v == null) return null;
         return asString(v);
+    }
+
+    /**
+     * N-208: an OPTIONAL boolean field. Absent (key missing) or an explicit
+     * JSON null both mean "not set" ({@code null} here); a PRESENT value of
+     * any other JSON type is refused rather than silently treated as "not
+     * set" (the bug this closes: {@code Boolean.TRUE.equals(v)} is {@code
+     * false} for every non-{@code Boolean.TRUE} value, including a
+     * wrong-typed one, so a malformed marker read as the same thing as a
+     * genuinely absent one).
+     */
+    private static Boolean optBool(Map<?, ?> obj, String key, String path) {
+        if (!obj.containsKey(key)) return null;
+        Object v = obj.get(key);
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        throw malformed(fieldPath(path, key), "a boolean", v);
     }
 
     private static BigInteger asBigInt(Object v) {
