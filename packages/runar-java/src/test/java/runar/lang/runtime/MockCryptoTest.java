@@ -98,6 +98,90 @@ class MockCryptoTest {
         assertFalse(MockCrypto.checkMultiSig(sigs, pks));
     }
 
+    /**
+     * N-175: {@link MockCrypto}'s class javadoc said "Signature verification
+     * is mocked (always returns success)" with no qualification, and never
+     * named Rabin at all -- even though {@code verifyRabinSig} (below),
+     * {@code verifyWOTS}, the six {@code verifySLHDSA_SHA2_*} methods, and
+     * {@code verifyECDSA_P256}/{@code verifyECDSA_P384} all perform real
+     * cryptography and reject a forged signature (see
+     * {@code RabinPaddingBoundTest}, {@code wotsVerifyFailsOnTamperedMessage},
+     * {@code SlhDsaTest}, {@code p256VerifyAcceptsBouncyCastleSignature}).
+     *
+     * <p>First, by execution: feed {@code verifyRabinSig} the universal-forgery
+     * shape ({@code sig = 0}, {@code padding = SHA256(msg)}) that a verifier
+     * which "always returns success" would accept, and confirm it is
+     * rejected. Then read the class javadoc straight from the source file and
+     * check it no longer makes the disproven blanket claim, does name Rabin
+     * as real, and says what {@code checkSig} actually does (a null check,
+     * not ECDSA math).
+     *
+     * <p>What this proves: the class-level javadoc text is consistent with
+     * the executable behaviour of the methods it describes. What it does not
+     * prove: the cryptographic correctness of any individual verifier (that
+     * is {@code RabinPaddingBoundTest}'s, {@code SlhDsaTest}'s, etc. job) or
+     * anything about the on-chain Script -- this is an off-chain simulator
+     * doc, not a consensus claim.
+     */
+    @Test
+    void classJavadocMatchesRealSignatureVerificationBehavior() throws java.io.IOException {
+        // Real Rabin test primes (both ≡ 3 mod 4), mirroring RabinPaddingBoundTest.
+        BigInteger p = new BigInteger("1361129467683753853853498429727072846227");
+        BigInteger q = new BigInteger("1361129467683753853853498429727082846007");
+        BigInteger n = p.multiply(q);
+        byte[] msg = "N-175 javadoc fidelity check".getBytes();
+        byte[] forgedPadding;
+        try {
+            forgedPadding = java.security.MessageDigest.getInstance("SHA-256").digest(msg);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+
+        boolean accepted = MockCrypto.verifyRabinSig(
+            new ByteString(msg), BigInteger.ZERO, new ByteString(forgedPadding), n);
+        assertFalse(accepted,
+            "verifyRabinSig accepted a forged signature -- if signature verification on "
+            + "this class always returned success, this assertion would be backwards");
+
+        String doc = classJavadoc();
+        assertFalse(
+            doc.contains("Signature verification is mocked (always returns success)"),
+            "class javadoc still claims ALL signature verification always returns success, "
+            + "which the forged-signature rejection above (and the existing WOTS+/SLH-DSA/"
+            + "P-256/P-384 tests) disprove by execution");
+        assertTrue(
+            doc.toLowerCase(java.util.Locale.ROOT).contains("rabin"),
+            "class javadoc never mentions Rabin, but verifyRabinSig performs real "
+            + "verification -- the doc's list of real verifiers is incomplete");
+        assertTrue(
+            doc.contains("checkSig") && doc.toLowerCase(java.util.Locale.ROOT).contains("null"),
+            "class javadoc does not say what checkSig actually does (a null check, not "
+            + "ECDSA verification)");
+    }
+
+    /** Locates {@code MockCrypto.java}'s source whether tests run from the
+     * {@code packages/runar-java} module root (Gradle's default) or the repo root. */
+    private static java.nio.file.Path mockCryptoSourceFile() {
+        java.nio.file.Path rel =
+            java.nio.file.Path.of("src/main/java/runar/lang/runtime/MockCrypto.java");
+        java.nio.file.Path here = java.nio.file.Path.of("").toAbsolutePath();
+        if (java.nio.file.Files.exists(here.resolve(rel))) return here.resolve(rel);
+        java.nio.file.Path nested = here.resolve("packages/runar-java").resolve(rel);
+        if (java.nio.file.Files.exists(nested)) return nested;
+        throw new IllegalStateException("cannot locate MockCrypto.java from " + here);
+    }
+
+    /** The class-level javadoc block immediately preceding {@code public final class MockCrypto}. */
+    private static String classJavadoc() throws java.io.IOException {
+        String src = java.nio.file.Files.readString(mockCryptoSourceFile());
+        int classIdx = src.indexOf("public final class MockCrypto");
+        assertTrue(classIdx > 0, "MockCrypto class declaration not found");
+        int docEnd = src.lastIndexOf("*/", classIdx);
+        int docStart = src.lastIndexOf("/**", docEnd);
+        assertTrue(docStart >= 0 && docEnd > docStart, "class javadoc block not found");
+        return src.substring(docStart, docEnd + 2);
+    }
+
     // --- Math -----------------------------------------------------------
 
     @Test

@@ -18,15 +18,21 @@ import runar.lang.types.Sig;
  * TypeScript reference runtime. Hash functions use real
  * {@link MessageDigest} implementations (SHA-256 via JDK, RIPEMD-160 via
  * BouncyCastle when available, falling back to a pure-Java port otherwise).
- * Signature verification is mocked (always returns success) since genuine
- * verification would require a full Bitcoin transaction context; that is
- * the Script VM's job, not the simulator's.
+ *
+ * <p>Signature verification is a MIXTURE, not a blanket mock. {@link #checkSig}
+ * is a null check (true whenever both arguments are non-null; no ECDSA math
+ * is performed, since genuine verification would require a full Bitcoin
+ * transaction context -- that is the Script VM's job, not the simulator's),
+ * and {@link #checkMultiSig} only compares array lengths. By contrast
+ * {@link #verifyRabinSig}, {@link #verifyWOTS}, the six
+ * {@code verifySLHDSA_SHA2_*} methods, and {@link #verifyECDSA_P256} /
+ * {@link #verifyECDSA_P384} are REAL verifiers that reject a malformed or
+ * forged signature rather than returning a constant.
  *
  * <p>Math and ByteString operations are real. EC operations use
  * BouncyCastle's secp256k1 curve if the BC provider is on the classpath.
- * Post-quantum verifications (WOTS, SLH-DSA SHA-2 variants), Blake3,
- * NIST P-256 / P-384 ECDSA verification, and SHA-256 partial compression
- * (sha256Compress / sha256Finalize) are real implementations.
+ * Blake3 and SHA-256 partial compression (sha256Compress / sha256Finalize)
+ * are real implementations.
  *
  * <p>BabyBear and KoalaBear field arithmetic remain real (small primes,
  * trivial BigInteger ports). BN254 and Poseidon2 are intentionally Go-only
