@@ -54,6 +54,8 @@ import {
   extractVersion,
   extractLocktime,
   extractSigHashType,
+  extractOutputHash,
+  extractOutputs,
   // Post-quantum
   verifyWOTS,
   verifySLHDSA_SHA2_128s,
@@ -317,6 +319,48 @@ describe('runtime builtins', () => {
 
     it('extractSigHashType returns 0x41', () => {
       expect(extractSigHashType(pre)).toBe(0x41n);
+    });
+  });
+
+  // N-245: extractOutputHash must return the preimage's actual hashOutputs
+  // field, not the leading 32 bytes (which cover nVersion + most of
+  // hashPrevouts in a real BIP-143 preimage).
+  describe('extractOutputHash (N-245)', () => {
+    // Builds a syntactically valid BIP-143 preimage with a zero-length
+    // scriptCode, so every field lands at its fixed offset:
+    //   version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+    //   scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+    //   locktime(4) sighashType(4)
+    function buildPreimageHex(hashPrevoutsByte: string, hashOutputsByte: string): string {
+      const version = '01000000';
+      const hashPrevouts = hashPrevoutsByte.repeat(32);
+      const hashSequence = '00'.repeat(32);
+      const outpoint = '00'.repeat(36);
+      const scriptCodeLen = '00';
+      const amount = '1027000000000000'; // 10000 satoshis, LE int64
+      const sequence = 'feffffff';
+      const hashOutputs = hashOutputsByte.repeat(32);
+      const locktime = '00000000';
+      const sighashType = '41000000';
+      return (
+        version + hashPrevouts + hashSequence + outpoint + scriptCodeLen +
+        amount + sequence + hashOutputs + locktime + sighashType
+      );
+    }
+
+    it('returns hashOutputs, not the leading bytes of the preimage', () => {
+      const preimage = SigHashPreimage(buildPreimageHex('aa', 'bb'));
+      const result = extractOutputHash(preimage);
+      // The bug: echoing the first 32 bytes returns version + most of
+      // hashPrevouts (all 'aa' after the version bytes), not hashOutputs.
+      expect(result).toBe('bb'.repeat(32));
+      expect(result).not.toBe('aa'.repeat(32));
+    });
+
+    it('extractOutputs (alias) agrees with extractOutputHash', () => {
+      const preimage = SigHashPreimage(buildPreimageHex('cc', 'dd'));
+      expect(extractOutputs(preimage)).toBe(extractOutputHash(preimage));
+      expect(extractOutputHash(preimage)).toBe('dd'.repeat(32));
     });
   });
 

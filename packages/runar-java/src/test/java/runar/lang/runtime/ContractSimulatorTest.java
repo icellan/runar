@@ -347,6 +347,21 @@ class ContractSimulatorTest {
         assertTrue(e.getMessage().contains("checkPreimage"), e.getMessage());
     }
 
+    /**
+     * N-245: extractOutputHash(SigHashPreimage) with an empty preimage and no
+     * active simulator preimage must refuse, like checkPreimage does — not
+     * silently answer ZERO_32. An all-zero hashOutputs is a value an
+     * assertion could accidentally be satisfied by; checkPreimage already
+     * treats "no spending transaction to check against" as fail-closed
+     * (N-099), and extractOutputHash must match.
+     */
+    @Test
+    void extractOutputHashWithoutASpendThrows() {
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+            () -> extractOutputHash(new SigHashPreimage(new byte[0])));
+        assertTrue(e.getMessage().contains("extractOutputHash"), e.getMessage());
+    }
+
     /** Rúnar source for {@link PayTo}. */
     private static final String PAY_TO_SRC = """
         import runar.lang.SmartContract;

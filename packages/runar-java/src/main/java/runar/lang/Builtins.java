@@ -504,7 +504,19 @@ public final class Builtins {
             }
             return new ByteString(java.util.Arrays.copyOfRange(raw, raw.length - 40, raw.length - 8));
         }
-        return Preimage.extractOutputHash(resolvePreimage(p));
+        // N-245: no explicit preimage bytes were supplied, so this reads
+        // this.txPreimage — which only has a value when the active
+        // ContractSimulator call threaded a real spending-transaction
+        // preimage. Answering ZERO_32 here let an assertion comparing
+        // against an all-zero hashOutputs pass with nothing to back it;
+        // refuse instead, matching checkPreimage's fail-closed behaviour.
+        Preimage active = resolvePreimage(p);
+        if (active == null) {
+            throw new IllegalStateException("extractOutputHash has no spending transaction to read "
+                + "hashOutputs from: call a stateless method through ContractSimulator.callWithSpend "
+                + "(simulator built with an artifact), or a stateful one through callStateful");
+        }
+        return Preimage.extractOutputHash(active);
     }
     public static ByteString extractOutputHash(Preimage p) { return Preimage.extractOutputHash(p); }
 
