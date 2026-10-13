@@ -1121,12 +1121,13 @@ def self_test() -> int:
 
     # A bare, unindented `pytest.importorskip(...)` must anchor to MODULE
     # scope, not to whichever `def` happens to sit nearest it — in
-    # test_cli_debug.py that would otherwise be the `_run` helper at line 42,
-    # which is not even a test.
-    cli_debug_scope = enclosing_scope("compilers/python/tests/test_cli_debug.py", 31)
+    # test_cli_debug.py that would otherwise be the `_spec_missing` helper
+    # (N-209's CI guard) or the `_run` helper at line 86, neither of which
+    # is a test.
+    cli_debug_scope = enclosing_scope("compilers/python/tests/test_cli_debug.py", 75)
     if cli_debug_scope != ScopeRef("module", "test_cli_debug.py"):
         failures.append(
-            f"enclosing_scope(test_cli_debug.py:31) resolved {cli_debug_scope!r}, "
+            f"enclosing_scope(test_cli_debug.py:75) resolved {cli_debug_scope!r}, "
             "expected ScopeRef('module', 'test_cli_debug.py')"
         )
 

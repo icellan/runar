@@ -29,12 +29,54 @@ of "limb i is load-bearing in the on-chain comparison".
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from runar_compiler.compiler import compile_from_ir_bytes
+
+
+def _spec_missing(module_name: str) -> bool:
+    """``importlib.util.find_spec`` for a dotted name imports its parent
+    packages first and raises ``ModuleNotFoundError`` if one is absent
+    (e.g. ``runar`` not on ``PYTHONPATH``), rather than returning ``None``
+    the way it does for a missing top-level module. Treat either outcome
+    as "missing"."""
+    try:
+        return importlib.util.find_spec(module_name) is None
+    except ModuleNotFoundError:
+        return True
+
+
+# N-209: in CI we want a missing `bsv-sdk`, or a `runar-py` not on
+# PYTHONPATH, to be loud, not a silent skip — mirrors
+# packages/runar-py/tests/test_script_vm.py's T-8 guard
+# (audits/cross-language-completeness-20260514.md §5.2) for both of this
+# file's optional dependencies.
+if os.environ.get("CI") and _spec_missing("bsv"):
+    pytest.fail(
+        "test_f092_poseidon2_merkle_root_binds_every_limb.py: CI environment "
+        "detected ($CI is set) but the optional `bsv-sdk` package is not "
+        "installed — this module's tests would silently skip. Install the "
+        "`script-vm` extra in CI (`pip install runar[script-vm]` or "
+        "`pip install bsv-sdk`). See "
+        "audits/cross-language-completeness-20260514.md T-8.",
+        pytrace=False,
+    )
+if os.environ.get("CI") and _spec_missing("runar.sdk.script_vm"):
+    pytest.fail(
+        "test_f092_poseidon2_merkle_root_binds_every_limb.py: CI environment "
+        "detected ($CI is set) but `runar.sdk.script_vm` is not importable "
+        "— `packages/runar-py` is missing from PYTHONPATH and this "
+        "module's tests would silently skip. Set PYTHONPATH to include "
+        "`packages/runar-py` in CI (see `.github/workflows/ci.yml`'s "
+        "`python-compiler` job). See "
+        "audits/cross-language-completeness-20260514.md T-8.",
+        pytrace=False,
+    )
 
 pytest.importorskip("bsv", reason="bsv-sdk not installed (runar[script-vm] extra)")
 script_vm = pytest.importorskip(
