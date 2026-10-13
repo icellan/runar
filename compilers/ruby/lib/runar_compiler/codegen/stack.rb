@@ -3551,8 +3551,15 @@ module RunarCompiler::Codegen
               "integer literal. Got a runtime value for '#{depth_arg}'."
       end
       depth = depth_value
-      if depth < 1 || depth > 64
-        raise "merkleRootPoseidon2KB: depth must be between 1 and 64, got #{depth}"
+      # The bound is 32, not 64 (Go R-172 / Rust N-237 / Python F-260): the
+      # emitter (Poseidon2Merkle.emit_poseidon2_merkle_root) refuses anything
+      # above 32 itself -- its roll counts grow quadratically in depth -- so a
+      # gate at 64 let 33..64 pass this check only to die inside the emitter
+      # under a message naming emit_poseidon2_merkle_root, not the builtin a
+      # caller actually wrote. merkleRootSha256/merkleRootHash256 keep 1..64:
+      # their emitter carries no bound of its own.
+      if depth < 1 || depth > 32
+        raise "merkleRootPoseidon2KB: depth must be between 1 and 32, got #{depth}"
       end
 
       # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
@@ -3582,10 +3589,12 @@ module RunarCompiler::Codegen
       emit_fn = ->(op) { emit_op(op) }
       Poseidon2Merkle.emit_poseidon2_merkle_root(emit_fn, depth)
 
-      # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
-      # The type system returns a single bigint, so only root_7 (top) is accessible.
-      # Drop the lower 7 elements with OP_NIP to keep the stack clean.
-      7.times { emit_op({ op: "nip" }) }
+      # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on
+      # top). The type system returns a single bigint, so pack all eight
+      # limbs into one Script integer (CL-BUG-099 / R-056, matching Go's
+      # EmitPoseidon2RootPack) rather than keeping root_7 alone behind seven
+      # OP_NIPs -- which authenticated against a single ~31-bit field element.
+      Poseidon2Merkle.emit_poseidon2_root_pack(emit_fn)
 
       @sm.push(binding_name)
       _track_depth

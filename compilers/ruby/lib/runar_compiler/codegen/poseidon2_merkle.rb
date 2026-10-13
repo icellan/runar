@@ -28,6 +28,25 @@ require_relative "poseidon2_koalabear"
 module RunarCompiler
   module Codegen
     module Poseidon2Merkle
+      # Build a StackOp hash.
+      #
+      # @param op [String] operation type
+      # @param kwargs [Hash] additional fields
+      # @return [Hash] StackOp hash
+      def self.make_stack_op(op:, **kwargs)
+        result = { op: op }
+        kwargs.each { |k, v| result[k] = v }
+        result
+      end
+
+      # Build a PushValue hash for a big integer.
+      #
+      # @param n [Integer]
+      # @return [Hash] PushValue hash
+      def self.big_int_push(n)
+        { kind: "bigint", big_int: n }
+      end
+
       # Helper: emit a ROLL operation for a given depth using raw StackOp hashes.
       #
       # @param emit [Proc] callback receiving a StackOp hash
@@ -179,6 +198,50 @@ module RunarCompiler
         # After all levels: [..., root(8), index]
         emit.call({ op: "drop" })
         # Stack: [..., root_0..root_7]
+      end
+
+      # poseidon2_root_pack_base is the radix used to pack the 8-element
+      # Poseidon2 KoalaBear root into a single Script integer. Every
+      # KoalaBear element is < p = 2^31 - 2^24 + 1 < 2^32, so base-2^32
+      # positional packing is INJECTIVE over the whole root: two roots pack
+      # to the same integer if and only if all eight of their elements are
+      # equal.
+      POSEIDON2_ROOT_PACK_BASE = 1 << 32
+
+      # Fold the 8-element Poseidon2 KoalaBear root that
+      # emit_poseidon2_merkle_root leaves on the stack into ONE Script
+      # integer. Direct port of Go's EmitPoseidon2RootPack (R-056 /
+      # CL-BUG-099), byte for byte.
+      #
+      # Stack in:  [..., root_0, root_1, ..., root_7]   (root_7 on top)
+      # Stack out: [..., packed]
+      #
+      # where packed = sum(root_i * (2^32)^i) -- root_7 is the most
+      # significant limb and root_0 the least significant.
+      #
+      # WHY THIS EXISTS (CL-BUG-099 / R-056). The Runar type system has no
+      # multi-word return type: merkleRootPoseidon2KB is declared to return
+      # one bigint. This used to be reconciled with seven OP_NIPs, keeping
+      # root_7 and discarding root_0..root_6 -- so a contract writing
+      # `assert(merkleRootPoseidon2KB(...) === expected)` authenticated
+      # against a SINGLE ~31-bit field element. Packing keeps the declared
+      # return type (one bigint) while making every limb load-bearing:
+      # equality on the packed value is equality on all eight limbs.
+      #
+      # Deliberately NOT applied inside emit_poseidon2_merkle_root: the SP1
+      # FRI verifier consumes the eight raw limbs and does its own
+      # comparisons against a caller-supplied expected root.
+      #
+      # @param emit [Proc] callback receiving a StackOp hash
+      def self.emit_poseidon2_root_pack(emit)
+        # Horner from the top of the stack down. After step k the top holds
+        # the packed suffix and the next-lower limb sits directly below it,
+        # so OP_ADD folds it in with no rolls at all.
+        7.times do
+          emit.call(make_stack_op(op: "push", value: big_int_push(POSEIDON2_ROOT_PACK_BASE)))
+          emit.call(make_stack_op(op: "opcode", code: "OP_MUL"))
+          emit.call(make_stack_op(op: "opcode", code: "OP_ADD"))
+        end
       end
     end
   end
