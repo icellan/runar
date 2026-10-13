@@ -87,6 +87,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run runar-zig tests");
     test_step.dependOn(&run_tests.step);
 
+    // ── N-173 panic-text probe (used by builtins_n173_panic_text_test.zig) ──
+    // A Zig `@panic` aborts the whole process, so the only way to assert on a
+    // panic's exact text is out-of-process: the test spawns this binary and
+    // checks its stderr. It only needs builtins.zig + bsvz, like the other
+    // CLI shims below.
+    const n173_panic_probe_module = b.createModule(.{
+        .root_source_file = b.path("src/builtins_n173_panic_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    n173_panic_probe_module.addImport("bsvz", bsvz_module);
+    const n173_panic_probe_exe = b.addExecutable(.{
+        .name = "runar-n173-panic-probe",
+        .root_module = n173_panic_probe_module,
+    });
+    const install_n173_panic_probe = b.addInstallArtifact(n173_panic_probe_exe, .{});
+    run_tests.step.dependOn(&install_n173_panic_probe.step);
+
     // ── Analyzer CLI executable (used by tools/analyzer-runner/zig.sh) ──
     const analyzer_cli_module = b.createModule(.{
         .root_source_file = b.path("src/analyzer_cli.zig"),

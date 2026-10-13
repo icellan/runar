@@ -309,6 +309,7 @@ test {
     _ = @import("runtime_vectors_test.zig");
     _ = @import("builtins_math_onchain_test.zig");
     _ = @import("builtins_n171_substr_onchain_test.zig");
+    _ = @import("builtins_n173_panic_text_test.zig");
     _ = @import("leak_detector_probe_test.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");

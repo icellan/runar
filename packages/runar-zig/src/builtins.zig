@@ -666,10 +666,23 @@ pub fn log2(value: base.Bigint) base.Bigint {
     return count;
 }
 
+// N-173: the length-mismatch panics below used to omit the actual length,
+// unlike the shared diagnostic text every other tier uses for the same
+// checks (packages/runar-testing/src/interpreter/interpreter.ts,
+// packages/runar-py/runar/builtins.py, packages/runar-java/.../MockCrypto.java):
+// "<prefix>, got <N>". `lengthPanic` formats that suffix into a small stack
+// buffer and aborts; the fallback only fires if formatting itself fails,
+// which it cannot for the `usize` values passed here.
+fn lengthPanic(comptime prefix: []const u8, got: usize) noreturn {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, prefix ++ ", got {d}", .{got}) catch prefix;
+    @panic(msg);
+}
+
 pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: length invariants of the in-contract SHA-256 builtin.
-    if (chaining_value.len != 32) @panic("sha256Compress: state must be 32 bytes");
-    if (block.len != 64) @panic("sha256Compress: block must be 64 bytes");
+    if (chaining_value.len != 32) lengthPanic("sha256Compress: state must be 32 bytes", chaining_value.len);
+    if (block.len != 64) lengthPanic("sha256Compress: block must be 64 bytes", block.len);
 
     var out: [32]u8 = undefined;
     sha256CompressBlock(&out, chaining_value, block);
@@ -678,8 +691,11 @@ pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) b
 
 pub fn sha256Finalize(chaining_value: base.ByteString, remaining: base.ByteString, total_len: base.Bigint) base.ByteString {
     // CONTRACT-ABORT: length / range invariants of the in-contract SHA-256 finalize builtin.
-    if (chaining_value.len != 32) @panic("sha256Finalize: state must be 32 bytes");
-    if (remaining.len > 119) @panic("sha256Finalize: remaining must be <= 119 bytes");
+    if (chaining_value.len != 32) lengthPanic("sha256Finalize: state must be 32 bytes", chaining_value.len);
+    // N-173: "0-119 bytes" (not "<= 119 bytes") matches the shared diagnostic
+    // text (interpreter.ts, runar.go, builtins.rb) for this bound.
+    if (remaining.len > 119) lengthPanic("sha256Finalize: remaining must be 0-119 bytes", remaining.len);
+    // No shared counterpart checks this; wording is Zig-specific by design.
     if (total_len < 0) @panic("sha256Finalize: total bit length must be non-negative");
 
     const blocks: usize = if (remaining.len + 1 + 8 <= 64) 1 else 2;
@@ -738,8 +754,8 @@ fn blake3CompressBlock(chaining_value: base.ByteString, block: base.ByteString, 
 
 pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: length invariants of the in-contract Blake3 builtin.
-    if (chaining_value.len != 32) @panic("blake3Compress: chaining value must be 32 bytes");
-    if (block.len != 64) @panic("blake3Compress: block must be 64 bytes");
+    if (chaining_value.len != 32) lengthPanic("blake3Compress: chaining value must be 32 bytes", chaining_value.len);
+    if (block.len != 64) lengthPanic("blake3Compress: block must be 64 bytes", block.len);
 
     // Full 64-byte block → block_len = 64.
     return blake3CompressBlock(chaining_value, block, 64);
@@ -747,7 +763,7 @@ pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) b
 
 pub fn blake3Hash(message: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: message length invariant of the in-contract Blake3 builtin.
-    if (message.len > 64) @panic("blake3Hash: message must be <= 64 bytes");
+    if (message.len > 64) lengthPanic("blake3Hash: message must be <= 64 bytes", message.len);
 
     var block = [_]u8{0} ** 64;
     @memcpy(block[0..message.len], message);
@@ -1218,13 +1234,15 @@ pub fn ecMakePoint(x: base.Bigint, y: base.Bigint) base.Point {
 
 pub fn ecPointX(point: base.Point) base.Bigint {
     // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
-    if (point.len != 64) @panic("ecPointX: point must be 64 bytes");
+    // N-173: "EC point must be 64 bytes" (with "EC") matches the shared
+    // diagnostic text (runar-lang/src/runtime/builtins.ts's ecDecode).
+    if (point.len != 64) lengthPanic("ecPointX: EC point must be 64 bytes", point.len);
     return @bitCast(std.mem.readInt(u64, point[24..32], .big));
 }
 
 pub fn ecPointY(point: base.Point) base.Bigint {
     // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
-    if (point.len != 64) @panic("ecPointY: point must be 64 bytes");
+    if (point.len != 64) lengthPanic("ecPointY: EC point must be 64 bytes", point.len);
     return @bitCast(std.mem.readInt(u64, point[56..64], .big));
 }
 
