@@ -106,6 +106,14 @@ const SHAPES: { name: string; src: string; reject?: string }[] = [
     src: IMPORTS + DECOY.replace('class Helper {', 'class Helper extends NotSmartContract {'),
     reject: NO_CLASS,
   },
+  // N-062: `export default class` must be accepted the same as `export
+  // class` / `class` — Rust used to fall through to NO_CLASS for this shape
+  // because it only matched `Stmt::Decl(Decl::Class)` and
+  // `ModuleDecl::ExportDecl`, never `ModuleDecl::ExportDefaultDecl`.
+  {
+    name: 'EXPORT_DEFAULT',
+    src: IMPORTS + HASHLOCK.replace('export class HashLock', 'export default class HashLock'),
+  },
   {
     name: 'TWO_VALID',
     src: IMPORTS + `export class First extends SmartContract {

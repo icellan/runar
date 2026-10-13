@@ -9,7 +9,7 @@ use swc_common::sync::Lrc;
 use swc_common::{BytePos, FileName, SourceMap, Spanned};
 use swc_ecma_ast as swc;
 use swc_ecma_ast::{
-    Accessibility, AssignExpr, AssignOp, AssignTarget, CallExpr, Callee, Class, ClassDecl,
+    Accessibility, AssignExpr, AssignOp, AssignTarget, CallExpr, Callee, Class,
     ClassMember, Decl, EsVersion, Expr, ExprOrSpread, ForStmt, IfStmt, Lit,
     MemberExpr as SwcMemberExpr, MemberProp, ModuleDecl, ModuleItem, Param, ParamOrTsParamProp,
     Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt, SuperProp,
@@ -220,46 +220,63 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
         errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
     }
 
-    // Find the class that extends SmartContract or StatefulSmartContract
-    let mut contract_class: Option<&ClassDecl> = None;
+    // Find the class that extends SmartContract, StatefulSmartContract, or
+    // UnsafeSmartContract. N-062: a single pass over `module.body` IN SOURCE
+    // ORDER, matching plain `class X extends ...`, `export class X extends
+    // ...`, AND `export default class X extends ...` — mirrors the TS
+    // reference, which calls `sourceFile.getClasses()` (document order,
+    // export-agnostic) and keeps the last match. The previous two-pass
+    // version (every non-exported class, then every exported class) silently
+    // refused export-default contracts (no arm matched `ExportDefaultDecl`
+    // at all) and could keep the wrong class whenever a plain class appeared
+    // later in the file than an exported one, since the exported pass always
+    // ran — and so always won the tie-break — last.
+    let mut contract_class: Option<&Class> = None;
+    let mut contract_ident: Option<String> = None;
     let mut detected_parent_class: &str = "SmartContract";
 
     for item in &module.body {
-        if let ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) = item {
-            if let Some(super_class) = &class_decl.class.super_class {
+        let candidate: Option<(&Class, Option<String>)> = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) => {
+                Some((&class_decl.class, Some(class_decl.ident.sym.to_string())))
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                if let Decl::Class(class_decl) = &export_decl.decl {
+                    Some((&class_decl.class, Some(class_decl.ident.sym.to_string())))
+                } else {
+                    None
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export_default)) => {
+                if let swc::DefaultDecl::Class(class_expr) = &export_default.decl {
+                    Some((
+                        &class_expr.class,
+                        class_expr.ident.as_ref().map(|i| i.sym.to_string()),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((class, ident)) = candidate {
+            if let Some(super_class) = &class.super_class {
                 if let Some(base_name) = get_base_class_name(super_class) {
                     if contract_class.is_some() {
                         errors.push(Diagnostic::error(
                             "Only one SmartContract subclass is allowed per file", None,
                         ));
                     }
-                    contract_class = Some(class_decl);
+                    contract_class = Some(class);
+                    contract_ident = ident;
                     detected_parent_class = base_name;
                 }
             }
         }
     }
 
-    // Also check export declarations
-    for item in &module.body {
-        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) = item {
-            if let Decl::Class(class_decl) = &export_decl.decl {
-                if let Some(super_class) = &class_decl.class.super_class {
-                    if let Some(base_name) = get_base_class_name(super_class) {
-                        if contract_class.is_some() {
-                            errors.push(Diagnostic::error(
-                                "Only one SmartContract subclass is allowed per file", None,
-                            ));
-                        }
-                        contract_class = Some(class_decl);
-                        detected_parent_class = base_name;
-                    }
-                }
-            }
-        }
-    }
-
-    let class_decl = match contract_class {
+    let class = match contract_class {
         Some(c) => c,
         None => {
             errors.push(Diagnostic::error("No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", None));
@@ -267,8 +284,9 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
         }
     };
 
-    let contract_name = class_decl.ident.sym.to_string();
-    let class = &class_decl.class;
+    // TS reference: `contractClass.getName() ?? 'UnnamedContract'` (an
+    // anonymous `export default class extends ... { }` has no ident).
+    let contract_name = contract_ident.unwrap_or_else(|| "UnnamedContract".to_string());
 
     // Extract properties
     let properties = parse_properties(class, file, &mut errors, &comments, &cm);
@@ -2797,6 +2815,96 @@ mod tests {
         assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
         let contract = result.contract.expect("exported class should be found");
         assert_eq!(contract.name, "Exported");
+    }
+
+    // N-062: `export default class X extends SmartContract` must be accepted,
+    // same as `class X ...` and `export class X ...`. Pre-fix, the parser only
+    // recognized `Stmt::Decl(Decl::Class)` and `ModuleDecl::ExportDecl`, so an
+    // export-default contract (the only class in the file) fell through to
+    // "No class extending ... found" even though the TS reference (which just
+    // calls `sourceFile.getClasses()`, export-agnostic) compiles it fine.
+    //
+    // Proves: a lone `export default class` contract parses with no errors
+    // and the right contract name.
+    // Does not prove: codegen bytes match the TS reference for this shape
+    // (covered by the `EXPORT_DEFAULT` shape added to
+    // `n011-ts-class-selection-vm.test.ts`), or anonymous `export default
+    // class extends SmartContract { ... }` (no name at all) — out of scope
+    // for this item.
+    #[test]
+    fn test_parse_export_default_contract() {
+        let source = r#"
+            import { SmartContract, assert } from 'runar-lang';
+
+            export default class Exported extends SmartContract {
+                readonly val: bigint;
+
+                constructor(val: bigint) {
+                    super(val);
+                }
+
+                public check() {
+                    assert(this.val > 0n);
+                }
+            }
+        "#;
+        let result = parse(source, Some("Exported.runar.ts"));
+        assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
+        let contract = result.contract.expect("export-default class should be found");
+        assert_eq!(contract.name, "Exported");
+    }
+
+    // N-062: the previous implementation ran two separate passes — all plain
+    // `class X ...` declarations first, then all exported declarations,
+    // regardless of where either actually appears in the file — so an
+    // exported class occurring BEFORE a plain class in the source could still
+    // win the "keep the last match" tie-break, contradicting the TS reference
+    // (which walks `sourceFile.getClasses()` in document order and keeps
+    // whichever matching class it sees last).
+    //
+    // Here `export class B` appears first and plain `class A` appears second;
+    // the TS reference, scanning in document order, keeps `A`. Pre-fix, Rust's
+    // non-exported-pass-then-exported-pass order always overwrote with the
+    // exported class last, keeping `B` — the wrong one.
+    //
+    // Proves: with two valid contract classes, Rust keeps the one that is
+    // LAST in source order (matching the TS reference), not the one found by
+    // whichever internal pass runs last.
+    // Does not prove: the diagnostic's reported location, or behavior with
+    // more than two valid classes (covered by existing `THREE_VALID`-style
+    // coverage in n011-ts-class-selection-vm.test.ts).
+    #[test]
+    fn test_export_order_keeps_last_in_source_order() {
+        let source = r#"
+            import { SmartContract, assert } from 'runar-lang';
+
+            export class B extends SmartContract {
+                constructor() {
+                    super();
+                }
+
+                public unlock(x: bigint) {
+                    assert(x === 1n);
+                }
+            }
+
+            class A extends SmartContract {
+                constructor() {
+                    super();
+                }
+
+                public unlock(x: bigint) {
+                    assert(x === 2n);
+                }
+            }
+        "#;
+        let result = parse(source, Some("Order.runar.ts"));
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("Only one SmartContract subclass is allowed per file")),
+            "expected the 'only one' diagnostic: {:?}", result.errors
+        );
+        let contract = result.contract.expect("a contract should still be selected");
+        assert_eq!(contract.name, "A", "should keep the LAST class in source order, matching the TS reference");
     }
 
     // -----------------------------------------------------------------------
