@@ -154,3 +154,34 @@ func TestF011_Shapes(t *testing.T) {
 	f011ExpectAt(t, rs+"        let t: ByteString = \"ca\\\"\n        assert!(y < 5);\n    }\n}\n", "G.runar.rs", f011Msg, 9)
 	f011ExpectNone(t, rs+"        let t: ByteString = \"ca\nfe\";\n        assert!(y < 5);\n    }\n}\n", "G.runar.rs")
 }
+
+// ---------------------------------------------------------------------------
+// N-077: on a .runar.py source with no `class` statement at all, the Go
+// tokenizer still accumulates an "unterminated string literal" diagnostic
+// for an open string/byte-string literal that reaches end of file via a
+// trailing backslash. Pre-fix, parsePythonSurface discarded those
+// accumulated tokenizer diagnostics the moment parseContract() failed with
+// "expected 'class' keyword", so only the class-keyword message reached the
+// caller — matching the TS reference (packages/runar-compiler/src/passes/
+// 01-parse-python.ts), which keeps a single running errors array across
+// tokenize + parse and reports BOTH diagnostics for this exact input.
+//
+// This also covers the backslash-at-EOF shape (no trailing newline after
+// the backslash) that TestF011_Shapes did not exercise: every existing
+// backslash case there is followed by more source (a newline then another
+// statement); here the backslash is the very last byte of the file.
+//
+// What this proves: for a class-less .runar.py source ending in an open
+// string/byte-string literal whose last character is a backslash, this
+// tier's tokenizer-level "unterminated string literal" diagnostic survives
+// the subsequent class-keyword parse failure instead of being dropped.
+// What this does not prove: anything about other parse-error paths out of
+// parseContract (e.g. "unknown parent class"), about other tiers, or about
+// a file with a `class` statement present (TestF011_ConformanceNegatives /
+// TestF011_Shapes already cover that case).
+// ---------------------------------------------------------------------------
+
+func TestF011_ClassLessBackslashAtEOF(t *testing.T) {
+	f011ExpectAt(t, `x = "abc\`, "x.runar.py", f011Msg, 1)
+	f011ExpectAt(t, `x = b"abc\`, "x.runar.py", f011Msg, 1)
+}

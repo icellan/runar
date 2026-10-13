@@ -35,7 +35,14 @@ func parsePythonSurface(source []byte, fileName string) *ParseResult {
 
 	contract, err := p.parseContract()
 	if err != nil {
-		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
+		// N-077: tokenizer diagnostics (e.g. an unterminated string literal)
+		// are accumulated in p.errors during tokenize() above, before this
+		// parse error is raised. Surface them ahead of the parse error
+		// instead of discarding them, matching the TS reference (which
+		// keeps a single running errors array across tokenize + parse).
+		errs := append([]Diagnostic{}, p.errors...)
+		errs = append(errs, Diagnostic{Message: err.Error(), Severity: SeverityError})
+		return &ParseResult{Errors: errs}
 	}
 	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
