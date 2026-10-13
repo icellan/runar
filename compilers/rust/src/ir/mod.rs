@@ -6,6 +6,7 @@
 
 pub mod input_limits;
 pub mod loader;
+pub mod rabin_key_provenance;
 pub mod required_fields;
 pub mod synthetic_array_chain;
 pub mod unknown_anf_kind_error;

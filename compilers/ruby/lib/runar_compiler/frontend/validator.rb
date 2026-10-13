@@ -500,6 +500,81 @@ module RunarCompiler
             add_error(RABIN_PUBKEY_PROVENANCE_MESSAGE, loc: scope[:method].source_location)
           })
         end
+
+        check_rabin_key_writes(scopes, property_names, private_methods, call_sites, trusted_params)
+      end
+
+      # N-205 (a): the diagnostic every tier emits when a mutable key property
+      # is written, outside the constructor, with a value F-286 does not trust.
+      def self.rabin_key_write_message(prop)
+        "verifyRabinSig public key property '#{prop}' may only be assigned a contract property or a literal " \
+          "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature"
+      end
+
+      # N-205 (a): a MUTABLE property used as the key is state the previous
+      # spend chose, so outside the constructor it may only be written with a
+      # value +rabin_trusted?+ accepts. KEY properties: those whose value
+      # reaches a 4th argument, closed under "is written into a key property".
+      # Port of the N-205 block of +checkRabinPubKeyProvenance+ (02-validate.ts).
+      def check_rabin_key_writes(scopes, property_names, private_methods, call_sites, trusted_params)
+        key_props = Set.new
+        scopes.each do |scope|
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            next unless e.is_a?(CallExpr) &&
+                        e.callee.is_a?(Identifier) &&
+                        e.callee.name == "verifyRabinSig" &&
+                        e.args.length >= 4
+
+            rabin_sources_of(e.args[3], scope, key_props, Set.new, property_names, call_sites)
+          })
+        end
+
+        mutable_props = @contract.properties.reject(&:readonly).map(&:name)
+        # value nil = ++/--, which no value makes trusted.
+        writes = []
+        scopes.each do |scope|
+          next if scope[:is_ctor]
+
+          rabin_collect_assignments(scope[:method].body, scope, property_names, writes)
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            loc = scope[:method].source_location
+            if e.is_a?(IncrementExpr) || e.is_a?(DecrementExpr)
+              prop = rabin_written_prop(e.operand, scope, property_names)
+              writes << { prop: prop, value: nil, scope: scope, loc: loc } unless prop.nil?
+            elsif e.is_a?(CallExpr) &&
+                  (e.callee.is_a?(PropertyAccessExpr) || e.callee.is_a?(MemberExpr)) &&
+                  e.callee.property == "addOutput"
+              # addOutput(satoshis, ...values): values are positional over the
+              # mutable properties in declaration order. A single array-literal
+              # value list (the Zig tuple form) is unpacked, as ANF lowering's
+              # _flatten_add_output_args does.
+              values = e.args.length == 2 && e.args[1].is_a?(ArrayLiteralExpr) ? e.args[1].elements : e.args.drop(1)
+              values.each_with_index do |value, i|
+                prop = mutable_props[i]
+                writes << { prop: prop, value: value, scope: scope, loc: loc } unless prop.nil?
+              end
+            end
+          })
+        end
+
+        loop do
+          before = key_props.size
+          writes.each do |w|
+            next unless key_props.include?(w[:prop]) && !w[:value].nil? &&
+                        rabin_trusted?(w[:value], w[:scope], Set.new, property_names, trusted_params)
+
+            rabin_sources_of(w[:value], w[:scope], key_props, Set.new, property_names, call_sites)
+          end
+          break if key_props.size == before
+        end
+
+        mutable = Set.new(mutable_props)
+        writes.each do |w|
+          next unless key_props.include?(w[:prop]) && mutable.include?(w[:prop])
+          next if !w[:value].nil? && rabin_trusted?(w[:value], w[:scope], Set.new, property_names, trusted_params)
+
+          add_error(self.class.rabin_key_write_message(w[:prop]), loc: w[:loc])
+        end
       end
 
       # N-065 / N-060: refuse a declared identifier spelled like a name a
@@ -560,6 +635,9 @@ module RunarCompiler
           params: method.params.map(&:name),
           bindings: {},
           mutated: Set.new,
+          # N-205: names declared as locals (a bare property write also lands
+          # in +bindings+).
+          declared: Set.new,
         }
         bind = lambda do |name, value|
           (scope[:bindings][name] ||= []) << value
@@ -576,6 +654,7 @@ module RunarCompiler
           (stmts || []).each do |stmt|
             case stmt
             when VariableDeclStmt
+              scope[:declared].add(stmt.name)
               bind.call(stmt.name, stmt.init)
               visit_expr.call(stmt.init)
             when AssignmentStmt
@@ -633,6 +712,69 @@ module RunarCompiler
           true
         else
           false
+        end
+      end
+
+      # N-205: the property names a trusted value can come from, through
+      # local aliases and private-helper call sites.
+      def rabin_sources_of(expr, scope, out, visiting, property_names, call_sites)
+        case expr
+        when PropertyAccessExpr
+          out.add(expr.property)
+        when MemberExpr
+          out.add(expr.property) if expr.object.is_a?(Identifier) && expr.object.name == "this"
+        when Identifier
+          name = expr.name
+          is_param = scope[:params].include?(name)
+          locals = scope[:bindings][name]
+          if !is_param && locals.nil?
+            out.add(name) if property_names.include?(name)
+            return
+          end
+          key = [scope[:method].object_id, name]
+          return if visiting.include?(key)
+
+          visiting.add(key)
+          (locals || []).each { |v| rabin_sources_of(v, scope, out, visiting, property_names, call_sites) }
+          method = scope[:method]
+          if is_param && !scope[:is_ctor] && method.visibility == "private"
+            idx = method.params.index { |p| p.name == name }
+            (call_sites[method.name] || []).each do |site|
+              arg = site[:args][idx]
+              rabin_sources_of(arg, site[:scope], out, visiting, property_names, call_sites) unless arg.nil?
+            end
+          end
+        end
+      end
+
+      # N-205: the property an assignment / ++ / -- target writes, or nil.
+      def rabin_written_prop(target, scope, property_names)
+        case target
+        when PropertyAccessExpr
+          target.property
+        when MemberExpr
+          target.object.is_a?(Identifier) && target.object.name == "this" ? target.property : nil
+        when Identifier
+          name = target.name
+          if property_names.include?(name) && !scope[:params].include?(name) && !scope[:declared].include?(name)
+            name
+          end
+        end
+      end
+
+      def rabin_collect_assignments(stmts, scope, property_names, writes)
+        (stmts || []).each do |stmt|
+          case stmt
+          when AssignmentStmt
+            prop = rabin_written_prop(stmt.target, scope, property_names)
+            writes << { prop: prop, value: stmt.value, scope: scope, loc: stmt.source_location } unless prop.nil?
+          when IfStmt
+            rabin_collect_assignments(stmt.then, scope, property_names, writes)
+            rabin_collect_assignments(stmt.else_, scope, property_names, writes)
+          when ForStmt
+            rabin_collect_assignments([stmt.init, stmt.update].compact, scope, property_names, writes)
+            rabin_collect_assignments(stmt.body, scope, property_names, writes)
+          end
         end
       end
 

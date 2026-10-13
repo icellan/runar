@@ -130,6 +130,7 @@ import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact, StackOp } fro
 import { MAX_LOOP_COUNT } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
+import { assertRabinKeyProvenance } from './ir/rabin-key-provenance.js';
 import { builtinArityViolation } from './ir/builtin-arity.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
 import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
@@ -902,6 +903,9 @@ export function loadANFFromJSON(json: string): ANFProgram {
   // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
   // written (shared rule and diagnostic, 7 tiers).
   assertSyntheticArrayChains(program as ANFProgram);
+  // N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+  // mutable key property (shared rule and diagnostics, 7 tiers).
+  assertRabinKeyProvenance(program as ANFProgram);
   return program as ANFProgram;
 }
 

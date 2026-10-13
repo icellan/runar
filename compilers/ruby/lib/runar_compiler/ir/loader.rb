@@ -18,6 +18,7 @@ require_relative "required_fields"
 require_relative "../frontend/reserved_names"
 require_relative "stateful_scaffold"
 require_relative "synthetic_array_chain"
+require_relative "rabin_key_provenance"
 
 module RunarCompiler
   module IR
@@ -115,6 +116,10 @@ module RunarCompiler
       # N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
       # written (shared rule and diagnostic, 7 tiers).
       SyntheticArrayChain.assert!(program)
+
+      # N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+      # mutable key property (shared rule and diagnostics, 7 tiers).
+      RabinKeyProvenance.assert!(program)
 
       program
     end

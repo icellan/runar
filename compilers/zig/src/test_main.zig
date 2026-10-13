@@ -135,6 +135,7 @@ test {
     _ = @import("tests/f025_loop_bound_surfaces.zig");
     _ = @import("tests/n008_zig_while_non_adjacent_init.zig");
     _ = @import("tests/f286_rabin_pubkey_provenance.zig");
+    _ = @import("tests/n205_rabin_key_write_provenance.zig");
     _ = @import("tests/f024_continuation_amount.zig");
     _ = @import("tests/r189_private_call_arity.zig");
     _ = @import("tests/r290_void_sentinel.zig");

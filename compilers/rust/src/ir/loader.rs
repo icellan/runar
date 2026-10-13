@@ -384,6 +384,10 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     // written (shared rule and diagnostic, 7 tiers).
     super::synthetic_array_chain::assert_synthetic_array_chains(program)?;
 
+    // N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+    // mutable key property (shared rule and diagnostics, 7 tiers).
+    super::rabin_key_provenance::assert_rabin_key_provenance(program)?;
+
     Ok(())
 }
 

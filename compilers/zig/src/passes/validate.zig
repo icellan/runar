@@ -2290,6 +2290,9 @@ const RabinScope = struct {
     loc: ?SourceLocation,
     bindings: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Expression)) = .empty,
     mutated: StringSet = .empty,
+    /// N-205: names declared as locals (a bare property write also lands in
+    /// `bindings`, so `bindings` cannot tell a local from a property).
+    declared: StringSet = .empty,
 
     fn isParam(self: *const RabinScope, name: []const u8) ?usize {
         for (self.params, 0..) |p, i| {
@@ -2406,6 +2409,206 @@ fn checkRabinPubKeyProvenance(
     for (scopes) |*sc| {
         try rabinWalkStmts(sc.body, sc.loc, Checker{ .a = a, .gpa = allocator, .contract = contract, .trusted = &trusted, .scope = sc, .errs = errors });
     }
+
+    // N-205 (a): a MUTABLE property used as the key is state the previous
+    // spend chose, so outside the constructor it may only be written with a
+    // value `rabinIsTrusted` accepts. KEY properties: those whose value
+    // reaches a 4th argument, closed under "is written into a key property".
+    var key_props = StringSet{};
+    const KeyCollector = struct {
+        a: Allocator,
+        contract: ContractNode,
+        sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
+        scope: *const RabinScope,
+        out: *StringSet,
+        fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
+            if (expr != .call) return;
+            const c = expr.call;
+            if (!std.mem.eql(u8, c.callee, "verifyRabinSig") or c.args.len < 4) return;
+            var visiting = StringSet{};
+            try rabinSourcesOf(self.a, self.contract, self.sites, c.args[3], self.scope, self.out, &visiting);
+        }
+    };
+    for (scopes) |*sc| {
+        try rabinWalkStmts(sc.body, sc.loc, KeyCollector{ .a = a, .contract = contract, .sites = &sites, .scope = sc, .out = &key_props });
+    }
+
+    // Every write to a property outside the constructor (scopes[0]). `value`
+    // is null for ++/--, which no value makes trusted.
+    var writes: std.ArrayListUnmanaged(RabinPropWrite) = .empty;
+    var mutable_props: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (contract.properties) |p| {
+        if (!p.readonly) try mutable_props.append(a, p.name);
+    }
+    const WriteCollector = struct {
+        a: Allocator,
+        contract: ContractNode,
+        scope: *const RabinScope,
+        mutable_props: []const []const u8,
+        writes: *std.ArrayListUnmanaged(RabinPropWrite),
+        fn visit(self: @This(), expr: Expression, loc: ?SourceLocation) !void {
+            const where = loc orelse self.scope.loc;
+            switch (expr) {
+                .increment, .decrement => {
+                    const operand = if (expr == .increment) expr.increment.operand else expr.decrement.operand;
+                    if (rabinWrittenProp(self.contract, self.scope, operand)) |prop| {
+                        try self.writes.append(self.a, .{ .prop = prop, .value = null, .scope = self.scope, .loc = where });
+                    }
+                },
+                .method_call => |mc| {
+                    if (!std.mem.eql(u8, mc.method, "addOutput") or mc.args.len < 1) return;
+                    // addOutput(satoshis, ...values): values are positional
+                    // over the mutable properties in declaration order.
+                    // The `.{a, b}` tuple form carries them in one array
+                    // literal, as ANF lowering (`lowerAddOutputArgs`) reads it.
+                    const values: []const Expression = if (mc.args.len == 2 and mc.args[1] == .array_literal) mc.args[1].array_literal else mc.args[1..];
+                    for (values, 0..) |value, i| {
+                        if (i < self.mutable_props.len) {
+                            try self.writes.append(self.a, .{ .prop = self.mutable_props[i], .value = value, .scope = self.scope, .loc = where });
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+    for (scopes[1..]) |*sc| {
+        try rabinCollectAssignments(a, contract, sc, sc.body, sc.loc, &writes);
+        try rabinWalkStmts(sc.body, sc.loc, WriteCollector{ .a = a, .contract = contract, .scope = sc, .mutable_props = mutable_props.items, .writes = &writes });
+    }
+
+    var grew = true;
+    while (grew) {
+        const before = key_props.count();
+        for (writes.items) |w| {
+            if (key_props.get(w.prop) == null) continue;
+            const value = w.value orelse continue;
+            if (!(try rabinIsTrusted(a, contract, &trusted, value, w.scope))) continue;
+            var visiting = StringSet{};
+            try rabinSourcesOf(a, contract, &sites, value, w.scope, &key_props, &visiting);
+        }
+        grew = key_props.count() != before;
+    }
+
+    for (writes.items) |w| {
+        if (key_props.get(w.prop) == null) continue;
+        var is_mutable = false;
+        for (mutable_props.items) |m| {
+            if (std.mem.eql(u8, m, w.prop)) is_mutable = true;
+        }
+        if (!is_mutable) continue;
+        if (w.value) |value| {
+            if (try rabinIsTrusted(a, contract, &trusted, value, w.scope)) continue;
+        }
+        try errors.append(allocator, .{
+            .message = try rabinKeyWriteMessage(allocator, w.prop),
+            .location = w.loc,
+            .severity = .@"error",
+            .owned_message = true,
+        });
+    }
+}
+
+/// N-205 (a): the diagnostic every tier emits when a mutable key property is
+/// written, outside the constructor, with a value the F-286 rule does not
+/// trust. Caller owns the returned slice.
+pub fn rabinKeyWriteMessage(allocator: Allocator, prop: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, RABIN_KEY_WRITE_FMT, .{prop});
+}
+
+/// `{s}` is the property name. Shared with the `--ir` loader
+/// (ir/rabin_key_provenance.zig).
+pub const RABIN_KEY_WRITE_FMT = "verifyRabinSig public key property '{s}' may only be assigned a contract property or a literal " ++
+    "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature";
+
+const RabinPropWrite = struct { prop: []const u8, value: ?Expression, scope: *const RabinScope, loc: ?SourceLocation };
+
+/// The property a write target names: `this.x`, or a bare name that is a
+/// property and neither a parameter nor a declared local of the method.
+fn rabinWrittenProp(contract: ContractNode, scope: *const RabinScope, target: Expression) ?[]const u8 {
+    switch (target) {
+        .property_access => |pa| return if (std.mem.eql(u8, pa.object, "this")) pa.property else null,
+        .identifier => |name| return rabinBarePropName(contract, scope, name),
+        else => return null,
+    }
+}
+
+fn rabinBarePropName(contract: ContractNode, scope: *const RabinScope, name: []const u8) ?[]const u8 {
+    if (scope.isParam(name) != null or scope.declared.get(name) != null) return null;
+    for (contract.properties) |p| {
+        if (std.mem.eql(u8, p.name, name)) return p.name;
+    }
+    return null;
+}
+
+fn rabinCollectAssignments(
+    a: Allocator,
+    contract: ContractNode,
+    scope: *const RabinScope,
+    stmts: []const Statement,
+    fallback: ?SourceLocation,
+    writes: *std.ArrayListUnmanaged(RabinPropWrite),
+) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .assign => |as| {
+                if (as.index_target != null) continue;
+                const prop: ?[]const u8 = if (as.target_is_property) as.target else rabinBarePropName(contract, scope, as.target);
+                if (prop) |p| try writes.append(a, .{ .prop = p, .value = as.value, .scope = scope, .loc = as.source_loc orelse fallback });
+            },
+            .if_stmt => |i| {
+                try rabinCollectAssignments(a, contract, scope, i.then_body, fallback, writes);
+                if (i.else_body) |e| try rabinCollectAssignments(a, contract, scope, e, fallback, writes);
+            },
+            .for_stmt => |f| {
+                if (f.update) |u| try rabinCollectAssignments(a, contract, scope, (u)[0..1], f.source_loc orelse fallback, writes);
+                try rabinCollectAssignments(a, contract, scope, f.body, fallback, writes);
+            },
+            else => {},
+        }
+    }
+}
+
+/// The properties a trusted expression's value can come from, through local
+/// aliases and private-helper call sites (port of the TS `sourcesOf`).
+fn rabinSourcesOf(
+    a: Allocator,
+    contract: ContractNode,
+    sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
+    expr: Expression,
+    scope: *const RabinScope,
+    out: *StringSet,
+    visiting: *StringSet,
+) Allocator.Error!void {
+    switch (expr) {
+        .property_access => |pa| {
+            if (std.mem.eql(u8, pa.object, "this")) try out.put(a, pa.property, {});
+        },
+        .identifier => |name| {
+            const param_idx = scope.isParam(name);
+            const locals = scope.bindings.get(name);
+            if (param_idx == null and locals == null) {
+                for (contract.properties) |p| {
+                    if (std.mem.eql(u8, p.name, name)) try out.put(a, p.name, {});
+                }
+                return;
+            }
+            const key = try std.fmt.allocPrint(a, "{x}\x00{s}", .{ @intFromPtr(scope), name });
+            if (visiting.get(key) != null) return;
+            try visiting.put(a, key, {});
+            if (locals) |list| {
+                for (list.items) |v| try rabinSourcesOf(a, contract, sites, v, scope, out, visiting);
+            }
+            if (param_idx) |idx| {
+                const pname = scope.private_name orelse return;
+                const list = sites.get(pname) orelse return;
+                for (list.items) |site| {
+                    if (idx < site.args.len) try rabinSourcesOf(a, contract, sites, site.args[idx], site.scope, out, visiting);
+                }
+            }
+        },
+        else => {},
+    }
 }
 
 fn rabinBind(a: Allocator, scope: *RabinScope, name: []const u8, value: Expression) !void {
@@ -2431,8 +2634,12 @@ fn rabinCollectBindings(a: Allocator, scope: *RabinScope, stmts: []const Stateme
     };
     for (stmts) |stmt| {
         switch (stmt) {
-            .const_decl => |d| try rabinBind(a, scope, d.name, d.value),
+            .const_decl => |d| {
+                try scope.declared.put(a, d.name, {});
+                try rabinBind(a, scope, d.name, d.value);
+            },
             .let_decl => |d| {
+                try scope.declared.put(a, d.name, {});
                 // A declaration with no initialiser binds nothing provable.
                 if (d.value) |v| try rabinBind(a, scope, d.name, v) else try scope.mutated.put(a, d.name, {});
             },
@@ -2446,6 +2653,7 @@ fn rabinCollectBindings(a: Allocator, scope: *RabinScope, stmts: []const Stateme
             .for_stmt => |f| {
                 // The loop counter is never a trusted modulus.
                 try scope.mutated.put(a, f.var_name, {});
+                try scope.declared.put(a, f.var_name, {});
                 if (f.update) |u| try rabinCollectBindings(a, scope, (u)[0..1]);
                 try rabinCollectBindings(a, scope, f.body);
             },

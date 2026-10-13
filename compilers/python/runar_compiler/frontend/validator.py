@@ -1710,6 +1710,15 @@ RABIN_PUBKEY_PROVENANCE_MESSAGE = (
 )
 
 
+def rabin_key_write_message(prop: str) -> str:
+    """N-205 (a): the diagnostic every tier emits when a mutable key property is
+    written, outside the constructor, with a value the F-286 rule does not trust."""
+    return (
+        f"verifyRabinSig public key property '{prop}' may only be assigned a contract property or a literal "
+        "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature"
+    )
+
+
 class _RabinScope:
     """Per-method view: params, every value bound to each local, ++/-- names."""
 
@@ -1718,6 +1727,9 @@ class _RabinScope:
         self.params: list[str] = [p.name for p in method.params]
         self.bindings: dict[str, list[Expression]] = {}
         self.mutated: set[str] = set()
+        # N-205: names declared as locals (a bare property write also lands in
+        # ``bindings``).
+        self.declared: set[str] = set()
         self._visit(method.body)
 
     def _bind(self, name: str, value: Expression | None) -> None:
@@ -1735,6 +1747,7 @@ class _RabinScope:
             if stmt is None:
                 continue
             if isinstance(stmt, VariableDeclStmt):
+                self.declared.add(stmt.name)
                 self._bind(stmt.name, stmt.init)
                 self._visit_expr(stmt.init)
             elif isinstance(stmt, AssignmentStmt):
@@ -1877,6 +1890,132 @@ def _check_rabin_pubkey_provenance(ctx: "_ValidationContext") -> None:
             ):
                 ctx._add_error(RABIN_PUBKEY_PROVENANCE_MESSAGE, scope.method.source_location)
         _walk_expressions_in_body_deep(scope.method.body, check)
+
+    # N-205 (a): a MUTABLE property used as the key is state the previous spend
+    # chose, so outside the constructor it may only be written with a value
+    # ``is_trusted`` accepts. KEY properties: those whose value reaches a 4th
+    # argument, closed under "is written into a key property".
+    def sources_of(expr: Expression | None, scope: _RabinScope, out: set[str], visiting: set[str]) -> None:
+        if isinstance(expr, PropertyAccessExpr):
+            out.add(expr.property)
+            return
+        if isinstance(expr, MemberExpr):
+            if isinstance(expr.object, Identifier) and expr.object.name == "this":
+                out.add(expr.property)
+            return
+        if not isinstance(expr, Identifier):
+            return
+        name = expr.name
+        is_param = name in scope.params
+        local_values = scope.bindings.get(name)
+        if not is_param and local_values is None:
+            if name in property_names:
+                out.add(name)
+            return
+        key = f"{scope.method.name}\0{name}"
+        if key in visiting:
+            return
+        visiting.add(key)
+        for v in local_values or []:
+            sources_of(v, scope, out, visiting)
+        method = scope.method
+        if is_param and method.visibility == "private" and method is not contract.constructor:
+            idx = scope.params.index(name)
+            for args, site_scope in call_sites.get(method.name, []):
+                if idx < len(args):
+                    sources_of(args[idx], site_scope, out, visiting)
+
+    key_props: set[str] = set()
+    for scope in scopes:
+        def collect_key(e: Expression, scope: _RabinScope = scope) -> None:
+            if (
+                isinstance(e, CallExpr)
+                and isinstance(e.callee, Identifier)
+                and e.callee.name == "verifyRabinSig"
+                and len(e.args) >= 4
+            ):
+                sources_of(e.args[3], scope, key_props, set())
+        _walk_expressions_in_body_deep(scope.method.body, collect_key)
+
+    # Every write to a property outside the constructor: (prop, value, scope,
+    # loc). ``value`` is None for ++/--, which no value makes trusted.
+    mutable_props = [p.name for p in contract.properties if not p.readonly]
+    writes: list[tuple[str, Expression | None, _RabinScope, object]] = []
+
+    def written_prop(target: Expression | None, scope: _RabinScope) -> str | None:
+        if isinstance(target, PropertyAccessExpr):
+            return target.property
+        if isinstance(target, MemberExpr) and isinstance(target.object, Identifier) and target.object.name == "this":
+            return target.property
+        if (
+            isinstance(target, Identifier)
+            and target.name in property_names
+            and target.name not in scope.params
+            and target.name not in scope.declared
+        ):
+            return target.name
+        return None
+
+    def collect_assignments(stmts: list[Statement], scope: _RabinScope) -> None:
+        for stmt in stmts:
+            if stmt is None:
+                continue
+            if isinstance(stmt, AssignmentStmt):
+                prop = written_prop(stmt.target, scope)
+                if prop is not None:
+                    writes.append((prop, stmt.value, scope, stmt.source_location))
+            elif isinstance(stmt, IfStmt):
+                collect_assignments(stmt.then, scope)
+                collect_assignments(stmt.else_, scope)
+            elif isinstance(stmt, ForStmt):
+                collect_assignments([s for s in (stmt.init, stmt.update) if s is not None], scope)
+                collect_assignments(stmt.body, scope)
+
+    def output_callee(expr: Expression) -> str | None:
+        if not isinstance(expr, CallExpr):
+            return None
+        c = expr.callee
+        if isinstance(c, (PropertyAccessExpr, MemberExpr)):
+            return c.property
+        return None
+
+    for scope in scopes:
+        if scope.method is contract.constructor:
+            continue
+        collect_assignments(scope.method.body, scope)
+
+        def collect_writes(e: Expression, scope: _RabinScope = scope) -> None:
+            loc = scope.method.source_location
+            if isinstance(e, (IncrementExpr, DecrementExpr)):
+                prop = written_prop(e.operand, scope)
+                if prop is not None:
+                    writes.append((prop, None, scope, loc))
+            elif output_callee(e) == "addOutput":
+                # addOutput(satoshis, ...values): values are positional over
+                # the mutable properties in declaration order. A single
+                # array-literal value list (the Zig tuple form) is unpacked,
+                # as ANF lowering's _flatten_add_output_args does.
+                values = e.args[1].elements if len(e.args) == 2 and isinstance(e.args[1], ArrayLiteralExpr) else e.args[1:]
+                for i, value in enumerate(values):
+                    if i < len(mutable_props):
+                        writes.append((mutable_props[i], value, scope, loc))
+        _walk_expressions_in_body_deep(scope.method.body, collect_writes)
+
+    grew = True
+    while grew:
+        before = len(key_props)
+        for prop, value, sc, _loc in writes:
+            if prop in key_props and value is not None and is_trusted(value, sc, set()):
+                sources_of(value, sc, key_props, set())
+        grew = len(key_props) != before
+
+    mutable = set(mutable_props)
+    for prop, value, sc, loc in writes:
+        if prop not in key_props or prop not in mutable:
+            continue
+        if value is not None and is_trusted(value, sc, set()):
+            continue
+        ctx._add_error(rabin_key_write_message(prop), loc)
 
 
 # ---------------------------------------------------------------------------

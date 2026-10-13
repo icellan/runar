@@ -1816,6 +1816,17 @@ export const RABIN_PUBKEY_PROVENANCE_MESSAGE =
   'a spender-supplied Rabin modulus lets anyone forge a signature';
 
 /**
+ * N-205 (a): the diagnostic every tier emits when a mutable key property is
+ * written, outside the constructor, with a value the F-286 rule does not trust.
+ */
+export function rabinKeyWriteMessage(prop: string): string {
+  return (
+    `verifyRabinSig public key property '${prop}' may only be assigned a contract property or a literal ` +
+    'outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature'
+  );
+}
+
+/**
  * `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod n ==
  * SHA256(msg) mod n`. A spender who chooses `n` forges any message (`n = 1`,
  * `sig = 0` passes on chain), so the modulus must be fixed by the deployer.
@@ -1847,6 +1858,8 @@ function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
     params: Set<string>;
     bindings: Map<string, Expression[]>;
     mutated: Set<string>;
+    /** N-205: names declared as locals (a bare property write also lands in `bindings`). */
+    declared: Set<string>;
   }
   const scopeOf = (method: MethodNode): Scope => {
     const scope: Scope = {
@@ -1854,6 +1867,7 @@ function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
       params: new Set(method.params.map((p) => p.name)),
       bindings: new Map(),
       mutated: new Set(),
+      declared: new Set(),
     };
     const bind = (name: string, value: Expression) => {
       const list = scope.bindings.get(name) ?? [];
@@ -1871,6 +1885,7 @@ function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
       for (const stmt of stmts) {
         switch (stmt.kind) {
           case 'variable_decl':
+            scope.declared.add(stmt.name);
             bind(stmt.name, stmt.init);
             visitExpr(stmt.init);
             break;
@@ -1998,6 +2013,134 @@ function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
         ));
       }
     });
+  }
+
+  // N-205 (a): a MUTABLE property used as the key is state the previous spend
+  // chose, so outside the constructor it may only be written with a value
+  // `isTrusted` accepts. KEY properties: those whose value reaches a 4th
+  // argument, closed under "is written into a key property" (so a trusted
+  // property read on the right-hand side is itself held to the rule).
+  const sourcesOf = (expr: Expression, scope: Scope, out: Set<string>, visiting: Set<string>): void => {
+    switch (expr.kind) {
+      case 'property_access':
+        out.add(expr.property);
+        return;
+      case 'member_expr':
+        if (expr.object.kind === 'identifier' && expr.object.name === 'this') out.add(expr.property);
+        return;
+      case 'identifier': {
+        const name = expr.name;
+        const isParam = scope.params.has(name);
+        const locals = scope.bindings.get(name);
+        if (!isParam && !locals) {
+          if (propertyNames.has(name)) out.add(name);
+          return;
+        }
+        const key = `${scope.method.name}\u0000${name}`;
+        if (visiting.has(key)) return;
+        visiting.add(key);
+        for (const v of locals ?? []) sourcesOf(v, scope, out, visiting);
+        const method = scope.method;
+        if (isParam && method.visibility === 'private' && method !== contract.constructor) {
+          const idx = method.params.findIndex((p) => p.name === name);
+          for (const site of callSites.get(method.name) ?? []) {
+            const arg = site.args[idx];
+            if (arg !== undefined) sourcesOf(arg, site.scope, out, visiting);
+          }
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
+  const keyProps = new Set<string>();
+  for (const scope of scopes.values()) {
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      if (e.kind === 'call_expr' && e.callee.kind === 'identifier' && e.callee.name === 'verifyRabinSig' && e.args.length >= 4) {
+        sourcesOf(e.args[3]!, scope, keyProps, new Set());
+      }
+    });
+  }
+
+  // Every write to a property outside the constructor. `value` is undefined
+  // for ++/--, which no value makes trusted.
+  interface PropWrite { prop: string; value: Expression | undefined; scope: Scope; loc: SourceLocation }
+  const writes: PropWrite[] = [];
+  const mutableProps = contract.properties.filter((p) => !p.readonly).map((p) => p.name);
+  const writtenProp = (target: Expression, scope: Scope): string | undefined => {
+    if (target.kind === 'property_access') return target.property;
+    if (target.kind === 'member_expr' && target.object.kind === 'identifier' && target.object.name === 'this') {
+      return target.property;
+    }
+    if (
+      target.kind === 'identifier' &&
+      propertyNames.has(target.name) &&
+      !scope.params.has(target.name) &&
+      !scope.declared.has(target.name)
+    ) {
+      return target.name;
+    }
+    return undefined;
+  };
+  const collectAssignments = (stmts: Statement[], scope: Scope): void => {
+    for (const stmt of stmts) {
+      switch (stmt.kind) {
+        case 'assignment': {
+          const prop = writtenProp(stmt.target, scope);
+          if (prop !== undefined) writes.push({ prop, value: stmt.value, scope, loc: stmt.sourceLocation });
+          break;
+        }
+        case 'if_statement':
+          collectAssignments(stmt.then, scope);
+          if (stmt.else) collectAssignments(stmt.else, scope);
+          break;
+        case 'for_statement':
+          collectAssignments([stmt.init, stmt.update], scope);
+          collectAssignments(stmt.body, scope);
+          break;
+      }
+    }
+  };
+  for (const scope of scopes.values()) {
+    if (scope.method === contract.constructor) continue;
+    collectAssignments(scope.method.body, scope);
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      const loc = e.sourceLocation ?? scope.method.sourceLocation;
+      if (e.kind === 'increment_expr' || e.kind === 'decrement_expr') {
+        const prop = writtenProp(e.operand, scope);
+        if (prop !== undefined) writes.push({ prop, value: undefined, scope, loc });
+      } else if (outputIntrinsicCallName(e) === 'addOutput' && e.kind === 'call_expr') {
+        // addOutput(satoshis, ...values): values are positional over the
+        // mutable properties in declaration order. A single array-literal
+        // value list (`addOutput(sats, [a, b])`, the Zig tuple form) is
+        // unpacked, as ANF lowering's flattenAddOutputArgs does.
+        const values = e.args.length === 2 && e.args[1]!.kind === 'array_literal' ? e.args[1].elements : e.args.slice(1);
+        values.forEach((value, i) => {
+          const prop = mutableProps[i];
+          if (prop !== undefined) writes.push({ prop, value, scope, loc });
+        });
+      }
+    });
+  }
+
+  let grew = true;
+  while (grew) {
+    const before = keyProps.size;
+    for (const w of writes) {
+      if (keyProps.has(w.prop) && w.value !== undefined && isTrusted(w.value, w.scope, new Set())) {
+        sourcesOf(w.value, w.scope, keyProps, new Set());
+      }
+    }
+    grew = keyProps.size !== before;
+  }
+
+  const mutable = new Set(mutableProps);
+  for (const w of writes) {
+    if (!keyProps.has(w.prop) || !mutable.has(w.prop)) continue;
+    if (w.value !== undefined && isTrusted(w.value, w.scope, new Set())) continue;
+    ctx.errors.push(makeDiagnostic(rabinKeyWriteMessage(w.prop), 'error', w.loc));
   }
 }
 

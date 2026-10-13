@@ -1821,6 +1821,9 @@ type rabinScope struct {
 	params    map[string]int
 	bindings  map[string][]Expression
 	mutated   map[string]bool
+	// N-205: names declared as locals (a bare property write also lands in
+	// bindings).
+	declared map[string]bool
 }
 
 type rabinCallSite struct {
@@ -1853,7 +1856,7 @@ func (ctx *validationContext) checkRabinPubKeyProvenance() {
 
 	newScope := func(m *MethodNode, isPrivate bool) *rabinScope {
 		sc := &rabinScope{method: m, isPrivate: isPrivate, params: map[string]int{},
-			bindings: map[string][]Expression{}, mutated: map[string]bool{}}
+			bindings: map[string][]Expression{}, mutated: map[string]bool{}, declared: map[string]bool{}}
 		for i, p := range m.Params {
 			sc.params[p.Name] = i
 		}
@@ -1876,6 +1879,7 @@ func (ctx *validationContext) checkRabinPubKeyProvenance() {
 			for _, stmt := range stmts {
 				switch st := stmt.(type) {
 				case VariableDeclStmt:
+					sc.declared[st.Name] = true
 					sc.bindings[st.Name] = append(sc.bindings[st.Name], st.Init)
 					visitExpr(st.Init)
 				case AssignmentStmt:
@@ -2035,6 +2039,184 @@ func (ctx *validationContext) checkRabinPubKeyProvenance() {
 			}
 		})
 	}
+
+	// N-205 (a): a MUTABLE property used as the key is state the previous
+	// spend chose, so outside the constructor it may only be written with a
+	// value isTrusted accepts. KEY properties: those whose value reaches a 4th
+	// argument, closed under "is written into a key property".
+	var sourcesOf func(e Expression, sc *rabinScope, out map[string]bool, visiting map[string]bool)
+	sourcesOf = func(e Expression, sc *rabinScope, out map[string]bool, visiting map[string]bool) {
+		switch v := e.(type) {
+		case PropertyAccessExpr:
+			out[v.Property] = true
+		case MemberExpr:
+			if id, ok := v.Object.(Identifier); ok && id.Name == "this" {
+				out[v.Property] = true
+			}
+		case Identifier:
+			name := v.Name
+			idx, isParam := sc.params[name]
+			locals, isLocal := sc.bindings[name]
+			if !isParam && !isLocal {
+				if props[name] {
+					out[name] = true
+				}
+				return
+			}
+			key := sc.method.Name + "\x00" + name
+			if visiting[key] {
+				return
+			}
+			visiting[key] = true
+			for _, b := range locals {
+				sourcesOf(b, sc, out, visiting)
+			}
+			if isParam && sc.isPrivate {
+				for _, site := range sites[sc.method.Name] {
+					if idx < len(site.args) {
+						sourcesOf(site.args[idx], site.scope, out, visiting)
+					}
+				}
+			}
+		}
+	}
+
+	keyProps := map[string]bool{}
+	for _, sc := range scopes {
+		sc := sc
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, _ SourceLocation) {
+			call, ok := e.(CallExpr)
+			if !ok {
+				return
+			}
+			if id, ok := call.Callee.(Identifier); ok && id.Name == "verifyRabinSig" && len(call.Args) >= 4 {
+				sourcesOf(call.Args[3], sc, keyProps, map[string]bool{})
+			}
+		})
+	}
+
+	// Every write to a property outside the constructor; value is nil for
+	// ++/--, which no value makes trusted.
+	type propWrite struct {
+		prop  string
+		value Expression
+		scope *rabinScope
+		loc   SourceLocation
+	}
+	var writes []propWrite
+	var mutableProps []string
+	mutable := map[string]bool{}
+	for _, p := range contract.Properties {
+		if !p.Readonly {
+			mutableProps = append(mutableProps, p.Name)
+			mutable[p.Name] = true
+		}
+	}
+	writtenProp := func(target Expression, sc *rabinScope) (string, bool) {
+		switch v := target.(type) {
+		case PropertyAccessExpr:
+			return v.Property, true
+		case MemberExpr:
+			if id, ok := v.Object.(Identifier); ok && id.Name == "this" {
+				return v.Property, true
+			}
+		case Identifier:
+			_, isParam := sc.params[v.Name]
+			if props[v.Name] && !isParam && !sc.declared[v.Name] {
+				return v.Name, true
+			}
+		}
+		return "", false
+	}
+	var collectAssignments func(stmts []Statement, sc *rabinScope)
+	collectAssignments = func(stmts []Statement, sc *rabinScope) {
+		for _, stmt := range stmts {
+			switch st := stmt.(type) {
+			case AssignmentStmt:
+				if prop, ok := writtenProp(st.Target, sc); ok {
+					writes = append(writes, propWrite{prop, st.Value, sc, st.SourceLocation})
+				}
+			case IfStmt:
+				collectAssignments(st.Then, sc)
+				collectAssignments(st.Else, sc)
+			case ForStmt:
+				collectAssignments([]Statement{st.Init}, sc)
+				if st.Update != nil {
+					collectAssignments([]Statement{st.Update}, sc)
+				}
+				collectAssignments(st.Body, sc)
+			}
+		}
+	}
+	for _, sc := range scopes {
+		sc := sc
+		if sc.method == &contract.Constructor {
+			continue
+		}
+		collectAssignments(sc.method.Body, sc)
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, loc SourceLocation) {
+			switch v := e.(type) {
+			case IncrementExpr:
+				if prop, ok := writtenProp(v.Operand, sc); ok {
+					writes = append(writes, propWrite{prop, nil, sc, loc})
+				}
+			case DecrementExpr:
+				if prop, ok := writtenProp(v.Operand, sc); ok {
+					writes = append(writes, propWrite{prop, nil, sc, loc})
+				}
+			case CallExpr:
+				name := ""
+				switch c := v.Callee.(type) {
+				case PropertyAccessExpr:
+					name = c.Property
+				case MemberExpr:
+					name = c.Property
+				}
+				if name != "addOutput" {
+					return
+				}
+				// addOutput(satoshis, ...values): values are positional over
+				// the mutable properties in declaration order. A single
+				// array-literal value list (the Zig tuple form) is unpacked,
+				// as ANF lowering's flattenAddOutputArgs does.
+				args := flattenAddOutputArgs(v.Args)
+				for i := 1; i < len(args); i++ {
+					if i-1 < len(mutableProps) {
+						writes = append(writes, propWrite{mutableProps[i-1], args[i], sc, loc})
+					}
+				}
+			}
+		})
+	}
+
+	for grew := true; grew; {
+		before := len(keyProps)
+		for _, w := range writes {
+			if keyProps[w.prop] && w.value != nil && isTrusted(w.value, w.scope, map[string]bool{}) {
+				sourcesOf(w.value, w.scope, keyProps, map[string]bool{})
+			}
+		}
+		grew = len(keyProps) != before
+	}
+
+	for _, w := range writes {
+		if !keyProps[w.prop] || !mutable[w.prop] {
+			continue
+		}
+		if w.value != nil && isTrusted(w.value, w.scope, map[string]bool{}) {
+			continue
+		}
+		l := w.loc
+		ctx.addErrorWithLoc(RabinKeyWriteMessage(w.prop), &l)
+	}
+}
+
+// RabinKeyWriteMessage is the N-205 (a) diagnostic every tier emits when a
+// mutable key property is written, outside the constructor, with a value the
+// F-286 rule does not trust.
+func RabinKeyWriteMessage(prop string) string {
+	return "verifyRabinSig public key property '" + prop + "' may only be assigned a contract property or a literal " +
+		"outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature"
 }
 
 // walkRabinBodyDeep visits every expression in stmts, including every for

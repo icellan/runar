@@ -222,6 +222,9 @@ public final class AnfLoader {
         // N-096: a syntheticArrayChain must be one expand-fixed-arrays could
         // have written (shared rule and diagnostic, 7 tiers).
         SyntheticArrayChain.check(props);
+        // N-205: F-286's verifyRabinSig key provenance, and the write rule for
+        // a mutable key property (shared rule and diagnostics, 7 tiers).
+        RabinKeyProvenance.check(props, methods);
         return new AnfProgram(name, props, methods, parentClass);
     }
 

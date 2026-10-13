@@ -176,6 +176,16 @@ public final class Validate {
      * The F-286 diagnostic, shared verbatim with the other six tiers (TS
      * reference: {@code RABIN_PUBKEY_PROVENANCE_MESSAGE} in 02-validate.ts).
      */
+    /**
+     * N-205 (a): the diagnostic every tier emits when a mutable key property is
+     * written, outside the constructor, with a value the F-286 rule does not
+     * trust (TS reference: {@code rabinKeyWriteMessage} in 02-validate.ts).
+     */
+    static String rabinKeyWriteMessage(String prop) {
+        return "verifyRabinSig public key property '" + prop + "' may only be assigned a contract property or a literal "
+            + "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature";
+    }
+
     static final String RABIN_PUBKEY_PROVENANCE_MESSAGE =
         "verifyRabinSig public key (4th argument) must be a contract property or a literal; "
             + "a spender-supplied Rabin modulus lets anyone forge a signature";
@@ -201,6 +211,8 @@ public final class Validate {
             final Set<String> params = new HashSet<>();
             final Map<String, List<Expression>> bindings = new LinkedHashMap<>();
             final Set<String> mutated = new HashSet<>();
+            /** N-205: names declared as locals (a bare property write also lands in {@code bindings}). */
+            final Set<String> declared = new HashSet<>();
 
             Scope(MethodNode method, boolean isConstructor) {
                 this.method = method;
@@ -227,6 +239,7 @@ public final class Validate {
                 if (stmts == null) return;
                 for (Statement s : stmts) {
                     if (s instanceof VariableDeclStatement v) {
+                        declared.add(v.name());
                         bind(v.name(), v.init());
                         visitExpr(v.init());
                     } else if (s instanceof AssignmentStatement a) {
@@ -316,6 +329,155 @@ public final class Validate {
                         ctx.error(RABIN_PUBKEY_PROVENANCE_MESSAGE, scope.method.sourceLocation());
                     }
                 });
+            }
+
+            // N-205 (a): a MUTABLE key property is state the previous spend
+            // chose, so outside the constructor it may only be written with a
+            // value isTrusted accepts. KEY properties: those whose value
+            // reaches a 4th argument, closed under "is written into a key
+            // property". Port of the TS reference.
+            Set<String> keyProps = new HashSet<>();
+            for (Scope scope : scopes) {
+                walkDeep(scope.method.body(), e -> {
+                    if (e instanceof CallExpr c
+                        && c.callee() instanceof Identifier id
+                        && "verifyRabinSig".equals(id.name())
+                        && c.args().size() >= 4) {
+                        sourcesOf(c.args().get(3), scope, keyProps, new HashSet<>(), callSites);
+                    }
+                });
+            }
+
+            List<String> mutableProps = new ArrayList<>();
+            for (PropertyNode p : contract.properties()) if (!p.readonly()) mutableProps.add(p.name());
+            List<PropWrite> writes = new ArrayList<>();
+            for (Scope scope : scopes) {
+                if (scope.isConstructor) continue;
+                collectAssignments(scope.method.body(), scope, writes);
+                walkDeep(scope.method.body(), e -> {
+                    SourceLocation loc = scope.method.sourceLocation();
+                    if (e instanceof IncrementExpr ie) {
+                        String prop = writtenProp(ie.operand(), scope);
+                        if (prop != null) writes.add(new PropWrite(prop, null, scope, loc));
+                    } else if (e instanceof DecrementExpr de) {
+                        String prop = writtenProp(de.operand(), scope);
+                        if (prop != null) writes.add(new PropWrite(prop, null, scope, loc));
+                    } else if (e instanceof CallExpr c && "addOutput".equals(calleeProperty(c))) {
+                        // addOutput(satoshis, ...values): positional over the
+                        // mutable properties in declaration order. A single
+                        // array-literal value list (the Zig tuple form) is
+                        // unpacked, as AnfLower.flattenAddOutputArgs does.
+                        List<Expression> args = c.args();
+                        if (args.size() == 2 && args.get(1) instanceof ArrayLiteralExpr al) {
+                            args = new ArrayList<>(args.subList(0, 1));
+                            args.addAll(al.elements());
+                        }
+                        for (int i = 1; i < args.size(); i++) {
+                            if (i - 1 < mutableProps.size()) {
+                                writes.add(new PropWrite(mutableProps.get(i - 1), args.get(i), scope, loc));
+                            }
+                        }
+                    }
+                });
+            }
+
+            boolean grew = true;
+            while (grew) {
+                int before = keyProps.size();
+                for (PropWrite w : writes) {
+                    if (keyProps.contains(w.prop()) && w.value() != null
+                        && isTrusted(w.value(), w.scope(), new HashSet<>())) {
+                        sourcesOf(w.value(), w.scope(), keyProps, new HashSet<>(), callSites);
+                    }
+                }
+                grew = keyProps.size() != before;
+            }
+
+            Set<String> mutable = new HashSet<>(mutableProps);
+            for (PropWrite w : writes) {
+                if (!keyProps.contains(w.prop()) || !mutable.contains(w.prop())) continue;
+                if (w.value() != null && isTrusted(w.value(), w.scope(), new HashSet<>())) continue;
+                ctx.error(rabinKeyWriteMessage(w.prop()), w.loc());
+            }
+        }
+
+        private record PropWrite(String prop, Expression value, Scope scope, SourceLocation loc) {}
+
+        private static String calleeProperty(CallExpr c) {
+            if (c.callee() instanceof PropertyAccessExpr pa) return pa.property();
+            if (c.callee() instanceof MemberExpr me) return me.property();
+            return null;
+        }
+
+        private String writtenProp(Expression target, Scope scope) {
+            if (target instanceof PropertyAccessExpr pa) return pa.property();
+            if (target instanceof MemberExpr me && me.object() instanceof Identifier obj && "this".equals(obj.name())) {
+                return me.property();
+            }
+            if (target instanceof Identifier id
+                && propertyNames.contains(id.name())
+                && !scope.params.contains(id.name())
+                && !scope.declared.contains(id.name())) {
+                return id.name();
+            }
+            return null;
+        }
+
+        private void collectAssignments(List<Statement> stmts, Scope scope, List<PropWrite> out) {
+            if (stmts == null) return;
+            for (Statement s : stmts) {
+                if (s instanceof AssignmentStatement a) {
+                    String prop = writtenProp(a.target(), scope);
+                    if (prop != null) out.add(new PropWrite(prop, a.value(), scope, a.sourceLocation()));
+                } else if (s instanceof IfStatement i) {
+                    collectAssignments(i.thenBody(), scope, out);
+                    collectAssignments(i.elseBody(), scope, out);
+                } else if (s instanceof ForStatement f) {
+                    List<Statement> header = new ArrayList<>();
+                    if (f.init() != null) header.add(f.init());
+                    if (f.update() != null) header.add(f.update());
+                    collectAssignments(header, scope, out);
+                    collectAssignments(f.body(), scope, out);
+                }
+            }
+        }
+
+        /** The properties a trusted value can come from (aliases and private-helper call sites followed). */
+        private void sourcesOf(Expression expr, Scope scope, Set<String> out, Set<String> visiting,
+                               Map<String, List<Site>> callSites) {
+            if (expr instanceof PropertyAccessExpr pa) {
+                out.add(pa.property());
+                return;
+            }
+            if (expr instanceof MemberExpr me) {
+                if (me.object() instanceof Identifier obj && "this".equals(obj.name())) out.add(me.property());
+                return;
+            }
+            if (!(expr instanceof Identifier id)) return;
+            String name = id.name();
+            boolean isParam = scope.params.contains(name);
+            List<Expression> locals = scope.bindings.get(name);
+            if (!isParam && locals == null) {
+                if (propertyNames.contains(name)) out.add(name);
+                return;
+            }
+            String key = scope.method.name() + "\0" + name;
+            if (!visiting.add(key)) return;
+            if (locals != null) for (Expression v : locals) sourcesOf(v, scope, out, visiting, callSites);
+            MethodNode m = scope.method;
+            if (isParam && !scope.isConstructor && m.visibility() == Visibility.PRIVATE) {
+                int idx = -1;
+                for (int i = 0; i < m.params().size(); i++) {
+                    if (m.params().get(i).name().equals(name)) {
+                        idx = i;
+                        break;
+                    }
+                }
+                for (Site site : callSites.getOrDefault(m.name(), List.of())) {
+                    if (idx >= 0 && idx < site.args().size()) {
+                        sourcesOf(site.args().get(idx), site.scope(), out, visiting, callSites);
+                    }
+                }
             }
         }
 

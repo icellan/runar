@@ -69,6 +69,12 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, err
 	}
 
+	// N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+	// mutable key property (shared rule and diagnostics, 7 tiers).
+	if err := AssertRabinKeyProvenance(&program); err != nil {
+		return nil, err
+	}
+
 	return &program, nil
 }
 

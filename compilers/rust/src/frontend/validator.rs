@@ -2071,6 +2071,9 @@ struct RabinScope<'a> {
     bindings: HashMap<String, Vec<&'a Expression>>,
     /// Names that are ever ++/--: never trusted.
     mutated: HashSet<String>,
+    /// N-205: names declared as locals (a bare property write also lands in
+    /// `bindings`).
+    declared: HashSet<String>,
 }
 
 fn rabin_scope_collect<'a>(stmts: &'a [Statement], scope: &mut RabinScope<'a>) {
@@ -2087,6 +2090,7 @@ fn rabin_scope_collect<'a>(stmts: &'a [Statement], scope: &mut RabinScope<'a>) {
     for stmt in stmts {
         match stmt {
             Statement::VariableDecl { name, init, .. } => {
+                scope.declared.insert(name.clone());
                 scope.bindings.entry(name.clone()).or_default().push(init);
                 note_mutations(init, &mut scope.mutated);
             }
@@ -2314,6 +2318,7 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
             params: m.params.iter().map(|p| p.name.clone()).collect(),
             bindings: HashMap::new(),
             mutated: HashSet::new(),
+            declared: HashSet::new(),
         };
         rabin_scope_collect(&m.body, &mut scope);
         scopes.push(scope);
@@ -2377,6 +2382,214 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
                 RABIN_PUBKEY_PROVENANCE_MESSAGE,
                 Some(scope.method.source_location.clone()),
             ));
+        }
+    }
+
+    // N-205 (a): a MUTABLE key property is state the previous spend chose, so
+    // outside the constructor it may only be written with a trusted value.
+    // KEY properties: those whose value reaches a 4th argument, closed under
+    // "is written into a key property".
+    let ctx = RabinCtx { scopes: &scopes, call_sites: &call_sites, property_names: &property_names };
+    let mut key_props: HashSet<String> = HashSet::new();
+    for (si, scope) in scopes.iter().enumerate() {
+        walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
+            if let Expression::CallExpr { callee, args, .. } = e {
+                if let Expression::Identifier { name } = callee.as_ref() {
+                    if name == "verifyRabinSig" && args.len() >= 4 {
+                        rabin_sources_of(&args[3], si, &ctx, &mut key_props, &mut HashSet::new());
+                    }
+                }
+            }
+        });
+    }
+
+    // Every write to a property outside the constructor: (prop, value, scope
+    // index). `None` is ++/--, which no value makes trusted.
+    let mutable_props: Vec<&str> =
+        contract.properties.iter().filter(|p| !p.readonly).map(|p| p.name.as_str()).collect();
+    let mut writes: Vec<(String, Option<Expression>, usize)> = Vec::new();
+    for (si, scope) in scopes.iter().enumerate() {
+        if scope.is_constructor {
+            continue;
+        }
+        rabin_collect_assignments(&scope.method.body, scope, &property_names, si, &mut writes);
+        walk_expressions_in_body_deep(&scope.method.body, &mut |e| match e {
+            Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                if let Some(prop) = rabin_written_prop(operand, scope, &property_names) {
+                    writes.push((prop, None, si));
+                }
+            }
+            Expression::CallExpr { callee, args, .. } => {
+                let is_add_output = match callee.as_ref() {
+                    Expression::PropertyAccess { property } | Expression::MemberExpr { property, .. } => {
+                        property == "addOutput"
+                    }
+                    _ => false,
+                };
+                if is_add_output {
+                    // addOutput(satoshis, ...values): positional over the
+                    // mutable properties in declaration order. A single
+                    // array-literal value list (the Zig tuple form) is
+                    // unpacked, as ANF lowering's flatten_add_output_args does.
+                    let flat = crate::frontend::anf_lower::flatten_add_output_args(args);
+                    for (i, value) in flat.iter().skip(1).enumerate() {
+                        if let Some(prop) = mutable_props.get(i) {
+                            writes.push((prop.to_string(), Some(value.clone()), si));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        });
+    }
+
+    let trusted = |v: &Expression, si: usize| {
+        rabin_is_trusted(v, &scopes[si], &property_names, &trusted_params, &mut HashSet::new())
+    };
+    loop {
+        let before = key_props.len();
+        for (prop, value, si) in &writes {
+            if let Some(v) = value {
+                if key_props.contains(prop) && trusted(v, *si) {
+                    rabin_sources_of(v, *si, &ctx, &mut key_props, &mut HashSet::new());
+                }
+            }
+        }
+        if key_props.len() == before {
+            break;
+        }
+    }
+
+    for (prop, value, si) in &writes {
+        if !key_props.contains(prop) || !mutable_props.contains(&prop.as_str()) {
+            continue;
+        }
+        if let Some(v) = value {
+            if trusted(v, *si) {
+                continue;
+            }
+        }
+        errors.push(Diagnostic::error(
+            rabin_key_write_message(prop),
+            Some(scopes[*si].method.source_location.clone()),
+        ));
+    }
+}
+
+/// N-205 (a): the diagnostic every tier emits when a mutable key property is
+/// written, outside the constructor, with a value the F-286 rule does not trust.
+pub fn rabin_key_write_message(prop: &str) -> String {
+    format!(
+        "verifyRabinSig public key property '{}' may only be assigned a contract property or a literal \
+outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature",
+        prop
+    )
+}
+
+struct RabinCtx<'s, 'a> {
+    scopes: &'s [RabinScope<'a>],
+    call_sites: &'s HashMap<String, Vec<(&'a [Expression], usize)>>,
+    property_names: &'s HashSet<&'a str>,
+}
+
+/// N-205: the properties a trusted expression's value can come from, through
+/// local aliases and private-helper call sites.
+fn rabin_sources_of(
+    expr: &Expression,
+    si: usize,
+    ctx: &RabinCtx,
+    out: &mut HashSet<String>,
+    visiting: &mut HashSet<(usize, String)>,
+) {
+    match expr {
+        Expression::PropertyAccess { property } => {
+            out.insert(property.clone());
+        }
+        Expression::MemberExpr { object, property } => {
+            if matches!(object.as_ref(), Expression::Identifier { name } if name == "this") {
+                out.insert(property.clone());
+            }
+        }
+        Expression::Identifier { name } => {
+            let scope = &ctx.scopes[si];
+            let is_param = scope.params.contains(name);
+            let locals = scope.bindings.get(name);
+            if !is_param && locals.is_none() {
+                if ctx.property_names.contains(name.as_str()) {
+                    out.insert(name.clone());
+                }
+                return;
+            }
+            if !visiting.insert((si, name.clone())) {
+                return;
+            }
+            if let Some(values) = locals {
+                for v in values {
+                    rabin_sources_of(v, si, ctx, out, visiting);
+                }
+            }
+            let m = scope.method;
+            if is_param && m.visibility == Visibility::Private && !scope.is_constructor {
+                if let Some(idx) = m.params.iter().position(|p| &p.name == name) {
+                    if let Some(sites) = ctx.call_sites.get(&m.name) {
+                        for (args, caller) in sites {
+                            if let Some(a) = args.get(idx) {
+                                rabin_sources_of(a, *caller, ctx, out, visiting);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// N-205: the property a write target names, if any.
+fn rabin_written_prop(target: &Expression, scope: &RabinScope, property_names: &HashSet<&str>) -> Option<String> {
+    match target {
+        Expression::PropertyAccess { property } => Some(property.clone()),
+        Expression::MemberExpr { object, property } => match object.as_ref() {
+            Expression::Identifier { name } if name == "this" => Some(property.clone()),
+            _ => None,
+        },
+        Expression::Identifier { name }
+            if property_names.contains(name.as_str())
+                && !scope.params.contains(name)
+                && !scope.declared.contains(name) =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    }
+}
+
+fn rabin_collect_assignments(
+    stmts: &[Statement],
+    scope: &RabinScope,
+    property_names: &HashSet<&str>,
+    si: usize,
+    out: &mut Vec<(String, Option<Expression>, usize)>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Assignment { target, value, .. } => {
+                if let Some(prop) = rabin_written_prop(target, scope, property_names) {
+                    out.push((prop, Some(value.clone()), si));
+                }
+            }
+            Statement::IfStatement { then_branch, else_branch, .. } => {
+                rabin_collect_assignments(then_branch, scope, property_names, si, out);
+                if let Some(e) = else_branch {
+                    rabin_collect_assignments(e, scope, property_names, si, out);
+                }
+            }
+            Statement::ForStatement { init, update, body, .. } => {
+                rabin_collect_assignments(std::slice::from_ref(init.as_ref()), scope, property_names, si, out);
+                rabin_collect_assignments(std::slice::from_ref(update.as_ref()), scope, property_names, si, out);
+                rabin_collect_assignments(body, scope, property_names, si, out);
+            }
+            _ => {}
         }
     }
 }

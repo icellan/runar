@@ -11,6 +11,7 @@ const reserved_names = @import("../passes/reserved_names.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
 const stateful_scaffold = @import("stateful_scaffold.zig");
 const synthetic_array_chain = @import("synthetic_array_chain.zig");
+const rabin_key_provenance = @import("rabin_key_provenance.zig");
 pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
@@ -86,6 +87,7 @@ const ParseError = error{
     // (too deep, an index out of range, names that do not derive, or sibling
     // leaves that are not one expansion). Message in lastDiagnostic().
     SyntheticArrayChainMalformed,
+    RabinKeyProvenance,
 };
 
 const max_parse_depth: u32 = 256;
@@ -496,6 +498,12 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     // written (shared rule and diagnostic, 7 tiers).
     synthetic_array_chain.check(allocator, properties) catch |err| switch (err) {
         error.SyntheticArrayChainMalformed => return ParseError.SyntheticArrayChainMalformed,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    // N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+    // mutable key property (shared rule and diagnostics, 7 tiers).
+    rabin_key_provenance.check(allocator, properties, method_list.items) catch |err| switch (err) {
+        error.RabinKeyProvenance => return ParseError.RabinKeyProvenance,
         error.OutOfMemory => return error.OutOfMemory,
     };
 
