@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -163,4 +163,61 @@ describe('runAnfDifferential shrinks findings with reduceAnfProgram (F-173)', ()
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+// N-228 — `saveFinding`'s directory name was `new Date().toISOString()` with
+// `:`/`.` swapped for `-`, i.e. millisecond resolution. Two findings landing
+// in the same millisecond get the SAME directory: `mkdirSync(..., {recursive:
+// true})` doesn't fail, and the second finding's `program.json`/`finding.json`
+// silently overwrite the first's — a finding disappears with no error. A tight
+// synchronous loop (as the main `for` loop in `runAnfDifferential` is, between
+// awaits) can produce many mismatches inside one millisecond in practice; the
+// existing F-173 test above can't see this because reading the same
+// (collided) directory twice just reads the same surviving data twice.
+//
+// This test freezes the system clock (`vi.useFakeTimers`) so the collision is
+// deterministic instead of a timing-dependent flake, then drives the real
+// `runAnfDifferential` with a fake tier that makes EVERY program a mismatch.
+describe('runAnfDifferential: finding directories do not collide (N-228)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('writes one directory per mismatch even when the clock does not advance', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    const dir = mkdtempSync(join(tmpdir(), 'anf-n228-'));
+    // Every program is a mismatch: 'go' always disagrees with every other tier.
+    const alwaysDiverge = (tier: CompilerName): string | null => (tier === 'go' ? 'AA' : 'BB');
+    try {
+      const report = await runAnfDifferential({
+        numPrograms: 10,
+        seed: 1,
+        findingsDir: dir,
+        compileTier: alwaysDiverge,
+        genOpts: { maxMethods: 2, maxBindingsPerMethod: 5 },
+      });
+      expect(report.mismatchCount).toBe(10);
+      expect(report.findings.length).toBe(10);
+
+      // Before the fix: every finding lands in the same `<frozen-ts>` dir, so
+      // this is far fewer than 10. After the fix: exactly 10.
+      const dirsOnDisk = readdirSync(dir);
+      expect(dirsOnDisk.length).toBe(10);
+      expect(new Set(report.findings).size).toBe(10);
+
+      // Stronger than distinct names: prove no finding's DATA was lost by
+      // overwrite. Each finding.json must record a distinct programIndex —
+      // if two mismatches shared a directory, the second's finding.json would
+      // have clobbered the first's, collapsing the set below 10.
+      const programIndices = dirsOnDisk.map((d) => {
+        const finding = JSON.parse(readFileSync(join(dir, d, 'finding.json'), 'utf-8'));
+        return finding.programIndex;
+      });
+      expect(new Set(programIndices).size).toBe(10);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

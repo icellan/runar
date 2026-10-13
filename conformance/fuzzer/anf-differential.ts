@@ -59,8 +59,10 @@
  *
  * Determinism: fast-check carries a `seed`; running with the same
  * `--seed` reproduces the exact same program corpus. Failing cases are
- * persisted under `conformance/fuzz-findings-anf/<timestamp>/` so the
- * source program + per-tier hex output can be replayed offline.
+ * persisted under `conformance/fuzz-findings-anf/<timestamp>-<programIndex>/`
+ * (the `programIndex` suffix keeps two findings in the same millisecond from
+ * colliding — N-228) so the source program + per-tier hex output can be
+ * replayed offline.
  */
 
 import fc from 'fast-check';
@@ -895,8 +897,14 @@ function countBindings(program: AnfProgram): number {
 }
 
 function saveFinding(dir: string, f: Finding): string {
+  // N-228: the millisecond-resolution timestamp alone collides when the
+  // harness's tight synchronous per-program loop produces two mismatches
+  // inside the same millisecond — `mkdirSync(..., {recursive: true})` doesn't
+  // fail on an existing dir, so the second finding's files would silently
+  // overwrite the first's. `programIndex` is unique within a single run, so
+  // appending it guarantees a distinct directory per finding.
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const out = join(dir, ts);
+  const out = join(dir, `${ts}-${f.programIndex}`);
   mkdirSync(out, { recursive: true });
   writeFileSync(join(out, 'program.json'), f.programJson, 'utf-8');
   for (const [tier, hex] of Object.entries(f.outputs)) {

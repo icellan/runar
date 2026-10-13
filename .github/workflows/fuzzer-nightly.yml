@@ -151,6 +151,14 @@ jobs:
       # ----- seed (424242) + modest program count (40) keep it deterministic
       # ----- and fast. All argv values are literal constants — no untrusted PR
       # ----- input reaches the shell.
+      # ----- `--time-budget-ms` (N-228): without it, a MISMATCHING run's
+      # ----- delta-debugging shrink (F-173, `anf-differential.ts`'s `shrink`)
+      # ----- has `deadline === undefined` and runs with no wall-clock cap. 40
+      # ----- programs / 7 tiers measured at ~12s idle / ~35s under load; 2
+      # ----- minutes leaves headroom for that AND bounds the shrinker. A run
+      # ----- that still can't finish in budget hard-fails as an incomplete run
+      # ----- (the C5 rule in `fuzzer/index.ts`), so a too-tight budget is a
+      # ----- visible failure, not a silently truncated pass.
       - name: Fuzz (PR gate — fold-OFF, fixed seed)
         if: github.event_name == 'pull_request'
         working-directory: conformance
@@ -160,6 +168,7 @@ jobs:
             --anf \
             --num 40 \
             --seed 424242 \
+            --time-budget-ms 120000 \
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldoff.json
 
@@ -183,6 +192,7 @@ jobs:
             --fold-on \
             --num 40 \
             --seed 424242 \
+            --time-budget-ms 120000 \
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldon.json
 
