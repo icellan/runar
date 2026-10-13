@@ -993,6 +993,25 @@ func (c *RunarContract) PrepareCall(
 		extraContractUtxos = options.AdditionalContractInputs
 	}
 
+	// N-227 Part 2: the isStateful branch below builds a REAL per-input
+	// unlock (its own OP_PUSH_TX preimage + signed Sig args) for every extra
+	// contract input via buildStatefulUnlock. The non-stateful ("stateless")
+	// branch has no equivalent — it only ever reuses the SIZING placeholder
+	// unlock (72 zero-byte sig + args + witness) for extra inputs, because
+	// that branch never loops over extraContractUtxos to build real ones.
+	// Shipping those placeholders as the FINAL unlocking script would
+	// broadcast an invalid spend for every input after the primary. Fail
+	// closed rather than silently ship unvalidatable bytes.
+	if len(extraContractUtxos) > 0 && !isStateful {
+		return nil, fmt.Errorf(
+			"RunarContract.PrepareCall(%s): additionalContractInputs is not supported when the "+
+				"contract has zero mutable fields (StateFields is empty) — this SDK path only builds "+
+				"a placeholder unlock for extra contract inputs on that branch and the resulting tx "+
+				"would be invalid",
+			methodName,
+		)
+	}
+
 	// Build contract outputs
 	var contractOutputs []ContractOutput
 	hasMultiOutput := options != nil && len(options.Outputs) > 0
@@ -1647,6 +1666,98 @@ func (c *RunarContract) PrepareCall(
 			resolvedArgs[preimageIndex] = hex.EncodeToString(finalPre)
 			finalOpPushTxSig = hex.EncodeToString(finalSig)
 			finalPreimage = hex.EncodeToString(finalPre)
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
+				c.BuildUnlockingScript(methodName, resolvedArgs)
+
+			// N-227 (port of N-085): the BIP-143 scriptCode is everything
+			// AFTER the checkPreimage-injected OP_CODESEPARATOR, which can sit
+			// right at method entry — for a zero-mutable-field
+			// StatefulSmartContract (empty StateFields makes isStateful false
+			// here even though it IS parentStateful) that leaves almost the
+			// ENTIRE locking script as scriptCode. The real preimage — and
+			// therefore realUnlockingScript — can end up far bigger than the
+			// sizing pass above assumed (which stubbed a 181-byte placeholder
+			// preimage). The isStateful branch above already re-derives
+			// fee/change from the REAL unlock via a second BuildCallTransaction
+			// call; do the same here so changeAmount isn't pinned to the
+			// undersized estimate — otherwise the broadcast tx pays less than
+			// the fee floor even though its real byte size is larger than what
+			// fee/change were computed for.
+			rebuildOpts := &BuildCallOptions{}
+			if len(contractOutputs) > 0 {
+				rebuildOpts.ContractOutputs = contractOutputs
+			}
+			if len(resolvedDataOutputs) > 0 {
+				rebuildOpts.DataOutputs = resolvedDataOutputs
+			}
+			if options != nil {
+				rebuildOpts.Locktime = options.Locktime
+				rebuildOpts.Sequence = options.Sequence
+			}
+			if len(extraContractUtxos) > 0 {
+				rebuildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))
+				for i, utxo := range extraContractUtxos {
+					rebuildOpts.AdditionalContractInputs[i] = AdditionalContractInput{
+						Utxo:            *utxo,
+						UnlockingScript: extraUnlockPlaceholders[i],
+					}
+				}
+			}
+			rebuildTx, rebuildCount, rebuildChange, rebuildErr := BuildCallTransaction(
+				contractUtxo,
+				realUnlockingScript,
+				newLockingScript,
+				newSatoshis,
+				changeAddress,
+				changeScript,
+				additionalUtxos,
+				feeRate,
+				rebuildOpts,
+			)
+			if rebuildErr != nil {
+				return nil, fmt.Errorf("RunarContract.PrepareCall: %w", rebuildErr)
+			}
+			inputCount = rebuildCount
+			changeAmount = rebuildChange
+			signedTx = rebuildTx.Hex()
+
+			// buildCallTransaction above returned a FRESH Transaction whose
+			// P2PKH funding inputs (already signed once, before this stateless
+			// branch ran) are blank again — re-sign them against the rebuilt
+			// tx (issue #134's fundingSigner), mirroring the isStateful
+			// branch's re-sign step.
+			for i := p2pkhStartIdx; i < inputCount; i++ {
+				utxoIdx := i - p2pkhStartIdx
+				if utxoIdx < len(additionalUtxos) {
+					utxo := additionalUtxos[utxoIdx]
+					sig, signErr := fundingSigner.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
+					if signErr != nil {
+						return nil, fmt.Errorf("RunarContract.PrepareCall: re-signing input %d: %w", i, signErr)
+					}
+					pubKey, pkErr := fundingSigner.GetPublicKey()
+					if pkErr != nil {
+						return nil, fmt.Errorf("RunarContract.PrepareCall: getting public key: %w", pkErr)
+					}
+					unlockScript := EncodePushData(sig) + EncodePushData(pubKey)
+					signedTx = InsertUnlockingScript(signedTx, i, unlockScript)
+				}
+			}
+
+			// The rebuild may have changed the change output's satoshis, which
+			// hashOutputs (and therefore the preimage above) commits to — the
+			// preimage is now stale. Recompute it against the REBUILT tx
+			// before embedding it in the final unlock (same scriptCode => same
+			// preimage byte length, so this does not reopen the sizing
+			// question above).
+			signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
+			rebuiltSig, rebuiltPre, ptxErr2 := ComputeOpPushTxWithSigHash(signedTx, 0,
+				contractUtxo.Script, contractUtxo.Satoshis, codeSepIdx, sigHashType)
+			if ptxErr2 != nil {
+				return nil, fmt.Errorf("RunarContract.PrepareCall: OP_PUSH_TX for N-227 rebuild: %w", ptxErr2)
+			}
+			resolvedArgs[preimageIndex] = hex.EncodeToString(rebuiltPre)
+			finalOpPushTxSig = hex.EncodeToString(rebuiltSig)
+			finalPreimage = hex.EncodeToString(rebuiltPre)
 			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
 				c.BuildUnlockingScript(methodName, resolvedArgs)
 		}

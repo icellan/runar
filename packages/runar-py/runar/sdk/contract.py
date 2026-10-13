@@ -863,6 +863,23 @@ class RunarContract:
                 else:
                     extra_contract_utxos.append(item)
 
+        # N-227 Part 2: the is_stateful branch below builds a REAL per-input
+        # unlock (its own OP_PUSH_TX preimage + signed Sig args) for every
+        # extra contract input via _build_stateful_unlock. The non-stateful
+        # ("stateless") branch has no equivalent — it only ever reuses the
+        # SIZING placeholder unlock for extra inputs, because that branch
+        # never loops over extra_contract_utxos to build real ones. Shipping
+        # those placeholders as the FINAL unlocking script would broadcast
+        # an invalid spend for every input after the primary. Fail closed
+        # rather than silently ship unvalidatable bytes.
+        if extra_contract_utxos and not is_stateful:
+            raise ValueError(
+                f"RunarContract.call({method_name}): additional_contract_inputs is not "
+                "supported when the contract has zero mutable fields (state_fields is "
+                "empty) — this SDK path only builds a placeholder unlock for extra "
+                "contract inputs on that branch and the resulting tx would be invalid"
+            )
+
         # Normalize outputs
         has_multi_output = opts.outputs is not None and len(opts.outputs) > 0
 
@@ -1422,6 +1439,64 @@ class RunarContract:
                 final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
                 real_unlocking_script = self._build_stateful_prefix(final_sig, False) + \
+                    self.build_unlocking_script(method_name, resolved_args)
+
+                # N-227 (port of N-085): the BIP-143 scriptCode is everything
+                # AFTER the checkPreimage-injected OP_CODESEPARATOR, which can
+                # sit right at method entry — for a zero-mutable-field
+                # StatefulSmartContract (empty state_fields makes is_stateful
+                # False here even though it IS parent_stateful) that leaves
+                # almost the ENTIRE locking script as scriptCode. The real
+                # preimage — and therefore real_unlocking_script — can end up
+                # far bigger than the sizing pass above assumed. The
+                # is_stateful branch above already re-derives fee/change from
+                # the REAL unlock via a second build_call_transaction call; do
+                # the same here so change_amount isn't pinned to the
+                # undersized estimate — otherwise the broadcast tx pays less
+                # than the fee floor even though its real byte size is larger
+                # than what fee/change were computed for.
+                tx_hex, input_count, change_amount = build_call_transaction(
+                    self._current_utxo, real_unlocking_script, new_locking_script,
+                    new_satoshis, change_address, change_script,
+                    additional_utxos if additional_utxos else None, fee_rate,
+                    contract_outputs=contract_outputs,
+                    additional_contract_inputs=[
+                        {'utxo': u, 'unlocking_script': extra_unlock_placeholders[i]}
+                        for i, u in enumerate(extra_contract_utxos)
+                    ] if extra_contract_utxos else None,
+                    data_outputs=resolved_data_outputs or None,
+                    locktime=opts.locktime,
+                    sequence=opts.sequence,
+                )
+                signed_tx = tx_hex
+
+                # buildCallTransaction above returned a FRESH tx whose P2PKH
+                # funding inputs (already signed once, before this stateless
+                # branch ran) are blank again — re-sign them against the
+                # rebuilt tx (issue #134's funding_signer), mirroring the
+                # is_stateful branch's re-sign step (once, matching TS).
+                p2pkh_start_idx = 1 + len(extra_contract_utxos)
+                for i in range(p2pkh_start_idx, input_count):
+                    utxo_idx = i - p2pkh_start_idx
+                    if utxo_idx < len(additional_utxos):
+                        utxo = additional_utxos[utxo_idx]
+                        sig = funding_signer.sign(signed_tx, i, utxo.script, utxo.satoshis)
+                        unlock_script = encode_push_data(sig) + encode_push_data(pub_key)
+                        signed_tx = insert_unlocking_script(signed_tx, i, unlock_script)
+
+                # The rebuild may have changed the change output's satoshis,
+                # which hashOutputs (and therefore the preimage above)
+                # commits to — recompute it against the REBUILT tx before
+                # embedding it in the final unlock.
+                signed_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
+                rebuilt_sig, rebuilt_pre = compute_op_push_tx(
+                    signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
+                    method_sig_hash_type,
+                )
+                resolved_args[preimage_index] = rebuilt_pre
+                final_op_push_tx_sig = rebuilt_sig
+                final_preimage = rebuilt_pre
+                real_unlocking_script = self._build_stateful_prefix(rebuilt_sig, False) + \
                     self.build_unlocking_script(method_name, resolved_args)
             signed_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
             if not final_preimage and needs_op_push_tx:

@@ -645,6 +645,24 @@ module Runar
           end
         end
 
+        # N-227 Part 2: the is_stateful branch below (stateful_preimage_passes)
+        # builds a REAL per-input unlock (its own OP_PUSH_TX preimage + signed
+        # Sig args) for every extra contract input via build_stateful_unlock.
+        # The non-stateful ("stateless") branch (stateless_preimage_pass) has
+        # no equivalent — it only ever reuses the SIZING placeholder unlock for
+        # extra inputs, because that branch never loops over
+        # extra_contract_utxos to build real ones. Shipping those placeholders
+        # as the FINAL unlocking script would broadcast an invalid spend for
+        # every input after the primary. Fail closed rather than silently ship
+        # unvalidatable bytes.
+        if !extra_contract_utxos.empty? && !is_stateful
+          raise ArgumentError,
+                "RunarContract.call(#{method_name}): additional_contract_inputs is not " \
+                'supported when the contract has zero mutable fields (state_fields is ' \
+                'empty) — this SDK path only builds a placeholder unlock for extra ' \
+                'contract inputs on that branch and the resulting tx would be invalid'
+        end
+
         # Resolve per-input args for additional contract inputs.
         raw_per_input_args = Array(opts.additional_contract_input_args)
         resolved_per_input_args = extra_contract_utxos.each_with_index.map do |_, i|
@@ -1757,6 +1775,57 @@ module Runar
               signed_tx, contract_utxo, resolved_args, method_name,
               code_sep_idx, needs_op_push_tx, preimage_index
             )
+
+          # N-227 (port of N-085): the BIP-143 scriptCode is everything AFTER
+          # the checkPreimage-injected OP_CODESEPARATOR, which can sit right
+          # at method entry — for a zero-mutable-field StatefulSmartContract
+          # (empty state_fields makes is_stateful false here even though it
+          # IS parent_stateful) that leaves almost the ENTIRE locking script
+          # as scriptCode. The real preimage — and therefore the unlocking
+          # script stateless_preimage_pass just spliced in — can end up far
+          # bigger than the sizing pass above assumed. The is_stateful branch
+          # above already re-derives fee/change from the REAL unlock via a
+          # second build_call_transaction call; do the same here so
+          # change_amount isn't pinned to the undersized estimate —
+          # otherwise the broadcast tx pays less than the fee floor even
+          # though its real byte size is larger than what fee/change were
+          # computed for. (extra_contract_utxos is always empty on this
+          # branch — see the fail-closed guard in call/prepare_call — so no
+          # additional_contract_inputs plumbing is needed in the rebuild.)
+          if needs_op_push_tx && !final_op_push_tx_sig.empty?
+            # Reconstructs exactly what stateless_preimage_pass just spliced
+            # into signed_tx's input 0 (resolved_args[preimage_index] was
+            # mutated in place by that call).
+            real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) +
+                          build_unlocking_script(method_name, resolved_args)
+            rebuild_options = {}
+            rebuild_options[:contract_outputs] = contract_outputs if contract_outputs
+            rebuild_options[:data_outputs] = data_outputs if data_outputs && !data_outputs.empty?
+            rebuild_options[:locktime] = locktime unless locktime.nil?
+            rebuild_options[:sequence] = sequence unless sequence.nil?
+
+            tx_hex, _input_count, change_amount = SDK.build_call_transaction(
+              contract_utxo, real_unlock, new_locking_script,
+              new_satoshis, change_address, change_script,
+              additional_utxos.empty? ? nil : additional_utxos,
+              fee_rate: fee_rate,
+              options: rebuild_options.empty? ? nil : rebuild_options
+            )
+            signed_tx = sign_funding_inputs(tx_hex, additional_utxos, funding_signer, 1)
+
+            # The rebuild may have changed the change output's satoshis,
+            # which hashOutputs (and therefore the preimage above) commits
+            # to — recompute it against the REBUILT tx before embedding it
+            # in the final unlock (same scriptCode => same preimage byte
+            # length, so this does not reopen the sizing question above).
+            signed_tx = SDK.insert_unlocking_script(signed_tx, 0, real_unlock)
+            signed_tx, final_op_push_tx_sig, final_preimage =
+              stateless_preimage_pass(
+                signed_tx, contract_utxo, resolved_args, method_name,
+                code_sep_idx, needs_op_push_tx, preimage_index
+              )
+          end
+
           final_preimage = resolved_args[preimage_index] if final_preimage.empty? && needs_op_push_tx
         end
 

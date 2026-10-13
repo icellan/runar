@@ -1421,6 +1421,26 @@ export class RunarContract {
     let newSatoshis: number | undefined;
     let contractOutputs: Array<{ script: string; satoshis: number }> | undefined;
     const extraContractUtxos = options?.additionalContractInputs ?? [];
+
+    // N-227 Part 2: the isStateful branch below builds a REAL per-input
+    // unlock (its own OP_PUSH_TX preimage + signed Sig args) for every
+    // extra contract input via buildStatefulUnlock. The non-stateful
+    // ("stateless") branch has no equivalent — it only ever reuses the
+    // SIZING placeholder unlock (72 zero-byte sig + args + witness) for
+    // extra inputs, because that branch never loops over extraContractUtxos
+    // to build real ones. Shipping those placeholders as the FINAL
+    // unlocking script would broadcast an invalid spend for every input
+    // after the primary. Fail closed rather than silently ship
+    // unvalidatable bytes.
+    if (extraContractUtxos.length > 0 && !isStateful) {
+      throw new Error(
+        `RunarContract.call(${methodName}): additionalContractInputs is not supported when ` +
+          'the contract has zero mutable fields (stateFields is empty) — this SDK path only ' +
+          'builds a placeholder unlock for extra contract inputs on that branch and the ' +
+          'resulting tx would be invalid',
+      );
+    }
+
     const hasMultiOutput = options?.outputs && options.outputs.length > 0;
 
     // Data outputs declared via this.addDataOutput(...). Explicit

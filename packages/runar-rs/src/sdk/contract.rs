@@ -1014,6 +1014,26 @@ impl RunarContract {
             .and_then(|o| o.additional_contract_inputs.as_ref())
             .cloned()
             .unwrap_or_default();
+
+        // N-227 Part 2: the is_stateful branch below builds a REAL per-input
+        // unlock (its own OP_PUSH_TX preimage + signed Sig args) for every
+        // extra contract input via build_stateful_unlock. The non-stateful
+        // ("stateless") branch has no equivalent — it only ever reuses the
+        // SIZING placeholder unlock for extra inputs, because that branch
+        // never loops over extra_contract_utxos to build real ones. Shipping
+        // those placeholders as the FINAL unlocking script would broadcast
+        // an invalid spend for every input after the primary. Fail closed
+        // rather than silently ship unvalidatable bytes.
+        if !extra_contract_utxos.is_empty() && !is_stateful {
+            return Err(format!(
+                "RunarContract.call({}): additional_contract_inputs is not supported when the \
+                 contract has zero mutable fields (state_fields is empty) — this SDK path only \
+                 builds a placeholder unlock for extra contract inputs on that branch and the \
+                 resulting tx would be invalid",
+                method_name,
+            ));
+        }
+
         let has_multi_output = options
             .and_then(|o| o.outputs.as_ref())
             .map_or(false, |v| !v.is_empty());
@@ -1728,6 +1748,91 @@ impl RunarContract {
                 }
                 final_op_push_tx_sig = final_sig;
                 final_preimage = final_pre;
+                real_unlocking_script = format!(
+                    "{}{}",
+                    self.build_stateful_prefix(&final_op_push_tx_sig, false),
+                    self.build_unlocking_script(method_name, &resolved_args)?
+                );
+
+                // N-227 (port of N-085): the BIP-143 scriptCode is everything
+                // AFTER the checkPreimage-injected OP_CODESEPARATOR, which can
+                // sit right at method entry — for a zero-mutable-field
+                // StatefulSmartContract (empty state_fields makes is_stateful
+                // false here even though it IS parent_stateful) that leaves
+                // almost the ENTIRE locking script as scriptCode. The real
+                // preimage — and therefore real_unlocking_script — can end up
+                // far bigger than the sizing pass above assumed. The
+                // is_stateful branch above already re-derives fee/change from
+                // the REAL unlock via a second build_call_transaction_ext
+                // call; do the same here so change_amount isn't pinned to the
+                // undersized estimate — otherwise the broadcast tx pays less
+                // than the fee floor even though its real byte size is larger
+                // than what fee/change were computed for.
+                let rebuild_options = CallTxOptions {
+                    contract_outputs: contract_outputs.as_ref().map(|cos| {
+                        cos.iter().map(|co| ContractOutput { script: co.script.clone(), satoshis: co.satoshis }).collect()
+                    }),
+                    additional_contract_inputs: if extra_contract_utxos.is_empty() {
+                        None
+                    } else {
+                        Some(extra_contract_utxos.iter().enumerate().map(|(i, utxo)| {
+                            AdditionalContractInput {
+                                utxo: utxo.clone(),
+                                unlocking_script: extra_unlock_placeholders[i].clone(),
+                            }
+                        }).collect())
+                    },
+                    data_outputs: if resolved_data_outputs.is_empty() {
+                        None
+                    } else {
+                        Some(resolved_data_outputs.iter().map(|co| ContractOutput {
+                            script: co.script.clone(),
+                            satoshis: co.satoshis,
+                        }).collect())
+                    },
+                    locktime: options.and_then(|o| o.locktime),
+                    sequence: options.and_then(|o| o.sequence),
+                };
+                let (rebuilt_tx, rebuilt_input_count, rebuilt_change) = build_call_transaction_ext(
+                    &current_utxo,
+                    &real_unlocking_script,
+                    new_locking_script.as_deref(),
+                    new_satoshis,
+                    change_addr_opt,
+                    change_script_opt,
+                    if additional_utxos.is_empty() { None } else { Some(&additional_utxos) },
+                    Some(fee_rate),
+                    Some(&rebuild_options),
+                )?;
+                signed_tx = rebuilt_tx;
+                change_amount = rebuilt_change;
+
+                // Re-sign P2PKH funding inputs (issue #134's funding_signer):
+                // build_call_transaction_ext above returned a FRESH tx whose
+                // P2PKH funding inputs are blank again.
+                let p2pkh_start_idx = 1 + extra_contract_utxos.len();
+                for i in p2pkh_start_idx..rebuilt_input_count {
+                    if let Some(utxo) = additional_utxos.get(i - p2pkh_start_idx) {
+                        let sig = funding_signer.sign(&signed_tx, i, &utxo.script, utxo.satoshis, None)?;
+                        let pub_key = funding_signer.get_public_key()?;
+                        let unlock_script = format!("{}{}", encode_push_data(&sig), encode_push_data(&pub_key));
+                        signed_tx = insert_unlocking_script(&signed_tx, i, &unlock_script)?;
+                    }
+                }
+
+                // The rebuild may have changed the change output's satoshis,
+                // which hashOutputs (and therefore the preimage above)
+                // commits to — recompute it against the REBUILT tx before
+                // embedding it in the final unlock.
+                signed_tx = insert_unlocking_script(&signed_tx, 0, &real_unlocking_script)?;
+                let (rebuilt_sig, rebuilt_pre) = compute_op_push_tx_with_code_sep_sighash(
+                    &signed_tx, 0, &current_utxo.script, current_utxo.satoshis, code_sep_idx, sig_hash_type,
+                )?;
+                if let Some(idx) = preimage_index {
+                    resolved_args[idx] = SdkValue::Bytes(rebuilt_pre.clone());
+                }
+                final_op_push_tx_sig = rebuilt_sig;
+                final_preimage = rebuilt_pre;
                 real_unlocking_script = format!(
                     "{}{}",
                     self.build_stateful_prefix(&final_op_push_tx_sig, false),
