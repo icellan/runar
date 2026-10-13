@@ -89,6 +89,10 @@ describe('F-287 constant folding is ON by default; the docs must say so', () => 
     'packages/runar-compiler/README.md',
     'docs/compiler-architecture.md',
     'docs/java-tier-plan.md',
+    // N-203: the whitepaper's "Conformance tradeoff" paragraph carried the
+    // same wrong claim (and the checked-in PDF, regenerated from this
+    // source, inherited it) — fixed alongside its README/docs siblings.
+    'docs/runar-whitepaper.tex',
   ]) {
     it(`${doc} does not claim constant folding is disabled/off by default`, () => {
       const text = read(doc);

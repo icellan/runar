@@ -897,34 +897,34 @@ The optimizer preserves the binding indices---it replaces values in-place
 rather than removing bindings---ensuring that subsequent bindings' references
 remain valid.
 
-\paragraph{Conformance tradeoff: disabled by default.}
-Although the constant folding optimizer is fully implemented, it is
-\emph{disabled by default} in the standard compilation pipeline. The
-reason is architectural: the ANF IR serves as the conformance boundary
-between the seven independent compiler implementations
-(Section~\ref{sec:eval-conformance}), and all seven must produce
-byte-identical ANF IR for the same input to satisfy
-Theorem~\ref{thm:conformance}. Enabling constant folding would modify the
-ANF IR---replacing operation bindings with pre-computed constants---thereby
-altering the canonical representation that the conformance suite validates
-against. Since the seven compilers share the same stack lowering and
-emission algorithms, any script size reduction achieved by folding at the
-ANF level would equally be achievable by each compiler independently, but
-the intermediate ANF output would no longer match, breaking the
-byte-identical cross-compiler guarantee at the conformance boundary.
+\paragraph{Conformance tradeoff: on by default; checked-in goldens are fold-OFF.}
+The constant folding optimizer is \emph{enabled by default} in the
+production compilation pipeline, across all seven independent compiler
+implementations (Section~\ref{sec:eval-conformance}). Each compiler's CLI
+additionally exposes an explicit \texttt{--disable-constant-folding}
+opt-out, because the checked-in conformance goldens---the fixed ANF IR and
+Bitcoin Script hex files used to verify byte-identical cross-compiler
+output against Theorem~\ref{thm:conformance}---were stamped with folding
+disabled, to pin a stable byte-exact baseline for golden-file comparison.
+Folding is reproduced identically by all seven compilers, so enabling it
+does not itself break the byte-identical cross-compiler guarantee; it only
+diverges from the pre-recorded fold-OFF goldens, which is why the goldens
+and the production default are allowed to disagree.
 
-In practice, the optimizer can be enabled via an explicit compiler option
-for production builds in which script size optimization is desired and
-cross-compiler ANF conformance is not required. When enabled, it correctly
-folds all arithmetic ($+$, $-$, $*$, $/$, $\%$), comparison ($<$, $>$,
-$\leq$, $\geq$, $===$, $!==$), bitwise ($\&$, $|$, $\wedge$, $\ll$,
-$\gg$), and unary ($-$, $!$, $\sim$) operations, as well as pure built-in
-function calls (\texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow},
+In practice, the conformance suite exercises both modes: the baseline
+multi-format run passes \texttt{--disable-constant-folding} and checks
+cross-tier hex and ANF parity against the goldens, while a companion run
+re-executes the same fixtures with folding on and separately enforces
+cross-tier parity across all seven tiers, without comparing against the
+fold-OFF goldens. When enabled, the optimizer correctly folds all
+arithmetic ($+$, $-$, $*$, $/$, $\%$), comparison ($<$, $>$, $\leq$,
+$\geq$, $===$, $!==$), bitwise ($\&$, $|$, $\wedge$, $\ll$, $\gg$), and
+unary ($-$, $!$, $\sim$) operations, as well as pure built-in function
+calls (\texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow},
 \texttt{sqrt}, \texttt{gcd}, \texttt{sign}, \texttt{clamp},
-\texttt{divmod}, \texttt{log2}, among others). The default pipeline
-instead passes the unmodified ANF IR directly to stack lowering, preserving
-the canonical form that underpins the cross-compiler conformance
-architecture.
+\texttt{divmod}, \texttt{log2}, among others). Disabling folding instead
+passes the unmodified ANF IR directly to stack lowering, preserving the
+canonical form that the checked-in goldens were stamped against.
 
 %-----------------------------------------------------------------------------
 \subsection{Pass 5: Stack Lowering}
