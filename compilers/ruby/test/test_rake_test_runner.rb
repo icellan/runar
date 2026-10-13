@@ -109,10 +109,24 @@ class TestRakeTestRunner < Minitest::Test
       out_path = File.join(dir, "rake_output.txt")
       system("cd #{dir} && rake test > #{out_path} 2>&1")
       exit_status = $?.exitstatus
+      output = File.read(out_path)
 
       refute_equal 0, exit_status,
                    "rake test must fail (non-zero exit) when one of its test files runs zero tests:\n" \
-                   "#{File.read(out_path)}"
+                   "#{output}"
+
+      # A nonzero exit alone does not prove rake failed for the RIGHT reason:
+      # a Rakefile that raises before running any test file also exits
+      # nonzero, and `refute_equal 0, exit_status` above cannot tell the two
+      # apart (mutation-proven: making the :test task raise immediately
+      # leaves that assertion green). Require evidence that test_pass.rb
+      # actually ran, and that the failure is attributed to test_zero.rb by
+      # name via the "ran zero tests" reason -- not some other crash.
+      assert_includes output, "Running test/test_pass.rb...",
+                      "test_pass.rb must actually run before the task fails:\n#{output}"
+      assert_includes output, "FAILED: test/test_zero.rb: ran zero tests",
+                      "the failure must be attributed to test_zero.rb by the zero-tests reason, " \
+                      "not an unrelated crash:\n#{output}"
     end
   end
 
@@ -130,5 +144,55 @@ class TestRakeTestRunner < Minitest::Test
 
     assert_includes files.uniq, File.join(test_dir, "test", "test_helper.rb"),
                      "this assumption no longer holds — test_helper.rb moved or was renamed"
+  end
+
+  # test_glob_excludes_test_helper above only proves the PREMISE: that the
+  # raw glob picks up test_helper.rb. It says nothing about whether the
+  # Rakefile's actual `.exclude('test/test_helper.rb')` works end-to-end
+  # (mutation-proven: dropping that `.exclude(...)` call from the Rakefile
+  # leaves every existing test in this file green, including the other
+  # end-to-end test above, because its scratch dir never contains a
+  # test_helper.rb to begin with). Run the real Rakefile against a scratch
+  # dir that DOES contain a zero-test test_helper.rb, and require the task
+  # to succeed -- which only happens if the exclusion actually takes effect.
+  def test_rake_test_task_passes_when_test_helper_runs_zero_tests
+    Dir.mktmpdir("runar-rake-integration") do |dir|
+      FileUtils.mkdir_p(File.join(dir, "test"))
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      FileUtils.mkdir_p(File.join(dir, "rakelib"))
+
+      File.write(File.join(dir, "test", "test_helper.rb"), <<~RUBY)
+        require 'minitest/autorun'
+        # shared support module, no Minitest::Test subclass -- legitimately
+        # registers zero tests, same shape as the real test_helper.rb
+      RUBY
+
+      File.write(File.join(dir, "test", "test_pass.rb"), <<~RUBY)
+        require 'minitest/autorun'
+        class PassingTest < Minitest::Test
+          def test_truth
+            assert true
+          end
+        end
+      RUBY
+
+      FileUtils.cp(
+        File.expand_path("../Rakefile", __dir__),
+        File.join(dir, "Rakefile")
+      )
+      FileUtils.cp(
+        File.expand_path("../rakelib/test_runner.rb", __dir__),
+        File.join(dir, "rakelib", "test_runner.rb")
+      )
+
+      out_path = File.join(dir, "rake_output.txt")
+      system("cd #{dir} && rake test > #{out_path} 2>&1")
+      exit_status = $?.exitstatus
+
+      assert_equal 0, exit_status,
+                   "rake test must still succeed when the only zero-test file is " \
+                   "test_helper.rb, which the Rakefile excludes by name:\n" \
+                   "#{File.read(out_path)}"
+    end
   end
 end
