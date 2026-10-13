@@ -226,3 +226,55 @@ describe('F-038: --emit-ir -> --ir reproduces the --source artifact', () => {
     });
   }
 });
+
+/**
+ * N-187 — the --ir artifact carries `parentClass` AND `isTerminal` together,
+ * for a zero-mutable-field StatefulSmartContract.
+ *
+ * Neither existing gate asserts this conjunction directly on a tier's --ir
+ * artifact. F-038 above checks `viaIr.parentClass` alone, plus a whole-ABI
+ * `viaIr.abi` vs `direct.abi` equality (the "--ir artifact equals the
+ * --source artifact" tests) — but that equality is symmetric: if a tier
+ * dropped `isTerminal` from BOTH its --source and --ir artifacts, the two
+ * sides would still match each other and the test would stay green.
+ * N-139 (conformance/negatives/artifact-flag-parity.test.ts) asserts
+ * `isTerminal` directly, but only against each tier's --source artifact,
+ * never --ir. So a tier could pass both existing gates while silently
+ * dropping or defaulting `isTerminal` on exactly the --ir path for exactly
+ * this shape (zero mutable fields -> `stateFields` is empty, the fallback
+ * every tier's `isStateful` derivation uses when `parentClass` itself is
+ * missing from the loaded IR) and nothing would fail.
+ *
+ * Proves: for `all-readonly-cleanstack` (PROBES[0], the issue-#44
+ * zero-mutable-field StatefulSmartContract), each of the six --ir tiers'
+ * `--ir` artifact has BOTH `parentClass === 'StatefulSmartContract'` AND
+ * its one public method ('claim') `isTerminal === true`, asserted as a
+ * single object so a tier that drops or flips EITHER field fails. TS has
+ * no CLI --ir-artifact path (excluded above, by design: see the "TS is
+ * excluded by design" comment on the "every --ir tier is built" test); it
+ * is checked here on its in-process reference artifact instead — the
+ * artifact every --ir tier's output is meant to agree with.
+ *
+ * Does not prove: anything about any other PROBES fixture, or that an SDK
+ * acts correctly on either flag (see the F-070 spend tests above for that).
+ */
+describe('N-187: --ir artifact carries parentClass AND isTerminal together', () => {
+  const EXPECTED = { parentClass: 'StatefulSmartContract', isTerminal: true };
+
+  it('ts: all-readonly-cleanstack reference artifact carries parentClass + isTerminal together', () => {
+    const probe = PROBES[0]!;
+    const result = compile(readFileSync(probe.file, 'utf-8'), { fileName: probe.file });
+    expect(result.success, JSON.stringify(result.diagnostics)).toBe(true);
+    const art = result.artifact!;
+    const claim = art.abi.methods.find((m) => m.name === 'claim');
+    expect({ parentClass: art.parentClass, isTerminal: claim?.isTerminal }).toEqual(EXPECTED);
+  });
+
+  for (const tier of available) {
+    it(`${tier.id}: all-readonly-cleanstack --ir artifact carries parentClass + isTerminal together`, () => {
+      const { viaIr } = roundTrip(tier, PROBES[0]!.file);
+      const claim = viaIr.abi.methods.find((m) => m.name === 'claim');
+      expect({ parentClass: viaIr.parentClass, isTerminal: claim?.isTerminal }).toEqual(EXPECTED);
+    });
+  }
+});
