@@ -82,16 +82,29 @@ sync_locks() {
 check_exact() {
   local f="$1"; shift
   [ -f "$f" ] || return 0
-  local rel="${f#"$ROOT"/}" found=0 ere v
+  local rel="${f#"$ROOT"/}" found=0 ere v matches
   for ere in "$@"; do
-    while IFS= read -r v; do
-      found=1
-      if [ "$v" != "$expected" ]; then
-        echo "  ✗ $rel: $v"
-        ok=false
-      fi
+    # Here-string, not `< <(sed ...)`: bash 3.2 (macOS's /bin/bash) leaks the
+    # process-substitution pipe fd rather than closing it once the loop ends,
+    # so a function called this many times over the course of --check
+    # eventually exhausts open fds (see the N-172 note below, by the sdk_input
+    # loop). A here-string reads from a temp file instead of a FIFO, which
+    # sidesteps the bug. `|| true`: under `<(sed ...)`, the substitution's own
+    # exit status was never checked by `set -e`; `var=$(sed ...)` IS checked,
+    # so this keeps the same "a file simply not containing this shape is not
+    # fatal" behaviour (sed itself exits 0 here even on zero `-n ...p` matches
+    # — this guards a future sed/grep swap-in, not today's command).
     # `|` delimits: the shapes contain `/` (`</version>`) but never `|`.
-    done < <(sed -nE "s|.*${ere}.*|\1|p" "$f")
+    matches="$(sed -nE "s|.*${ere}.*|\1|p" "$f" || true)"
+    if [ -n "$matches" ]; then
+      while IFS= read -r v; do
+        found=1
+        if [ "$v" != "$expected" ]; then
+          echo "  ✗ $rel: $v"
+          ok=false
+        fi
+      done <<< "$matches"
+    fi
   done
   if [ "$found" -eq 0 ]; then
     echo "  ✗ $rel: no version string found"
@@ -212,10 +225,13 @@ check_versions() {
   # The README's `.version = "0.1.0"` is the consumer's example manifest, not ours.
   check_exact "$ROOT/packages/runar-zig/README.md" \
     'runar-zig-v([^/ )"]*)\.tar\.gz' 'SDK is at \*\*v([^*]*)\*\*'
-  local sdk_input
-  while IFS= read -r sdk_input; do
-    check_exact "$sdk_input" "${artifact_shapes[@]}"
-  done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
+  local sdk_input sdk_input_list
+  sdk_input_list="$(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null || true)"
+  if [ -n "$sdk_input_list" ]; then
+    while IFS= read -r sdk_input; do
+      check_exact "$sdk_input" "${artifact_shapes[@]}"
+    done <<< "$sdk_input_list"
+  fi
 
   # N-172 (R87 user decision 2026-10-12): the "frozen" version pins carried
   # by the sdk-vertical conformance fixtures and the Go/Zig SDK pin-test
@@ -300,14 +316,19 @@ check_versions() {
     "$ROOT/examples/ruby/Gemfile.lock" \
     "$ROOT/examples/end2end-example/ruby/Gemfile.lock"; do
     [ -f "$lockfile" ] || continue
-    local rel="${lockfile#"$ROOT"/}" found=0 v
-    while IFS= read -r v; do
-      found=1
-      if [ "$v" != "$rubygems_expected" ]; then
-        echo "  ✗ $rel: $v"
-        ok=false
-      fi
-    done < <(sed -nE "s/.*runar-lang \(([^)]*)\).*/\1/p" "$lockfile")
+    local rel="${lockfile#"$ROOT"/}" found=0 v matches
+    # Here-string, not `< <(sed ...)`: see the N-172 note above the sv_list
+    # loop — a bash-3.2 leaked-fd issue, not specific to any one call site.
+    matches="$(sed -nE "s/.*runar-lang \(([^)]*)\).*/\1/p" "$lockfile" || true)"
+    if [ -n "$matches" ]; then
+      while IFS= read -r v; do
+        found=1
+        if [ "$v" != "$rubygems_expected" ]; then
+          echo "  ✗ $rel: $v"
+          ok=false
+        fi
+      done <<< "$matches"
+    fi
     if [ "$found" -eq 0 ]; then
       echo "  ✗ $rel: no version string found"
       ok=false
@@ -358,7 +379,16 @@ check_versions() {
   # ($semver is declared once, near the top of this function.)
   for f in "${COMPILER_VERSION_FILES[@]}"; do
     [ -f "$f" ] || continue
-    local found=0 bad
+    local found=0 bad matches
+    # Here-string, not `< <(...)`: see the N-172 note above the sv_list loop
+    # — a bash-3.2 leaked-fd issue, not specific to any one call site. The
+    # `[ -z "$bad" ] && continue` below already tolerates the single empty
+    # line a `<<<` of a truly-empty capture feeds to `read`.
+    matches="$( { grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
+                  | grep -oE "runar-v${semver}|${semver}-(go|rust|zig|ruby|python|ts)" \
+                  | sed -E 's/^runar-v//; s/-(go|rust|zig|ruby|python|ts)$//'
+                sed -nE "s/.*DEFAULT_COMPILER_VERSION = '([^']*)'.*/\1/p" "$f"
+              } | sort -u || true)"
     while IFS= read -r bad; do
       [ -z "$bad" ] && continue
       found=1
@@ -369,11 +399,7 @@ check_versions() {
     # Comment lines are excluded: assembler.ts documents the field with
     # `e.g. "runar-v0.1.0"`, which is an illustration and not a stamped version.
     # Flagging it would make the gate cry wolf at every release.
-    done < <( { grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
-                  | grep -oE "runar-v${semver}|${semver}-(go|rust|zig|ruby|python|ts)" \
-                  | sed -E 's/^runar-v//; s/-(go|rust|zig|ruby|python|ts)$//'
-                sed -nE "s/.*DEFAULT_COMPILER_VERSION = '([^']*)'.*/\1/p" "$f"
-              } | sort -u || true)
+    done <<< "$matches"
     if [ "$found" -eq 0 ]; then
       echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): no version string found"
       ok=false
