@@ -103,9 +103,15 @@ public final class Validate {
         ctx.validateProperties();
         ctx.validateConstructor();
         ctx.validateMethods();
-        ctx.checkNoRecursion();
+        boolean callDepthExceeded = ctx.checkNoRecursion();
         ctx.checkReservedNames();
         ctx.warnStrippedReadonlyFields();
+        // N-180: the Rabin-provenance and sighash passes walk the private-method
+        // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+        // refuses, so stop here.
+        if (callDepthExceeded) {
+            return new Result(ctx.errors, ctx.warnings);
+        }
         RabinPubKeyProvenance.check(ctx);
 
         // Issue #123: reject preimage-field reads / output bindings that are
@@ -1863,7 +1869,8 @@ public final class Validate {
             }
         }
 
-        void checkNoRecursion() {
+        /** Reports recursion and the N-180 call depth; true iff MAX_CALL_DEPTH was exceeded. */
+        boolean checkNoRecursion() {
             Set<String> methodNames = new HashSet<>();
             for (MethodNode m : contract.methods()) {
                 methodNames.add(m.name());
@@ -1871,11 +1878,18 @@ public final class Validate {
             java.util.Map<String, Set<String>> callGraph = new java.util.HashMap<>();
             for (MethodNode m : contract.methods()) {
                 Set<String> calls = new HashSet<>();
-                collectMethodCalls(m.body(), calls);
+                collectMethodCalls(m.body(), calls, true);
                 callGraph.put(m.name(), calls);
             }
+            // N-180: one iterative pass answers, for every method, whether it
+            // reaches a cycle and how deep its call chain is, in O(methods +
+            // calls). The old per-method DFS restarted for each method
+            // (quadratic on a chain) and recursed once per link.
+            java.util.Map<String, Boolean> reachesCycle = new java.util.HashMap<>();
+            java.util.Map<String, Integer> depth = new java.util.HashMap<>();
+            analyzeCallGraph(callGraph, methodNames, reachesCycle, depth);
             for (MethodNode m : contract.methods()) {
-                if (hasCycle(m.name(), callGraph, methodNames, new HashSet<>(), new HashSet<>())) {
+                if (reachesCycle.getOrDefault(m.name(), false)) {
                     error(
                         "recursion detected: method '" + m.name()
                             + "' calls itself directly or indirectly",
@@ -1883,33 +1897,82 @@ public final class Validate {
                     );
                 }
             }
+            // N-180: private methods are inlined at every call site, so the call
+            // depth is the inlining depth. Report the first method (declaration
+            // order) past it.
+            for (MethodNode m : contract.methods()) {
+                if (!reachesCycle.getOrDefault(m.name(), false)
+                    && depth.getOrDefault(m.name(), 0) > runar.compiler.frontend.InputLimits.MAX_CALL_DEPTH) {
+                    error(runar.compiler.frontend.InputLimits.callDepthMessage(m.name()), m.sourceLocation());
+                    return true;
+                }
+            }
+            return false;
         }
 
-        private static boolean hasCycle(
-            String name,
+        /**
+         * N-180: for every method, whether it reaches a call cycle, and (when it
+         * does not) its call depth: 0 if it calls no contract method, else 1 +
+         * the largest call depth among the contract methods it calls. Iterative
+         * three-colour DFS with memoisation: O(methods + calls), no recursion.
+         * {@code reachesCycle} matches what a fresh DFS from each method reports.
+         */
+        private void analyzeCallGraph(
             java.util.Map<String, Set<String>> callGraph,
             Set<String> methodNames,
-            Set<String> visited,
-            Set<String> stack
+            java.util.Map<String, Boolean> reachesCycle,
+            java.util.Map<String, Integer> depth
         ) {
-            if (stack.contains(name)) {
-                return true;
+            final class Frame {
+                final String name;
+                final java.util.Iterator<String> callees;
+                boolean cyc;
+                int depth;
+
+                Frame(String name) {
+                    this.name = name;
+                    this.callees = callGraph.getOrDefault(name, Set.of()).iterator();
+                }
             }
-            if (visited.contains(name)) {
-                return false;
-            }
-            visited.add(name);
-            stack.add(name);
-            Set<String> callees = callGraph.getOrDefault(name, Set.of());
-            for (String callee : callees) {
-                if (methodNames.contains(callee)) {
-                    if (hasCycle(callee, callGraph, methodNames, visited, stack)) {
-                        return true;
+            Set<String> onStack = new HashSet<>();
+            for (MethodNode root : contract.methods()) {
+                if (reachesCycle.containsKey(root.name())) continue;
+                java.util.ArrayDeque<Frame> stack = new java.util.ArrayDeque<>();
+                onStack.add(root.name());
+                stack.push(new Frame(root.name()));
+                while (!stack.isEmpty()) {
+                    Frame top = stack.peek();
+                    if (top.callees.hasNext()) {
+                        String callee = top.callees.next();
+                        if (!methodNames.contains(callee)) continue;
+                        if (onStack.contains(callee)) {
+                            top.cyc = true;
+                        } else if (reachesCycle.containsKey(callee)) {
+                            if (reachesCycle.get(callee)) {
+                                top.cyc = true;
+                            } else {
+                                top.depth = Math.max(top.depth, 1 + depth.get(callee));
+                            }
+                        } else {
+                            onStack.add(callee);
+                            stack.push(new Frame(callee));
+                        }
+                        continue;
+                    }
+                    stack.pop();
+                    onStack.remove(top.name);
+                    reachesCycle.put(top.name, top.cyc);
+                    depth.put(top.name, top.depth);
+                    Frame parent = stack.peek();
+                    if (parent != null) {
+                        if (top.cyc) {
+                            parent.cyc = true;
+                        } else {
+                            parent.depth = Math.max(parent.depth, 1 + top.depth);
+                        }
                     }
                 }
             }
-            stack.remove(name);
-            return false;
         }
     }
 
@@ -2160,36 +2223,40 @@ public final class Validate {
     // ------------------------------------------------------------------
 
     private static void collectMethodCalls(List<Statement> body, Set<String> out) {
+        collectMethodCalls(body, out, false);
+    }
+
+    private static void collectMethodCalls(List<Statement> body, Set<String> out, boolean bare) {
         for (Statement s : body) {
-            collectMethodCallsInStmt(s, out);
+            collectMethodCallsInStmt(s, out, bare);
         }
     }
 
-    private static void collectMethodCallsInStmt(Statement s, Set<String> out) {
+    private static void collectMethodCallsInStmt(Statement s, Set<String> out, boolean bare) {
         if (s instanceof ExpressionStatement es) {
-            collectMethodCallsInExpr(es.expression(), out);
+            collectMethodCallsInExpr(es.expression(), out, bare);
         } else if (s instanceof VariableDeclStatement v) {
-            collectMethodCallsInExpr(v.init(), out);
+            collectMethodCallsInExpr(v.init(), out, bare);
         } else if (s instanceof AssignmentStatement a) {
-            collectMethodCallsInExpr(a.target(), out);
-            collectMethodCallsInExpr(a.value(), out);
+            collectMethodCallsInExpr(a.target(), out, bare);
+            collectMethodCallsInExpr(a.value(), out, bare);
         } else if (s instanceof IfStatement i) {
-            collectMethodCallsInExpr(i.condition(), out);
-            collectMethodCalls(i.thenBody(), out);
+            collectMethodCallsInExpr(i.condition(), out, bare);
+            collectMethodCalls(i.thenBody(), out, bare);
             if (i.elseBody() != null) {
-                collectMethodCalls(i.elseBody(), out);
+                collectMethodCalls(i.elseBody(), out, bare);
             }
         } else if (s instanceof ForStatement f) {
-            collectMethodCallsInExpr(f.condition(), out);
-            collectMethodCalls(f.body(), out);
+            collectMethodCallsInExpr(f.condition(), out, bare);
+            collectMethodCalls(f.body(), out, bare);
         } else if (s instanceof ReturnStatement r) {
             if (r.value() != null) {
-                collectMethodCallsInExpr(r.value(), out);
+                collectMethodCallsInExpr(r.value(), out, bare);
             }
         }
     }
 
-    private static void collectMethodCallsInExpr(Expression e, Set<String> out) {
+    private static void collectMethodCallsInExpr(Expression e, Set<String> out, boolean bare) {
         if (e == null) return;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa) {
@@ -2200,31 +2267,38 @@ public final class Validate {
                 && "this".equals(id.name())) {
                 out.add(me.property());
             }
-            collectMethodCallsInExpr(c.callee(), out);
+            // N-180: the Solidity, Move and Java surfaces call a helper as a bare
+            // m(...). Counted only for the recursion / call-depth graph (bare),
+            // and only names of contract methods count there (analyzeCallGraph
+            // filters by methodNames), so builtins are unaffected.
+            if (bare && c.callee() instanceof Identifier bareId) {
+                out.add(bareId.name());
+            }
+            collectMethodCallsInExpr(c.callee(), out, bare);
             for (Expression arg : c.args()) {
-                collectMethodCallsInExpr(arg, out);
+                collectMethodCallsInExpr(arg, out, bare);
             }
         } else if (e instanceof BinaryExpr be) {
-            collectMethodCallsInExpr(be.left(), out);
-            collectMethodCallsInExpr(be.right(), out);
+            collectMethodCallsInExpr(be.left(), out, bare);
+            collectMethodCallsInExpr(be.right(), out, bare);
         } else if (e instanceof UnaryExpr ue) {
-            collectMethodCallsInExpr(ue.operand(), out);
+            collectMethodCallsInExpr(ue.operand(), out, bare);
         } else if (e instanceof MemberExpr me) {
-            collectMethodCallsInExpr(me.object(), out);
+            collectMethodCallsInExpr(me.object(), out, bare);
         } else if (e instanceof TernaryExpr te) {
-            collectMethodCallsInExpr(te.condition(), out);
-            collectMethodCallsInExpr(te.consequent(), out);
-            collectMethodCallsInExpr(te.alternate(), out);
+            collectMethodCallsInExpr(te.condition(), out, bare);
+            collectMethodCallsInExpr(te.consequent(), out, bare);
+            collectMethodCallsInExpr(te.alternate(), out, bare);
         } else if (e instanceof IndexAccessExpr ia) {
-            collectMethodCallsInExpr(ia.object(), out);
-            collectMethodCallsInExpr(ia.index(), out);
+            collectMethodCallsInExpr(ia.object(), out, bare);
+            collectMethodCallsInExpr(ia.index(), out, bare);
         } else if (e instanceof IncrementExpr ie) {
-            collectMethodCallsInExpr(ie.operand(), out);
+            collectMethodCallsInExpr(ie.operand(), out, bare);
         } else if (e instanceof DecrementExpr de) {
-            collectMethodCallsInExpr(de.operand(), out);
+            collectMethodCallsInExpr(de.operand(), out, bare);
         } else if (e instanceof ArrayLiteralExpr al) {
             for (Expression el : al.elements()) {
-                collectMethodCallsInExpr(el, out);
+                collectMethodCallsInExpr(el, out, bare);
             }
         }
     }

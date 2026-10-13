@@ -30,6 +30,20 @@ MAX_SOURCE_BYTES: int = 4 * 1024 * 1024
 # :func:`ast_nesting_violation`. F-213.
 MAX_SOURCE_NESTING: int = 128
 
+# Mirrors ``InputLimits.MAX_CALL_DEPTH`` (128) from
+# packages/runar-ir-schema/src/input-limits.ts (N-180). The call depth of a
+# method is 0 if it calls no contract method, else 1 + the largest call depth
+# among the contract methods it calls. Private methods are inlined at every call
+# site, so this is the inlining depth; the validator refuses a method that does
+# not reach a call cycle and sits deeper than this, naming the first such method
+# in declaration order with :func:`call_depth_message`.
+MAX_CALL_DEPTH: int = 128
+
+
+def call_depth_message(method: str) -> str:
+    """The one diagnostic every tier emits for a call chain past MAX_CALL_DEPTH."""
+    return f"call depth of method '{method}' exceeds MAX_CALL_DEPTH (limit={MAX_CALL_DEPTH})"
+
 
 class SourceSizeExceededError(Exception):
     """Raised when a source payload exceeds :data:`MAX_SOURCE_BYTES` at a

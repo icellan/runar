@@ -10,6 +10,7 @@ require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "sighash_validate"
 require_relative "reserved_names"
+require_relative "input_limits"
 
 module RunarCompiler
   module Frontend
@@ -78,8 +79,13 @@ module RunarCompiler
       ctx.validate_properties
       ctx.validate_constructor
       ctx.validate_methods
-      ctx.check_no_recursion
+      call_depth_exceeded = ctx.check_no_recursion
       ctx.check_reserved_names
+      # N-180: the Rabin-provenance and sighash passes walk the private-method
+      # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+      # refuses, so stop here.
+      return ValidationResult.new(errors: ctx.errors, warnings: ctx.warnings) if call_depth_exceeded
+
       ctx.check_rabin_pubkey_provenance
 
       # Issue #123: reject preimage-field reads / output bindings that are
@@ -398,6 +404,8 @@ module RunarCompiler
       # Recursion detection
       # -------------------------------------------------------------------
 
+      # Reports recursion and the N-180 call depth; true iff MAX_CALL_DEPTH
+      # was exceeded.
       def check_no_recursion
         call_graph = {}
         method_names = Set.new
@@ -405,22 +413,91 @@ module RunarCompiler
         @contract.methods.each do |method|
           method_names.add(method.name)
           calls = Set.new
-          collect_method_calls(method.body, calls)
+          collect_method_calls(method.body, calls, true)
           call_graph[method.name] = calls
         end
 
-        # Check for cycles using DFS
+        # N-180: one iterative pass answers, for every method, whether it
+        # reaches a cycle and how deep its call chain is, in O(methods +
+        # calls). The old per-method DFS restarted for each method (quadratic
+        # on a chain) and recursed once per link (SystemStackError at ~2000).
+        reaches_cycle, depth = analyze_call_graph(call_graph, method_names)
+
         @contract.methods.each do |method|
-          visited = Set.new
-          stack = Set.new
-          if has_cycle?(method.name, call_graph, method_names, visited, stack)
-            add_error(
-              "recursion detected: method '#{method.name}' calls itself " \
-              "directly or indirectly",
-              loc: method.source_location
-            )
+          next unless reaches_cycle[method.name]
+
+          add_error(
+            "recursion detected: method '#{method.name}' calls itself " \
+            "directly or indirectly",
+            loc: method.source_location
+          )
+        end
+
+        # N-180: private methods are inlined at every call site, so the call
+        # depth is the inlining depth. Report the first method (declaration
+        # order) past it.
+        @contract.methods.each do |method|
+          next if reaches_cycle[method.name] || depth[method.name] <= InputLimits::MAX_CALL_DEPTH
+
+          add_error(InputLimits.call_depth_message(method.name), loc: method.source_location)
+          return true
+        end
+        false
+      end
+
+      # N-180: for every method, whether it reaches a call cycle, and (when it
+      # does not) its call depth: 0 if it calls no contract method, else 1 +
+      # the largest call depth among the contract methods it calls. Iterative
+      # three-colour DFS with memoisation: O(methods + calls), no recursion.
+      # reaches_cycle matches what a fresh DFS from each method reports.
+      def analyze_call_graph(call_graph, method_names)
+        reaches_cycle = {}
+        depth = {}
+        on_stack = Set.new
+
+        @contract.methods.each do |root|
+          next if reaches_cycle.key?(root.name)
+
+          # frame: [name, callees, next, cyc, depth]
+          stack = [[root.name, (call_graph[root.name] || Set.new).to_a, 0, false, 0]]
+          on_stack.add(root.name)
+          until stack.empty?
+            top = stack.last
+            if top[2] < top[1].length
+              callee = top[1][top[2]]
+              top[2] += 1
+              next unless method_names.include?(callee)
+
+              if on_stack.include?(callee)
+                top[3] = true
+              elsif reaches_cycle.key?(callee)
+                if reaches_cycle[callee]
+                  top[3] = true
+                else
+                  top[4] = [top[4], 1 + depth[callee]].max
+                end
+              else
+                on_stack.add(callee)
+                stack << [callee, (call_graph[callee] || Set.new).to_a, 0, false, 0]
+              end
+              next
+            end
+            stack.pop
+            name, _callees, _next, cyc, d = top
+            on_stack.delete(name)
+            reaches_cycle[name] = cyc
+            depth[name] = d
+            parent = stack.last
+            next if parent.nil?
+
+            if cyc
+              parent[3] = true
+            else
+              parent[4] = [parent[4], 1 + d].max
+            end
           end
         end
+        [reaches_cycle, depth]
       end
 
       # F-286: the one diagnostic every tier emits (user decision R78).
@@ -2001,32 +2078,32 @@ module RunarCompiler
       # Recursion detection helpers
       # -------------------------------------------------------------------
 
-      def collect_method_calls(stmts, calls)
-        stmts.each { |stmt| collect_method_calls_in_stmt(stmt, calls) }
+      def collect_method_calls(stmts, calls, bare = false)
+        stmts.each { |stmt| collect_method_calls_in_stmt(stmt, calls, bare) }
       end
 
-      def collect_method_calls_in_stmt(stmt, calls)
+      def collect_method_calls_in_stmt(stmt, calls, bare = false)
         case stmt
         when ExpressionStmt
-          collect_method_calls_in_expr(stmt.expr, calls)
+          collect_method_calls_in_expr(stmt.expr, calls, bare)
         when VariableDeclStmt
-          collect_method_calls_in_expr(stmt.init, calls)
+          collect_method_calls_in_expr(stmt.init, calls, bare)
         when AssignmentStmt
-          collect_method_calls_in_expr(stmt.target, calls)
-          collect_method_calls_in_expr(stmt.value, calls)
+          collect_method_calls_in_expr(stmt.target, calls, bare)
+          collect_method_calls_in_expr(stmt.value, calls, bare)
         when IfStmt
-          collect_method_calls_in_expr(stmt.condition, calls)
-          collect_method_calls(stmt.then, calls)
-          collect_method_calls(stmt.else_, calls)
+          collect_method_calls_in_expr(stmt.condition, calls, bare)
+          collect_method_calls(stmt.then, calls, bare)
+          collect_method_calls(stmt.else_, calls, bare)
         when ForStmt
-          collect_method_calls_in_expr(stmt.condition, calls)
-          collect_method_calls(stmt.body, calls)
+          collect_method_calls_in_expr(stmt.condition, calls, bare)
+          collect_method_calls(stmt.body, calls, bare)
         when ReturnStmt
-          collect_method_calls_in_expr(stmt.value, calls) unless stmt.value.nil?
+          collect_method_calls_in_expr(stmt.value, calls, bare) unless stmt.value.nil?
         end
       end
 
-      def collect_method_calls_in_expr(expr, calls)
+      def collect_method_calls_in_expr(expr, calls, bare = false)
         return if expr.nil?
 
         case expr
@@ -2039,46 +2116,35 @@ module RunarCompiler
               calls.add(expr.callee.property)
             end
           end
-          collect_method_calls_in_expr(expr.callee, calls)
-          expr.args.each { |arg| collect_method_calls_in_expr(arg, calls) }
+          # N-180: the Solidity, Move and Java surfaces may call a helper as a
+          # bare `m(...)`. Counted only for the recursion / call-depth graph
+          # (bare), and only names of contract methods count there
+          # (analyze_call_graph filters by method_names), so builtins are
+          # unaffected.
+          calls.add(expr.callee.name) if bare && expr.callee.is_a?(Identifier)
+          collect_method_calls_in_expr(expr.callee, calls, bare)
+          expr.args.each { |arg| collect_method_calls_in_expr(arg, calls, bare) }
         when BinaryExpr
-          collect_method_calls_in_expr(expr.left, calls)
-          collect_method_calls_in_expr(expr.right, calls)
+          collect_method_calls_in_expr(expr.left, calls, bare)
+          collect_method_calls_in_expr(expr.right, calls, bare)
         when UnaryExpr
-          collect_method_calls_in_expr(expr.operand, calls)
+          collect_method_calls_in_expr(expr.operand, calls, bare)
         when MemberExpr
-          collect_method_calls_in_expr(expr.object, calls)
+          collect_method_calls_in_expr(expr.object, calls, bare)
         when TernaryExpr
-          collect_method_calls_in_expr(expr.condition, calls)
-          collect_method_calls_in_expr(expr.consequent, calls)
-          collect_method_calls_in_expr(expr.alternate, calls)
+          collect_method_calls_in_expr(expr.condition, calls, bare)
+          collect_method_calls_in_expr(expr.consequent, calls, bare)
+          collect_method_calls_in_expr(expr.alternate, calls, bare)
         when IndexAccessExpr
-          collect_method_calls_in_expr(expr.object, calls)
-          collect_method_calls_in_expr(expr.index, calls)
+          collect_method_calls_in_expr(expr.object, calls, bare)
+          collect_method_calls_in_expr(expr.index, calls, bare)
         when IncrementExpr
-          collect_method_calls_in_expr(expr.operand, calls)
+          collect_method_calls_in_expr(expr.operand, calls, bare)
         when DecrementExpr
-          collect_method_calls_in_expr(expr.operand, calls)
+          collect_method_calls_in_expr(expr.operand, calls, bare)
         when ArrayLiteralExpr
-          expr.elements.each { |el| collect_method_calls_in_expr(el, calls) }
+          expr.elements.each { |el| collect_method_calls_in_expr(el, calls, bare) }
         end
-      end
-
-      def has_cycle?(name, call_graph, method_names, visited, stack)
-        return true if stack.include?(name)
-        return false if visited.include?(name)
-
-        visited.add(name)
-        stack.add(name)
-
-        (call_graph[name] || Set.new).each do |callee|
-          if method_names.include?(callee)
-            return true if has_cycle?(callee, call_graph, method_names, visited, stack)
-          end
-        end
-
-        stack.delete(name)
-        false
       end
     end
   end

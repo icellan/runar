@@ -27,6 +27,20 @@ pub const SOURCE_NESTING_MESSAGE = std.fmt.comptimePrint(
     .{MAX_SOURCE_NESTING},
 );
 
+/// Mirrors `InputLimits.MAX_CALL_DEPTH` (128) from
+/// packages/runar-ir-schema/src/input-limits.ts (N-180). The call depth of a
+/// method is 0 if it calls no contract method, else 1 + the largest call depth
+/// among the contract methods it calls. Private methods are inlined at every
+/// call site, so this is the inlining depth; the validator refuses a method
+/// that does not reach a call cycle and sits deeper than this, naming the first
+/// such method in declaration order with `CALL_DEPTH_MESSAGE_FMT`.
+pub const MAX_CALL_DEPTH: usize = 128;
+
+/// The one diagnostic every tier emits for a call chain past MAX_CALL_DEPTH
+/// (format string; the one argument is the method name).
+pub const CALL_DEPTH_MESSAGE_FMT = "call depth of method '{s}' exceeds MAX_CALL_DEPTH (limit=" ++
+    std.fmt.comptimePrint("{d}", .{MAX_CALL_DEPTH}) ++ ")";
+
 /// Typed error set for source-size rejection. Distinct from generic
 /// ParseFailed so callers can distinguish DoS-bound rejection.
 pub const SourceSizeError = error{SourceSizeExceeded};

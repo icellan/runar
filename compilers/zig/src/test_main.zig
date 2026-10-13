@@ -40,6 +40,7 @@ test {
     _ = @import("tests/f203_py_bytes_escape.zig");
     _ = @import("tests/java_parenthesised_expression.zig");
     _ = @import("tests/f213_source_nesting_limit.zig");
+    _ = @import("tests/n180_call_depth_limit.zig");
     _ = @import("tests/f026_int_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");
     _ = @import("tests/n004_ruby_stray_tokens.zig");

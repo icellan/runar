@@ -23,6 +23,23 @@ pub const MAX_SOURCE_NESTING: usize = 128;
 pub const SOURCE_NESTING_MESSAGE: &str =
     "source nesting depth exceeds MAX_SOURCE_NESTING (limit=128)";
 
+/// Mirrors `InputLimits.MAX_CALL_DEPTH` (128) from
+/// `packages/runar-ir-schema/src/input-limits.ts` (N-180). The call depth of a
+/// method is 0 if it calls no contract method, else 1 + the largest call depth
+/// among the contract methods it calls. Private methods are inlined at every
+/// call site, so this is the inlining depth; the validator refuses a method
+/// that does not reach a call cycle and sits deeper than this, naming the first
+/// such method in declaration order with [`call_depth_message`].
+pub const MAX_CALL_DEPTH: usize = 128;
+
+/// The one diagnostic every tier emits for a call chain past [`MAX_CALL_DEPTH`].
+pub fn call_depth_message(method: &str) -> String {
+    format!(
+        "call depth of method '{}' exceeds MAX_CALL_DEPTH (limit={})",
+        method, MAX_CALL_DEPTH
+    )
+}
+
 /// Returned when a source payload exceeds [`MAX_SOURCE_BYTES`] at a public
 /// parser entry point. Distinct typed error so callers can distinguish
 /// DoS-bound rejection from generic syntax errors.

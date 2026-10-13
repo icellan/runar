@@ -17,6 +17,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { validateSighashUsage } from './sighash-validate.js';
 import { isReservedSourceName } from './reserved-names.js';
+import { InputLimits } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -44,8 +45,12 @@ export function validate(contract: ContractNode): ValidationResult {
   validateProperties(ctx);
   validateConstructor(ctx);
   validateMethods(ctx);
-  checkNoRecursion(ctx);
+  const callDepthExceeded = checkNoRecursion(ctx);
   checkReservedNames(ctx);
+  // N-180: the Rabin-provenance and sighash passes walk the private-method
+  // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+  // refuses, so stop here.
+  if (callDepthExceeded) return { errors, warnings };
   checkRabinPubKeyProvenance(ctx);
 
   // Issue #123: reject preimage-field reads / output bindings that are unsound
@@ -1667,7 +1672,8 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
 // Recursion detection
 // ---------------------------------------------------------------------------
 
-function checkNoRecursion(ctx: ValidationContext): void {
+/** Reports recursion and N-180 call depth; true iff MAX_CALL_DEPTH was exceeded. */
+function checkNoRecursion(ctx: ValidationContext): boolean {
   // Build call graph: method name -> set of methods it calls
   const callGraph = new Map<string, Set<string>>();
   const methodNames = new Set<string>();
@@ -1675,23 +1681,25 @@ function checkNoRecursion(ctx: ValidationContext): void {
   for (const method of ctx.contract.methods) {
     methodNames.add(method.name);
     const calls = new Set<string>();
-    collectMethodCalls(method.body, calls);
+    collectMethodCalls(method.body, calls, true);
     callGraph.set(method.name, calls);
   }
 
   // Also add constructor
   {
     const calls = new Set<string>();
-    collectMethodCalls(ctx.contract.constructor.body, calls);
+    collectMethodCalls(ctx.contract.constructor.body, calls, true);
     callGraph.set('constructor', calls);
   }
 
-  // Check for cycles using DFS
-  for (const method of ctx.contract.methods) {
-    const visited = new Set<string>();
-    const stack = new Set<string>();
+  // N-180: one iterative pass over the call graph answers both questions for
+  // every method — does it reach a cycle, and how deep is its call chain — in
+  // O(methods + calls). The old per-method DFS restarted from scratch for each
+  // method (quadratic on a chain) and recursed once per link.
+  const { reachesCycle, depth } = analyzeCallGraph(callGraph, methodNames);
 
-    if (hasCycle(method.name, callGraph, methodNames, visited, stack)) {
+  for (const method of ctx.contract.methods) {
+    if (reachesCycle.get(method.name)) {
       ctx.errors.push(makeDiagnostic(
         `Recursion detected: method '${method.name}' calls itself directly or indirectly. Recursion is not allowed in Rúnar contracts.`,
         'error',
@@ -1699,43 +1707,111 @@ function checkNoRecursion(ctx: ValidationContext): void {
       ));
     }
   }
+
+  // N-180: private methods are inlined at every call site, so the call depth is
+  // the inlining depth. Report the first method (declaration order) past it.
+  for (const method of ctx.contract.methods) {
+    if (!reachesCycle.get(method.name) && (depth.get(method.name) ?? 0) > InputLimits.MAX_CALL_DEPTH) {
+      ctx.errors.push(makeDiagnostic(
+        `call depth of method '${method.name}' exceeds MAX_CALL_DEPTH (limit=${InputLimits.MAX_CALL_DEPTH})`,
+        'error',
+        method.sourceLocation,
+      ));
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * N-180: for every method in `methodNames`, whether it reaches a call cycle,
+ * and (when it does not) its call depth: 0 if it calls no contract method, else
+ * 1 + the largest call depth among the contract methods it calls. Iterative
+ * three-colour DFS with memoisation, so O(methods + calls) and no host
+ * recursion. `reachesCycle` matches what a fresh DFS from each method reports.
+ */
+function analyzeCallGraph(
+  callGraph: Map<string, Set<string>>,
+  methodNames: Set<string>,
+): { reachesCycle: Map<string, boolean>; depth: Map<string, number> } {
+  const reachesCycle = new Map<string, boolean>();
+  const depth = new Map<string, number>();
+  const onStack = new Set<string>();
+
+  for (const root of methodNames) {
+    if (reachesCycle.has(root)) continue;
+    const stack: Array<{ name: string; callees: string[]; next: number; cyc: boolean; depth: number }> = [];
+    const push = (name: string) => {
+      onStack.add(name);
+      stack.push({ name, callees: [...(callGraph.get(name) ?? [])], next: 0, cyc: false, depth: 0 });
+    };
+    push(root);
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.next < top.callees.length) {
+        const callee = top.callees[top.next++]!;
+        if (!methodNames.has(callee)) continue;
+        if (onStack.has(callee)) {
+          top.cyc = true;
+        } else if (reachesCycle.has(callee)) {
+          if (reachesCycle.get(callee)) top.cyc = true;
+          else top.depth = Math.max(top.depth, 1 + depth.get(callee)!);
+        } else {
+          push(callee);
+        }
+        continue;
+      }
+      stack.pop();
+      onStack.delete(top.name);
+      reachesCycle.set(top.name, top.cyc);
+      depth.set(top.name, top.depth);
+      const parent = stack[stack.length - 1];
+      if (parent) {
+        if (top.cyc) parent.cyc = true;
+        else parent.depth = Math.max(parent.depth, 1 + top.depth);
+      }
+    }
+  }
+  return { reachesCycle, depth };
 }
 
 function collectMethodCalls(
   stmts: Statement[],
   calls: Set<string>,
+  bareCalls = false,
 ): void {
   for (const stmt of stmts) {
-    collectMethodCallsInStatement(stmt, calls);
+    collectMethodCallsInStatement(stmt, calls, bareCalls);
   }
 }
 
 function collectMethodCallsInStatement(
   stmt: Statement,
   calls: Set<string>,
+  bareCalls = false,
 ): void {
   switch (stmt.kind) {
     case 'expression_statement':
-      collectMethodCallsInExpr(stmt.expression, calls);
+      collectMethodCallsInExpr(stmt.expression, calls, bareCalls);
       break;
     case 'variable_decl':
-      collectMethodCallsInExpr(stmt.init, calls);
+      collectMethodCallsInExpr(stmt.init, calls, bareCalls);
       break;
     case 'assignment':
-      collectMethodCallsInExpr(stmt.target, calls);
-      collectMethodCallsInExpr(stmt.value, calls);
+      collectMethodCallsInExpr(stmt.target, calls, bareCalls);
+      collectMethodCallsInExpr(stmt.value, calls, bareCalls);
       break;
     case 'if_statement':
-      collectMethodCallsInExpr(stmt.condition, calls);
-      collectMethodCalls(stmt.then, calls);
-      if (stmt.else) collectMethodCalls(stmt.else, calls);
+      collectMethodCallsInExpr(stmt.condition, calls, bareCalls);
+      collectMethodCalls(stmt.then, calls, bareCalls);
+      if (stmt.else) collectMethodCalls(stmt.else, calls, bareCalls);
       break;
     case 'for_statement':
-      collectMethodCallsInExpr(stmt.condition, calls);
-      collectMethodCalls(stmt.body, calls);
+      collectMethodCallsInExpr(stmt.condition, calls, bareCalls);
+      collectMethodCalls(stmt.body, calls, bareCalls);
       break;
     case 'return_statement':
-      if (stmt.value) collectMethodCallsInExpr(stmt.value, calls);
+      if (stmt.value) collectMethodCallsInExpr(stmt.value, calls, bareCalls);
       break;
   }
 }
@@ -1743,6 +1819,7 @@ function collectMethodCallsInStatement(
 function collectMethodCallsInExpr(
   expr: Expression,
   calls: Set<string>,
+  bareCalls = false,
 ): void {
   switch (expr.kind) {
     case 'call_expr':
@@ -1756,69 +1833,48 @@ function collectMethodCallsInExpr(
           expr.callee.object.name === 'this') {
         calls.add(expr.callee.property);
       }
-      collectMethodCallsInExpr(expr.callee, calls);
+      // N-180: the Solidity, Move and Java surfaces call a helper as a bare
+      // `m(...)`. Counted only for the recursion / call-depth graph
+      // (`bareCalls`), and only names of contract methods count there
+      // (analyzeCallGraph filters by methodNames), so builtins are unaffected.
+      if (bareCalls && expr.callee.kind === 'identifier') {
+        calls.add(expr.callee.name);
+      }
+      collectMethodCallsInExpr(expr.callee, calls, bareCalls);
       for (const arg of expr.args) {
-        collectMethodCallsInExpr(arg, calls);
+        collectMethodCallsInExpr(arg, calls, bareCalls);
       }
       break;
     case 'binary_expr':
-      collectMethodCallsInExpr(expr.left, calls);
-      collectMethodCallsInExpr(expr.right, calls);
+      collectMethodCallsInExpr(expr.left, calls, bareCalls);
+      collectMethodCallsInExpr(expr.right, calls, bareCalls);
       break;
     case 'unary_expr':
-      collectMethodCallsInExpr(expr.operand, calls);
+      collectMethodCallsInExpr(expr.operand, calls, bareCalls);
       break;
     case 'member_expr':
-      collectMethodCallsInExpr(expr.object, calls);
+      collectMethodCallsInExpr(expr.object, calls, bareCalls);
       break;
     case 'ternary_expr':
-      collectMethodCallsInExpr(expr.condition, calls);
-      collectMethodCallsInExpr(expr.consequent, calls);
-      collectMethodCallsInExpr(expr.alternate, calls);
+      collectMethodCallsInExpr(expr.condition, calls, bareCalls);
+      collectMethodCallsInExpr(expr.consequent, calls, bareCalls);
+      collectMethodCallsInExpr(expr.alternate, calls, bareCalls);
       break;
     case 'index_access':
-      collectMethodCallsInExpr(expr.object, calls);
-      collectMethodCallsInExpr(expr.index, calls);
+      collectMethodCallsInExpr(expr.object, calls, bareCalls);
+      collectMethodCallsInExpr(expr.index, calls, bareCalls);
       break;
     case 'increment_expr':
     case 'decrement_expr':
-      collectMethodCallsInExpr(expr.operand, calls);
+      collectMethodCallsInExpr(expr.operand, calls, bareCalls);
       break;
     case 'array_literal':
-      for (const el of expr.elements) collectMethodCallsInExpr(el, calls);
+      for (const el of expr.elements) collectMethodCallsInExpr(el, calls, bareCalls);
       break;
     default:
       // Leaf nodes
       break;
   }
-}
-
-function hasCycle(
-  methodName: string,
-  callGraph: Map<string, Set<string>>,
-  methodNames: Set<string>,
-  visited: Set<string>,
-  stack: Set<string>,
-): boolean {
-  if (stack.has(methodName)) return true;
-  if (visited.has(methodName)) return false;
-
-  visited.add(methodName);
-  stack.add(methodName);
-
-  const calls = callGraph.get(methodName);
-  if (calls) {
-    for (const callee of calls) {
-      if (methodNames.has(callee)) {
-        if (hasCycle(callee, callGraph, methodNames, visited, stack)) {
-          return true;
-        }
-      }
-    }
-  }
-
-  stack.delete(methodName);
-  return false;
 }
 
 // ---------------------------------------------------------------------------

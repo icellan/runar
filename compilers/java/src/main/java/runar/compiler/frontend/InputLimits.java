@@ -29,6 +29,23 @@ public final class InputLimits {
     public static final int MAX_SOURCE_NESTING = 128;
 
     /**
+     * Mirrors {@code InputLimits.MAX_CALL_DEPTH} (128) from
+     * {@code packages/runar-ir-schema/src/input-limits.ts} (N-180). The call
+     * depth of a method is 0 if it calls no contract method, else 1 + the
+     * largest call depth among the contract methods it calls. Private methods
+     * are inlined at every call site, so this is the inlining depth; the
+     * validator refuses a method that does not reach a call cycle and sits
+     * deeper than this, naming the first such method in declaration order with
+     * {@link #callDepthMessage}.
+     */
+    public static final int MAX_CALL_DEPTH = 128;
+
+    /** The one diagnostic every tier emits for a call chain past {@link #MAX_CALL_DEPTH}. */
+    public static String callDepthMessage(String method) {
+        return "call depth of method '" + method + "' exceeds MAX_CALL_DEPTH (limit=" + MAX_CALL_DEPTH + ")";
+    }
+
+    /**
      * Thrown when a source payload exceeds {@link #MAX_SOURCE_BYTES} at a
      * public parser entry point. Distinct typed exception so callers can
      * distinguish DoS-bound rejection from generic syntax errors.

@@ -22,6 +22,21 @@ const MaxSourceNesting = 128
 // over-nested source (byte-identical across tiers).
 const SourceNestingMessage = "source nesting depth exceeds MAX_SOURCE_NESTING (limit=128)"
 
+// MaxCallDepth mirrors InputLimits.MAX_CALL_DEPTH (128) from
+// packages/runar-ir-schema/src/input-limits.ts (N-180). The call depth of a
+// method is 0 if it calls no contract method, else 1 + the largest call depth
+// among the contract methods it calls. Private methods are inlined at every
+// call site, so this is the inlining depth; Validate refuses a method that
+// does not reach a call cycle and sits deeper than this, naming the first such
+// method in declaration order with CallDepthMessage.
+const MaxCallDepth = 128
+
+// CallDepthMessage is the one diagnostic every tier emits for a call chain
+// past MaxCallDepth (byte-identical across tiers).
+func CallDepthMessage(method string) string {
+	return fmt.Sprintf("call depth of method '%s' exceeds MAX_CALL_DEPTH (limit=%d)", method, MaxCallDepth)
+}
+
 // SourceSizeExceededError is returned when a source payload exceeds
 // MaxSourceBytes at a public parser entry point. Distinct typed error so
 // callers can distinguish DoS-bound rejection from generic syntax errors.

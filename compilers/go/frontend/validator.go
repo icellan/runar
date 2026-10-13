@@ -51,8 +51,14 @@ func Validate(contract *ContractNode) *ValidationResult {
 	ctx.validateProperties()
 	ctx.validateConstructor()
 	ctx.validateMethods()
-	ctx.checkNoRecursion()
+	callDepthExceeded := ctx.checkNoRecursion()
 	ctx.checkReservedNames()
+	// N-180: the Rabin-provenance and sighash passes walk the private-method
+	// call graph; past MaxCallDepth that walk is the very depth the limit
+	// refuses, so stop here.
+	if callDepthExceeded {
+		return &ValidationResult{Errors: ctx.errors, Warnings: ctx.warnings}
+	}
 	ctx.checkRabinPubKeyProvenance()
 
 	// Issue #123: reject preimage-field reads / output bindings that are
@@ -1691,7 +1697,7 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 		// Follow calls into private helpers so a guard (or locktime read) supplied
 		// by an inlined helper is seen by the public entry point.
 		calls := make(map[string]bool)
-		collectMethodCalls(current.Body, calls)
+		collectMethodCalls(current.Body, calls, false)
 		for callee := range calls {
 			if visited[callee] {
 				continue
@@ -2268,57 +2274,141 @@ func walkRabinBodyDeep(stmts []Statement, fallback SourceLocation, visitor func(
 // Recursion detection
 // ---------------------------------------------------------------------------
 
-func (ctx *validationContext) checkNoRecursion() {
+// checkNoRecursion reports recursion and the N-180 call depth; it returns true
+// iff MaxCallDepth was exceeded.
+func (ctx *validationContext) checkNoRecursion() bool {
 	callGraph := make(map[string]map[string]bool)
 	methodNames := make(map[string]bool)
 
 	for _, method := range ctx.contract.Methods {
 		methodNames[method.Name] = true
 		calls := make(map[string]bool)
-		collectMethodCalls(method.Body, calls)
+		collectMethodCalls(method.Body, calls, true)
 		callGraph[method.Name] = calls
 	}
 
-	// Check for cycles using DFS
+	// N-180: one iterative pass answers, for every method, whether it reaches
+	// a cycle and how deep its call chain is, in O(methods + calls). The old
+	// per-method DFS restarted for each method (quadratic on a chain).
+	reachesCycle, depth := analyzeCallGraph(ctx.contract.Methods, callGraph, methodNames)
+
 	for _, method := range ctx.contract.Methods {
-		visited := make(map[string]bool)
-		stack := make(map[string]bool)
-		if hasCycle(method.Name, callGraph, methodNames, visited, stack) {
+		if reachesCycle[method.Name] {
 			ctx.addErrorWithLoc(fmt.Sprintf("recursion detected: method '%s' calls itself directly or indirectly", method.Name), &method.SourceLocation)
 		}
 	}
+
+	// N-180: private methods are inlined at every call site, so the call depth
+	// is the inlining depth. Report the first method (declaration order) past it.
+	for _, method := range ctx.contract.Methods {
+		if !reachesCycle[method.Name] && depth[method.Name] > MaxCallDepth {
+			ctx.addErrorWithLoc(CallDepthMessage(method.Name), &method.SourceLocation)
+			return true
+		}
+	}
+	return false
 }
 
-func collectMethodCalls(stmts []Statement, calls map[string]bool) {
+// analyzeCallGraph (N-180) returns, for every method, whether it reaches a
+// call cycle, and (when it does not) its call depth: 0 if it calls no contract
+// method, else 1 + the largest call depth among the contract methods it calls.
+// Iterative three-colour DFS with memoisation: O(methods + calls), no
+// recursion. reachesCycle matches what a fresh DFS from each method reports.
+func analyzeCallGraph(methods []MethodNode, callGraph map[string]map[string]bool, methodNames map[string]bool) (map[string]bool, map[string]int) {
+	type frame struct {
+		name    string
+		callees []string
+		next    int
+		cyc     bool
+		depth   int
+	}
+	reachesCycle := make(map[string]bool, len(methodNames))
+	depth := make(map[string]int, len(methodNames))
+	done := make(map[string]bool, len(methodNames))
+	onStack := make(map[string]bool)
+
+	for _, root := range methods {
+		if done[root.Name] {
+			continue
+		}
+		var stack []*frame
+		push := func(name string) {
+			onStack[name] = true
+			callees := make([]string, 0, len(callGraph[name]))
+			for c := range callGraph[name] {
+				callees = append(callees, c)
+			}
+			stack = append(stack, &frame{name: name, callees: callees})
+		}
+		push(root.Name)
+		for len(stack) > 0 {
+			top := stack[len(stack)-1]
+			if top.next < len(top.callees) {
+				callee := top.callees[top.next]
+				top.next++
+				switch {
+				case !methodNames[callee]:
+				case onStack[callee]:
+					top.cyc = true
+				case done[callee]:
+					if reachesCycle[callee] {
+						top.cyc = true
+					} else if d := 1 + depth[callee]; d > top.depth {
+						top.depth = d
+					}
+				default:
+					push(callee)
+				}
+				continue
+			}
+			stack = stack[:len(stack)-1]
+			delete(onStack, top.name)
+			done[top.name] = true
+			reachesCycle[top.name] = top.cyc
+			depth[top.name] = top.depth
+			if len(stack) > 0 {
+				parent := stack[len(stack)-1]
+				if top.cyc {
+					parent.cyc = true
+				} else if d := 1 + top.depth; d > parent.depth {
+					parent.depth = d
+				}
+			}
+		}
+	}
+	return reachesCycle, depth
+}
+
+func collectMethodCalls(stmts []Statement, calls map[string]bool, bare bool) {
 	for _, stmt := range stmts {
-		collectMethodCallsInStmt(stmt, calls)
+		collectMethodCallsInStmt(stmt, calls, bare)
 	}
 }
 
-func collectMethodCallsInStmt(stmt Statement, calls map[string]bool) {
+func collectMethodCallsInStmt(stmt Statement, calls map[string]bool, bare bool) {
 	switch s := stmt.(type) {
 	case ExpressionStmt:
-		collectMethodCallsInExpr(s.Expr, calls)
+		collectMethodCallsInExpr(s.Expr, calls, bare)
 	case VariableDeclStmt:
-		collectMethodCallsInExpr(s.Init, calls)
+		collectMethodCallsInExpr(s.Init, calls, bare)
 	case AssignmentStmt:
-		collectMethodCallsInExpr(s.Target, calls)
-		collectMethodCallsInExpr(s.Value, calls)
+		collectMethodCallsInExpr(s.Target, calls, bare)
+		collectMethodCallsInExpr(s.Value, calls, bare)
 	case IfStmt:
-		collectMethodCallsInExpr(s.Condition, calls)
-		collectMethodCalls(s.Then, calls)
-		collectMethodCalls(s.Else, calls)
+		collectMethodCallsInExpr(s.Condition, calls, bare)
+		collectMethodCalls(s.Then, calls, bare)
+		collectMethodCalls(s.Else, calls, bare)
 	case ForStmt:
-		collectMethodCallsInExpr(s.Condition, calls)
-		collectMethodCalls(s.Body, calls)
+		collectMethodCallsInExpr(s.Condition, calls, bare)
+		collectMethodCalls(s.Body, calls, bare)
 	case ReturnStmt:
 		if s.Value != nil {
-			collectMethodCallsInExpr(s.Value, calls)
+			collectMethodCallsInExpr(s.Value, calls, bare)
 		}
 	}
 }
 
-func collectMethodCallsInExpr(expr Expression, calls map[string]bool) {
+func collectMethodCallsInExpr(expr Expression, calls map[string]bool, bare bool) {
 	switch e := expr.(type) {
 	case CallExpr:
 		if pa, ok := e.Callee.(PropertyAccessExpr); ok {
@@ -2329,53 +2419,38 @@ func collectMethodCallsInExpr(expr Expression, calls map[string]bool) {
 				calls[me.Property] = true
 			}
 		}
-		collectMethodCallsInExpr(e.Callee, calls)
+		// N-180: the Solidity, Move and Java surfaces may call a helper as a
+		// bare `m(...)`. Counted only for the recursion / call-depth graph
+		// (bare), and only names of contract methods count there
+		// (analyzeCallGraph filters by methodNames), so builtins are unaffected.
+		if id, ok := e.Callee.(Identifier); ok && bare {
+			calls[id.Name] = true
+		}
+		collectMethodCallsInExpr(e.Callee, calls, bare)
 		for _, arg := range e.Args {
-			collectMethodCallsInExpr(arg, calls)
+			collectMethodCallsInExpr(arg, calls, bare)
 		}
 	case BinaryExpr:
-		collectMethodCallsInExpr(e.Left, calls)
-		collectMethodCallsInExpr(e.Right, calls)
+		collectMethodCallsInExpr(e.Left, calls, bare)
+		collectMethodCallsInExpr(e.Right, calls, bare)
 	case UnaryExpr:
-		collectMethodCallsInExpr(e.Operand, calls)
+		collectMethodCallsInExpr(e.Operand, calls, bare)
 	case MemberExpr:
-		collectMethodCallsInExpr(e.Object, calls)
+		collectMethodCallsInExpr(e.Object, calls, bare)
 	case TernaryExpr:
-		collectMethodCallsInExpr(e.Condition, calls)
-		collectMethodCallsInExpr(e.Consequent, calls)
-		collectMethodCallsInExpr(e.Alternate, calls)
+		collectMethodCallsInExpr(e.Condition, calls, bare)
+		collectMethodCallsInExpr(e.Consequent, calls, bare)
+		collectMethodCallsInExpr(e.Alternate, calls, bare)
 	case IndexAccessExpr:
-		collectMethodCallsInExpr(e.Object, calls)
-		collectMethodCallsInExpr(e.Index, calls)
+		collectMethodCallsInExpr(e.Object, calls, bare)
+		collectMethodCallsInExpr(e.Index, calls, bare)
 	case IncrementExpr:
-		collectMethodCallsInExpr(e.Operand, calls)
+		collectMethodCallsInExpr(e.Operand, calls, bare)
 	case DecrementExpr:
-		collectMethodCallsInExpr(e.Operand, calls)
+		collectMethodCallsInExpr(e.Operand, calls, bare)
 	case ArrayLiteralExpr:
 		for _, el := range e.Elements {
-			collectMethodCallsInExpr(el, calls)
+			collectMethodCallsInExpr(el, calls, bare)
 		}
 	}
-}
-
-func hasCycle(name string, callGraph map[string]map[string]bool, methodNames map[string]bool, visited, stack map[string]bool) bool {
-	if stack[name] {
-		return true
-	}
-	if visited[name] {
-		return false
-	}
-	visited[name] = true
-	stack[name] = true
-
-	for callee := range callGraph[name] {
-		if methodNames[callee] {
-			if hasCycle(callee, callGraph, methodNames, visited, stack) {
-				return true
-			}
-		}
-	}
-
-	delete(stack, name)
-	return false
 }

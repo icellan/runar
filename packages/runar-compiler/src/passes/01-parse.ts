@@ -2012,16 +2012,48 @@ function reportUnterminatedLiterals(
 }
 
 function locFromNode(node: Node, file: string): SourceLocation {
-  const start = node.getStartLineNumber();
   const pos = node.getStart();
-  const sourceFile = node.getSourceFile();
-  const lineAndCol = sourceFile.getLineAndColumnAtPos(pos);
-
+  const breaks = lineBreaksOf(node.getSourceFile().getFullText());
+  // N-180: the same numbers ts-morph's getStartLineNumber() / getLineAndColumnAtPos()
+  // give (line = 1 + count of '\n' before pos; column = distance from the last
+  // '\n' or '\r' before pos), but by binary search over a per-text index —
+  // ts-morph rescans the text from offset 0 on every call, which made parsing
+  // quadratic in file size (a 20 000-method file ran past 200 s of CPU).
   return {
     file,
-    line: start,
-    column: lineAndCol.column - 1, // 0-based
+    line: 1 + countBelow(breaks.nl, pos),
+    column: pos - (breaks.any[countBelow(breaks.any, pos) - 1] ?? -1) - 1, // 0-based
   };
+}
+
+const lineBreakCache = new Map<string, { nl: number[]; any: number[] }>();
+
+/** Ascending offsets of every '\n', and of every '\n' or '\r', in `text`. */
+function lineBreaksOf(text: string): { nl: number[]; any: number[] } {
+  let hit = lineBreakCache.get(text);
+  if (!hit) {
+    hit = { nl: [], any: [] };
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 10) hit.nl.push(i);
+      if (c === 10 || c === 13) hit.any.push(i);
+    }
+    lineBreakCache.clear(); // one source at a time; never grows past one entry
+    lineBreakCache.set(text, hit);
+  }
+  return hit;
+}
+
+/** Number of entries of the ascending array `xs` that are < `pos`. */
+function countBelow(xs: number[], pos: number): number {
+  let lo = 0;
+  let hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (xs[mid]! < pos) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 // ---------------------------------------------------------------------------

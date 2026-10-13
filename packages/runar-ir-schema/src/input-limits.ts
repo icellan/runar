@@ -92,6 +92,26 @@
  *   the Rust release build on a 2 MiB thread stack (Rust's default for
  *   spawned threads, where `compile_check` may run) overflowed between 300
  *   and 400 nested parens, so 256 would leave under 1.5× margin there.
+ * - MAX_CALL_DEPTH = 128 — the bound on the method CALL GRAPH of a Rúnar
+ *   source (N-180). Private methods are inlined at every call site, so a
+ *   chain of helpers `verify -> m0 -> m1 -> … -> mN` is N+1 nested inlinings
+ *   even when every body is one flat statement that MAX_SOURCE_NESTING never
+ *   sees. Before this bound a 20,000-link chain (~1 MB, a quarter of
+ *   MAX_SOURCE_BYTES) SIGABRTed Rust at 8,000 links, segfaulted Zig at 4,000,
+ *   raised SystemStackError in Ruby at 2,000 and StackOverflowError in Java at
+ *   8,000, and ran Go past 156 s of CPU; the recursion check in every tier
+ *   restarted its DFS from each method (quadratic) and recursed once per
+ *   link. The measure: the call depth of a method is 0 if it calls no
+ *   contract method, else 1 + the largest call depth among the contract
+ *   methods it calls; a source is refused, with the one diagnostic
+ *   `call depth of method '<m>' exceeds MAX_CALL_DEPTH (limit=128)` naming the
+ *   first method in declaration order past the bound, when any method that
+ *   does not reach a call cycle (a cycle is the recursion diagnostic instead)
+ *   has a call depth above this bound. Headroom: the deepest call depth over
+ *   all 1,174 parseable git-tracked `*.runar.*` sources is 2 (tic-tac-toe),
+ *   so 64× headroom. Ceiling: the Rust release CLI under a 2 MiB stack
+ *   (`ulimit -s 2048`, the Rust spawned-thread default) compiles a 1,000-link
+ *   chain, so 128 keeps ~8× margin in the most stack-hungry tier.
  */
 export const InputLimits = {
   MAX_IR_BYTES: 16 * 1024 * 1024,       // 16 MiB — uncompressed ANF IR JSON
@@ -112,6 +132,9 @@ export const InputLimits = {
   MAX_SOURCE_NESTING: 128,               // nesting depth of a Rúnar source (F-213):
                                          // parse nesting (A) and AST nesting (B),
                                          // both enforced in all 7 tiers
+  MAX_CALL_DEPTH: 128,                   // longest private-method call chain of a
+                                         // Rúnar source (N-180), enforced by the
+                                         // validator in all 7 tiers
 } as const;
 
 export type InputLimitsKey = keyof typeof InputLimits;

@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::ast::*;
 use super::diagnostic::Diagnostic;
+use super::input_limits::{call_depth_message, MAX_CALL_DEPTH};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -37,8 +38,14 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     validate_properties(contract, &mut errors, &mut warnings);
     validate_constructor(contract, &mut errors);
     validate_methods(contract, &mut errors, &mut warnings);
-    check_no_recursion(contract, &mut errors);
+    let call_depth_exceeded = check_no_recursion(contract, &mut errors);
     check_reserved_names(contract, &mut errors);
+    // N-180: the Rabin-provenance and sighash passes walk the private-method
+    // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+    // refuses, so stop here.
+    if call_depth_exceeded {
+        return ValidationResult { errors, warnings };
+    }
     check_rabin_pubkey_provenance(contract, &mut errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
@@ -1717,7 +1724,9 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
 // Recursion detection
 // ---------------------------------------------------------------------------
 
-fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+/// Reports recursion and the N-180 call depth; returns true iff
+/// `MAX_CALL_DEPTH` was exceeded.
+fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<Diagnostic>) -> bool {
     // Build call graph: method name -> set of methods it calls
     let mut call_graph: HashMap<String, HashSet<String>> = HashMap::new();
     let mut method_names: HashSet<String> = HashSet::new();
@@ -1725,54 +1734,137 @@ fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     for method in &contract.methods {
         method_names.insert(method.name.clone());
         let mut calls = HashSet::new();
-        collect_method_calls(&method.body, &mut calls);
+        collect_method_calls(&method.body, &mut calls, true);
         call_graph.insert(method.name.clone(), calls);
     }
 
     // Also add constructor
     {
         let mut calls = HashSet::new();
-        collect_method_calls(&contract.constructor.body, &mut calls);
+        collect_method_calls(&contract.constructor.body, &mut calls, true);
         call_graph.insert("constructor".to_string(), calls);
     }
 
-    // Check for cycles using DFS
-    for method in &contract.methods {
-        let mut visited = HashSet::new();
-        let mut stack = HashSet::new();
+    // N-180: one iterative pass answers, for every method, whether it reaches
+    // a cycle and how deep its call chain is, in O(methods + calls). The old
+    // per-method DFS restarted for each method (quadratic on a chain) and
+    // recursed once per link (a stack overflow at ~8000 links).
+    let (reaches_cycle, depth) = analyze_call_graph(contract, &call_graph, &method_names);
 
-        if has_cycle(
-            &method.name,
-            &call_graph,
-            &method_names,
-            &mut visited,
-            &mut stack,
-        ) {
+    for method in &contract.methods {
+        if reaches_cycle.get(&method.name).copied().unwrap_or(false) {
             errors.push(Diagnostic::error(format!(
                 "Recursion detected: method '{}' calls itself directly or indirectly. Recursion is not allowed in Rúnar contracts.",
                 method.name
             ), Some(method.source_location.clone())));
         }
     }
+
+    // N-180: private methods are inlined at every call site, so the call depth
+    // is the inlining depth. Report the first method (declaration order) past it.
+    for method in &contract.methods {
+        if !reaches_cycle.get(&method.name).copied().unwrap_or(false)
+            && depth.get(&method.name).copied().unwrap_or(0) > MAX_CALL_DEPTH
+        {
+            errors.push(Diagnostic::error(
+                call_depth_message(&method.name),
+                Some(method.source_location.clone()),
+            ));
+            return true;
+        }
+    }
+    false
 }
 
-fn collect_method_calls(stmts: &[Statement], calls: &mut HashSet<String>) {
+/// N-180: for every method, whether it reaches a call cycle, and (when it does
+/// not) its call depth: 0 if it calls no contract method, else 1 + the largest
+/// call depth among the contract methods it calls. Iterative three-colour DFS
+/// with memoisation: O(methods + calls), no recursion. `reaches_cycle` matches
+/// what a fresh DFS from each method reports.
+fn analyze_call_graph(
+    contract: &ContractNode,
+    call_graph: &HashMap<String, HashSet<String>>,
+    method_names: &HashSet<String>,
+) -> (HashMap<String, bool>, HashMap<String, usize>) {
+    struct Frame<'a> {
+        name: &'a str,
+        callees: Vec<&'a str>,
+        next: usize,
+        cyc: bool,
+        depth: usize,
+    }
+    let mut reaches_cycle: HashMap<String, bool> = HashMap::new();
+    let mut depth: HashMap<String, usize> = HashMap::new();
+    let mut on_stack: HashSet<&str> = HashSet::new();
+
+    for root in &contract.methods {
+        if reaches_cycle.contains_key(&root.name) {
+            continue;
+        }
+        let mut stack: Vec<Frame> = Vec::new();
+        let callees_of = |name: &str| -> Vec<&str> {
+            call_graph
+                .get(name)
+                .map(|c| c.iter().map(|s| s.as_str()).collect())
+                .unwrap_or_default()
+        };
+        on_stack.insert(root.name.as_str());
+        stack.push(Frame { name: root.name.as_str(), callees: callees_of(&root.name), next: 0, cyc: false, depth: 0 });
+        while let Some(top) = stack.last_mut() {
+            if top.next < top.callees.len() {
+                let callee = top.callees[top.next];
+                top.next += 1;
+                if !method_names.contains(callee) {
+                    continue;
+                }
+                if on_stack.contains(callee) {
+                    top.cyc = true;
+                } else if let Some(&cyc) = reaches_cycle.get(callee) {
+                    if cyc {
+                        top.cyc = true;
+                    } else {
+                        top.depth = top.depth.max(1 + depth[callee]);
+                    }
+                } else {
+                    on_stack.insert(callee);
+                    let callees = callees_of(callee);
+                    stack.push(Frame { name: callee, callees, next: 0, cyc: false, depth: 0 });
+                }
+                continue;
+            }
+            let done = stack.pop().expect("non-empty");
+            on_stack.remove(done.name);
+            reaches_cycle.insert(done.name.to_string(), done.cyc);
+            depth.insert(done.name.to_string(), done.depth);
+            if let Some(parent) = stack.last_mut() {
+                if done.cyc {
+                    parent.cyc = true;
+                } else {
+                    parent.depth = parent.depth.max(1 + done.depth);
+                }
+            }
+        }
+    }
+    (reaches_cycle, depth)
+}
+
+fn collect_method_calls(stmts: &[Statement], calls: &mut HashSet<String>, bare: bool) {
     for stmt in stmts {
-        collect_method_calls_in_statement(stmt, calls);
+        collect_method_calls_in_statement(stmt, calls, bare);
     }
 }
 
-fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<String>) {
+fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<String>, bare: bool) {
     match stmt {
         Statement::ExpressionStatement { expression, .. } => {
-            collect_method_calls_in_expr(expression, calls);
+            collect_method_calls_in_expr(expression, calls, bare);
         }
         Statement::VariableDecl { init, .. } => {
-            collect_method_calls_in_expr(init, calls);
+            collect_method_calls_in_expr(init, calls, bare);
         }
         Statement::Assignment { target, value, .. } => {
-            collect_method_calls_in_expr(target, calls);
-            collect_method_calls_in_expr(value, calls);
+            collect_method_calls_in_expr(target, calls, bare);
+            collect_method_calls_in_expr(value, calls, bare);
         }
         Statement::IfStatement {
             condition,
@@ -1780,27 +1872,27 @@ fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<Strin
             else_branch,
             ..
         } => {
-            collect_method_calls_in_expr(condition, calls);
-            collect_method_calls(then_branch, calls);
+            collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls(then_branch, calls, bare);
             if let Some(else_stmts) = else_branch {
-                collect_method_calls(else_stmts, calls);
+                collect_method_calls(else_stmts, calls, bare);
             }
         }
         Statement::ForStatement {
             condition, body, ..
         } => {
-            collect_method_calls_in_expr(condition, calls);
-            collect_method_calls(body, calls);
+            collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls(body, calls, bare);
         }
         Statement::ReturnStatement { value, .. } => {
             if let Some(v) = value {
-                collect_method_calls_in_expr(v, calls);
+                collect_method_calls_in_expr(v, calls, bare);
             }
         }
     }
 }
 
-fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>) {
+fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>, bare: bool) {
     match expr {
         Expression::CallExpr { callee, args, .. } => {
             // Check if callee is `this.methodName` (PropertyAccess variant)
@@ -1815,40 +1907,50 @@ fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>) 
                     }
                 }
             }
-            collect_method_calls_in_expr(callee, calls);
+            // N-180: the Solidity, Move and Java surfaces may call a helper as
+            // a bare `m(...)`. Counted only for the recursion / call-depth
+            // graph (`bare`), and only names of contract methods count there
+            // (analyze_call_graph filters by method_names), so builtins are
+            // unaffected.
+            if let Expression::Identifier { name } = callee.as_ref() {
+                if bare {
+                    calls.insert(name.clone());
+                }
+            }
+            collect_method_calls_in_expr(callee, calls, bare);
             for arg in args {
-                collect_method_calls_in_expr(arg, calls);
+                collect_method_calls_in_expr(arg, calls, bare);
             }
         }
         Expression::BinaryExpr { left, right, .. } => {
-            collect_method_calls_in_expr(left, calls);
-            collect_method_calls_in_expr(right, calls);
+            collect_method_calls_in_expr(left, calls, bare);
+            collect_method_calls_in_expr(right, calls, bare);
         }
         Expression::UnaryExpr { operand, .. } => {
-            collect_method_calls_in_expr(operand, calls);
+            collect_method_calls_in_expr(operand, calls, bare);
         }
         Expression::MemberExpr { object, .. } => {
-            collect_method_calls_in_expr(object, calls);
+            collect_method_calls_in_expr(object, calls, bare);
         }
         Expression::TernaryExpr {
             condition,
             consequent,
             alternate,
         } => {
-            collect_method_calls_in_expr(condition, calls);
-            collect_method_calls_in_expr(consequent, calls);
-            collect_method_calls_in_expr(alternate, calls);
+            collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls_in_expr(consequent, calls, bare);
+            collect_method_calls_in_expr(alternate, calls, bare);
         }
         Expression::IndexAccess { object, index } => {
-            collect_method_calls_in_expr(object, calls);
-            collect_method_calls_in_expr(index, calls);
+            collect_method_calls_in_expr(object, calls, bare);
+            collect_method_calls_in_expr(index, calls, bare);
         }
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            collect_method_calls_in_expr(operand, calls);
+            collect_method_calls_in_expr(operand, calls, bare);
         }
         Expression::ArrayLiteral { elements } => {
             for el in elements {
-                collect_method_calls_in_expr(el, calls);
+                collect_method_calls_in_expr(el, calls, bare);
             }
         }
         // Leaf nodes
@@ -1856,36 +1958,6 @@ fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>) 
     }
 }
 
-fn has_cycle(
-    method_name: &str,
-    call_graph: &HashMap<String, HashSet<String>>,
-    method_names: &HashSet<String>,
-    visited: &mut HashSet<String>,
-    stack: &mut HashSet<String>,
-) -> bool {
-    if stack.contains(method_name) {
-        return true;
-    }
-    if visited.contains(method_name) {
-        return false;
-    }
-
-    visited.insert(method_name.to_string());
-    stack.insert(method_name.to_string());
-
-    if let Some(calls) = call_graph.get(method_name) {
-        for callee in calls {
-            if method_names.contains(callee) {
-                if has_cycle(callee, call_graph, method_names, visited, stack) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    stack.remove(method_name);
-    false
-}
 
 // ---------------------------------------------------------------------------
 // V24, V25: Warn about manual use of checkPreimage / getStateScript in
@@ -2046,7 +2118,7 @@ fn warn_locktime_without_sequence_guard(
         // supplied by an inlined helper is seen by the public entry point.
         // Reuses the shared `collect_method_calls` recursion-detection helper.
         let mut calls = HashSet::new();
-        collect_method_calls(&current.body, &mut calls);
+        collect_method_calls(&current.body, &mut calls, false);
         for callee in calls {
             if !visited.contains(&callee) {
                 if let Some(m) = private_methods.get(callee.as_str()) {

@@ -17,6 +17,7 @@ const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_validate = @import("sighash_validate.zig");
 const reserved_names = @import("reserved_names.zig");
+const input_limits = @import("../frontend/input_limits.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -72,8 +73,17 @@ fn validateWithMode(
     try validateProperties(allocator, contract, &errors, &warnings);
     try validateConstructor(allocator, contract, mode, &errors);
     try validateMethods(allocator, contract, &errors, &warnings);
-    try checkNoRecursion(allocator, contract, &errors);
+    const call_depth_exceeded = try checkNoRecursion(allocator, contract, &errors);
     try checkReservedNames(allocator, contract, &errors);
+    // N-180: the Rabin-provenance and sighash passes walk the private-method
+    // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+    // refuses, so stop here.
+    if (call_depth_exceeded) {
+        return .{
+            .errors = try errors.toOwnedSlice(allocator),
+            .warnings = try warnings.toOwnedSlice(allocator),
+        };
+    }
     try checkRabinPubKeyProvenance(allocator, contract, &errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
@@ -2102,7 +2112,7 @@ fn warnLocktimeWithoutSequenceGuard(
         var calls = StringSet{};
         defer calls.deinit(allocator);
         for (current.body) |stmt| {
-            try collectMethodCalls(allocator, stmt, &calls);
+            try collectMethodCalls(allocator, stmt, &calls, false);
         }
         var it = calls.iterator();
         while (it.next()) |entry| {
@@ -2140,12 +2150,13 @@ fn warnLocktimeWithoutSequenceGuard(
 
 const StringSet = std.StringHashMapUnmanaged(void);
 
-/// Build a call graph and check for cycles using DFS.
+/// Build a call graph, report recursion and the N-180 call depth. Returns true
+/// iff MAX_CALL_DEPTH was exceeded.
 fn checkNoRecursion(
     allocator: Allocator,
     contract: ContractNode,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
-) !void {
+) !bool {
     // Build call graph: method_name -> set of called method names
     var call_graph = std.StringHashMapUnmanaged(StringSet){};
     defer {
@@ -2165,114 +2176,177 @@ fn checkNoRecursion(
 
         var calls = StringSet{};
         for (method.body) |stmt| {
-            try collectMethodCalls(allocator, stmt, &calls);
+            try collectMethodCalls(allocator, stmt, &calls, true);
         }
         try call_graph.put(allocator, method.name, calls);
     }
 
-    // Check for cycles using DFS from each method
-    for (contract.methods) |method| {
-        var visited = StringSet{};
-        defer visited.deinit(allocator);
-        var stack = StringSet{};
-        defer stack.deinit(allocator);
+    // N-180: one iterative pass answers, for every method, whether it reaches
+    // a cycle and how deep its call chain is, in O(methods + calls). The old
+    // per-method DFS restarted for each method (quadratic on a chain) and
+    // recursed once per link.
+    var analysis = try analyzeCallGraph(allocator, contract, &call_graph, &method_names);
+    defer analysis.deinit(allocator);
 
-        if (try hasCycle(allocator, method.name, &call_graph, &method_names, &visited, &stack)) {
+    for (contract.methods) |method| {
+        if (analysis.reaches_cycle.get(method.name) orelse false) {
             try errors.append(allocator, .{
                 .message = "recursion detected: method calls itself directly or indirectly",
                 .severity = .@"error",
             });
         }
     }
+
+    // N-180: private methods are inlined at every call site, so the call depth
+    // is the inlining depth. Report the first method (declaration order) past it.
+    for (contract.methods) |method| {
+        if (analysis.reaches_cycle.get(method.name) orelse false) continue;
+        if ((analysis.depth.get(method.name) orelse 0) <= input_limits.MAX_CALL_DEPTH) continue;
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(allocator, input_limits.CALL_DEPTH_MESSAGE_FMT, .{method.name}),
+            .location = method.source_loc,
+            .severity = .@"error",
+            .owned_message = true,
+        });
+        return true;
+    }
+    return false;
 }
 
-fn hasCycle(
+const CallGraphAnalysis = struct {
+    reaches_cycle: std.StringHashMapUnmanaged(bool) = .{},
+    depth: std.StringHashMapUnmanaged(usize) = .{},
+
+    fn deinit(self: *CallGraphAnalysis, allocator: Allocator) void {
+        self.reaches_cycle.deinit(allocator);
+        self.depth.deinit(allocator);
+    }
+};
+
+/// N-180: for every method, whether it reaches a call cycle, and (when it does
+/// not) its call depth: 0 if it calls no contract method, else 1 + the largest
+/// call depth among the contract methods it calls. Iterative three-colour DFS
+/// with memoisation: O(methods + calls), no recursion. `reaches_cycle` matches
+/// what a fresh DFS from each method reports.
+fn analyzeCallGraph(
     allocator: Allocator,
-    name: []const u8,
+    contract: ContractNode,
     call_graph: *std.StringHashMapUnmanaged(StringSet),
     method_names: *StringSet,
-    visited: *StringSet,
-    stack: *StringSet,
-) !bool {
-    if (stack.get(name) != null) return true;
-    if (visited.get(name) != null) return false;
+) !CallGraphAnalysis {
+    const Frame = struct {
+        name: []const u8,
+        it: ?StringSet.KeyIterator,
+        cyc: bool = false,
+        depth: usize = 0,
+    };
+    var out = CallGraphAnalysis{};
+    errdefer out.deinit(allocator);
+    var on_stack = StringSet{};
+    defer on_stack.deinit(allocator);
+    var stack: std.ArrayListUnmanaged(Frame) = .empty;
+    defer stack.deinit(allocator);
 
-    try visited.put(allocator, name, {});
-    try stack.put(allocator, name, {});
-
-    if (call_graph.getPtr(name)) |calls| {
-        var it = calls.iterator();
-        while (it.next()) |entry| {
-            const callee = entry.key_ptr.*;
-            if (method_names.get(callee) != null) {
-                if (try hasCycle(allocator, callee, call_graph, method_names, visited, stack)) {
-                    return true;
+    for (contract.methods) |root| {
+        if (out.reaches_cycle.contains(root.name)) continue;
+        try on_stack.put(allocator, root.name, {});
+        try stack.append(allocator, .{ .name = root.name, .it = if (call_graph.getPtr(root.name)) |c| c.keyIterator() else null });
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const next: ?[]const u8 = if (top.it) |*it| (if (it.next()) |k| k.* else null) else null;
+            if (next) |callee| {
+                if (method_names.get(callee) == null) continue;
+                if (on_stack.contains(callee)) {
+                    top.cyc = true;
+                } else if (out.reaches_cycle.get(callee)) |cyc| {
+                    if (cyc) {
+                        top.cyc = true;
+                    } else {
+                        top.depth = @max(top.depth, 1 + (out.depth.get(callee) orelse 0));
+                    }
+                } else {
+                    try on_stack.put(allocator, callee, {});
+                    try stack.append(allocator, .{ .name = callee, .it = if (call_graph.getPtr(callee)) |c| c.keyIterator() else null });
+                }
+                continue;
+            }
+            const done = stack.pop().?;
+            _ = on_stack.remove(done.name);
+            try out.reaches_cycle.put(allocator, done.name, done.cyc);
+            try out.depth.put(allocator, done.name, done.depth);
+            if (stack.items.len > 0) {
+                const parent = &stack.items[stack.items.len - 1];
+                if (done.cyc) {
+                    parent.cyc = true;
+                } else {
+                    parent.depth = @max(parent.depth, 1 + done.depth);
                 }
             }
         }
     }
-
-    _ = stack.remove(name);
-    return false;
+    return out;
 }
 
 /// Collect method calls from statements.
-fn collectMethodCalls(allocator: Allocator, stmt: Statement, calls: *StringSet) !void {
+fn collectMethodCalls(allocator: Allocator, stmt: Statement, calls: *StringSet, self_receiver: bool) !void {
     switch (stmt) {
-        .expr_stmt => |expr| try collectMethodCallsInExpr(allocator, expr.expr, calls),
-        .const_decl => |cd| try collectMethodCallsInExpr(allocator, cd.value, calls),
+        .expr_stmt => |expr| try collectMethodCallsInExpr(allocator, expr.expr, calls, self_receiver),
+        .const_decl => |cd| try collectMethodCallsInExpr(allocator, cd.value, calls, self_receiver),
         .let_decl => |ld| {
-            if (ld.value) |v| try collectMethodCallsInExpr(allocator, v, calls);
+            if (ld.value) |v| try collectMethodCallsInExpr(allocator, v, calls, self_receiver);
         },
-        .assign => |a| try collectMethodCallsInExpr(allocator, a.value, calls),
+        .assign => |a| try collectMethodCallsInExpr(allocator, a.value, calls, self_receiver),
         .if_stmt => |if_s| {
-            try collectMethodCallsInExpr(allocator, if_s.condition, calls);
-            for (if_s.then_body) |s| try collectMethodCalls(allocator, s, calls);
+            try collectMethodCallsInExpr(allocator, if_s.condition, calls, self_receiver);
+            for (if_s.then_body) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
             if (if_s.else_body) |eb| {
-                for (eb) |s| try collectMethodCalls(allocator, s, calls);
+                for (eb) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
             }
         },
         .for_stmt => |fs| {
-            for (fs.body) |s| try collectMethodCalls(allocator, s, calls);
+            for (fs.body) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
         },
-        .assert_stmt => |a| try collectMethodCallsInExpr(allocator, a.condition, calls),
+        .assert_stmt => |a| try collectMethodCallsInExpr(allocator, a.condition, calls, self_receiver),
         .return_stmt => |opt_expr| {
-            if (opt_expr) |expr| try collectMethodCallsInExpr(allocator, expr, calls);
+            if (opt_expr) |expr| try collectMethodCallsInExpr(allocator, expr, calls, self_receiver);
         },
     }
 }
 
-fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *StringSet) !void {
+fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *StringSet, self_receiver: bool) !void {
     switch (expr) {
         .call => |c| {
             // Bare function calls that might be method references
             try calls.put(allocator, c.callee, {});
-            for (c.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls);
+            for (c.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls, self_receiver);
         },
         .method_call => |mc| {
-            // this.methodName() calls
-            if (std.mem.eql(u8, mc.object, "this")) {
+            // this.methodName() calls. N-180: the .runar.zig surface spells
+            // the receiver `self`; anf_lower inlines `self.m()` like
+            // `this.m()`, so the recursion / call-depth graph
+            // (`self_receiver`) counts it too.
+            if (std.mem.eql(u8, mc.object, "this") or (self_receiver and std.mem.eql(u8, mc.object, "self"))) {
                 try calls.put(allocator, mc.method, {});
             }
-            for (mc.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls);
+            for (mc.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls, self_receiver);
         },
         .binary_op => |b| {
-            try collectMethodCallsInExpr(allocator, b.left, calls);
-            try collectMethodCallsInExpr(allocator, b.right, calls);
+            try collectMethodCallsInExpr(allocator, b.left, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, b.right, calls, self_receiver);
         },
-        .unary_op => |u| try collectMethodCallsInExpr(allocator, u.operand, calls),
+        .unary_op => |u| try collectMethodCallsInExpr(allocator, u.operand, calls, self_receiver),
         .ternary => |t| {
-            try collectMethodCallsInExpr(allocator, t.condition, calls);
-            try collectMethodCallsInExpr(allocator, t.then_expr, calls);
-            try collectMethodCallsInExpr(allocator, t.else_expr, calls);
+            try collectMethodCallsInExpr(allocator, t.condition, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, t.then_expr, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, t.else_expr, calls, self_receiver);
         },
         .index_access => |ia| {
-            try collectMethodCallsInExpr(allocator, ia.object, calls);
-            try collectMethodCallsInExpr(allocator, ia.index, calls);
+            try collectMethodCallsInExpr(allocator, ia.object, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, ia.index, calls, self_receiver);
         },
-        .increment => |inc| try collectMethodCallsInExpr(allocator, inc.operand, calls),
-        .decrement => |dec| try collectMethodCallsInExpr(allocator, dec.operand, calls),
-        .array_literal => |els| for (els) |el| try collectMethodCallsInExpr(allocator, el, calls),
+        .increment => |inc| try collectMethodCallsInExpr(allocator, inc.operand, calls, self_receiver),
+        .decrement => |dec| try collectMethodCallsInExpr(allocator, dec.operand, calls, self_receiver),
+        .array_literal => |els| for (els) |el| try collectMethodCallsInExpr(allocator, el, calls, self_receiver),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
         .property_access,
         => {},

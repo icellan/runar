@@ -390,6 +390,29 @@ export class Neg extends SmartContract {
 }
 `,
   },
+  {
+    // N-180: 130 private helpers h0 -> h1 -> ... -> h129; `go` sits at call
+    // depth 130, past MAX_CALL_DEPTH (128).
+    target: "call depth of method '*' exceeds MAX_CALL_DEPTH",
+    name: 'call-chain-too-deep',
+    source: `import { SmartContract, assert } from 'runar-lang';
+
+export class Neg extends SmartContract {
+  readonly a: bigint;
+
+  constructor(a: bigint) {
+    super(a);
+    this.a = a;
+  }
+
+${Array.from({ length: 129 }, (_, i) => `  private h${i}(x: bigint): bigint { return this.h${i + 1}(x); }\n`).join('')}  private h129(x: bigint): bigint { return x; }
+
+  public go(x: bigint) {
+    assert(this.h0(x) > 0n);
+  }
+}
+`,
+  },
 
   // ------------------------------------------------------------------
   // 02-validate: statements and literals

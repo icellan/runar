@@ -42,6 +42,7 @@ from runar_compiler.frontend.ast_nodes import (
     VariableDeclStmt,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import MAX_CALL_DEPTH, call_depth_message
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +75,13 @@ def validate(contract: ContractNode) -> ValidationResult:
     ctx.validate_properties()
     ctx.validate_constructor()
     ctx.validate_methods()
-    ctx.check_no_recursion()
+    call_depth_exceeded = ctx.check_no_recursion()
     ctx.check_reserved_names()
+    # N-180: the Rabin-provenance and sighash passes walk the private-method
+    # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+    # refuses, so stop here.
+    if call_depth_exceeded:
+        return ValidationResult(errors=ctx.errors, warnings=ctx.warnings)
     _check_rabin_pubkey_provenance(ctx)
 
     # Issue #123: reject preimage-field reads / output bindings that are unsound
@@ -1187,26 +1193,39 @@ class _ValidationContext:
     # Recursion detection
     # -------------------------------------------------------------------
 
-    def check_no_recursion(self) -> None:
+    def check_no_recursion(self) -> bool:
+        """Report recursion and the N-180 call depth; True iff MAX_CALL_DEPTH was exceeded."""
         call_graph: dict[str, set[str]] = {}
         method_names: set[str] = set()
 
         for method in self.contract.methods:
             method_names.add(method.name)
             calls: set[str] = set()
-            _collect_method_calls(method.body, calls)
+            _collect_method_calls(method.body, calls, bare=True)
             call_graph[method.name] = calls
 
-        # Check for cycles using DFS
+        # N-180: one iterative pass answers, for every method, whether it
+        # reaches a cycle and how deep its call chain is, in O(methods + calls).
+        # The old per-method DFS restarted for each method (quadratic on a
+        # chain) and recursed once per link.
+        reaches_cycle, depth = _analyze_call_graph(self.contract.methods, call_graph, method_names)
+
         for method in self.contract.methods:
-            visited: set[str] = set()
-            stack: set[str] = set()
-            if _has_cycle(method.name, call_graph, method_names, visited, stack):
+            if reaches_cycle[method.name]:
                 self._add_error(
                     f"recursion detected: method '{method.name}' calls itself "
                     f"directly or indirectly",
                     loc=method.source_location,
                 )
+
+        # N-180: private methods are inlined at every call site, so the call
+        # depth is the inlining depth. Report the first method (declaration
+        # order) past it.
+        for method in self.contract.methods:
+            if not reaches_cycle[method.name] and depth[method.name] > MAX_CALL_DEPTH:
+                self._add_error(call_depth_message(method.name), loc=method.source_location)
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -2041,32 +2060,32 @@ def _check_rabin_pubkey_provenance(ctx: "_ValidationContext") -> None:
 # Recursion detection helpers
 # ---------------------------------------------------------------------------
 
-def _collect_method_calls(stmts: list[Statement], calls: set[str]) -> None:
+def _collect_method_calls(stmts: list[Statement], calls: set[str], bare: bool = False) -> None:
     for stmt in stmts:
-        _collect_method_calls_in_stmt(stmt, calls)
+        _collect_method_calls_in_stmt(stmt, calls, bare)
 
 
-def _collect_method_calls_in_stmt(stmt: Statement, calls: set[str]) -> None:
+def _collect_method_calls_in_stmt(stmt: Statement, calls: set[str], bare: bool = False) -> None:
     if isinstance(stmt, ExpressionStmt):
-        _collect_method_calls_in_expr(stmt.expr, calls)
+        _collect_method_calls_in_expr(stmt.expr, calls, bare)
     elif isinstance(stmt, VariableDeclStmt):
-        _collect_method_calls_in_expr(stmt.init, calls)
+        _collect_method_calls_in_expr(stmt.init, calls, bare)
     elif isinstance(stmt, AssignmentStmt):
-        _collect_method_calls_in_expr(stmt.target, calls)
-        _collect_method_calls_in_expr(stmt.value, calls)
+        _collect_method_calls_in_expr(stmt.target, calls, bare)
+        _collect_method_calls_in_expr(stmt.value, calls, bare)
     elif isinstance(stmt, IfStmt):
-        _collect_method_calls_in_expr(stmt.condition, calls)
-        _collect_method_calls(stmt.then, calls)
-        _collect_method_calls(stmt.else_, calls)
+        _collect_method_calls_in_expr(stmt.condition, calls, bare)
+        _collect_method_calls(stmt.then, calls, bare)
+        _collect_method_calls(stmt.else_, calls, bare)
     elif isinstance(stmt, ForStmt):
-        _collect_method_calls_in_expr(stmt.condition, calls)
-        _collect_method_calls(stmt.body, calls)
+        _collect_method_calls_in_expr(stmt.condition, calls, bare)
+        _collect_method_calls(stmt.body, calls, bare)
     elif isinstance(stmt, ReturnStmt):
         if stmt.value is not None:
-            _collect_method_calls_in_expr(stmt.value, calls)
+            _collect_method_calls_in_expr(stmt.value, calls, bare)
 
 
-def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str]) -> None:
+def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str], bare: bool = False) -> None:
     if expr is None:
         return
     if isinstance(expr, CallExpr):
@@ -2075,53 +2094,89 @@ def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str]) -> N
         if isinstance(expr.callee, MemberExpr):
             if isinstance(expr.callee.object, Identifier) and expr.callee.object.name == "this":
                 calls.add(expr.callee.property)
-        _collect_method_calls_in_expr(expr.callee, calls)
+        # N-180: the Solidity, Move and Java surfaces may call a helper as a
+        # bare ``m(...)``. Counted only for the recursion / call-depth graph
+        # (``bare``), and only names of contract methods count there
+        # (_analyze_call_graph filters by method_names), so builtins are
+        # unaffected.
+        if bare and isinstance(expr.callee, Identifier):
+            calls.add(expr.callee.name)
+        _collect_method_calls_in_expr(expr.callee, calls, bare)
         for arg in expr.args:
-            _collect_method_calls_in_expr(arg, calls)
+            _collect_method_calls_in_expr(arg, calls, bare)
     elif isinstance(expr, BinaryExpr):
-        _collect_method_calls_in_expr(expr.left, calls)
-        _collect_method_calls_in_expr(expr.right, calls)
+        _collect_method_calls_in_expr(expr.left, calls, bare)
+        _collect_method_calls_in_expr(expr.right, calls, bare)
     elif isinstance(expr, UnaryExpr):
-        _collect_method_calls_in_expr(expr.operand, calls)
+        _collect_method_calls_in_expr(expr.operand, calls, bare)
     elif isinstance(expr, MemberExpr):
-        _collect_method_calls_in_expr(expr.object, calls)
+        _collect_method_calls_in_expr(expr.object, calls, bare)
     elif isinstance(expr, TernaryExpr):
-        _collect_method_calls_in_expr(expr.condition, calls)
-        _collect_method_calls_in_expr(expr.consequent, calls)
-        _collect_method_calls_in_expr(expr.alternate, calls)
+        _collect_method_calls_in_expr(expr.condition, calls, bare)
+        _collect_method_calls_in_expr(expr.consequent, calls, bare)
+        _collect_method_calls_in_expr(expr.alternate, calls, bare)
     elif isinstance(expr, IndexAccessExpr):
-        _collect_method_calls_in_expr(expr.object, calls)
-        _collect_method_calls_in_expr(expr.index, calls)
+        _collect_method_calls_in_expr(expr.object, calls, bare)
+        _collect_method_calls_in_expr(expr.index, calls, bare)
     elif isinstance(expr, IncrementExpr):
-        _collect_method_calls_in_expr(expr.operand, calls)
+        _collect_method_calls_in_expr(expr.operand, calls, bare)
     elif isinstance(expr, DecrementExpr):
-        _collect_method_calls_in_expr(expr.operand, calls)
+        _collect_method_calls_in_expr(expr.operand, calls, bare)
     elif isinstance(expr, ArrayLiteralExpr):
         for el in expr.elements:
-            _collect_method_calls_in_expr(el, calls)
+            _collect_method_calls_in_expr(el, calls, bare)
 
 
-def _has_cycle(
-    name: str,
+def _analyze_call_graph(
+    methods: list,
     call_graph: dict[str, set[str]],
     method_names: set[str],
-    visited: set[str],
-    stack: set[str],
-) -> bool:
-    if name in stack:
-        return True
-    if name in visited:
-        return False
-    visited.add(name)
-    stack.add(name)
+) -> tuple[dict[str, bool], dict[str, int]]:
+    """N-180: for every method, whether it reaches a call cycle, and (when it
+    does not) its call depth: 0 if it calls no contract method, else 1 + the
+    largest call depth among the contract methods it calls. Iterative
+    three-colour DFS with memoisation: O(methods + calls), no recursion.
+    ``reaches_cycle`` matches what a fresh DFS from each method reports."""
+    reaches_cycle: dict[str, bool] = {}
+    depth: dict[str, int] = {}
+    on_stack: set[str] = set()
 
-    for callee in call_graph.get(name, set()):
-        if callee in method_names:
-            if _has_cycle(callee, call_graph, method_names, visited, stack):
-                return True
-
-    stack.discard(name)
-    return False
+    for root in methods:
+        if root.name in reaches_cycle:
+            continue
+        # frame: [name, callees, next, cyc, depth]
+        stack: list[list] = [[root.name, list(call_graph.get(root.name, ())), 0, False, 0]]
+        on_stack.add(root.name)
+        while stack:
+            top = stack[-1]
+            if top[2] < len(top[1]):
+                callee = top[1][top[2]]
+                top[2] += 1
+                if callee not in method_names:
+                    continue
+                if callee in on_stack:
+                    top[3] = True
+                elif callee in reaches_cycle:
+                    if reaches_cycle[callee]:
+                        top[3] = True
+                    else:
+                        top[4] = max(top[4], 1 + depth[callee])
+                else:
+                    on_stack.add(callee)
+                    stack.append([callee, list(call_graph.get(callee, ())), 0, False, 0])
+                continue
+            stack.pop()
+            name, _, _, cyc, d = top
+            on_stack.discard(name)
+            reaches_cycle[name] = cyc
+            depth[name] = d
+            if stack:
+                parent = stack[-1]
+                if cyc:
+                    parent[3] = True
+                else:
+                    parent[4] = max(parent[4], 1 + d)
+    return reaches_cycle, depth
 
 
 def _sub_expressions(expr):
