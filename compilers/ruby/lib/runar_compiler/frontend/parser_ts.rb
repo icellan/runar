@@ -182,10 +182,11 @@ module RunarCompiler
       }.freeze
 
       # Matches the author-facing comment directives (issue #109 @embedAlways,
-      # issue #123 @sighash). Word-boundary anchored to mirror the TS reference
-      # compiler's +/@embedAlways\b/+ / +/@sighash\b/+ scans so an identifier
-      # like +sighashType+ inside a comment does not register a directive.
-      DIRECTIVE_RE = /@(?:embedAlways|sighash)\b/
+      # issue #123 @sighash), mirroring the TS reference compiler's
+      # +/@embedAlways\b/+ / +/@sighash/+ scans. N-039 (R85): +@sighash+ has no
+      # word boundary, so +@sighashSINGLE|FORKID+ / +@sighashType+ are recorded
+      # and refused as malformed rather than ignored as prose.
+      DIRECTIVE_RE = /@embedAlways\b|@sighash/
 
       # Tokenize a source string into an array of Token structs.
       #
@@ -715,7 +716,7 @@ module RunarCompiler
         embed_always = member_directives.any? { |d| d[:text].match?(/@embedAlways\b/) }
         # Every directive comment is kept (not just the first) so a second
         # `@sighash` on the same member is seen and refused (F-039).
-        sighash_texts = member_directives.map { |d| d[:text] }.select { |t| t.match?(/@sighash\b/) }
+        sighash_texts = member_directives.map { |d| d[:text] }.select { |t| t.match?(/@sighash/) }
         sighash_text = sighash_texts.empty? ? nil : sighash_texts.join("\n")
 
         # Collect modifiers: public, private, readonly
@@ -900,7 +901,7 @@ module RunarCompiler
         # Issue #123: `/** @sighash <FLAGS> */` directive -> per-method sighash
         # type. Only public methods are spending entry points, so a directive on
         # a private helper is meaningless (error). Malformed flag lists error too.
-        sighash_type = parse_sighash_on_method(name, visibility, sighash_text)
+        sighash_type = parse_sighash_on_method(name, visibility, sighash_text, location)
 
         MethodNode.new(
           name: name,
@@ -915,12 +916,14 @@ module RunarCompiler
       # Resolve a method's `@sighash` directive text to a numeric sighash type,
       # or nil when there is no directive. Pushes a parse error for a directive
       # on a non-public method or for a malformed flag list.
-      def parse_sighash_on_method(name, visibility, sighash_text)
+      def parse_sighash_on_method(name, visibility, sighash_text, location)
         return nil if sighash_text.nil?
 
+        # N-039 (R88a): located at the method declaration, like the TS reference.
         if visibility != "public"
-          add_error("@sighash directive on non-public method '#{name}' has no effect — " \
-                    "only public methods are spending entry points")
+          @errors << Diagnostic.new(message: "@sighash directive on non-public method '#{name}' has no effect — " \
+                                             "only public methods are spending entry points",
+                                    severity: Severity::ERROR, loc: location)
           return nil
         end
 
@@ -930,7 +933,8 @@ module RunarCompiler
         result = { error: SighashDirective::SIGHASH_MALFORMED_ERROR } if result.nil?
 
         if result.key?(:error)
-          add_error("Method '#{name}': #{result[:error]}")
+          @errors << Diagnostic.new(message: "Method '#{name}': #{result[:error]}",
+                                    severity: Severity::ERROR, loc: location)
           return nil
         end
         result[:value]

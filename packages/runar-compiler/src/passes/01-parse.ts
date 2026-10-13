@@ -521,7 +521,9 @@ function parseSighashOnMethod(
   return result.value;
 }
 
-const SIGHASH_TOKEN_RE = /@sighash\b/;
+// N-039 (R85): no word boundary. `@sighashSINGLE|FORKID` / `@sighashType` reach
+// extractSighashDirective and are refused as malformed, not ignored as prose.
+const SIGHASH_TOKEN_RE = /@sighash/;
 
 // ---------------------------------------------------------------------------
 // Parameters

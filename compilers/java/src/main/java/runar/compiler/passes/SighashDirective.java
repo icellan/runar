@@ -150,9 +150,10 @@ public final class SighashDirective {
      * {@code null} only when no {@code @sighash} marker is present, otherwise
      * the parse result (value or error). Mirrors the TS reference.
      *
-     * <p>A marker is {@code @sighash} followed by an ASCII word boundary, so
-     * {@code @sighashType} (or {@code @sighashSINGLE}) is prose, not a
-     * directive. Once a marker is present (fail-closed, F-039): more than one
+     * <p>A marker is every occurrence of {@code @sighash}, whatever follows it
+     * (N-039, user decision R85): {@code @sighashSINGLE|FORKID} or
+     * {@code @sighashType} is a malformed directive, never prose. Once a
+     * marker is present (fail-closed, F-039): more than one
      * marker is {@link #SIGHASH_MULTIPLE_ERROR}; the segment after the marker,
      * up to the block-comment close, a newline, CR or the end, must be empty,
      * or start with a space/tab and contain only {@code [A-Za-z0-9_|]}, spaces
@@ -165,10 +166,7 @@ public final class SighashDirective {
         }
         java.util.List<Integer> markers = new java.util.ArrayList<>();
         for (int i = commentText.indexOf(SIGHASH_MARKER); i != -1; i = commentText.indexOf(SIGHASH_MARKER, i + 1)) {
-            int next = i + SIGHASH_MARKER.length();
-            if (next >= commentText.length() || !isAsciiWordChar(commentText.charAt(next))) {
-                markers.add(i);
-            }
+            markers.add(i);
         }
         if (markers.isEmpty()) {
             return null;

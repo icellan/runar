@@ -2,7 +2,6 @@ package runar.compiler.frontend;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,9 +21,9 @@ import runar.compiler.ir.ast.MethodNode;
  * directive on one method was silently ignored.
  *
  * <p>Proves: the Java TS-surface parser refuses each malformed / duplicated
- * shape with the diagnostic shared by all seven tiers, keeps the reference
- * word-boundary rule ({@code @sighashSINGLE} / {@code @sighashType} are prose,
- * not markers), and still honours a well-formed multi-line JSDoc directive.
+ * shape with the diagnostic shared by all seven tiers (N-039: including
+ * {@code @sighash} glued to the next token), and still honours a well-formed
+ * multi-line JSDoc directive.
  * Does not prove: cross-tier agreement (conformance/negatives rejection-parity).
  */
 class F039SighashMalformedTest {
@@ -85,10 +84,21 @@ class F039SighashMalformedTest {
         assertFalse(msg.contains("malformed directive"), msg);
     }
 
+    // N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+    // word-boundary rule (@sighashSINGLE / @sighashType read as prose, so the
+    // method silently got the default ALL|FORKID). A comment token that starts
+    // with @sighash but is not exactly `@sighash <FLAGS>` is now refused with
+    // the shared malformed diagnostic; the case list is unchanged plus _ / digit.
     @ParameterizedTest
-    @ValueSource(strings = {"/** @sighashSINGLE|FORKID */", "/** see the @sighashType docs */"})
-    void wordBoundaryProseIsNotAMarker(String directive) throws Exception {
-        assertNull(bump(directive).sighashType());
+    @ValueSource(strings = {
+        "/** @sighashSINGLE|FORKID */",
+        "/** see the @sighashType docs */",
+        "// @sighash_SINGLE|FORKID",
+        "/** @sighash2 */",
+    })
+    void n039GluedMarkerRejected(String directive) {
+        String msg = rejection(directive);
+        assertTrue(msg.contains(MALFORMED), msg);
     }
 
     @Test

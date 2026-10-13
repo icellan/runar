@@ -90,9 +90,10 @@ TOK_ARROW = 45        # =>
 # `/@embedAlways\b/` scan.
 _EMBED_ALWAYS_RE = re.compile(r"@embedAlways\b")
 
-# Issue #123: `@sighash` comment directive token (word-boundary anchored),
-# mirroring the TS `/@sighash\b/` scan.
-_SIGHASH_TOKEN_RE = re.compile(r"@sighash\b")
+# Issue #123: `@sighash` comment directive token, mirroring the TS
+# `/@sighash/` scan. N-039 (R85): no word boundary, so `@sighashSINGLE|FORKID`
+# / `@sighashType` reach the extractor and are refused as malformed.
+_SIGHASH_TOKEN_RE = re.compile(r"@sighash")
 
 
 class Token:
@@ -841,7 +842,7 @@ class _TsParser:
 
         # Issue #123: `/** @sighash <FLAGS> */` (or `// @sighash ...`) directive
         # in the method's leading trivia → per-method BIP-143 sighash type.
-        sighash_type = self._parse_sighash_directive(leading, name, visibility)
+        sighash_type = self._parse_sighash_directive(leading, name, visibility, location)
 
         return MethodNode(
             name=name,
@@ -854,6 +855,7 @@ class _TsParser:
 
     def _parse_sighash_directive(
         self, leading: str, name: str, visibility: str,
+        location: SourceLocation,
     ) -> int | None:
         """Detect + parse a ``@sighash`` directive on a method (issue #123).
 
@@ -865,18 +867,21 @@ class _TsParser:
         if not _SIGHASH_TOKEN_RE.search(leading):
             return None
 
+        # N-039 (R88a): located at the method declaration, like the TS reference.
         if visibility != "public":
-            self.add_error(
-                f"@sighash directive on non-public method '{name}' has no effect "
-                f"— only public methods are spending entry points"
-            )
+            self.errors.append(Diagnostic(
+                message=f"@sighash directive on non-public method '{name}' has no effect "
+                        f"— only public methods are spending entry points",
+                severity=Severity.ERROR, loc=location))
             return None
 
         result = extract_sighash_directive(leading)
         if result is None:
             return None
         if result.error is not None:
-            self.add_error(f"Method '{name}': {result.error}")
+            self.errors.append(Diagnostic(
+                message=f"Method '{name}': {result.error}",
+                severity=Severity.ERROR, loc=location))
             return None
         return result.value
 

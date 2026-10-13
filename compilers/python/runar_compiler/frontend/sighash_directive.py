@@ -145,9 +145,10 @@ def extract_sighash_directive(comment_text: str) -> SighashParseResult | None:
     Returns ``None`` only when no ``@sighash`` marker is present, otherwise the
     parse result (value or error). Mirrors the TS reference.
 
-    A marker is ``@sighash`` followed by an ASCII word boundary, so
-    ``@sighashType`` (or ``@sighashSINGLE``) is prose, not a directive. Once a
-    marker is present (fail-closed, F-039): more than one marker is
+    A marker is every occurrence of ``@sighash``, whatever follows it (N-039,
+    user decision R85): ``@sighashSINGLE|FORKID`` or ``@sighashType`` is a
+    malformed directive, never prose. Once a marker is present (fail-closed,
+    F-039): more than one marker is
     ``SIGHASH_MULTIPLE_ERROR``; the segment after the marker, up to ``*/``, a
     newline, CR or the end, must be empty, or start with a space/tab and contain
     only ``[A-Za-z0-9_|]``, spaces and tabs, else ``SIGHASH_MALFORMED_ERROR``;
@@ -156,9 +157,7 @@ def extract_sighash_directive(comment_text: str) -> SighashParseResult | None:
     markers: list[int] = []
     i = comment_text.find(_SIGHASH_MARKER)
     while i != -1:
-        nxt = i + len(_SIGHASH_MARKER)
-        if nxt >= len(comment_text) or comment_text[nxt] not in _WORD_CHARS:
-            markers.append(i)
+        markers.append(i)
         i = comment_text.find(_SIGHASH_MARKER, i + 1)
     if not markers:
         return None

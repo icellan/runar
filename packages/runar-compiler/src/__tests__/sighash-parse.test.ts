@@ -75,8 +75,8 @@ describe('#123 @sighash directive parsing (TS surface)', () => {
 // compile errors carrying one shared diagnostic in all seven tiers.
 //
 // Proves: the TS parser refuses each malformed/ambiguous shape with the shared
-// text, and still honours the well-formed control and the reference's
-// word-boundary rule (`@sighashSINGLE` / `@sighashType` are NOT markers).
+// text (N-039: including `@sighash` glued to the next token), and still
+// honours the well-formed control.
 // Does not prove: the other six tiers agree — that is the rejection-parity
 // gate (conformance/negatives/N95..N98) plus each tier's own unit test.
 describe('F-039 malformed @sighash directive is fail-closed (TS surface)', () => {
@@ -119,12 +119,18 @@ describe('F-039 malformed @sighash directive is fail-closed (TS surface)', () =>
     expect(errorsOf(withLeading(leading))).toEqual([MULTIPLE]);
   });
 
-  it('keeps the reference word boundary: `@sighashSINGLE` / `@sighashType` are not markers', () => {
-    for (const leading of ['/** @sighashSINGLE|FORKID */', '/** see the @sighashType docs */']) {
-      const r = parse(withLeading(leading), 'X.runar.ts');
-      expect(r.errors.filter((e) => e.severity === 'error')).toEqual([]);
-      expect(r.contract!.methods.find((m) => m.name === 'bump')!.sighashType).toBeUndefined();
-    }
+  // N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+  // word-boundary rule (`@sighashSINGLE` / `@sighashType` read as prose, so the
+  // method silently got the default ALL|FORKID). A comment token that starts
+  // with `@sighash` but is not exactly `@sighash <FLAGS>` is now refused with
+  // the same malformed diagnostic; the case list is unchanged plus `_`/digit.
+  it.each([
+    ['flags glued to the marker', '/** @sighashSINGLE|FORKID */'],
+    ['a word glued to the marker', '/** see the @sighashType docs */'],
+    ['an underscore glued to the marker', '// @sighash_SINGLE|FORKID'],
+    ['a digit glued to the marker', '/** @sighash2 */'],
+  ])('N-039: rejects %s with the shared malformed diagnostic', (_label, leading) => {
+    expect(errorsOf(withLeading(leading))).toEqual([MALFORMED]);
   });
 
   it('still honours a well-formed multi-line JSDoc directive', () => {

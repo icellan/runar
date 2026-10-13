@@ -809,6 +809,9 @@ const Parser = struct {
         // tokenizer discards comments; leadingTrivia() recovers the raw source
         // between the previous token and this member's first token.
         const member_trivia = self.leadingTrivia();
+        // N-039 (R88a): the member's first token, where a @sighash diagnostic
+        // is located (the TS reference reports the method declaration's start).
+        const member_first_tok = self.current;
 
         // Skip TypeScript decorators: @prop(), @method(), etc.
         while (self.current.kind == .ident and self.current.text.len == 1 and self.current.text[0] == '@') {
@@ -871,7 +874,7 @@ const Parser = struct {
             // Issue #123: honour a `/** @sighash <FLAGS> */` directive in the
             // method's leading comment trivia. Only public methods are spending
             // entry points, so a directive on a private helper is meaningless.
-            m.sighash_type = self.parseSighashDirective(member_trivia, member_name, is_public);
+            m.sighash_type = self.parseSighashDirective(member_trivia, member_name, is_public, member_first_tok);
             return .{ .method = m };
         }
 
@@ -1073,20 +1076,25 @@ const Parser = struct {
     /// non-public method (only public methods are spending entry points, so a
     /// `@sighash` on a private helper is meaningless). Mirrors the Go
     /// parseSighashOnMethod / TS parseSighashOnMethod.
-    fn parseSighashDirective(self: *Parser, trivia: []const u8, name: []const u8, is_public: bool) ?i32 {
-        // Fast reject: no directive token present (word-boundary matched).
-        if (!containsDirectiveToken(trivia, "@sighash")) return null;
+    fn parseSighashDirective(self: *Parser, trivia: []const u8, name: []const u8, is_public: bool, at: Token) ?i32 {
+        // Fast reject: no `@sighash` present. N-039 (R85): no word boundary, so
+        // `@sighashSINGLE|FORKID` / `@sighashType` reach the extractor and are
+        // refused as malformed rather than ignored as prose.
+        if (std.mem.indexOf(u8, trivia, "@sighash") == null) return null;
 
+        // N-039 (R88a): located at the method declaration, like the TS reference.
         if (!is_public) {
-            self.addErrorFmt("@sighash directive on non-public method '{s}' has no effect — only public methods are spending entry points", .{name});
+            const msg = std.fmt.allocPrint(self.allocator, "@sighash directive on non-public method '{s}' has no effect — only public methods are spending entry points", .{name}) catch return null;
+            self.addErrorAt(at, msg);
             return null;
         }
 
         const result = sighash_directive.extractDirective(self.allocator, trivia) orelse return null;
         switch (result) {
             .value => |v| return v,
-            .err => |msg| {
-                self.addErrorFmt("Method '{s}': {s}", .{ name, msg });
+            .err => |err_msg| {
+                const msg = std.fmt.allocPrint(self.allocator, "Method '{s}': {s}", .{ name, err_msg }) catch return null;
+                self.addErrorAt(at, msg);
                 return null;
             },
         }

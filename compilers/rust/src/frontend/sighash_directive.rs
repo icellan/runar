@@ -131,23 +131,18 @@ const SIGHASH_MARKER: &str = "@sighash";
 /// no `@sighash` marker is present, otherwise the parse result (value or
 /// error). Mirrors the TS reference `extractSighashDirective`.
 ///
-/// A marker is `@sighash` followed by an ASCII word boundary, so `@sighashType`
-/// (or `@sighashSINGLE`) is prose, not a directive. Once a marker is present
-/// (fail-closed, F-039):
+/// A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+/// user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a malformed
+/// directive, never prose. Once a marker is present (fail-closed, F-039):
 ///   - more than one marker is an error (`SIGHASH_MULTIPLE_ERROR`);
 ///   - the segment after the marker, up to `*/`, a newline, CR or the end, must
 ///     be empty, or start with a space/tab and contain only `[A-Za-z0-9_|]`,
 ///     spaces and tabs — anything else is `SIGHASH_MALFORMED_ERROR`;
 ///   - the flag list itself is then validated by `parse_sighash_flags`.
 pub fn extract_sighash_directive(comment_text: &str) -> Option<Result<i64, String>> {
-    let bytes = comment_text.as_bytes();
     let markers: Vec<usize> = comment_text
         .match_indices(SIGHASH_MARKER)
         .map(|(i, _)| i)
-        .filter(|&i| {
-            let next = i + SIGHASH_MARKER.len();
-            next >= bytes.len() || !(bytes[next].is_ascii_alphanumeric() || bytes[next] == b'_')
-        })
         .collect();
     let first = *markers.first()?;
     if markers.len() > 1 {

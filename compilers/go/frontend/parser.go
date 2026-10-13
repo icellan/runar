@@ -657,15 +657,17 @@ func (p *parseContext) parseSighashOnMethod(node *sitter.Node, name, visibility 
 		return nil
 	}
 
+	// N-039 (R88a): located at the method declaration, like the TS reference.
+	loc := p.loc(node)
 	if visibility != "public" {
-		p.addError(fmt.Sprintf(
+		p.errors = append(p.errors, Diagnostic{Message: fmt.Sprintf(
 			"@sighash directive on non-public method '%s' has no effect — only public methods are spending entry points",
-			name))
+			name), Severity: SeverityError, Loc: &loc})
 		return nil
 	}
 
 	if !result.ok() {
-		p.addError(fmt.Sprintf("Method '%s': %s", name, result.err))
+		p.errors = append(p.errors, Diagnostic{Message: fmt.Sprintf("Method '%s': %s", name, result.err), Severity: SeverityError, Loc: &loc})
 		return nil
 	}
 	v := result.value

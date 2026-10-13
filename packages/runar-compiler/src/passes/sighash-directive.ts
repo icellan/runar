@@ -124,19 +124,15 @@ export const SIGHASH_MULTIPLE_ERROR =
 
 const SIGHASH_MARKER = '@sighash';
 
-/** ASCII word character — the reference `\b` boundary (no `u` flag). */
-function isWordChar(c: string): boolean {
-  return /[A-Za-z0-9_]/.test(c);
-}
-
 /**
  * Extract and parse an `@sighash` directive from a method's leading-comment
  * text (all of its leading comments, concatenated). Returns `null` only when
  * no `@sighash` marker is present, otherwise the parse result (value or error).
  *
- * A marker is `@sighash` followed by a word boundary, so `@sighashType` (or
- * `@sighashSINGLE`) is prose, not a directive. Once a marker is present
- * (fail-closed, F-039):
+ * A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+ * user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a malformed
+ * directive, never prose, so a glued flag list cannot silently fall back to
+ * ALL|FORKID. Once a marker is present (fail-closed, F-039):
  *   - more than one marker is an error (SIGHASH_MULTIPLE_ERROR);
  *   - the segment after the marker, up to `*` + `/`, a newline, CR or the end,
  *     must be empty, or start with a space/tab and contain only
@@ -146,8 +142,7 @@ function isWordChar(c: string): boolean {
 export function extractSighashDirective(commentText: string): SighashParseResult | null {
   const markers: number[] = [];
   for (let i = commentText.indexOf(SIGHASH_MARKER); i !== -1; i = commentText.indexOf(SIGHASH_MARKER, i + 1)) {
-    const next = commentText[i + SIGHASH_MARKER.length];
-    if (next === undefined || !isWordChar(next)) markers.push(i);
+    markers.push(i);
   }
   if (markers.length === 0) return null;
   if (markers.length > 1) return { error: SIGHASH_MULTIPLE_ERROR };

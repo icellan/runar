@@ -10,9 +10,9 @@ require_relative 'test_helper'
 # method was silently ignored.
 #
 # Proves: the Ruby TS-surface parser refuses each malformed / duplicated shape
-# with the diagnostic shared by all seven tiers, keeps the reference
-# word-boundary rule (`@sighashSINGLE` / `@sighashType` are prose, not
-# markers), and still honours a well-formed multi-line JSDoc directive.
+# with the diagnostic shared by all seven tiers (N-039: including `@sighash`
+# glued to the next token), and still honours a well-formed multi-line JSDoc
+# directive.
 # Does not prove: cross-tier agreement (conformance/negatives rejection-parity).
 class TestF039SighashMalformed < Minitest::Test
   MALFORMED = "Method 'bump': @sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS " \
@@ -58,11 +58,15 @@ class TestF039SighashMalformed < Minitest::Test
     end
   end
 
-  def test_word_boundary_prose_is_not_a_marker
-    ['/** @sighashSINGLE|FORKID */', '/** see the @sighashType docs */'].each do |d|
-      r = parse(d)
-      assert_empty r.errors.map(&:message), d
-      assert_nil r.contract.methods.find { |m| m.name == 'bump' }.sighash_type, d
+  # N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+  # word-boundary rule (`@sighashSINGLE` / `@sighashType` read as prose, so the
+  # method silently got the default ALL|FORKID). A comment token that starts
+  # with `@sighash` but is not exactly `@sighash <FLAGS>` is now refused with the
+  # shared malformed diagnostic; the case list is unchanged plus `_` / digit.
+  def test_n039_glued_marker_rejected
+    ['/** @sighashSINGLE|FORKID */', '/** see the @sighashType docs */',
+     '// @sighash_SINGLE|FORKID', '/** @sighash2 */'].each do |d|
+      assert_equal [MALFORMED], errors(d), d
     end
   end
 

@@ -6,9 +6,9 @@ compiled, silently, under the default ALL|FORKID. A second directive on one
 method was silently ignored.
 
 Proves: the Python TS-surface parser refuses each malformed / duplicated shape
-with the diagnostic shared by all seven tiers, keeps the reference
-word-boundary rule (``@sighashSINGLE`` / ``@sighashType`` are prose, not
-markers), and still honours a well-formed multi-line JSDoc directive.
+with the diagnostic shared by all seven tiers (N-039: including ``@sighash``
+glued to the next token), and still honours a well-formed multi-line JSDoc
+directive.
 Does not prove: cross-tier agreement (conformance/negatives rejection-parity).
 """
 
@@ -64,11 +64,19 @@ def test_multiple_directives_rejected(directive):
     assert _errors(directive) == [MULTIPLE]
 
 
-@pytest.mark.parametrize("directive", ["/** @sighashSINGLE|FORKID */", "/** see the @sighashType docs */"])
-def test_word_boundary_prose_is_not_a_marker(directive):
-    r = parse_source(_src(directive), "X.runar.ts")
-    assert not r.errors
-    assert next(m for m in r.contract.methods if m.name == "bump").sighash_type is None
+# N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+# word-boundary rule (``@sighashSINGLE`` / ``@sighashType`` read as prose, so the
+# method silently got the default ALL|FORKID). A comment token that starts with
+# ``@sighash`` but is not exactly ``@sighash <FLAGS>`` is now refused with the
+# shared malformed diagnostic; the case list is unchanged plus ``_`` / digit.
+@pytest.mark.parametrize("directive", [
+    "/** @sighashSINGLE|FORKID */",
+    "/** see the @sighashType docs */",
+    "// @sighash_SINGLE|FORKID",
+    "/** @sighash2 */",
+])
+def test_n039_glued_marker_rejected(directive):
+    assert _errors(directive) == [MALFORMED]
 
 
 def test_well_formed_multiline_jsdoc_honoured():

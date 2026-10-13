@@ -13,9 +13,9 @@ import (
 // the reference let the first win).
 //
 // Proves: the Go TS-surface parser refuses each malformed / duplicated shape
-// with the diagnostic shared by all seven tiers, keeps the reference
-// word-boundary rule (`@sighashSINGLE` / `@sighashType` are prose, not
-// markers), and still honours a well-formed multi-line JSDoc directive.
+// with the diagnostic shared by all seven tiers (N-039: including `@sighash`
+// glued to the next token), and still honours a well-formed multi-line JSDoc
+// directive.
 // Does not prove: cross-tier agreement (conformance/negatives rejection-parity).
 
 const (
@@ -74,10 +74,20 @@ func TestF039_MultipleDirectivesRejected(t *testing.T) {
 	}
 }
 
-func TestF039_WordBoundaryProseIsNotAMarker(t *testing.T) {
-	for _, d := range []string{"/** @sighashSINGLE|FORKID */", "/** see the @sighashType docs */"} {
-		if m := sighashMethodByName(t, f039Src(d), "bump"); m.SighashType != nil {
-			t.Errorf("%q: SighashType = %v, want nil", d, *m.SighashType)
+// N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+// word-boundary rule (`@sighashSINGLE` / `@sighashType` read as prose, so the
+// method silently got the default ALL|FORKID). A comment token that starts
+// with `@sighash` but is not exactly `@sighash <FLAGS>` is now refused with the
+// shared malformed diagnostic; the case list is unchanged plus `_` / digit.
+func TestN039_GluedMarkerRejected(t *testing.T) {
+	for _, d := range []string{
+		"/** @sighashSINGLE|FORKID */",
+		"/** see the @sighashType docs */",
+		"// @sighash_SINGLE|FORKID",
+		"/** @sighash2 */",
+	} {
+		if got := f039Errors(d); !reflect.DeepEqual(got, []string{f039Malformed}) {
+			t.Errorf("%q: errors = %q, want [%q]", d, got, f039Malformed)
 		}
 	}
 }

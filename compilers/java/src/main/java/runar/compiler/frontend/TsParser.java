@@ -89,10 +89,11 @@ public final class TsParser {
     }
 
     // Author-facing comment directives honoured ONLY on the .runar.ts surface
-    // (issues #109 / #123). Word-boundary anchored to mirror the TS
-    // /@embedAlways\b/ and /@sighash\b/ scans.
+    // (issues #109 / #123), mirroring the TS /@embedAlways\b/ and /@sighash/
+    // scans. N-039 (R85): @sighash has no word boundary, so
+    // @sighashSINGLE|FORKID / @sighashType are refused as malformed, not prose.
     private static final Pattern EMBED_ALWAYS_RE = Pattern.compile("@embedAlways\\b");
-    private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash\\b");
+    private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash");
 
     /**
      * A source comment captured by the tokenizer, keyed by its start line and
@@ -997,7 +998,7 @@ public final class TsParser {
             List<Statement> body = parseBlock();
 
             Visibility vis = visibility.equals("public") ? Visibility.PUBLIC : Visibility.PRIVATE;
-            Integer sighashType = parseSighashDirective(name, vis, leadingComments);
+            Integer sighashType = parseSighashDirective(name, vis, leadingComments, location);
             return new MethodNode(name, params, body, vis, location, sighashType);
         }
 
@@ -1008,14 +1009,16 @@ public final class TsParser {
          * present. Pushes an error for a malformed flag list or a directive on a
          * non-public method (only public methods are spending entry points).
          */
-        Integer parseSighashDirective(String name, Visibility vis, String leadingComments) {
+        Integer parseSighashDirective(String name, Visibility vis, String leadingComments,
+                                      SourceLocation location) {
             if (leadingComments == null || !SIGHASH_TOKEN_RE.matcher(leadingComments).find()) {
                 return null;
             }
+            // N-039 (R88a): located at the method declaration, like the TS reference.
             if (vis != Visibility.PUBLIC) {
-                addError(String.format(
+                addError(LexDiag.at(fileName, location.line(), location.column(), String.format(
                     "@sighash directive on non-public method '%s' has no effect "
-                    + "— only public methods are spending entry points", name));
+                    + "— only public methods are spending entry points", name)));
                 return null;
             }
             // Non-null: the marker is present (checked above). A malformed or
@@ -1023,11 +1026,13 @@ public final class TsParser {
             // directive" (F-039).
             SighashDirective.Result result = SighashDirective.extractSighashDirective(leadingComments);
             if (result == null) {
-                addError(String.format("Method '%s': %s", name, SighashDirective.SIGHASH_MALFORMED_ERROR));
+                addError(LexDiag.at(fileName, location.line(), location.column(),
+                    String.format("Method '%s': %s", name, SighashDirective.SIGHASH_MALFORMED_ERROR)));
                 return null;
             }
             if (result.isError()) {
-                addError(String.format("Method '%s': %s", name, result.error()));
+                addError(LexDiag.at(fileName, location.line(), location.column(),
+                    String.format("Method '%s': %s", name, result.error())));
                 return null;
             }
             return result.value();

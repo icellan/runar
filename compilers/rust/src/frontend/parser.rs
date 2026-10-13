@@ -624,7 +624,9 @@ fn parse_sighash_on_method(
     cm: &SourceMap,
 ) -> Option<i64> {
     let text = leading_comment_text(comments, pos)?;
-    if !directive_present(&text, "@sighash") {
+    // N-039 (R85): no word boundary. `@sighashSINGLE|FORKID` / `@sighashType`
+    // reach the extractor and are refused as malformed, not ignored as prose.
+    if !text.contains("@sighash") {
         return None;
     }
 

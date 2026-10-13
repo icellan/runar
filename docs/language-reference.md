@@ -871,8 +871,9 @@ present the rest of the line must be a well-formed flag list: whitespace, then
 flag names separated by `|`. Anything else is a compile error in every tier,
 not a silent fall-back to the default. That includes trailing punctuation
 (`@sighash SINGLE|FORKID!`), a missing space (`@sighash:SINGLE`), a `,`
-separator, or an empty flag list. `@sighash` directly followed by a letter,
-digit or `_` (for example `@sighashType`) is prose, not a marker.
+separator, or an empty flag list. `@sighash` directly followed by any other
+character is refused the same way, so `@sighashSINGLE|FORKID` (no space) and
+`@sighashType` are errors, not prose.
 
 `SINGLE|FORKID` commits to only the output at the same index as the input being
 signed, which is what lets one party fix their own output and leave the rest of

@@ -116,9 +116,10 @@ module RunarCompiler
       # no `@sighash` marker is present, otherwise the parse result ({value:} or
       # {error:}). Mirrors the TS reference.
       #
-      # A marker is `@sighash` followed by an ASCII word boundary, so
-      # `@sighashType` (or `@sighashSINGLE`) is prose, not a directive. Once a
-      # marker is present (fail-closed, F-039): more than one marker is
+      # A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+      # user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a
+      # malformed directive, never prose. Once a marker is present (fail-closed,
+      # F-039): more than one marker is
       # SIGHASH_MULTIPLE_ERROR; the segment after the marker, up to `*/`, a
       # newline, CR or the end, must be empty, or start with a space/tab and
       # contain only [A-Za-z0-9_|], spaces and tabs, else SIGHASH_MALFORMED_ERROR;
@@ -127,8 +128,7 @@ module RunarCompiler
         markers = []
         i = comment_text.index(SIGHASH_MARKER)
         until i.nil?
-          nxt = comment_text[i + SIGHASH_MARKER.length]
-          markers << i if nxt.nil? || !nxt.match?(/\A[A-Za-z0-9_]\z/)
+          markers << i
           i = comment_text.index(SIGHASH_MARKER, i + 1)
         end
         return nil if markers.empty?

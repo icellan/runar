@@ -140,9 +140,10 @@ fn isWordByte(c: u8) bool {
 /// marker is present; otherwise the parse result (which may itself be an
 /// error). Mirrors the TS reference extractSighashDirective.
 ///
-/// A marker is `@sighash` followed by an ASCII word boundary, so `@sighashType`
-/// (or `@sighashSINGLE`) is prose, not a directive. Once a marker is present
-/// (fail-closed, F-039):
+/// A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+/// user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a
+/// malformed directive, never prose. Once a marker is present (fail-closed,
+/// F-039):
 ///   - more than one marker is an error (SIGHASH_MULTIPLE_ERROR);
 ///   - the segment after the marker, up to `*/`, a newline, CR or the end,
 ///     must be empty, or start with a space/tab and contain only
@@ -155,11 +156,8 @@ pub fn extractDirective(allocator: std.mem.Allocator, comment_text: []const u8) 
     var count: usize = 0;
     var from: usize = 0;
     while (std.mem.indexOfPos(u8, comment_text, from, marker)) |pos| {
-        const next = pos + marker.len;
-        if (next >= comment_text.len or !isWordByte(comment_text[next])) {
-            if (first == null) first = pos;
-            count += 1;
-        }
+        if (first == null) first = pos;
+        count += 1;
         from = pos + 1;
     }
     const start = first orelse return null;

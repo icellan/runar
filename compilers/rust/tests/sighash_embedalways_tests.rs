@@ -488,9 +488,9 @@ fn ec_armed_embed_always_changes_the_emitted_script() {
 // ALL|FORKID. A second directive on one method was silently ignored.
 //
 // Proves: the Rust TS-surface parser refuses each malformed / duplicated shape
-// with the diagnostic shared by all seven tiers, keeps the reference
-// word-boundary rule (`@sighashSINGLE` / `@sighashType` are prose, not
-// markers), and still honours a well-formed multi-line JSDoc directive.
+// with the diagnostic shared by all seven tiers (N-039: including `@sighash`
+// glued to the next token), and still honours a well-formed multi-line JSDoc
+// directive.
 // Does not prove: cross-tier agreement (conformance/negatives rejection-parity)
 // or the on-chain consequence (conformance/closed-findings F-039 Spend test).
 
@@ -538,12 +538,20 @@ fn f039_multiple_directives_are_rejected() {
     }
 }
 
+// N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+// word-boundary rule (`@sighashSINGLE` / `@sighashType` read as prose, so the
+// method silently got the default ALL|FORKID). A comment token that starts
+// with `@sighash` but is not exactly `@sighash <FLAGS>` is now refused with the
+// shared malformed diagnostic; the case list is unchanged plus `_` / digit.
 #[test]
-fn f039_word_boundary_prose_is_not_a_marker() {
-    let dflt = compile(&counter_out(""), "Counter.runar.ts").script_hex;
-    for directive in ["/** @sighashSINGLE|FORKID */", "/** see the @sighashType docs */"] {
-        assert!(f039_errors(directive).is_empty(), "directive {directive:?}");
-        assert_eq!(compile(&counter_out(directive), "Counter.runar.ts").script_hex, dflt);
+fn n039_glued_marker_is_rejected_not_defaulted() {
+    for directive in [
+        "/** @sighashSINGLE|FORKID */",
+        "/** see the @sighashType docs */",
+        "// @sighash_SINGLE|FORKID",
+        "/** @sighash2 */",
+    ] {
+        assert_eq!(f039_errors(directive), vec![F039_MALFORMED.to_string()], "directive {directive:?}");
     }
 }
 

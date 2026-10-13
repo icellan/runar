@@ -136,9 +136,9 @@ func sighashIsWordByte(c byte) bool {
 // Returns (_, false) only when no `@sighash` marker is present, else
 // (result, true). Mirrors the TS reference extractSighashDirective.
 //
-// A marker is `@sighash` followed by an ASCII word boundary, so `@sighashType`
-// (or `@sighashSINGLE`) is prose, not a directive. Once a marker is present
-// (fail-closed, F-039):
+// A marker is every occurrence of `@sighash`, whatever follows it (N-039, user
+// decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a malformed
+// directive, never prose. Once a marker is present (fail-closed, F-039):
 //   - more than one marker is an error (sighashMultipleError);
 //   - the segment after the marker, up to `*/`, a newline, CR or the end, must
 //     be empty, or start with a space/tab and contain only [A-Za-z0-9_|],
@@ -152,10 +152,7 @@ func extractSighashDirective(commentText string) (sighashParseResult, bool) {
 			break
 		}
 		pos := i + j
-		next := pos + len(sighashMarker)
-		if next >= len(commentText) || !sighashIsWordByte(commentText[next]) {
-			markers = append(markers, pos)
-		}
+		markers = append(markers, pos)
 		i = pos + 1
 	}
 	if len(markers) == 0 {

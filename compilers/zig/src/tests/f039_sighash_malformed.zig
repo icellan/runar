@@ -8,9 +8,9 @@
 //! second directive on one method was silently ignored.
 //!
 //! Proves: the Zig TS-surface parser refuses each malformed / duplicated shape
-//! with the diagnostic shared by all seven tiers, keeps the reference
-//! word-boundary rule (`@sighashSINGLE` / `@sighashType` are prose, not
-//! markers), and still honours a well-formed multi-line JSDoc directive.
+//! with the diagnostic shared by all seven tiers (N-039: including `@sighash`
+//! glued to the next token, located at the method declaration), and still
+//! honours a well-formed multi-line JSDoc directive.
 //! Does not prove: cross-tier agreement (conformance/negatives rejection-parity).
 
 const std = @import("std");
@@ -72,9 +72,27 @@ test "F-039 more than one @sighash directive on a method is rejected" {
     try expectSoleError("/** @sighash SINGLE|FORKID!\n   * @sighash NONE|FORKID */", MULTIPLE);
 }
 
-test "F-039 word-boundary prose is not a marker" {
-    try std.testing.expectEqual(@as(?i32, null), try sighashOf("/** @sighashSINGLE|FORKID */"));
-    try std.testing.expectEqual(@as(?i32, null), try sighashOf("/** see the @sighashType docs */"));
+// N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+// word-boundary rule (`@sighashSINGLE` / `@sighashType` read as prose, so the
+// method silently got the default ALL|FORKID). A comment token that starts
+// with `@sighash` but is not exactly `@sighash <FLAGS>` is now refused with the
+// shared malformed diagnostic; the case list is unchanged plus `_` / digit.
+test "N-039 @sighash glued to the next token is rejected, not prose" {
+    try expectSoleError("/** @sighashSINGLE|FORKID */", MALFORMED);
+    try expectSoleError("/** see the @sighashType docs */", MALFORMED);
+    try expectSoleError("// @sighash_SINGLE|FORKID", MALFORMED);
+    try expectSoleError("/** @sighash2 */", MALFORMED);
+}
+
+// N-039 (R88a): the diagnostic sits at the method declaration (`public` on
+// line 5, 0-based column 2), like the TS reference; Zig used to report the
+// token after the method body.
+test "N-039 @sighash diagnostic is located at the method declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = parse_ts.parseTs(arena.allocator(), src("/** @sighashSINGLE|FORKID */"), "X.runar.ts");
+    try std.testing.expectEqual(@as(usize, 1), parsed.errors.len);
+    try std.testing.expect(std.mem.startsWith(u8, parsed.errors[0], "X.runar.ts:5:2: Method 'bump': "));
 }
 
 test "F-039 well-formed multi-line JSDoc directive still honoured" {
