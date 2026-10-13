@@ -5,6 +5,21 @@ use super::provider::Provider;
 use super::signer::Signer;
 use super::contract::RunarContract;
 use super::script_utils::build_p2pkh_script;
+use std::sync::Once;
+
+// N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
+// be made sound, so they are deprecated rather than redesigned or removed.
+// Each warns once per process on first use.
+const MERGE_DEPRECATION: &str = "runar-sdk: warning: TokenWallet::merge is deprecated and unsafe. \
+    Its merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion input, \
+    so a holder can call merge on ONE input with a made-up otherSupply (supply inflation). \
+    Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).";
+const TRANSFER_DEPRECATION: &str = "runar-sdk: warning: TokenWallet::transfer is deprecated and unsafe. \
+    Its transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, \
+    so the token stays with the current holder instead of moving to the recipient. \
+    Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).";
+static MERGE_WARN_ONCE: Once = Once::new();
+static TRANSFER_WARN_ONCE: Once = Once::new();
 
 /// Manages token UTXOs for a fungible token contract.
 ///
@@ -61,7 +76,13 @@ impl TokenWallet {
     /// this wallet's signer and passed as the first argument.
     ///
     /// Returns the txid of the transfer transaction.
+    #[deprecated(
+        note = "unsafe (N-239): the transfer(sig, to: Addr) ABI cannot re-key a PubKey holder, \
+                so the token does not move to the recipient; use the token-ft example \
+                (FungibleTokenExample) instead"
+    )]
     pub fn transfer(&mut self, recipient_addr: &str, amount: i64) -> Result<String, String> {
+        TRANSFER_WARN_ONCE.call_once(|| eprintln!("{}", TRANSFER_DEPRECATION));
         let utxos = self.get_utxos()?;
         if utxos.is_empty() {
             return Err("TokenWallet.transfer: no token UTXOs found".to_string());
@@ -116,7 +137,13 @@ impl TokenWallet {
     /// on-chain state and passed as arguments.
     ///
     /// Returns the txid of the merge transaction.
+    #[deprecated(
+        note = "unsafe (N-239): the merge(sig, otherSupply, otherHolder) ABI cannot authenticate \
+                its companion input, so a holder can inflate supply; use the token-ft example \
+                (FungibleTokenExample) instead"
+    )]
     pub fn merge(&mut self) -> Result<String, String> {
+        MERGE_WARN_ONCE.call_once(|| eprintln!("{}", MERGE_DEPRECATION));
         let utxos = self.get_utxos()?;
         if utxos.len() < 2 {
             return Err("TokenWallet.merge: need at least 2 UTXOs to merge".to_string());
@@ -342,5 +369,88 @@ mod tests {
         let utxos = wallet.get_utxos().unwrap();
         assert_eq!(utxos.len(), 1);
         assert_eq!(utxos[0].txid, "aa".repeat(32));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-239: merge / transfer are deprecated and unsafe. The ABI they drive
+    // cannot be made sound: merge(sig, otherSupply, otherHolder) cannot
+    // authenticate its companion input (supply inflation) and
+    // transfer(sig, to: Addr) cannot re-key a PubKey holder. User decision
+    // R92: deprecate (marker + one-time runtime warning + docs), do not
+    // redesign or remove.
+    //
+    // Proves: each method carries `#[deprecated]`; calling it writes a
+    // warning to the process's real stderr naming its specific unsoundness
+    // and pointing to token-ft (FungibleTokenExample), once per process, not
+    // per call; the method's own behaviour (here, its error path) is
+    // unchanged. libtest captures eprintln!, so the parent re-runs this test
+    // binary on the child test below with --nocapture and reads its stderr.
+    // Does NOT prove: that anyone reads the warning, or anything on-chain —
+    // the happy paths stay covered by tests/f045_token_wallet.rs.
+    // -----------------------------------------------------------------------
+
+    const N239_CHILD_ENV: &str = "RUNAR_N239_CHILD";
+
+    /// Child half: only does anything when the parent re-executes it.
+    #[test]
+    #[allow(deprecated)]
+    fn n239_child_calls_deprecated_methods() {
+        if std::env::var(N239_CHILD_ENV).is_err() {
+            return;
+        }
+        use crate::sdk::provider::MockProvider;
+        use crate::sdk::signer::MockSigner;
+        let mut wallet = TokenWallet::new(
+            make_token_artifact(),
+            Box::new(MockProvider::testnet()),
+            Box::new(MockSigner::new()),
+        );
+        for _ in 0..2 {
+            let e = wallet.merge().unwrap_err();
+            assert!(e.contains("need at least 2 UTXOs"), "merge error path changed: {e}");
+            let e = wallet.transfer("recipient", 1).unwrap_err();
+            assert!(e.contains("no token UTXOs found"), "transfer error path changed: {e}");
+        }
+    }
+
+    #[test]
+    fn n239_merge_and_transfer_warn_once_on_stderr() {
+        let child = format!(
+            "{}::n239_child_calls_deprecated_methods",
+            module_path!().split_once("::").map(|(_, rest)| rest).unwrap()
+        );
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &child, "--nocapture", "--test-threads=1"])
+            .env(N239_CHILD_ENV, "1")
+            .output()
+            .expect("re-exec test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "child failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.contains("1 passed"), "child test did not run: {stdout}");
+
+        let merge: Vec<&str> = stderr.lines().filter(|l| l.contains("TokenWallet::merge")).collect();
+        let transfer: Vec<&str> = stderr.lines().filter(|l| l.contains("TokenWallet::transfer")).collect();
+        assert_eq!(merge.len(), 1, "want one merge warning, stderr:\n{stderr}");
+        assert_eq!(transfer.len(), 1, "want one transfer warning, stderr:\n{stderr}");
+        for needle in ["deprecated", "supply inflation", "token-ft", "FungibleTokenExample"] {
+            assert!(merge[0].contains(needle), "merge warning lacks {needle:?}: {}", merge[0]);
+        }
+        for needle in ["deprecated", "re-key", "token-ft", "FungibleTokenExample"] {
+            assert!(transfer[0].contains(needle), "transfer warning lacks {needle:?}: {}", transfer[0]);
+        }
+    }
+
+    #[test]
+    fn n239_methods_carry_deprecated_attribute() {
+        let src = include_str!("token_wallet.rs");
+        for m in ["transfer", "merge"] {
+            let sig = format!("pub fn {m}(&mut self");
+            let at = src.find(&sig).unwrap_or_else(|| panic!("{m} not found"));
+            let before = &src[..at];
+            let attr = before.rfind("#[deprecated").unwrap_or_else(|| panic!("{m} lacks #[deprecated]"));
+            // The attribute must belong to THIS fn: no other `fn ` between it and the signature.
+            assert!(!before[attr..].contains("fn "), "{m} lacks #[deprecated]");
+        }
     }
 }

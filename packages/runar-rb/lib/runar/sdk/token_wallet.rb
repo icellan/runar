@@ -24,6 +24,33 @@ require_relative 'deployment'
 module Runar
   module SDK
     class TokenWallet
+      # N-239 (user decision R92): #merge and #transfer drive an ABI that
+      # cannot be made sound, so they are deprecated rather than redesigned or
+      # removed. Each warns once per process on first use. Plain +warn+, not
+      # +category: :deprecated+, which Ruby >= 2.7.2 suppresses by default.
+      MERGE_DEPRECATION =
+        'runar-sdk: warning: TokenWallet#merge is deprecated and unsafe. Its ' \
+        'merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion ' \
+        'input, so a holder can call merge on ONE input with a made-up otherSupply ' \
+        '(supply inflation). Use the token-ft example (FungibleTokenExample, ' \
+        'examples/*/token-ft/) instead (N-239).'
+      TRANSFER_DEPRECATION =
+        'runar-sdk: warning: TokenWallet#transfer is deprecated and unsafe. Its ' \
+        'transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, ' \
+        'so the token stays with the current holder instead of moving to the ' \
+        'recipient. Use the token-ft example (FungibleTokenExample, ' \
+        'examples/*/token-ft/) instead (N-239).'
+
+      @deprecation_warned = {}
+
+      # @api private
+      def self.warn_deprecated_once(key, message)
+        return if @deprecation_warned[key]
+
+        @deprecation_warned[key] = true
+        warn(message)
+      end
+
       # @param artifact [RunarArtifact] compiled token contract artifact
       # @param provider [Provider] blockchain provider
       # @param signer   [Signer] signing key
@@ -59,7 +86,11 @@ module Runar
       # @param recipient_addr [String] the BSV address (Addr) of the recipient
       # @param amount [Integer] minimum token balance required in the source UTXO
       # @return [String] the txid of the transfer transaction
+      # @deprecated Unsafe (N-239): the transfer(sig, to: Addr) ABI cannot
+      #   re-key a PubKey holder, so the token does not move to
+      #   +recipient_addr+. Use the token-ft example (FungibleTokenExample).
       def transfer(recipient_addr, amount)
+        TokenWallet.warn_deprecated_once(:transfer, TRANSFER_DEPRECATION)
         utxos = get_utxos
         raise 'TokenWallet.transfer: no token UTXOs found' if utxos.empty?
 
@@ -92,7 +123,11 @@ module Runar
       # on-chain state and passed as arguments.
       #
       # @return [String] the txid of the merge transaction
+      # @deprecated Unsafe (N-239): the merge(sig, otherSupply, otherHolder)
+      #   ABI cannot authenticate its companion input, so a holder can inflate
+      #   supply. Use the token-ft example (FungibleTokenExample).
       def merge
+        TokenWallet.warn_deprecated_once(:merge, MERGE_DEPRECATION)
         utxos = get_utxos
         raise 'TokenWallet.merge: need at least 2 UTXOs to merge' if utxos.length < 2
 

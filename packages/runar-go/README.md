@@ -1593,6 +1593,8 @@ func (tw *TokenWallet) Merge() (string, error)
 
 Convenience wrapper for fungible-token contracts that have a `transfer(sig, to)` method and a `balance` / `supply` / `amount` state field. [sdk_token_wallet.go](sdk_token_wallet.go).
 
+> **Deprecated and unsafe (N-239):** `Transfer` and `Merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/go/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 #### `ToBool`
 
 ```go

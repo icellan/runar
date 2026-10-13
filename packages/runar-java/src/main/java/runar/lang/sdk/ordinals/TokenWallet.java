@@ -18,9 +18,16 @@ import runar.lang.sdk.UTXO;
  *
  * <p>Wraps a compiled {@link RunarArtifact}, a {@link Provider}, and
  * a {@link Signer}, and provides UTXO-list filtering keyed off the
- * artifact's locking-script prefix. The full transfer / merge
- * lifecycle requires the high-level {@code RunarContract} surface and
- * lives there; this class is a small composable building block.
+ * artifact's locking-script prefix; this class is a small composable
+ * building block.
+ *
+ * <p>No {@code transfer} / {@code merge} here, on purpose (N-239). The
+ * other five tiers' {@code TokenWallet.transfer/merge} drive a
+ * {@code transfer(sig, to: Addr)} / {@code merge(sig, otherSupply,
+ * otherHolder)} ABI that cannot be made sound — transfer cannot re-key the
+ * PubKey holder, and merge cannot authenticate its companion input (supply
+ * inflation) — and are deprecated there. Do not port them; use the token-ft
+ * example (FungibleTokenExample) with {@code RunarContract}.
  */
 public final class TokenWallet {
 

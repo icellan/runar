@@ -1801,6 +1801,8 @@ Methods include `get_balance() -> Result<i64, String>` and
 when the artifact's state field is named `balance`, `supply`, or `amount`
 and the contract has a `transfer` method.
 
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/rust/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 #### `pub struct Transaction = TransactionData`
 Backward-compat alias.
 

@@ -1355,6 +1355,8 @@ Higher-level wrapper for fungible-token contracts (artifacts with a `transfer` p
 
 Implementation: [`lib/runar/sdk/token_wallet.rb`](lib/runar/sdk/token_wallet.rb).
 
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/ruby/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 #### `Runar::SDK::TransactionData` / `Runar::SDK::Transaction`
 
 `Transaction` is an alias for `TransactionData`. Keyword-init struct: `:txid`, `:version`, `:inputs`, `:outputs`, `:locktime`, `:raw`.

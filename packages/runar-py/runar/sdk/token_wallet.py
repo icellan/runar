@@ -11,11 +11,32 @@ common token use-case.
 
 from __future__ import annotations
 
+import warnings
+
 from runar.sdk.types import RunarArtifact, Utxo
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.contract import RunarContract
 from runar.sdk.deployment import build_p2pkh_script
+
+
+# N-239 (user decision R92): ``merge`` and ``transfer`` drive an ABI that
+# cannot be made sound, so they are deprecated rather than redesigned or
+# removed. ``warnings`` reports each once per call site by default.
+_MERGE_DEPRECATION = (
+    'runar-sdk: TokenWallet.merge is deprecated and unsafe. Its '
+    'merge(sig, otherSupply, otherHolder) ABI cannot authenticate the '
+    'companion input, so a holder can call merge on ONE input with a made-up '
+    'otherSupply (supply inflation). Use the token-ft example '
+    '(FungibleTokenExample, examples/*/token-ft/) instead (N-239).'
+)
+_TRANSFER_DEPRECATION = (
+    'runar-sdk: TokenWallet.transfer is deprecated and unsafe. Its '
+    'transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an '
+    'Addr, so the token stays with the current holder instead of moving to '
+    'the recipient. Use the token-ft example (FungibleTokenExample, '
+    'examples/*/token-ft/) instead (N-239).'
+)
 
 
 class TokenWallet:
@@ -68,7 +89,13 @@ class TokenWallet:
 
         Returns:
             The txid of the transfer transaction.
+
+        .. deprecated::
+            Unsafe (N-239): the ``transfer(sig, to: Addr)`` ABI cannot re-key a
+            PubKey holder, so the token does not move to ``recipient_addr``.
+            Use the token-ft example (FungibleTokenExample) instead.
         """
+        warnings.warn(_TRANSFER_DEPRECATION, DeprecationWarning, stacklevel=2)
         utxos = self.get_utxos()
         if not utxos:
             raise RuntimeError('TokenWallet.transfer: no token UTXOs found')
@@ -116,7 +143,13 @@ class TokenWallet:
 
         Returns:
             The txid of the merge transaction.
+
+        .. deprecated::
+            Unsafe (N-239): the ``merge(sig, otherSupply, otherHolder)`` ABI
+            cannot authenticate its companion input, so a holder can inflate
+            supply. Use the token-ft example (FungibleTokenExample) instead.
         """
+        warnings.warn(_MERGE_DEPRECATION, DeprecationWarning, stacklevel=2)
         utxos = self.get_utxos()
         if len(utxos) < 2:
             raise RuntimeError('TokenWallet.merge: need at least 2 UTXOs to merge')

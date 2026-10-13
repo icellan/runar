@@ -8,11 +8,14 @@ const signer_mod = @import("sdk_signer.zig");
 // ---------------------------------------------------------------------------
 //
 // Mirrors the TS/Go/Rust/Python/Ruby TokenWallet API. Holds references to a
-// compiled artifact, a Provider, and a Signer, and offers UTXO filtering
-// and helpers for the common token-contract lifecycle (balance, transfer,
-// merge). Full transfer/merge require the RunarContract high-level API,
-// which is not yet consumed from this wrapper — see `prepareTransferUnlock`
-// for a low-level building block intended for SDK users.
+// compiled artifact, a Provider, and a Signer, and offers UTXO filtering.
+//
+// No transfer/merge here, on purpose (N-239). The other five tiers'
+// TokenWallet.transfer/merge drive a transfer(sig, to: Addr) /
+// merge(sig, otherSupply, otherHolder) ABI that cannot be made sound —
+// transfer cannot re-key the PubKey holder, and merge cannot authenticate its
+// companion input (supply inflation) — and are deprecated there. Do not port
+// them; use the token-ft example (FungibleTokenExample) with RunarContract.
 
 pub const TokenWalletError = error{
     NoUtxos,

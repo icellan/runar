@@ -2,12 +2,30 @@ package runar
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
 // TokenWallet — Token UTXO management
 // ---------------------------------------------------------------------------
+
+// N-239 (user decision R92): Merge and Transfer drive an ABI that cannot be
+// made sound, so they are deprecated rather than redesigned or removed. Each
+// warns once per process on first use.
+const (
+	tokenWalletMergeDeprecation = "runar-sdk: warning: TokenWallet.Merge is deprecated and unsafe. " +
+		"Its merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion input, " +
+		"so a holder can call merge on ONE input with a made-up otherSupply (supply inflation). " +
+		"Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).\n"
+	tokenWalletTransferDeprecation = "runar-sdk: warning: TokenWallet.Transfer is deprecated and unsafe. " +
+		"Its transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, " +
+		"so the token stays with the current holder instead of moving to the recipient. " +
+		"Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).\n"
+)
+
+var tokenWalletMergeWarnOnce, tokenWalletTransferWarnOnce sync.Once
 
 // TokenWallet manages token UTXOs for a fungible token contract.
 //
@@ -63,7 +81,12 @@ func (tw *TokenWallet) GetBalance() (int64, error) {
 // recipientAddr is the BSV address of the recipient.
 // amount is the minimum token balance required in the source UTXO.
 // Returns the txid of the transfer transaction.
+//
+// Deprecated: unsafe (N-239). The transfer(sig, to: Addr) ABI cannot re-key
+// a PubKey holder, so the token does not move to recipientAddr. Use the
+// token-ft example (FungibleTokenExample) instead.
 func (tw *TokenWallet) Transfer(recipientAddr string, amount int64) (string, error) {
+	tokenWalletTransferWarnOnce.Do(func() { fmt.Fprint(os.Stderr, tokenWalletTransferDeprecation) })
 	utxos, err := tw.GetUtxos()
 	if err != nil {
 		return "", err
@@ -120,7 +143,12 @@ func (tw *TokenWallet) Transfer(recipientAddr string, amount int64) (string, err
 // on-chain state and passed as arguments.
 //
 // Returns the txid of the merge transaction.
+//
+// Deprecated: unsafe (N-239). The merge(sig, otherSupply, otherHolder) ABI
+// cannot authenticate its companion input, so a holder can inflate supply.
+// Use the token-ft example (FungibleTokenExample) instead.
 func (tw *TokenWallet) Merge() (string, error) {
+	tokenWalletMergeWarnOnce.Do(func() { fmt.Fprint(os.Stderr, tokenWalletMergeDeprecation) })
 	utxos, err := tw.GetUtxos()
 	if err != nil {
 		return "", err

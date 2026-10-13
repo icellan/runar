@@ -9,6 +9,24 @@ import type { UTXO } from './types.js';
 import { RunarContract } from './contract.js';
 import { buildP2PKHScript } from './script-utils.js';
 
+// N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
+// be made sound, so they are deprecated rather than redesigned or removed.
+// Each warns once per process on first use.
+const MERGE_DEPRECATION =
+  'runar-sdk: warning: TokenWallet.merge is deprecated and unsafe. Its ' +
+  'merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion ' +
+  'input, so a holder can call merge on ONE input with a made-up otherSupply ' +
+  '(supply inflation). Use the token-ft example (FungibleTokenExample, ' +
+  'examples/*/token-ft/) instead (N-239).';
+const TRANSFER_DEPRECATION =
+  'runar-sdk: warning: TokenWallet.transfer is deprecated and unsafe. Its ' +
+  'transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, ' +
+  'so the token stays with the current holder instead of moving to the ' +
+  'recipient. Use the token-ft example (FungibleTokenExample, ' +
+  'examples/*/token-ft/) instead (N-239).';
+let mergeDeprecationWarned = false;
+let transferDeprecationWarned = false;
+
 /**
  * Manages token UTXOs for a fungible token contract.
  *
@@ -59,8 +77,15 @@ export class TokenWallet {
    * @param recipientAddr - The BSV address (Addr) of the recipient.
    * @param amount - Minimum token balance required in the source UTXO.
    * @returns The txid of the transfer transaction.
+   * @deprecated Unsafe (N-239): the `transfer(sig, to: Addr)` ABI cannot
+   * re-key a PubKey holder, so the token does not move to `recipientAddr`.
+   * Use the token-ft example (FungibleTokenExample) instead.
    */
   async transfer(recipientAddr: string, amount: bigint): Promise<string> {
+    if (!transferDeprecationWarned) {
+      transferDeprecationWarned = true;
+      console.warn(TRANSFER_DEPRECATION);
+    }
     const utxos = await this.getUtxos();
     if (utxos.length === 0) {
       throw new Error('TokenWallet.transfer: no token UTXOs found');
@@ -112,8 +137,15 @@ export class TokenWallet {
    * on-chain state and passed as arguments.
    *
    * @returns The txid of the merge transaction.
+   * @deprecated Unsafe (N-239): the `merge(sig, otherSupply, otherHolder)` ABI
+   * cannot authenticate its companion input, so a holder can inflate supply.
+   * Use the token-ft example (FungibleTokenExample) instead.
    */
   async merge(): Promise<string> {
+    if (!mergeDeprecationWarned) {
+      mergeDeprecationWarned = true;
+      console.warn(MERGE_DEPRECATION);
+    }
     const utxos = await this.getUtxos();
     if (utxos.length < 2) {
       throw new Error('TokenWallet.merge: need at least 2 UTXOs to merge');

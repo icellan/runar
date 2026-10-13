@@ -1541,6 +1541,8 @@ class TokenWallet:
 
 Higher-level wrapper for fungible-token contracts. Assumes the artifact has a `transfer` method and a state field named `balance`, `supply`, or `amount`. Source: [runar/sdk/token_wallet.py:22](runar/sdk/token_wallet.py).
 
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each raises a `DeprecationWarning` (hidden by Python's default filters outside `__main__`; run with `-W default` to see it). They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/python/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 #### `Transaction`
 
 Backward-compat alias for `TransactionData`.

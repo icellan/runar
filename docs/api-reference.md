@@ -639,6 +639,8 @@ Returns `null` for stateless contracts or if no state section is found.
 
 The `TokenWallet` class is a higher-level convenience wrapper for managing fungible token UTXOs.
 
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use, in every SDK that ships them (TS, Go, Rust, Python, Ruby; the Zig and Java `TokenWallet` deliberately ship neither). They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/ts/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 ```typescript
 import { TokenWallet } from 'runar-sdk';
 
@@ -665,9 +667,13 @@ const txid: string = await wallet.transfer('mxyz...', 1000n);
 
 Finds a UTXO with sufficient balance and calls its `transfer` public method.
 
+**Deprecated and unsafe (N-239)** — see the note above.
+
 ### `merge()`
 
 Merge multiple token UTXOs into a single UTXO (assumes the contract has a `merge` method).
+
+**Deprecated and unsafe (N-239)** — see the note above.
 
 ```typescript
 const txid: string = await wallet.merge();
