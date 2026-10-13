@@ -2156,7 +2156,7 @@ theorem updatePropArithValueB_iff (v : ANFValue) :
   | assert _ => simp [updatePropArithValueB, updatePropArithValue]
   | updateProp _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | getStateScript => simp [updatePropArithValueB, updatePropArithValue]
-  | checkPreimage _ => simp [updatePropArithValueB, updatePropArithValue]
+  | checkPreimage _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | deserializeState _ => simp [updatePropArithValueB, updatePropArithValue]
   | addOutput _ _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | addRawOutput _ _ => simp [updatePropArithValueB, updatePropArithValue]

@@ -157,7 +157,7 @@ theorem lowerValueP_checkPreimage_statefulPrologue
     (budget : Nat) (localBindings : List String) (pre : String)
     (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
     Lower.lowerValueP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
-        [] localBindings [] [pre] "_cp0" (.checkPreimage pre)
+        [] localBindings [] [pre] "_cp0" (.checkPreimage pre none)
       = (statefulPrologueOps, (["_cp0"] : Stack.Lower.StackMap), localBindings) := by
   unfold Lower.lowerValueP
   simp [Lower.lowerCheckPreimageOpsLive, Lower.loadRefLive, Lower.bringToTop,
@@ -194,7 +194,7 @@ theorem lowerBindingsP_statefulPrologue
       = (statefulPrologueOps ++ [.opcode "OP_VERIFY"], ([] : Stack.Lower.StackMap)) := by
   show (Lower.lowerBindingsP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre]
-        [⟨"_cp0", .checkPreimage pre, none⟩, ⟨"_v", .assert "_cp0", none⟩])
+        [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩])
       = (statefulPrologueOps ++ [.opcode "OP_VERIFY"], [])
   rw [Lower.lowerBindingsP.eq_def]
   simp only [lowerValueP_checkPreimage_statefulPrologue progMethods props budget
@@ -314,7 +314,7 @@ EXACTLY the gated stateful prologue on `pre`, with the two name-collision
 exclusions. -/
 def statefulConsumeShapeBool (m : ANFMethod) : Bool :=
   match m.params, m.body with
-  | [p], [⟨bn1, .checkPreimage pre, none⟩, ⟨bn2, .assert ref, none⟩] =>
+  | [p], [⟨bn1, .checkPreimage pre none, none⟩, ⟨bn2, .assert ref, none⟩] =>
       (bn1 == "_cp0") && (bn2 == "_v") && (ref == "_cp0") &&
       (p.name == pre) && !(pre == "_cp0") && !(pre == "_opPushTxSig") &&
       !(pre == "_codePart")
@@ -463,7 +463,7 @@ theorem lowerValueP_checkPreimage_statefulFull
     Lower.lowerValueP progMethods props budget 0
         [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre, stateVal, sats, "_codePart"]
-        "_cp0" (.checkPreimage pre)
+        "_cp0" (.checkPreimage pre none)
       = ((Lower.lowerCheckPreimageOpsLive
             ([pre, stateVal, sats, "_codePart"] : Stack.Lower.StackMap)
             "_cp0" pre 0
@@ -546,7 +546,7 @@ theorem lowerBindingsP_statefulFull
   show Lower.lowerBindingsP progMethods props budget 0
         [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre, stateVal, sats, "_codePart"]
-        [⟨"_cp0", .checkPreimage pre, none⟩, ⟨"_v", .assert "_cp0", none⟩,
+        [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩,
          ⟨"_so0", .addOutput sats [stateVal] "", none⟩]
       = (statefulFullOps, (["_so0", "_codePart"] : Stack.Lower.StackMap))
   rw [Lower.lowerBindingsP.eq_def]
@@ -692,7 +692,7 @@ theorem evalBindingsP_statefulFull_isSome_eq
   unfold statefulFullBody StatefulBridge.gatedStatefulPrologueBody
     AgreesD2.statefulPrologueBody AgreesD2.statefulEpilogueBody
   show (evalBindingsP methods s
-      [⟨"_cp0", .checkPreimage pre, none⟩, ⟨"_v", .assert "_cp0", none⟩,
+      [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩,
        ⟨"_so0", .addOutput sats [stateVal] "", none⟩]).toOption.isSome
     = Crypto.checkPreimage b
   have hLookup :
@@ -804,7 +804,7 @@ one mutable bigint property, all name-collision exclusions. -/
 def statefulFullConsumeShapeBool (props : List ANFProperty) (m : ANFMethod) : Bool :=
   match m.params, m.body with
   | [pS, pV, pP],
-    [⟨bn1, .checkPreimage pre, none⟩, ⟨bn2, .assert ref, none⟩,
+    [⟨bn1, .checkPreimage pre none, none⟩, ⟨bn2, .assert ref, none⟩,
      ⟨bn3, .addOutput sats [stateVal] epre, none⟩] =>
       (bn1 == "_cp0") && (bn2 == "_v") && (ref == "_cp0") && (bn3 == "_so0") &&
       (epre == "") &&

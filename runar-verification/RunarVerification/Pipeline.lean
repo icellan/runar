@@ -4650,7 +4650,7 @@ theorem arithOnlyBody_of_emittableArithChainReadyNoDblNeg
       | assert _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | updateProp _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | getStateScript => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
-      | checkPreimage _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
+      | checkPreimage _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | deserializeState _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | addOutput _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | addRawOutput _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
@@ -4796,7 +4796,7 @@ theorem noMethodCallBindings_true_of_mathByteNoLen :
       | .assert r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp n r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage pr => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage pr _ => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState pr => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput sa sv pre => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput sa sb => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
@@ -9999,7 +9999,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ .getStateScript _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
-                | [.mk _ (.checkPreimage _) _] =>
+                | [.mk _ (.checkPreimage _ _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ (.deserializeState _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])

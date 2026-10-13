@@ -162,7 +162,7 @@ def collectRefs : ANFValue → List String
   | .loop _ body _ _ _ => collectRefsBindings body
   | .assert ref               => [ref]
   | .updateProp _ ref         => [ref]
-  | .checkPreimage pre        => [pre]
+  | .checkPreimage pre _      => [pre]
   | .deserializeState pre     => [pre]
   | .arrayLiteral elems       => elems
   | .addRawOutput sat scr     => [sat, scr]
@@ -1866,6 +1866,25 @@ def checkPreimageBindingBytes : ByteArray := ByteArray.mk #[
     0x93, 0x8f, 0xdc, 0x1c, 0x96, 0x9a, 0x8d, 0x13, 0x82, 0xa2, 0xbf, 0x66,
     0xa7, 0x1a, 0xe7, 0x4a, 0x1e, 0x83, 0xb0, 0xad]
 
+/-- Byte offset of the sighash flag inside `checkPreimageBindingBytes`: the
+blob pushes `01 <flag>` then `OP_CAT` (`7e`) at bytes 390–392, mirroring
+`pushHex(sighashFlag & 0xff); op(OP_CAT)` in TS `anySBindingBytes`
+(`oppushtx-codegen.ts`). -/
+def checkPreimageBindingFlagIndex : Nat := 391
+
+/-- The OP_PUSH_TX binding blob for a `check_preimage` carrying `sighashFlag`
+(issue #123 / N-178). `none` (absent = default `ALL|FORKID`) is exactly the
+pinned `checkPreimageBindingBytes` — definitionally, so every proof stated
+at the default keeps reducing to the constant the binding axiom names.
+`some f` replaces the single flag byte with `f & 0xff` (`UInt8.ofNat`), as
+TS does; the blob length is unchanged. -/
+def checkPreimageBindingBytesFor : Option Nat → ByteArray
+  | none   => checkPreimageBindingBytes
+  | some f => checkPreimageBindingBytes.set! checkPreimageBindingFlagIndex (UInt8.ofNat f)
+
+@[simp] theorem checkPreimageBindingBytesFor_none :
+    checkPreimageBindingBytesFor none = checkPreimageBindingBytes := rfl
+
 /--
 Lowering for `check_preimage(preimage)` (BUG-100 on-chain binding). Mirrors
 `lowerCheckPreimage` in `05-stack-lower.ts:3156-3197`.
@@ -1883,12 +1902,12 @@ preimage remains on top, renamed to `bindingName` so downstream extractors
 can reference it. The old spender-supplied `_opPushTxSig` witness is gone.
 -/
 def lowerCheckPreimageOps (sm : StackMap) (bindingName : String)
-    (preimage : String) : (List StackOp × StackMap) :=
+    (preimage : String) (sighashFlag : Option Nat := none) : (List StackOp × StackMap) :=
   let s0 : List StackOp := [.opcode "OP_CODESEPARATOR"]
   -- Bring preimage to top.
   let s1 := loadRef sm preimage
   -- Derive + verify the signature on-chain (single opaque raw_bytes blob).
-  let s2 : List StackOp := [.rawBytes checkPreimageBindingBytes]
+  let s2 : List StackOp := [.rawBytes (checkPreimageBindingBytesFor sighashFlag)]
   (s0 ++ s1 ++ s2, sm.push bindingName)
 
 /-- Mutable properties only — R-010 clause 8 keys off this list. -/
@@ -2010,14 +2029,15 @@ def lowerCheckPreimageOpsLive (sm : StackMap) (bindingName : String)
     (lastUses : List (String × Nat))
     (outerProtected : List String)
     (scriptLevelCodeSeparator : Bool := false)
-    (props : List ANFProperty := []) : (List StackOp × StackMap) :=
+    (props : List ANFProperty := [])
+    (sighashFlag : Option Nat := none) : (List StackOp × StackMap) :=
   let s0 : List StackOp :=
     if scriptLevelCodeSeparator then [] else [.opcode "OP_CODESEPARATOR"]
   -- Step 1: bring preimage to top, consuming on last use.
   let (s1, sm1) := loadRefLive sm preimage currentIndex lastUses outerProtected
   -- Step 2: derive + verify the signature on-chain (single opaque raw_bytes
   -- blob; net stack effect 0 — preimage in → preimage out).
-  let s2 : List StackOp := [.rawBytes checkPreimageBindingBytes]
+  let s2 : List StackOp := [.rawBytes (checkPreimageBindingBytesFor sighashFlag)]
   -- Step 3: R-010 pin, only when this method's stack carries `_codePart`.
   let (sAuth, smAuth) :=
     match sm1.depth? "_codePart" with
@@ -3844,7 +3864,7 @@ def lowerValue (sm : StackMap) (bindingName : String) :
   -- in ANF lowering distinguishes them.
   | .addRawOutput sat scr    => lowerAddRawOutputOps sm bindingName sat scr
   | .addDataOutput sat scr   => lowerAddRawOutputOps sm bindingName sat scr
-  | .checkPreimage pre       => lowerCheckPreimageOps sm bindingName pre
+  | .checkPreimage pre flag  => lowerCheckPreimageOps sm bindingName pre flag
   -- Out-of-scope: depend on the program's property table (which
   -- `lowerValue` doesn't have access to). Tracked as Phase 3y deferred.
   | .getStateScript          => ([.opcode "OP_RUNAR_GETSTATESCRIPT_UNSUPPORTED"], sm.push bindingName)
@@ -5459,7 +5479,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
   | .addDataOutput sat scr   =>
       let (ops, sm') := lowerAddRawOutputOpsLive sm bindingName sat scr currentIndex lastUses outerProtected
       (ops, sm', localBindings)
-  | .checkPreimage pre       =>
+  | .checkPreimage pre flag  =>
       -- R-010: skip the per-method CODESEPARATOR when this method's stack
       -- carries `_codePart` (the implicit is only prepended for methods
       -- that authenticate). Mixed contracts whose checkPreimage-only
@@ -5470,7 +5490,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- flag through the lowering context.
       let scriptLevel : Bool := (sm.depth? "_codePart").isSome
       let (ops, sm') := lowerCheckPreimageOpsLive sm bindingName pre currentIndex lastUses outerProtected
-          scriptLevel props
+          scriptLevel props flag
       (ops, sm', localBindings)
   -- Phase 3z-A: property-table-aware framework intrinsics.
   | .getStateScript          =>
@@ -5686,7 +5706,7 @@ def bindingsUseCheckPreimage : List ANFBinding → Bool
   | (.mk _ v _) :: rest =>
       let here : Bool :=
         match v with
-        | .checkPreimage _    => true
+        | .checkPreimage _ _    => true
         | .ifVal _ thn els _    =>
             bindingsUseCheckPreimage thn || bindingsUseCheckPreimage els
         | .loop _ body _ _ _ => bindingsUseCheckPreimage body
@@ -6053,7 +6073,7 @@ def simpleValue : ANFValue → Bool
   | .loop _ body _ _ _ =>
       simpleBindings body
   -- Phase 3w-b — concretely lowered framework intrinsics:
-  | .checkPreimage _          => true
+  | .checkPreimage _ _          => true
   | .addRawOutput _ _         => true
   | .addDataOutput _ _        => true
   -- Phase 3z-A — property-table-aware framework intrinsics:

@@ -292,7 +292,12 @@ private def fromJsonANFValueAux? (fuel : Nat) (j : Json) : Except String ANFValu
       return .getStateScript
   | "check_preimage" =>
       let preimage ← j.getObjValAs? String "preimage"
-      return .checkPreimage preimage
+      -- Issue #123 / N-178: optional; absent or `null` = default ALL|FORKID.
+      let sighashFlag ← match j.getObjVal? "sighashFlag" with
+        | .ok .null => .ok none
+        | .ok f     => (f.getNat?).map some
+        | .error _  => .ok none
+      return .checkPreimage preimage sighashFlag
   | "deserialize_state" =>
       let preimage ← j.getObjValAs? String "preimage"
       return .deserializeState preimage
@@ -397,8 +402,11 @@ private def toJsonANFValue : ANFValue → Json
   | .updateProp name value =>
       mkObj [("kind", .str "update_prop"), ("name", .str name), ("value", .str value)]
   | .getStateScript => mkObj [("kind", .str "get_state_script")]
-  | .checkPreimage preimage =>
-      mkObj [("kind", .str "check_preimage"), ("preimage", .str preimage)]
+  | .checkPreimage preimage sighashFlag =>
+      mkObj ([("kind", .str "check_preimage"), ("preimage", .str preimage)]
+             ++ (match sighashFlag with
+                 | some f => [("sighashFlag", .num ⟨f, 0⟩)]
+                 | none   => []))
   | .deserializeState preimage =>
       mkObj [("kind", .str "deserialize_state"), ("preimage", .str preimage)]
   | .addOutput sats sv preimage =>

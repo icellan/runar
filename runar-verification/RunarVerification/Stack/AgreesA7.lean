@@ -126,7 +126,7 @@ theorem structuralLoopValue_iff_B (v : ANFValue) :
   | assert _ => simp [structuralLoopValue, structuralLoopValueB]
   | updateProp _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | getStateScript => simp [structuralLoopValue, structuralLoopValueB]
-  | checkPreimage _ => simp [structuralLoopValue, structuralLoopValueB]
+  | checkPreimage _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | deserializeState _ => simp [structuralLoopValue, structuralLoopValueB]
   | addOutput _ _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | addRawOutput _ _ => simp [structuralLoopValue, structuralLoopValueB]
@@ -290,7 +290,7 @@ theorem runOps_lowerValueP_structuralLoopValue_id
   | assert _ => exact (hSupp).elim
   | updateProp _ _ => exact (hSupp).elim
   | getStateScript => exact (hSupp).elim
-  | checkPreimage _ => exact (hSupp).elim
+  | checkPreimage _ _ => exact (hSupp).elim
   | deserializeState _ => exact (hSupp).elim
   | addOutput _ _ _ => exact (hSupp).elim
   | addRawOutput _ _ => exact (hSupp).elim
@@ -655,7 +655,7 @@ theorem structuralLoopValueExt_iff_B (v : ANFValue) :
   | assert _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | updateProp _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | getStateScript => simp [structuralLoopValueExt, structuralLoopValueExtB]
-  | checkPreimage _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
+  | checkPreimage _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | deserializeState _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | addOutput _ _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | addRawOutput _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
@@ -717,7 +717,7 @@ theorem structuralLoopValue_implies_Ext (v : ANFValue)
   | assert _ => exact h
   | updateProp _ _ => exact h
   | getStateScript => exact h
-  | checkPreimage _ => exact h
+  | checkPreimage _ _ => exact h
   | deserializeState _ => exact h
   | addOutput _ _ _ => exact h
   | addRawOutput _ _ => exact h
@@ -777,7 +777,7 @@ theorem runOps_lowerValueP_structuralLoopValueExt_id
   | assert _ => exact (hSupp).elim
   | updateProp _ _ => exact (hSupp).elim
   | getStateScript => exact (hSupp).elim
-  | checkPreimage _ => exact (hSupp).elim
+  | checkPreimage _ _ => exact (hSupp).elim
   | deserializeState _ => exact (hSupp).elim
   | addOutput _ _ _ => exact (hSupp).elim
   | addRawOutput _ _ => exact (hSupp).elim
@@ -1444,7 +1444,7 @@ theorem lowerBindingsP_structuralLoopConstBody_ops :
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.assert _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.updateProp _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ .getStateScript _ :: _, h => h.elim
-  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.checkPreimage _) _ :: _, h => h.elim
+  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.checkPreimage _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.deserializeState _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.addOutput _ _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.addRawOutput _ _) _ :: _, h => h.elim
@@ -1499,7 +1499,7 @@ theorem lowerBindingsP_structuralLoopConstBody_sm :
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.assert _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.updateProp _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ .getStateScript _ :: _, h => h.elim
-  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.checkPreimage _) _ :: _, h => h.elim
+  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.checkPreimage _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.deserializeState _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.addOutput _ _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.addRawOutput _ _) _ :: _, h => h.elim
@@ -1561,8 +1561,8 @@ theorem constBodyStackMap_preserves_listContains
           | getStateScript =>
               show ((constBodyStackMap (ANFBinding.mk _ .getStateScript _ :: rest) sm).any (· == name)) = true
               unfold constBodyStackMap; exact ih sm name h
-          | checkPreimage _ =>
-              show ((constBodyStackMap (ANFBinding.mk _ (.checkPreimage _) _ :: rest) sm).any (· == name)) = true
+          | checkPreimage _ _ =>
+              show ((constBodyStackMap (ANFBinding.mk _ (.checkPreimage _ _) _ :: rest) sm).any (· == name)) = true
               unfold constBodyStackMap; exact ih sm name h
           | deserializeState _ =>
               show ((constBodyStackMap (ANFBinding.mk _ (.deserializeState _) _ :: rest) sm).any (· == name)) = true
@@ -1622,7 +1622,7 @@ theorem runOps_emitConstChain_structuralLoopConstBody :
   | ANFBinding.mk _ (.assert _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.updateProp _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ .getStateScript _ :: _, h, _ => h.elim
-  | ANFBinding.mk _ (.checkPreimage _) _ :: _, h, _ => h.elim
+  | ANFBinding.mk _ (.checkPreimage _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.deserializeState _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.addOutput _ _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.addRawOutput _ _) _ :: _, h, _ => h.elim
@@ -1744,7 +1744,7 @@ private theorem applyDrop_constChainPostState_dropLast
     | assert _ => exact h.elim
     | updateProp _ _ => exact h.elim
     | getStateScript => exact h.elim
-    | checkPreimage _ => exact h.elim
+    | checkPreimage _ _ => exact h.elim
     | deserializeState _ => exact h.elim
     | addOutput _ _ _ => exact h.elim
     | addRawOutput _ _ => exact h.elim

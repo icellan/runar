@@ -259,7 +259,7 @@ theorem lowerValueP_eq_lowerValue_structuralCall
   | assert _ => simp [structuralCallValue] at h
   | updateProp _ _ => simp [structuralCallValue] at h
   | getStateScript => simp [structuralCallValue] at h
-  | checkPreimage _ => simp [structuralCallValue] at h
+  | checkPreimage _ _ => simp [structuralCallValue] at h
   | deserializeState _ => simp [structuralCallValue] at h
   | addOutput _ _ _ => simp [structuralCallValue] at h
   | addRawOutput _ _ => simp [structuralCallValue] at h
@@ -468,7 +468,7 @@ theorem evalValue_structuralCallValue_ok
   | assert _ => simp [structuralCallValue] at h
   | updateProp _ _ => simp [structuralCallValue] at h
   | getStateScript => simp [structuralCallValue] at h
-  | checkPreimage _ => simp [structuralCallValue] at h
+  | checkPreimage _ _ => simp [structuralCallValue] at h
   | deserializeState _ => simp [structuralCallValue] at h
   | addOutput _ _ _ => simp [structuralCallValue] at h
   | addRawOutput _ _ => simp [structuralCallValue] at h
@@ -4358,8 +4358,8 @@ theorem mathByteSingleArgShapeBool_iff :
           apply mathByteShape_false_of_notSingleCall bn .getStateScript src rest tsm
           · cases tsm <;> simp [mathByteSingleArgShapeBool]
           · intro f a hEq; exact absurd hEq (by simp)
-      | .checkPreimage p =>
-          apply mathByteShape_false_of_notSingleCall bn (.checkPreimage p) src rest tsm
+      | .checkPreimage p f =>
+          apply mathByteShape_false_of_notSingleCall bn (.checkPreimage p f) src rest tsm
           · cases tsm <;> simp [mathByteSingleArgShapeBool]
           · intro f a hEq; exact absurd hEq (by simp)
       | .deserializeState p =>
@@ -5635,7 +5635,7 @@ theorem mathByteEmitNoNip_of_noLenFragment :
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a =>
+      | .checkPreimage a _ =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5700,7 +5700,7 @@ theorem bindingsUseCheckPreimage_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5751,7 +5751,7 @@ theorem collectRawSlots_nil_of_noLen :
         | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-        | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+        | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5801,7 +5801,7 @@ theorem bindingsUseCodePart_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5845,7 +5845,7 @@ theorem bindingsUseDeserializeState_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5893,7 +5893,7 @@ theorem bodyEndsInAssert_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape

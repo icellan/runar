@@ -318,7 +318,7 @@ theorem catConsumeShapeBool_extract (m : ANFMethod)
   | [ANFBinding.mk _ (.assert _) _] => rw [hb] at h; simp at h
   | [ANFBinding.mk _ (.updateProp _ _) _] => rw [hb] at h; simp at h
   | [ANFBinding.mk _ .getStateScript _] => rw [hb] at h; simp at h
-  | [ANFBinding.mk _ (.checkPreimage _) _] => rw [hb] at h; simp at h
+  | [ANFBinding.mk _ (.checkPreimage _ _) _] => rw [hb] at h; simp at h
   | [ANFBinding.mk _ (.deserializeState _) _] => rw [hb] at h; simp at h
   | [ANFBinding.mk _ (.addOutput _ _ _) _] => rw [hb] at h; simp at h
   | [ANFBinding.mk _ (.addRawOutput _ _) _] => rw [hb] at h; simp at h

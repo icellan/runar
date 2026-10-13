@@ -3151,7 +3151,7 @@ theorem simpleStepRel_preserves :
   | .addOutput _ _ _ => rw [hVal] at hStep; exact hStep.elim
   | .addRawOutput _ _ => rw [hVal] at hStep; exact hStep.elim
   | .addDataOutput _ _ => rw [hVal] at hStep; exact hStep.elim
-  | .checkPreimage _ => rw [hVal] at hStep; exact hStep.elim
+  | .checkPreimage _ _ => rw [hVal] at hStep; exact hStep.elim
   | .getStateScript => rw [hVal] at hStep; exact hStep.elim
   | .deserializeState _ => rw [hVal] at hStep; exact hStep.elim
   -- Phase A14 — `raw_script` falls into `simpleStepRel`'s catch-all
@@ -12378,7 +12378,7 @@ theorem lowerValueP_eq_lowerValue_structuralConst
   | assert _ => simp [structuralConstValue] at h
   | updateProp _ _ => simp [structuralConstValue] at h
   | getStateScript => simp [structuralConstValue] at h
-  | checkPreimage _ => simp [structuralConstValue] at h
+  | checkPreimage _ _ => simp [structuralConstValue] at h
   | deserializeState _ => simp [structuralConstValue] at h
   | addOutput _ _ _ => simp [structuralConstValue] at h
   | addRawOutput _ _ => simp [structuralConstValue] at h
@@ -12492,7 +12492,7 @@ theorem evalValue_structuralConstValue_ok
   | assert _ => simp [structuralConstValue] at h
   | updateProp _ _ => simp [structuralConstValue] at h
   | getStateScript => simp [structuralConstValue] at h
-  | checkPreimage _ => simp [structuralConstValue] at h
+  | checkPreimage _ _ => simp [structuralConstValue] at h
   | deserializeState _ => simp [structuralConstValue] at h
   | addOutput _ _ _ => simp [structuralConstValue] at h
   | addRawOutput _ _ => simp [structuralConstValue] at h
@@ -12553,7 +12553,7 @@ theorem runOps_lowerValue_structuralConstValue_ok
   | assert _ => simp [structuralConstValue] at h
   | updateProp _ _ => simp [structuralConstValue] at h
   | getStateScript => simp [structuralConstValue] at h
-  | checkPreimage _ => simp [structuralConstValue] at h
+  | checkPreimage _ _ => simp [structuralConstValue] at h
   | deserializeState _ => simp [structuralConstValue] at h
   | addOutput _ _ _ => simp [structuralConstValue] at h
   | addRawOutput _ _ => simp [structuralConstValue] at h
@@ -12763,7 +12763,7 @@ theorem lowerValueP_eq_lowerValue_structuralCopy
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
-  | checkPreimage _ => simp [structuralCopyValue] at h
+  | checkPreimage _ _ => simp [structuralCopyValue] at h
   | deserializeState _ => simp [structuralCopyValue] at h
   | addOutput _ _ _ => simp [structuralCopyValue] at h
   | addRawOutput _ _ => simp [structuralCopyValue] at h
@@ -14501,7 +14501,7 @@ theorem evalValue_structuralCopyValue_ok
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
-  | checkPreimage _ => simp [structuralCopyValue] at h
+  | checkPreimage _ _ => simp [structuralCopyValue] at h
   | deserializeState _ => simp [structuralCopyValue] at h
   | addOutput _ _ _ => simp [structuralCopyValue] at h
   | addRawOutput _ _ => simp [structuralCopyValue] at h
@@ -14713,7 +14713,7 @@ private theorem lowerValue_snd_structuralCopy_early
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
-  | checkPreimage _ => simp [structuralCopyValue] at h
+  | checkPreimage _ _ => simp [structuralCopyValue] at h
   | deserializeState _ => simp [structuralCopyValue] at h
   | addOutput _ _ _ => simp [structuralCopyValue] at h
   | addRawOutput _ _ => simp [structuralCopyValue] at h
@@ -15501,7 +15501,7 @@ theorem runOps_lowerValue_structuralCopyValue_ok
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
-  | checkPreimage _ => simp [structuralCopyValue] at h
+  | checkPreimage _ _ => simp [structuralCopyValue] at h
   | deserializeState _ => simp [structuralCopyValue] at h
   | addOutput _ _ _ => simp [structuralCopyValue] at h
   | addRawOutput _ _ => simp [structuralCopyValue] at h
@@ -15803,7 +15803,7 @@ theorem structuralCopyValueBool_iff
   | assert _ => simp [structuralCopyValueBool, structuralCopyValue]
   | updateProp _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | getStateScript => simp [structuralCopyValueBool, structuralCopyValue]
-  | checkPreimage _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | checkPreimage _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | deserializeState _ => simp [structuralCopyValueBool, structuralCopyValue]
   | addOutput _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | addRawOutput _ _ => simp [structuralCopyValueBool, structuralCopyValue]
@@ -16054,7 +16054,7 @@ theorem lowerValueP_insideBranch_irrelevant
   | assert _ => simp [insideBranchFreeValueB] at h
   | updateProp _ _ => simp [insideBranchFreeValueB] at h
   | getStateScript => simp [insideBranchFreeValueB] at h
-  | checkPreimage _ => simp [insideBranchFreeValueB] at h
+  | checkPreimage _ _ => simp [insideBranchFreeValueB] at h
   | deserializeState _ => simp [insideBranchFreeValueB] at h
   | addOutput _ _ _ => simp [insideBranchFreeValueB] at h
   | addRawOutput _ _ => simp [insideBranchFreeValueB] at h
@@ -16227,7 +16227,7 @@ private theorem lowerValueP_snd_snd_eq_localBindings
       simp [structuralCopyValue, structuralConsumeValue] at hRef
   | getStateScript =>
       simp [structuralCopyValue, structuralConsumeValue] at hRef
-  | checkPreimage _ =>
+  | checkPreimage _ _ =>
       simp [structuralCopyValue, structuralConsumeValue] at hRef
   | deserializeState _ =>
       simp [structuralCopyValue, structuralConsumeValue] at hRef
@@ -16291,7 +16291,7 @@ theorem evalValue_structuralConsumeValue_ok
   | assert _ => simp [structuralConsumeValue] at h
   | updateProp _ _ => simp [structuralConsumeValue] at h
   | getStateScript => simp [structuralConsumeValue] at h
-  | checkPreimage _ => simp [structuralConsumeValue] at h
+  | checkPreimage _ _ => simp [structuralConsumeValue] at h
   | deserializeState _ => simp [structuralConsumeValue] at h
   | addOutput _ _ _ => simp [structuralConsumeValue] at h
   | addRawOutput _ _ => simp [structuralConsumeValue] at h
@@ -16721,7 +16721,7 @@ theorem runOps_lowerValueP_structuralConsumeValue_ok
   | assert _ => simp [structuralConsumeValue] at h
   | updateProp _ _ => simp [structuralConsumeValue] at h
   | getStateScript => simp [structuralConsumeValue] at h
-  | checkPreimage _ => simp [structuralConsumeValue] at h
+  | checkPreimage _ _ => simp [structuralConsumeValue] at h
   | deserializeState _ => simp [structuralConsumeValue] at h
   | addOutput _ _ _ => simp [structuralConsumeValue] at h
   | addRawOutput _ _ => simp [structuralConsumeValue] at h
@@ -17268,7 +17268,7 @@ theorem runOps_lowerBindingsP_structuralConsumeBody_preserves_metadata
         | assert _ => simp [structuralConsumeValue] at hHead
         | updateProp _ _ => simp [structuralConsumeValue] at hHead
         | getStateScript => simp [structuralConsumeValue] at hHead
-        | checkPreimage _ => simp [structuralConsumeValue] at hHead
+        | checkPreimage _ _ => simp [structuralConsumeValue] at hHead
         | deserializeState _ => simp [structuralConsumeValue] at hHead
         | addOutput _ _ _ => simp [structuralConsumeValue] at hHead
         | addRawOutput _ _ => simp [structuralConsumeValue] at hHead
@@ -18145,7 +18145,7 @@ theorem structuralConsumeValueBool_iff
   | assert _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | updateProp _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | getStateScript => simp [structuralConsumeValueBool, structuralConsumeValue]
-  | checkPreimage _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | checkPreimage _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | deserializeState _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | addOutput _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | addRawOutput _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
@@ -19723,7 +19723,7 @@ theorem structuralArithValueBool_iff
   | getStateScript =>
       simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
             structuralCopyValue, structuralConsumeValue]
-  | checkPreimage _ =>
+  | checkPreimage _ _ =>
       simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
             structuralCopyValue, structuralConsumeValue]
   | deserializeState _ =>
@@ -21191,7 +21191,7 @@ theorem structuralCallValueBool_iff
   | getStateScript =>
       simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
             structuralRefValue, structuralCopyValue, structuralConsumeValue]
-  | checkPreimage _ =>
+  | checkPreimage _ _ =>
       simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
             structuralRefValue, structuralCopyValue, structuralConsumeValue]
   | deserializeState _ =>
@@ -23247,7 +23247,7 @@ theorem supportedANFBodyB_iff :
                 simp [supportedUpdatePropShape] at hShape
             | methodCallValue _ _ _ _ hShape _ =>
                 simp [supportedMethodCallShape] at hShape
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           simp only [supportedANFBodyB, Bool.and_eq_true]
           refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
           · simp [supportedANFHead, supportedConstShape, supportedRefShape,
@@ -23437,7 +23437,7 @@ theorem SupportedANFBody_of_structuralConstBody :
         | assert _ => simp [structuralConstValue] at hHead
         | updateProp _ _ => simp [structuralConstValue] at hHead
         | getStateScript => simp [structuralConstValue] at hHead
-        | checkPreimage _ => simp [structuralConstValue] at hHead
+        | checkPreimage _ _ => simp [structuralConstValue] at hHead
         | deserializeState _ => simp [structuralConstValue] at hHead
         | addOutput _ _ _ => simp [structuralConstValue] at hHead
         | addRawOutput _ _ => simp [structuralConstValue] at hHead
@@ -23523,7 +23523,7 @@ theorem SupportedANFBody_of_structuralRefBody
       | getStateScript =>
           exact absurd hHead (by
             simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
       | deserializeState _ =>
@@ -23624,7 +23624,7 @@ theorem SupportedANFBody_of_structuralArithBody
           exact absurd hHead (by
             simp [structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
@@ -23728,7 +23728,7 @@ theorem SupportedANFBody_of_structuralCallBody
           exact absurd hHead (by
             simp [structuralCallValue, structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralCallValue, structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
@@ -23831,7 +23831,7 @@ theorem SupportedANFBody_of_structuralUpdatePropBody
           exact absurd hHead (by
             simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
                   structuralRefValue, structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
                   structuralRefValue, structuralCopyValue, structuralConsumeValue])
@@ -23951,7 +23951,7 @@ theorem SupportedANFBody_of_structuralIfValBody
             simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
                   structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
                   structuralArithValue, structuralRefValue,
@@ -24086,7 +24086,7 @@ theorem SupportedANFBody_of_structuralLoopBody
             simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
                   structuralCallValue, structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
                   structuralCallValue, structuralArithValue, structuralRefValue,
@@ -24218,7 +24218,7 @@ theorem SupportedANFBody_of_structuralMethodCallBody
             simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
                   structuralUpdatePropValue, structuralCallValue, structuralArithValue,
                   structuralRefValue, structuralCopyValue, structuralConsumeValue])
-      | checkPreimage _ =>
+      | checkPreimage _ _ =>
           exact absurd hHead (by
             simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
                   structuralUpdatePropValue, structuralCallValue, structuralArithValue,
