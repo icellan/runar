@@ -124,6 +124,112 @@ type fixtureFailure struct {
 	actual   string
 }
 
+// fixtureAllowlistedForGo honors the per-fixture compiler allowlist in
+// `source.json`. If `compilers` is present and does not include "go", the
+// fixture is intentionally opted out of Go Stack-IR / hex parity (parser
+// coverage is universal and enforced elsewhere). Mirrors the Rust harness's
+// `fixture_allowlisted_for_rust` (F-285) and the Ruby harness's
+// `read_compiler_allowlist` (F-151). See `conformance/README.md` ⇒
+// "Per-fixture compiler allowlist".
+func fixtureAllowlistedForGo(testDir string) bool {
+	configPath := filepath.Join(testDir, "source.json")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return true
+	}
+	var cfg struct {
+		Compilers []string `json:"compilers"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return true
+	}
+	if cfg.Compilers == nil {
+		return true
+	}
+	for _, c := range cfg.Compilers {
+		if c == "go" {
+			return true
+		}
+	}
+	return false
+}
+
+// scanFixtures walks `dirs` (conformance fixture directories) and classifies
+// each one, compiling via the native Go compiler API. Extracted from
+// TestConformanceGoldens so the classification logic is directly
+// unit-testable against synthetic fixture directories (N-124), without
+// depending on or risking the real conformance corpus.
+//
+// Classification (N-124 fix, porting F-151's scan semantics):
+//   - A fixture whose source.json `compilers` allowlist excludes "go" is
+//     SKIPPED outright (go is not a required conformance target for it).
+//   - Any other fixture with no resolvable `.runar.go` source is a FAILURE
+//     (kind "missing-source"). Before this fix, such fixtures were
+//     collected into a `missing` bucket that the final assertion never
+//     consulted, so a fixture whose source resolution failed reported
+//     "0 fail" instead of failing.
+//   - A fixture whose source compiles but ships no `expected-ir.json` or
+//     no `expected-script.hex` is a FAILURE (handled by compareGoldens,
+//     already fixed under F-280).
+//
+// Returns the passed, skipped, and failed fixture names/details.
+func scanFixtures(dirs []string, opts compiler.CompileOptions) (passed, skipped []string, failures []fixtureFailure) {
+	for _, testDir := range dirs {
+		name := filepath.Base(testDir)
+
+		if !fixtureAllowlistedForGo(testDir) {
+			skipped = append(skipped, name)
+			continue
+		}
+
+		sourcePath := findGoSource(testDir)
+		if sourcePath == "" {
+			failures = append(failures, fixtureFailure{
+				name:   name,
+				kind:   "missing-source",
+				actual: fmt.Sprintf("no .runar.go source found for fixture '%s'", name),
+			})
+			continue
+		}
+
+		// Step 1: source -> ANF IR
+		program, err := compiler.CompileSourceToIR(sourcePath, opts)
+		if err != nil {
+			failures = append(failures, fixtureFailure{name: name, kind: "compile-ir", actual: err.Error()})
+			continue
+		}
+
+		// Serialize ANF to JSON
+		rawIR, err := json.MarshalIndent(program, "", "  ")
+		if err != nil {
+			failures = append(failures, fixtureFailure{name: name, kind: "serialize-ir", actual: err.Error()})
+			continue
+		}
+		actualIR, err := canonicalizeJSON(rawIR)
+		if err != nil {
+			failures = append(failures, fixtureFailure{name: name, kind: "canonicalize-actual-ir", actual: err.Error()})
+			continue
+		}
+
+		// Step 2: source -> script hex
+		artifact, err := compiler.CompileFromSource(sourcePath, opts)
+		if err != nil {
+			failures = append(failures, fixtureFailure{name: name, kind: "compile-hex", actual: err.Error()})
+			continue
+		}
+		actualHex := strings.ToLower(strings.Join(strings.Fields(artifact.Script), ""))
+
+		// Step 3: compare against goldens
+		if fail := compareGoldens(name, testDir, actualIR, actualHex); fail != nil {
+			failures = append(failures, *fail)
+			continue
+		}
+
+		passed = append(passed, name)
+	}
+	return passed, skipped, failures
+}
+
 func shortDiff(expected, actual string) string {
 	expLines := strings.Split(expected, "\n")
 	actLines := strings.Split(actual, "\n")
@@ -263,64 +369,18 @@ func TestConformanceGoldens(t *testing.T) {
 	}
 	sort.Strings(dirs)
 
-	var passed []string
-	var missing []string
-	var failures []fixtureFailure
-
 	opts := compiler.CompileOptions{DisableConstantFolding: true}
 
-	for _, testDir := range dirs {
-		name := filepath.Base(testDir)
-		sourcePath := findGoSource(testDir)
-		if sourcePath == "" {
-			missing = append(missing, name)
-			continue
-		}
-
-		// Step 1: source -> ANF IR
-		program, err := compiler.CompileSourceToIR(sourcePath, opts)
-		if err != nil {
-			failures = append(failures, fixtureFailure{name: name, kind: "compile-ir", actual: err.Error()})
-			continue
-		}
-
-		// Serialize ANF to JSON
-		rawIR, err := json.MarshalIndent(program, "", "  ")
-		if err != nil {
-			failures = append(failures, fixtureFailure{name: name, kind: "serialize-ir", actual: err.Error()})
-			continue
-		}
-		actualIR, err := canonicalizeJSON(rawIR)
-		if err != nil {
-			failures = append(failures, fixtureFailure{name: name, kind: "canonicalize-actual-ir", actual: err.Error()})
-			continue
-		}
-
-		// Step 2: source -> script hex
-		artifact, err := compiler.CompileFromSource(sourcePath, opts)
-		if err != nil {
-			failures = append(failures, fixtureFailure{name: name, kind: "compile-hex", actual: err.Error()})
-			continue
-		}
-		actualHex := strings.ToLower(strings.Join(strings.Fields(artifact.Script), ""))
-
-		// Step 3: compare against goldens
-		if fail := compareGoldens(name, testDir, actualIR, actualHex); fail != nil {
-			failures = append(failures, *fail)
-			continue
-		}
-
-		passed = append(passed, name)
-	}
+	passed, skipped, failures := scanFixtures(dirs, opts)
 
 	total := len(dirs)
 	t.Logf(
-		"\n=== Go conformance-goldens summary: %d pass / %d fail / %d missing-source (of %d fixtures) ===",
-		len(passed), len(failures), len(missing), total,
+		"\n=== Go conformance-goldens summary: %d pass / %d fail / %d skipped (compilers allowlist excludes go) (of %d fixtures) ===",
+		len(passed), len(failures), len(skipped), total,
 	)
-	if len(missing) > 0 {
-		t.Log("Missing .runar.go source files:")
-		for _, n := range missing {
+	if len(skipped) > 0 {
+		t.Log("Skipped (source.json \"compilers\" allowlist excludes go):")
+		for _, n := range skipped {
 			t.Logf("  - %s", n)
 		}
 	}
@@ -376,5 +436,88 @@ func TestConformanceGoldens(t *testing.T) {
 
 	if len(failures) > 0 {
 		t.Fatalf("%d of %d fixtures failed conformance-goldens", len(failures), total)
+	}
+}
+
+// N-124: the Go golden harness had the same "missing-source collected but
+// never asserted" defect that F-151 (Ruby), F-285 (Rust) and F-323 (Python)
+// fixed in their own harnesses: a fixture whose `.runar.go` source could not
+// be resolved was appended only to the `missing` slice printed in the
+// summary, never to `failures`, so TestConformanceGoldens's final
+// `t.Fatalf(len(failures) > 0, ...)` never consulted it -- "every fixture's
+// .runar.go entry repointed at a nonexistent file" reported "0 fail".
+// scanFixtures is extracted so this is directly testable against synthetic,
+// throwaway fixture directories (via t.TempDir()), without depending on or
+// risking the real conformance corpus.
+//
+// What this proves: scanFixtures classifies a fixture with no resolvable
+// .runar.go source as a FAILURE (kind "missing-source"), not as a silently
+// unasserted bucket.
+//
+// What this does not prove: that the real conformance/tests corpus is free
+// of the gap today (it is -- every fixture ships a .runar.go source); nor
+// does it prove TestConformanceGoldens itself wires scanFixtures's return
+// value into t.Fatalf correctly end-to-end -- that is covered by
+// TestConformanceGoldens passing against the real corpus above.
+func TestScanFixtures_MissingSourceIsFailureNotSilent(t *testing.T) {
+	dir := t.TempDir()
+	// No source.json, no *.runar.go file anywhere in the scratch dir.
+
+	_, _, failures := scanFixtures([]string{dir}, compiler.CompileOptions{DisableConstantFolding: true})
+
+	name := filepath.Base(dir)
+	var found *fixtureFailure
+	for i := range failures {
+		if failures[i].name == name {
+			found = &failures[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("scanFixtures did not report a failure for a fixture with no .runar.go source (got failures=%v)", failures)
+	}
+	if found.kind != "missing-source" {
+		t.Errorf("got failure kind %q, want %q", found.kind, "missing-source")
+	}
+}
+
+// N-124: scanFixtures must SKIP (not fail) a fixture whose source.json
+// `compilers` allowlist excludes "go" -- mirroring the Rust harness's
+// fixture_allowlisted_for_rust (F-285) and the Ruby harness's
+// read_compiler_allowlist (F-151). Without this, treating every
+// missing-source fixture as a failure (the fix above) would wrongly fail a
+// fixture that legitimately ships no .runar.go source because Go is not a
+// required conformance target for it.
+//
+// What this proves: fixtureAllowlistedForGo / scanFixtures correctly skip
+// (rather than fail) an allowlist-excluded fixture with no .runar.go source.
+//
+// What this does not prove: that the real conformance corpus contains such
+// a fixture today for Go specifically -- it does not; the four existing
+// "compilers": ["go"] fixtures all include go, never exclude it. This is a
+// synthetic, throwaway fixture directory.
+func TestScanFixtures_SkipsAllowlistExcludedFixtureWithNoSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "source.json"), []byte(`{"compilers":["java"]}`), 0o644); err != nil {
+		t.Fatalf("write source.json: %v", err)
+	}
+	// No *.runar.go file -- legitimate, since the allowlist excludes go.
+
+	_, skipped, failures := scanFixtures([]string{dir}, compiler.CompileOptions{DisableConstantFolding: true})
+
+	name := filepath.Base(dir)
+	for _, f := range failures {
+		if f.name == name {
+			t.Fatalf("an allowlist-excluded fixture must not be reported as a failure (got: %v)", f)
+		}
+	}
+	found := false
+	for _, s := range skipped {
+		if s == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in skipped, got skipped=%v", name, skipped)
 	}
 }
