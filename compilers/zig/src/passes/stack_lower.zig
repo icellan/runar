@@ -2012,7 +2012,7 @@ const LowerCtx = struct {
         .{ "bn254G1ScalarMul", .bn254G1ScalarMul },
         .{ "bn254G1Negate", .bn254G1Negate },
         .{ "bn254G1OnCurve", .bn254G1OnCurve },
-        .{ "poseidon2MerkleRoot", .poseidon2MerkleRoot },
+        .{ "merkleRootPoseidon2KB", .poseidon2MerkleRoot },
         .{ "merkleRootSha256", .merkleRootSha256 },
         .{ "merkleRootHash256", .merkleRootHash256 },
         .{ "super", .super_call },
@@ -2512,27 +2512,47 @@ const LowerCtx = struct {
         bind_name: []const u8,
         args: []const []const u8,
     ) LowerError!void {
-        // args: [leaf_0..leaf_7(8), proof(depth*8 elems), index, depth]
-        // depth must be a compile-time constant
-        // The depth arg is always last.
-        if (args.len < 3) return LowerError.InvalidBuiltin;
+        // args: [leaf_0..leaf_7, sib0_0..sib0_7, ..., sib(D-1)_0..sib(D-1)_7, index, depth]
+        // depth must be a compile-time constant (last argument). Mirrors Go's
+        // lowerMerkleRootPoseidon2KB (codegen/stack.go) step for step (N-254).
+        const n_args = args.len;
+        if (n_args < 10) return LowerError.InvalidBuiltin;
 
-        const depth_arg = args[args.len - 1];
-        const depth_value = self.findConstantInt(depth_arg) orelse return LowerError.InvalidBuiltin;
-        if (depth_value < 1 or depth_value > 32) return LowerError.InvalidBuiltin;
+        const depth_arg = args[n_args - 1];
+        const depth_value = self.findConstantInt(depth_arg) orelse {
+            std.log.warn(
+                "merkleRootPoseidon2KB: depth (last argument) must be a compile-time constant integer literal",
+                .{},
+            );
+            return LowerError.MerkleDepthOutOfRange;
+        };
+        // The bound is 32, not 64 (R-172 / Go's poseidon2MerkleMaxDepth): the
+        // emitter's roll counts grow quadratically in depth.
+        if (depth_value < 1 or depth_value > 32) {
+            std.log.warn(
+                "merkleRootPoseidon2KB: depth must be between 1 and 32, got {d}",
+                .{depth_value},
+            );
+            return LowerError.MerkleDepthOutOfRange;
+        }
 
-        // Remove depth from the real stack (compile-time constant, not runtime).
+        // Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth.
+        const expected_args: usize = 8 + @as(usize, @intCast(depth_value)) * 8 + 1 + 1;
+        if (n_args != expected_args) return LowerError.InvalidBuiltin;
+
+        // Remove depth from the real stack FIRST (compile-time constant, not runtime).
         if (self.stack.findDepth(depth_arg) != null) {
             try self.bringToTopAuto(depth_arg);
             try self.emitOp(.op_drop);
             _ = self.stack.pop();
         }
 
-        // Bring remaining args to the stack top.
-        const runtime_args = args[0 .. args.len - 1];
+        // Bring all runtime args (leaf*8 + proof*depth*8 + index) to stack top in order.
+        const runtime_args = args[0 .. n_args - 1];
         for (runtime_args) |arg| {
             try self.bringToTopOperand(arg, args);
         }
+        // Pop all runtime args -- the codegen consumes them and produces 8 results.
         for (runtime_args) |_| {
             _ = self.stack.pop();
         }
@@ -2542,8 +2562,21 @@ const LowerCtx = struct {
             else => return error.UnsupportedOperation,
         };
         defer bundle.deinit();
-
         for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        // The codegen leaves 8 elements on the stack (root_0..root_7, root_7
+        // on top) but the type system models the result as a single `bigint`
+        // (CL-BUG-099 / R-056). Pack the eight limbs into one Script integer
+        // instead of discarding seven of them with OP_NIP -- base-2^32
+        // packing is injective over the full root, so equality on the packed
+        // value is equality on all eight limbs. Mirrors Go's
+        // EmitPoseidon2RootPack, ported the same way to Rust (N-237) and
+        // Ruby (N-248).
+        var pack_bundle = try poseidon2_merkle.buildPoseidon2RootPackOps(self.allocator);
+        defer pack_bundle.deinit();
+        for (pack_bundle.ops) |op| {
             try self.emitEcStackOp(op);
         }
 

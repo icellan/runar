@@ -408,9 +408,10 @@ describe('R-037: Go-only families — refuse, or match Go byte for byte', () => 
  * Execution of the Python script against Plonky3 vectors lives in
  * compilers/python/tests/test_f092_poseidon2_merkle_root_binds_every_limb.py;
  * Go's in compilers/go/compiler/poseidon2_merkle_root_binding_test.go.
- * What it does not prove: that a refusing tier's diagnostic names the builtin
- * (the Ruby and Zig `--ir` refusals today are an internal error and a bare
- * `InvalidBuiltin`), nor depths other than 1.
+ * What it does not prove: that a refusing tier's diagnostic names the
+ * builtin -- no tier refuses this probe any more. Rust (N-237), Ruby
+ * (N-248) and Zig (N-254) all match Go byte for byte at depth 1, the same
+ * way Python's port already did. Nor does it prove depths other than 1.
  */
 describe('F-092: merkleRootPoseidon2KB via --ir — refuse, or match Go byte for byte', () => {
   const src = join(DIR, 'GoOnlyPoseidon2Merkle.runar.ts');
