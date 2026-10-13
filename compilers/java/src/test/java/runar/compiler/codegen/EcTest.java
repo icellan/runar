@@ -75,10 +75,14 @@ class EcTest {
         // CL-BUG-096 then added a further +50 / +50: emitAffineInfinitySelect
         // replaces the four toTop/drop cleanups and the two `notinf` OP_MULs
         // with the pinf/qinf/usep/useq/user select. Again all 1-byte ops.
-        assertEquals(8297, countOpTree(ops), "ecAdd op count drift");
+        //
+        // N-110: +12, the tangent y = 0 guard: three deep picks (push <n>,
+        // OP_PICK) + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY.
+        assertEquals(8309, countOpTree(ops), "ecAdd op count drift");
 
         String hex = emitHex(ops);
-        assertEquals(25634, hex.length() / 2, "ecAdd hex byte count drift");
+        // N-110: 25634 -> 25646 (+12 bytes, all the guard's ops are 1 byte).
+        assertEquals(25646, hex.length() / 2, "ecAdd hex byte count drift");
     }
 
     @Test

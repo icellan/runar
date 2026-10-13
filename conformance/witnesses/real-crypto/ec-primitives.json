@@ -62,11 +62,54 @@
       ],
       "expect": "reject",
       "note": "control: ecPointX(G) != Gx + 1, so the accepts are not vacuous"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+        "89565891926547004231252920425935692360644145829622209833684329913297188986597n",
+        "12158399299693830322967808612713398636155367887041628176798871954788371653930n"
+      ],
+      "expect": "accept",
+      "note": "N-110 honest doubling: pt = other = G takes the tangent path (py != 0), 2G = (c6047f..., 1ae168...), coordinates computed independently in Python from the curve parameters"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+        "89565891926547004231252920425935692360644145829622209833684329913297188986597n",
+        "12158399299693830322967808612713398636155367887041628176798871954788371653931n"
+      ],
+      "expect": "reject",
+      "note": "N-110 control: the doubling accept is not vacuous, 2G's y + 1 is rejected"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee51ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a",
+        "112711660439710606056748659173929673102114977341539408544630613555209775888121n",
+        "25583027980570883691656905877401976406448868254816295069919888960541586679410n"
+      ],
+      "expect": "accept",
+      "note": "N-110 honest chord: G + 2G = 3G, independently computed; the new tangent guard is inert when the points differ"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0x00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000",
+        "115792089237316195423570985008687907853269984665640564039457584007908834671653n",
+        "0n"
+      ],
+      "constructorArgs": {
+        "pt": "0x00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss): pt = other = (5, 0), an off-curve point with y = 0. The tangent 3x^2 / 2y has no denominator; before N-110 inv(0) = 0 made the script return (p - 10, 0) and this exact spend was ACCEPTED. Now the adder OP_VERIFYs NOT(cond AND px != 0 AND py == 0) and the script aborts. The TestContract interpreter models the same abort (N-110), so source and script agree"
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "7e2fa1bef5b3ca203ad886d81446ea0c4afd2d422df731d54530f0002931fd81",
+    "expected-script.hex": "a76c1d86cbf58d61e753ca02eb4058b27948eaea6b2905b709f2f164e0ef9611",
     "expected-ir.json": "00c928d72428ff69c185be83375728d50c4b661ede10e1a48d4e3806c7ecb751"
   },
-  "goldenHashesNote": "N-104 moved both goldens: checkMulIdentity's ecMul(pt, 1n) rewrite now carries ecMul's operand gate (t2_inf, t2_isinf, t2_oncurve, t2_ok, t2_gate in expected-ir.json; +877 bytes of script). Nothing else in the fixture changed. The pin is self-invalidating: any later change to either golden must come back through this witness, whose spends re-execute the fixture's compiled locking script on the real @bsv/sdk Spend engine. All seven tiers produce these bytes (conformance multi-format, both fold modes)."
+  "goldenHashesNote": "N-110 moved expected-script.hex only (+24 bytes: 12 per ecAdd call, two calls): affineAdd now aborts when it doubles a point with y = 0 other than O, instead of returning (p - 2x, 0) through inv(0) = 0. expected-ir.json is unmoved. The checkAdd spends above re-execute the new bytes on @bsv/sdk Spend: honest doubling and chord accept with independently computed coordinates, the y = 0 doubling that the previous script accepted is rejected. All seven tiers produce these bytes (conformance golden STRICT and multi-format, both fold modes). Previous note: N-104 moved both goldens: checkMulIdentity's ecMul(pt, 1n) rewrite now carries ecMul's operand gate (t2_inf, t2_isinf, t2_oncurve, t2_ok, t2_gate in expected-ir.json; +877 bytes of script). Nothing else in the fixture changed. The pin is self-invalidating: any later change to either golden must come back through this witness, whose spends re-execute the fixture's compiled locking script on the real @bsv/sdk Spend engine. All seven tiers produce these bytes (conformance multi-format, both fold modes)."
 }

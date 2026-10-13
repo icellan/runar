@@ -882,7 +882,8 @@ public final class MockCrypto {
 
     /**
      * Modular inverse mod EC_P; inv(0) = 0, as the compiled script's Fermat
-     * inverse gives (N-111): an off-curve (x, 0) doubling is a value on-chain.
+     * inverse gives (N-111). An off-curve (x, 0) doubling no longer reaches
+     * it: the script aborts (N-110).
      */
     private static BigInteger modInvP(BigInteger a) {
         BigInteger r = mod(a, EC_P);
@@ -919,6 +920,12 @@ public final class MockCrypto {
         if (b.infinity) return a;
         if (a.x.equals(b.x)) {
             if (a.y.equals(b.y)) {
+                // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O
+                // returned above).
+                if (a.y.signum() == 0) {
+                    throw new IllegalArgumentException(
+                        "ecAdd: cannot double a point with y = 0 (the tangent is vertical)");
+                }
                 // Doubling.
                 BigInteger s = a.x.pow(2).multiply(BigInteger.valueOf(3))
                     .multiply(modInvP(a.y.multiply(BigInteger.valueOf(2))));

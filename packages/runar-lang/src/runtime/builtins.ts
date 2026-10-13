@@ -521,6 +521,10 @@ function ecAffineAdd(x1: bigint, y1: bigint, x2: bigint, y2: bigint): [bigint, b
   if (x1 === 0n && y1 === 0n) return [x2, y2];
   if (x2 === 0n && y2 === 0n) return [x1, y1];
   if (x1 === x2 && y1 !== y2) return [0n, 0n];
+  // N-110: the script's tangent OP_VERIFYs py != 0 (O + O returned above).
+  if (x1 === x2 && y1 === 0n) {
+    throw new Error('ecAdd: cannot double a point with y = 0 (the tangent is vertical)');
+  }
   const s = x1 === x2
     ? ecFieldMod(3n * x1 * x1 * ecFieldInv(2n * y1, EC_P), EC_P)
     : ecFieldMod((y2 - y1) * ecFieldInv(x2 - x1, EC_P), EC_P);

@@ -60,6 +60,10 @@ func ecAddCoords(x1, y1, x2, y2 *big.Int) (*big.Int, *big.Int) {
 
 	var slope *big.Int
 	if x1.Cmp(x2) == 0 && y1.Cmp(y2) == 0 {
+		// N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+		if y1.Sign() == 0 {
+			panic("runar: EcAdd: cannot double a point with y = 0 (the tangent is vertical)")
+		}
 		// Point doubling: slope = (3*x1^2) / (2*y1)
 		num := new(big.Int).Mul(x1, x1)
 		num.Mul(num, big.NewInt(3))

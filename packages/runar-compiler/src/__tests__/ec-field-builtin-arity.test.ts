@@ -181,7 +181,11 @@ export class Probe extends SmartContract {
       // one `<0> <p> OP_WITHIN OP_VERIFY` per witness operand on the five
       // bn254Field* entry points, the R-119 gate for this field. The other
       // seven digests are the control that it stayed off every other emitter.
-      ecAdd: 'fe483046de165476fe0cd40df10bc4b8ae2db27ae596915b86f4aa65c112b116',
+      //
+      // N-110 re-stamps exactly ecAdd: the secp256k1 adder's tangent y = 0
+      // guard (+12 bytes) lives inside affineAdd. p256Add is the control that
+      // it stayed on secp256k1, and the other seven that it touched nothing else.
+      ecAdd: '77e995b4398cf150ed9475ddeb8c6672fb414eda2b81d2ecb1fe2d6c0169f65f',
       ecPointX: '53726c95e164ce324e32889a6934902ad9eadd2a25ba5bfe3c813408cbe3ca87',
       p256Add: 'e16038ed755d7263035dd43a51db9ca5c121c50b90b0546d382d86d57585e44c',
       p384Negate: '84da75c3c5ceef1ada452b1156d1af554ce2d54f731d2527cd21bdd05775b7f2',

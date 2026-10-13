@@ -660,6 +660,24 @@ fn affine_add(t: &mut ECTracker) {
         e(StackOp::Opcode("OP_NOT".into()));
     });
 
+    // N-110: the tangent has no denominator when py == 0 (2*py == 0, and
+    // field_inv is Fermat, so inv(0) = 0 would silently return (p - 2px, 0)).
+    // No secp256k1 point has y == 0, so only an off-curve operand gets here.
+    // ABORT — the one failure channel this adder has besides the operand gates:
+    //   ok = NOT(cond AND px != 0 AND py == 0)
+    // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    t.copy_to_top("px", "_px_g");
+    t.copy_to_top("py", "_py_g");
+    t.copy_to_top("_cond", "_cond_g");
+    t.raw_block(&["_px_g", "_py_g", "_cond_g"], None, |e| {
+        e(StackOp::Opcode("OP_SWAP".into()));
+        e(StackOp::Opcode("OP_NOT".into()));
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_NOT".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+
     // chord numerator / denominator
     t.copy_to_top("qy", "_qy1");
     t.copy_to_top("py", "_py1");

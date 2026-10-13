@@ -86,7 +86,9 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// verifyCanonical flag that is FALSE on the ECDSA path, because
 		// decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
 		// bytes must return false from a total boolean builtin rather than abort.
-		{"EcAdd", EmitEcAdd, 8297},
+		// N-110: ecAdd 8297 -> 8309 (+12), the tangent y = 0 guard: three deep picks
+		// (push <n>, OP_PICK) + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY.
+		{"EcAdd", EmitEcAdd, 8309},
 		// R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
 		// ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
 		// the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd

@@ -190,7 +190,9 @@ fn test_ec_add_op_count_golden() {
     // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
     // and four OP_ADD selects and the picks/rolls feeding them. Measured on
     // this tier's own baseline, not copied from TypeScript.
-    assert_eq!(count_op_tree(&ops), 8297, "ecAdd op count drift");
+    // N-110: +12, the tangent y = 0 guard: three deep picks (push <n>, OP_PICK)
+    // + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY.
+    assert_eq!(count_op_tree(&ops), 8309, "ecAdd op count drift");
 }
 
 #[test]

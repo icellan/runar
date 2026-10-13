@@ -378,6 +378,16 @@ fn emitSubNotSequence(t: *ECTracker) !void {
     try t.emitOpcode("OP_NOT");
 }
 
+/// N-110: [px, py, cond] -> [] ; aborts iff cond AND px != 0 AND py == 0.
+fn emitTangentY0VerifySequence(t: *ECTracker) !void {
+    try t.emitOpcode("OP_SWAP");
+    try t.emitOpcode("OP_NOT");
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_NOT");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitFieldModSequence(t: *ECTracker) !void {
     try t.emitOpcode("OP_2DUP");
     try t.emitOpcode("OP_MOD");
@@ -709,6 +719,17 @@ fn affineAdd(t: *ECTracker) !void {
     try t.toTop("_xeq");
     try t.copyToTop("_cond", "_cond_c");
     try t.rawBlock(2, "_notinf", emitSubNotSequence);
+
+    // N-110: the tangent has no denominator when py == 0 (2*py == 0, and
+    // fieldInv is Fermat, so inv(0) = 0 would silently return (p - 2px, 0)).
+    // No secp256k1 point has y == 0, so only an off-curve operand gets here.
+    // ABORT — the one failure channel this adder has besides the operand gates:
+    //   ok = NOT(cond AND px != 0 AND py == 0)
+    // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    try t.copyToTop("px", "_px_g");
+    try t.copyToTop("py", "_py_g");
+    try t.copyToTop("_cond", "_cond_g");
+    try t.rawBlock(3, null, emitTangentY0VerifySequence);
 
     try t.copyToTop("qy", "_qy1");
     try t.copyToTop("py", "_py1");
@@ -1525,8 +1546,13 @@ test "ec helper op-count goldens" {
     // +50 OPS under the deep-pick/roll convention above: measured here, the
     // weighted count goes 8229 -> 8279, exactly +50. Nothing else moves —
     // ecMul / ecMulGen / ecNegate / ecOnCurve are untouched.
+    //
+    // ecAdd 8255 -> 8264 (+9): N-110, the tangent y = 0 guard — three picks
+    // (one `.pick` StackOp each here) + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND
+    // OP_NOT OP_VERIFY. The peers book it as +12 OPS (deep pick = two ops);
+    // +12 script BYTES in every tier.
     const cases = .{
-        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8255) },
+        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8264) },
         .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 120225) },
         .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 120227) },
         .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 956) },

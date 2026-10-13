@@ -1261,6 +1261,8 @@ pub const EcBuiltinError = error{
     NonCanonicalCoordinate,
     PointNotOnCurveOrIdentity,
     InvalidScalar,
+    /// N-110: ecAdd doubling a point with y = 0 (other than O).
+    VerticalTangent,
 };
 
 const Secp256k1Fe = std.crypto.ecc.Secp256k1.Fe;
@@ -1286,6 +1288,8 @@ pub fn ecAddChecked(left: base.Point, right: base.Point) EcBuiltinError!base.Poi
     if (r[0].isZero() and r[1].isZero()) return ecEncodeFe(l[0], l[1]);
     const same_x = l[0].equivalent(r[0]);
     if (same_x and !l[1].equivalent(r[1])) return dupeBytes(&([_]u8{0} ** 64));
+    // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+    if (same_x and l[1].isZero()) return EcBuiltinError.VerticalTangent;
     const three = comptime Secp256k1Fe.fromInt(3) catch unreachable;
     // Tangent or chord; invert(0) = 0, as the script's Fermat inverse gives.
     const s = if (same_x)

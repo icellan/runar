@@ -115,6 +115,11 @@ pub fn ec_add(a: &[u8], b: &[u8]) -> Point {
     if x1 == x2 && y1 != y2 {
         return vec![0u8; 64];
     }
+    // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+    assert!(
+        !(x1 == x2 && y1 == zero),
+        "runar: ec_add: cannot double a point with y = 0 (the tangent is vertical)"
+    );
     let p = field_p();
     let s = if x1 == x2 {
         fmod(&(BigintBig::from(3) * &x1 * &x1 * finv(&(BigintBig::from(2) * &y1), &p)), &p)

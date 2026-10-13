@@ -39,8 +39,8 @@ module Runar
         [g, y - (b / a) * x, x]
       end
 
-      # inv(0) = 0, as the compiled script's Fermat inverse gives (N-111): an
-      # off-curve (x, 0) doubling is a value on-chain, not an abort.
+      # inv(0) = 0, as the compiled script's Fermat inverse gives (N-111). An
+      # off-curve (x, 0) doubling no longer reaches it: the script aborts (N-110).
       def modinv(a, m)
         a %= m
         return 0 if a.zero?
@@ -57,6 +57,8 @@ module Runar
 
         if x1 == x2
           return [0, 0] if y1 != y2
+          # N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+          raise ArgumentError, 'ec_add: cannot double a point with y = 0 (the tangent is vertical)' if y1 == 0
 
           # Point doubling
           lam = (3 * x1 * x1 * modinv(2 * y1, EC_P)) % EC_P

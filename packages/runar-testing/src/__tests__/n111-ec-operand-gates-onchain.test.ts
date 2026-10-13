@@ -21,7 +21,10 @@
  * `expect`. An `abort` row must reject BOTH probes at the same witness: no
  * witness satisfies either, because the script failed before the comparison.
  *
- * Proves: every row's verdict on a consensus-shaped interpreter.
+ * Proves: every row's verdict on a consensus-shaped interpreter — including
+ * N-110's (5, 0) + (5, 0) row: the compiled adder ABORTS when it doubles a
+ * y = 0 point other than O (it used to return (p - 10, 0)), while G + G, O + O
+ * and the chord rows still verify.
  * Does not prove: anything about an off-chain implementation by itself, or
  * inputs outside the file; P-256 / P-384 analogues are out of scope.
  */
@@ -117,7 +120,7 @@ describe('N-111: secp256k1 EC operand gates — compiled script verdict on Spend
 
   it('covers valid, identity, off-curve, non-canonical and wrong-width operands', () => {
     const whys = rows.map((r) => r.why).join('\n');
-    for (const needle of ['P+O = P', 'R-117: x + p alias', 'R-157: off-curve', 'R-157: O is exempt', 'width 63', 'width 65', 'y == p', '(p+1, 2)']) {
+    for (const needle of ['P+O = P', 'R-117: x + p alias', 'R-157: off-curve', 'R-157: O is exempt', 'width 63', 'width 65', 'y == p', '(p+1, 2)', 'N-110: off-curve doubling with y = 0 aborts']) {
       expect(whys).toContain(needle);
     }
     for (const [fn] of PROBES) expect(rows.some((r) => r.fn === fn), fn).toBe(true);

@@ -29,8 +29,8 @@ def _encode_point(x: int, y: int) -> bytes:
 def _modinv(a: int, m: int) -> int:
     """Modular inverse using extended Euclidean algorithm.
 
-    inv(0) = 0, as the compiled script's Fermat inverse gives (N-111): an
-    off-curve (x, 0) doubling is a value on-chain, not an abort.
+    inv(0) = 0, as the compiled script's Fermat inverse gives (N-111). An
+    off-curve (x, 0) doubling no longer reaches it: the script aborts (N-110).
     """
     a = a % m
     if a == 0:
@@ -58,6 +58,9 @@ def _point_add(x1: int, y1: int, x2: int, y2: int) -> tuple[int, int]:
     if x1 == x2:
         if y1 != y2:
             return 0, 0  # Point at infinity
+        # N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+        if y1 == 0:
+            raise ValueError('ec_add: cannot double a point with y = 0 (the tangent is vertical)')
         # Point doubling
         lam = (3 * x1 * x1 * _modinv(2 * y1, EC_P)) % EC_P
     else:

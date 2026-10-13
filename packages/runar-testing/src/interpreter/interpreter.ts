@@ -2218,6 +2218,10 @@ function ecPointAddCoords(
   // repair if the script were the one that had drifted.
   if (x1 === x2 && y1 !== y2) return [0n, 0n];
   if (x1 === x2 && y1 === y2) {
+    // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+    if (y1 === 0n) {
+      throw new Error('ecAdd: cannot double a point with y = 0 (the tangent is vertical)');
+    }
     // Point doubling
     const s = ecMod(3n * x1 * x1 * ecModInv(2n * y1, p), p);
     const rx = ecMod(s * s - 2n * x1, p);
