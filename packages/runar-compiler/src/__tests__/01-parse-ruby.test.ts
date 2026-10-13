@@ -1265,10 +1265,15 @@ end
       expect(errors.length).toBeGreaterThan(0);
     });
 
-    it('does not throw on block syntax (each { |x| ... })', () => {
-      // The tokenizer skips '{' and '}' as unknown characters.
-      // '|' is tokenized as a bitwise OR operator, causing malformed
-      // expression parsing.  The parser must not throw.
+    it('reports a diagnostic naming the unsupported char for block syntax (each { |x| ... })', () => {
+      // Block syntax isn't part of the Rúnar Ruby surface. '{' and '}' are
+      // rejected by the tokenizer (see 01-parse-ruby.ts: "Unrecognized
+      // character — reject it rather than dropping it silently"), and '|'
+      // is tokenized as the bitwise-OR operator, so the braces' contents
+      // get folded into a malformed `each | n | assert` expression chain.
+      // The requirement this proves: that malformed re-parse must not pass
+      // silently — there must be a diagnostic naming the unsupported
+      // character, not merely "did not throw".
       const rb = `
 class Foo < Runar::SmartContract
   prop :x, Bigint
@@ -1282,8 +1287,18 @@ class Foo < Runar::SmartContract
   end
 end
 `;
-      // Must not throw — that's the only guarantee for unsupported syntax.
-      expect(() => parseRubySource(rb, 'Test.runar.rb')).not.toThrow();
+      const result = parseRubySource(rb, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.some(e => e.message.includes("'{'"))).toBe(true);
+      expect(errors.some(e => e.message.includes("'}'"))).toBe(true);
+      // Does NOT prove: that the resulting AST for `bar` is sane — it is
+      // not (the brace contents are folded into a bogus `|`-chain
+      // expression). It proves only that the parser flags the unsupported
+      // construct rather than silently accepting it; `compile()` in
+      // index.ts gates on `hasErrors()` right after parsing, so this
+      // diagnostic is what stops a malformed-but-non-throwing parse from
+      // reaching later passes.
     });
 
     it('does not throw on lambda syntax (-> { ... })', () => {
@@ -1383,13 +1398,6 @@ end
       expect(bar).toBeDefined();
       expect(bar!.params).toHaveLength(0);
     });
-  });
-
-  // ---------------------------------------------------------------------------
-  // Integration: full parse via dispatcher
-  // ---------------------------------------------------------------------------
-
-  describe('error handling', () => {
     it('rejects an unknown parent class', () => {
       const source = `
 class Foo < Runar::UnknownBase
