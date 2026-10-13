@@ -266,3 +266,32 @@ export class Countdown extends SmartContract {
 "#;
     compile(source, "Countdown.runar.ts").expect("a countdown loop must still compile");
 }
+
+/// N-116: an update that names the iterator (or is a literal) without
+/// advancing it. The validator accepted these as the "no-op sentinel" the
+/// while-shaped parsers synthesize, and the step was then inferred as +1 from
+/// the comparison direction — so a source loop that never terminates (i stays
+/// 3 forever) unrolled to two laps over i = 3, 4. Proves the refusal with the
+/// shared R-065 sentence on the Zig continue expression and the TS for-update
+/// surface; does NOT cover while loops whose update lives in the body (those
+/// keep a placeholder iterator and the condition rule refuses them).
+#[test]
+fn n116_non_advancing_update_is_rejected() {
+    let zig = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+        .replace("var i: i64 = 0;", "var i: i64 = 3;")
+        .replace("while (i < 5) : (i += 1)", "while (i < 5) : (i)");
+    let cases = [
+        ("zig continue reads iterator", zig, "BoundedLoop.runar.zig"),
+        ("ts update reads iterator", ts_with_update("i"), "UpdateProbe.runar.ts"),
+        ("ts update literal", ts_with_update("0n"), "UpdateProbe.runar.ts"),
+    ];
+    for (name, source, file) in cases.iter() {
+        match compile(source, file) {
+            Ok(hex) => panic!("{name}: a non-advancing update must not compile; got {hex}"),
+            Err(diags) => assert!(
+                diags.contains("must advance the loop variable by one"),
+                "{name}: rejection must carry the shared cross-tier diagnostic, got: {diags}"
+            ),
+        }
+    }
+}

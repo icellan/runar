@@ -1096,7 +1096,11 @@ class _ValidationContext:
         ``i = i + 1`` / ``i = i - 1`` / ``i = 1 + i`` that ``i += 1`` becomes in
         the Solidity, Zig and Java parsers; and the effect-free no-op sentinel
         (a literal or a bare identifier) that the while-shaped parsers
-        synthesize when the source has no continue expression at all.
+        synthesize when the source has no continue expression at all -- but
+        only on a loop whose condition does not test its declared iterator
+        (already refused by the condition rule). On a real iterator a no-op
+        update never advances it: ``var i = 3; while (i < 5) : (i)`` compiled
+        two laps over i = 3, 4 (N-116).
 
         The advanced variable must be the declared iterator or the identifier
         the condition tests. Both are needed: the Zig parser only folds
@@ -1113,7 +1117,17 @@ class _ValidationContext:
         ):
             allowed.append(stmt.condition.left.name)
 
-        if _is_representable_for_update(allowed, stmt.update):
+        # N-116: the no-op sentinel is tolerated only on a loop the condition
+        # rule already refuses (placeholder iterator). On a real iterator it
+        # never advances, yet the unrolled loop would still step by one.
+        cond_tests_iter = (
+            stmt.init is not None
+            and isinstance(stmt.condition, BinaryExpr)
+            and isinstance(stmt.condition.left, Identifier)
+            and stmt.condition.left.name == stmt.init.name
+        )
+
+        if _is_representable_for_update(allowed, stmt.update, not cond_tests_iter):
             return
 
         self._add_error(LOOP_UPDATE_DIAGNOSTIC, stmt.source_location)
@@ -1328,7 +1342,9 @@ def _is_literal_one(expr: Expression | None) -> bool:
     return isinstance(expr, BigIntLiteral) and expr.value == 1
 
 
-def _is_representable_for_update(allowed: list[str], update: Statement | None) -> bool:
+def _is_representable_for_update(
+    allowed: list[str], update: Statement | None, accept_no_op_sentinel: bool
+) -> bool:
     if isinstance(update, ExpressionStmt):
         e = update.expr
         if isinstance(e, (IncrementExpr, DecrementExpr)):
@@ -1336,8 +1352,11 @@ def _is_representable_for_update(allowed: list[str], update: Statement | None) -
         # The no-op sentinel a while-shaped frontend synthesizes when the source
         # carries no continue expression: zig's ``while (c) {}``, move's
         # ``while (c) {}``, go's ``for c {}``. Reading a literal or a bare
-        # identifier has no effect, so discarding it loses nothing.
-        return isinstance(e, (BigIntLiteral, BoolLiteral, Identifier))
+        # identifier has no effect, so discarding it loses nothing -- on a loop
+        # the condition rule already refuses (N-116).
+        return accept_no_op_sentinel and isinstance(
+            e, (BigIntLiteral, BoolLiteral, Identifier)
+        )
 
     if isinstance(update, AssignmentStmt):
         # ``i += 1`` / ``i -= 1`` arrive here as ``i = i + 1`` / ``i = i - 1``.

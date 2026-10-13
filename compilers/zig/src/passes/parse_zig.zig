@@ -1139,6 +1139,12 @@ const Parser = struct {
                         } });
                     }
                 }
+            } else if (lhs) |e| {
+                // N-116: a bare continue expression (`: (i)`) is recorded as
+                // the expression statement the reference builds, so the fold
+                // and validate.zig see it. It used to be dropped, leaving
+                // `update == null`, which nothing checks.
+                update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
             }
             if (self.current.kind == .rparen) _ = self.bump();
         }
@@ -1169,6 +1175,12 @@ const Parser = struct {
         const u = f.update orelse return null;
         return switch (u.*) {
             .assign => |a| if (a.target_is_property) null else a.target,
+            // N-116: the reference folds on a bare-identifier continue
+            // expression too (`getLoopUpdateTargetName`).
+            .expr_stmt => |es| switch (es.expr) {
+                .identifier => |name| name,
+                else => null,
+            },
             else => null,
         };
     }

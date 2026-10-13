@@ -248,3 +248,39 @@ def test_n132_empty_ts_update_is_rejected():
         f"an empty for-update must not compile ({len(hex_out)} hex chars emitted)"
     )
     assert EMPTY_UPDATE_DIAGNOSTIC in diags, diags
+
+
+# ---------------------------------------------------------------------------
+# N-116: an update that reads the iterator (or is a literal) without advancing it
+# ---------------------------------------------------------------------------
+
+
+def _zig_continue_reads_iterator() -> str:
+    source = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+    source = source.replace("var i: i64 = 0;", "var i: i64 = 3;", 1)
+    return source.replace("while (i < 5) : (i += 1)", "while (i < 5) : (i)", 1)
+
+
+@pytest.mark.parametrize(
+    "source_fn,file_name",
+    [
+        (_zig_continue_reads_iterator, "BoundedLoop.runar.zig"),
+        (lambda: ts_with_update("i"), "UpdateProbe.runar.ts"),
+        (lambda: ts_with_update("0n"), "UpdateProbe.runar.ts"),
+    ],
+    ids=["zig-continue-reads-iterator", "ts-update-reads-iterator", "ts-update-literal"],
+)
+def test_n116_non_advancing_update_is_rejected(source_fn, file_name):
+    """N-116: the validator accepted a bare identifier / literal update as the
+    "no-op sentinel" the while-shaped parsers synthesize, and the step was then
+    inferred as +1 from the comparison direction -- so ``var i = 3;
+    while (i < 5) : (i)``, a source loop that never terminates, unrolled to two
+    laps over i = 3, 4.
+
+    Proves: the refusal, with the shared R-065 sentence, on the Zig continue
+    expression and the TS for-update surface. Does not prove: anything about
+    while loops whose update lives in the body (those keep a placeholder
+    iterator and the condition rule refuses them)."""
+    ok, hex_out, diags = compile_source(source_fn(), file_name)
+    assert not ok, f"a non-advancing update must not compile; got {hex_out}"
+    assert LOOP_UPDATE_DIAGNOSTIC in diags, diags

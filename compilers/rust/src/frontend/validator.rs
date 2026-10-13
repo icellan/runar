@@ -1518,7 +1518,10 @@ fn validate_for_condition_tests_iterator(
 /// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
 /// the effect-free no-op sentinel (a literal or a bare identifier) that the
 /// while-shaped parsers synthesize when the source has no continue expression
-/// at all.
+/// at all -- but only on a loop whose condition does not test its declared
+/// iterator (already refused by the condition rule). On a real iterator a
+/// no-op update never advances it: `var i = 3; while (i < 5) : (i)` compiled
+/// two laps over i = 3, 4 (N-116).
 ///
 /// The advanced variable must be the declared iterator or the identifier the
 /// condition tests. Both are needed: the Zig parser only folds
@@ -1544,7 +1547,17 @@ fn validate_for_update(
         }
     }
 
-    if for_update_is_representable(&allowed, update) {
+    // N-116: the no-op sentinel is tolerated only on a loop the condition rule
+    // already refuses (placeholder iterator). On a real iterator it never
+    // advances, yet the unrolled loop would still step by one.
+    let cond_tests_iter = match (init, condition) {
+        (Statement::VariableDecl { name: iter, .. }, Expression::BinaryExpr { left, .. }) => {
+            matches!(left.as_ref(), Expression::Identifier { name } if name == iter)
+        }
+        _ => false,
+    };
+
+    if for_update_is_representable(&allowed, update, !cond_tests_iter) {
         return;
     }
 
@@ -1571,7 +1584,11 @@ fn is_literal_one(expr: &Expression) -> bool {
     matches!(expr, Expression::BigIntLiteral { value } if *value == num_bigint::BigInt::from(1))
 }
 
-fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
+fn for_update_is_representable(
+    allowed: &[&str],
+    update: &Statement,
+    accept_no_op_sentinel: bool,
+) -> bool {
     match update {
         Statement::ExpressionStatement { expression, .. } => match expression {
             Expression::IncrementExpr { operand, .. }
@@ -1579,10 +1596,11 @@ fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
             // The no-op sentinel a while-shaped frontend synthesizes when the
             // source carries no continue expression: `zig`'s `while (c) {}`,
             // `move`'s `while (c) {}`, `go`'s `for c {}`. Reading a literal or
-            // a bare identifier has no effect, so discarding it loses nothing.
+            // a bare identifier has no effect, so discarding it loses nothing --
+            // on a loop the condition rule already refuses (N-116).
             Expression::BigIntLiteral { .. }
             | Expression::BoolLiteral { .. }
-            | Expression::Identifier { .. } => true,
+            | Expression::Identifier { .. } => accept_no_op_sentinel,
             _ => false,
         },
         // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.

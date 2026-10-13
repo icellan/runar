@@ -1668,7 +1668,9 @@ public final class Validate {
          * {@code i = i + 1} / {@code i = i - 1} / {@code i = 1 + i} that {@code i += 1} becomes in
          * the Solidity, Zig and Java parsers; and the effect-free no-op sentinel (a literal or a
          * bare identifier) that the while-shaped parsers synthesize when the source has no continue
-         * expression at all.
+         * expression at all -- but only on a loop whose condition does not test its declared iterator
+         * (already refused by the condition rule). On a real iterator a no-op update never advances
+         * it: {@code var i = 3; while (i < 5) : (i)} compiled two laps over i = 3, 4 (N-116).
          *
          * <p>The advanced variable must be the declared iterator or the identifier the condition
          * tests. Both are needed: the Zig parser only folds
@@ -1685,7 +1687,15 @@ public final class Validate {
                 allowed.add(id.name());
             }
 
-            if (isRepresentableForUpdate(allowed, f.update())) {
+            // N-116: the no-op sentinel is tolerated only on a loop the condition rule already
+            // refuses (placeholder iterator). On a real iterator it never advances, yet the
+            // unrolled loop would still step by one.
+            boolean condTestsIter = f.init() != null
+                && f.condition() instanceof BinaryExpr cbe
+                && cbe.left() instanceof Identifier cid
+                && cid.name().equals(f.init().name());
+
+            if (isRepresentableForUpdate(allowed, f.update(), !condTestsIter)) {
                 return;
             }
 
@@ -2077,7 +2087,9 @@ public final class Validate {
             && b.value().equals(java.math.BigInteger.ONE);
     }
 
-    private static boolean isRepresentableForUpdate(List<String> allowed, Statement update) {
+    private static boolean isRepresentableForUpdate(
+        List<String> allowed, Statement update, boolean acceptNoOpSentinel
+    ) {
         if (update instanceof ExpressionStatement es) {
             Expression e = es.expression();
             if (e instanceof IncrementExpr inc) {
@@ -2088,8 +2100,10 @@ public final class Validate {
             }
             // The no-op sentinel a while-shaped frontend synthesizes when the source carries no
             // continue expression: zig's `while (c) {}`, move's `while (c) {}`, go's `for c {}`.
-            // Reading a literal or a bare identifier has no effect, so discarding it loses nothing.
-            return e instanceof BigIntLiteral || e instanceof BoolLiteral || e instanceof Identifier;
+            // Reading a literal or a bare identifier has no effect, so discarding it loses nothing
+            // -- on a loop the condition rule already refuses (N-116).
+            return acceptNoOpSentinel
+                && (e instanceof BigIntLiteral || e instanceof BoolLiteral || e instanceof Identifier);
         }
 
         if (update instanceof AssignmentStatement as) {

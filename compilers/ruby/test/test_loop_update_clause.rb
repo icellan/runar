@@ -231,4 +231,29 @@ class TestLoopUpdateClause < Minitest::Test
     refute ok, "an empty for-update must not compile (#{hex.length} hex chars emitted)"
     assert_includes msg, "For loop must have an update expression"
   end
+
+  # N-116: the validator accepted a bare identifier / literal update as the
+  # "no-op sentinel" the while-shaped parsers synthesize, and the step was then
+  # inferred as +1 from the comparison direction -- so `var i = 3;
+  # while (i < 5) : (i)`, a source loop that never terminates, unrolled to two
+  # laps over i = 3, 4.
+  #
+  # Proves: the refusal, with the shared R-065 sentence, on the Zig continue
+  # expression and the TS for-update surface. Does not prove: anything about
+  # while loops whose update lives in the body (those keep a placeholder
+  # iterator and the condition rule refuses them).
+  def test_n116_non_advancing_update_rejected
+    zig = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+          .sub("var i: i64 = 0;", "var i: i64 = 3;")
+          .sub("while (i < 5) : (i += 1)", "while (i < 5) : (i)")
+    [
+      ["zig continue reads iterator", zig, "BoundedLoop.runar.zig"],
+      ["ts update reads iterator", ts_with_update("i"), "UpdateProbe.runar.ts"],
+      ["ts update literal", ts_with_update("0n"), "UpdateProbe.runar.ts"]
+    ].each do |name, source, file|
+      ok, hex, msg = compile_source(source, file)
+      refute ok, "#{name}: a non-advancing update must not compile; got #{hex}"
+      assert_includes msg, LOOP_UPDATE_DIAGNOSTIC, name
+    end
+  end
 end

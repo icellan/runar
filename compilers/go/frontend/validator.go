@@ -1357,7 +1357,10 @@ const loopUpdateDiagnosticMsg = "For loop update must advance the loop variable 
 // `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
 // the effect-free no-op sentinel (a literal or a bare identifier) that the
 // while-shaped parsers synthesize when the source has no continue expression at
-// all.
+// all -- but only on a loop whose condition does not test its declared
+// iterator (already refused by the condition rule). On a real iterator a no-op
+// update never advances it: `var i = 3; while (i < 5) : (i)` compiled two laps
+// over i = 3, 4 (N-116).
 //
 // The advanced variable must be the declared iterator or the identifier the
 // condition tests. Both are needed: the Zig parser only folds
@@ -1375,7 +1378,17 @@ func (ctx *validationContext) validateForUpdate(stmt ForStmt) {
 		}
 	}
 
-	if isRepresentableForUpdate(allowed, stmt.Update) {
+	// N-116: the no-op sentinel is tolerated only on a loop the condition rule
+	// already refuses (placeholder iterator). On a real iterator it never
+	// advances, yet the unrolled loop would still step by one.
+	condTestsIter := false
+	if bin, ok := stmt.Condition.(BinaryExpr); ok {
+		if id, ok := bin.Left.(Identifier); ok && id.Name == stmt.Init.Name {
+			condTestsIter = true
+		}
+	}
+
+	if isRepresentableForUpdate(allowed, stmt.Update, !condTestsIter) {
 		return
 	}
 
@@ -1404,7 +1417,7 @@ func isLiteralOne(expr Expression) bool {
 	return ok && lit.Value != nil && lit.Value.IsInt64() && lit.Value.Int64() == 1
 }
 
-func isRepresentableForUpdate(allowed []string, update Statement) bool {
+func isRepresentableForUpdate(allowed []string, update Statement, acceptNoOpSentinel bool) bool {
 	switch u := update.(type) {
 	case ExpressionStmt:
 		switch e := u.Expr.(type) {
@@ -1416,8 +1429,9 @@ func isRepresentableForUpdate(allowed []string, update Statement) bool {
 			// The no-op sentinel a while-shaped frontend synthesizes when the
 			// source carries no continue expression: zig's `while (c) {}`,
 			// move's `while (c) {}`, go's `for c {}`. Reading a literal or a
-			// bare identifier has no effect, so discarding it loses nothing.
-			return true
+			// bare identifier has no effect, so discarding it loses nothing --
+			// on a loop the condition rule already refuses (N-116).
+			return acceptNoOpSentinel
 		}
 		return false
 

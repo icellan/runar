@@ -574,3 +574,43 @@ test "N-132: an empty .runar.sol for-update is rejected with the reference diagn
     const src = try std.mem.replaceOwned(u8, alloc, src_sol, "i < 5; i++)", "i < 5; )");
     try expectRejectedWithDiagnostic(alloc, src, "BoundedLoop.runar.sol", "Unexpected token in expression: ')'");
 }
+
+// ---------------------------------------------------------------------------
+// N-116: an update that reads the iterator (or is a literal) without advancing it
+// ---------------------------------------------------------------------------
+//
+// The validator accepted a bare identifier / literal update as the "no-op
+// sentinel" the while-shaped parsers synthesize, and the step was then inferred
+// from the comparison direction -- so `var i = 3; while (i < 5) : (i)`, a source
+// loop that never terminates, unrolled to two laps over i = 3, 4 in six tiers.
+// This tier refused the `.runar.zig` spelling only by accident: its parser
+// dropped a bare continue expression, so nothing folded and the condition rule
+// fired instead of the update rule.
+//
+// What these tests prove: the `.runar.zig` continue expression and the
+// `.runar.ts` for-update are refused with the shared R-065 sentence. What they
+// do not prove: anything about while loops whose update lives in the body
+// (those keep a placeholder iterator and the condition rule refuses them).
+
+test "N-116: a .runar.zig continue expression that only reads the iterator is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var src = try std.mem.replaceOwned(u8, alloc, src_zig, "var i: i64 = 0;", "var i: i64 = 3;");
+    src = try std.mem.replaceOwned(u8, alloc, src, "while (i < 5) : (i += 1)", "while (i < 5) : (i)");
+    try expectRejectedWithSharedDiagnostic(alloc, src, "BoundedLoop.runar.zig");
+}
+
+test "N-116: a .runar.ts for-update that only reads the iterator is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    try expectRejectedWithSharedDiagnostic(alloc, try tsWithUpdate(alloc, "i"), "UpdateProbe.runar.ts");
+}
+
+test "N-116: a .runar.ts literal for-update is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    try expectRejectedWithSharedDiagnostic(alloc, try tsWithUpdate(alloc, "0n"), "UpdateProbe.runar.ts");
+}

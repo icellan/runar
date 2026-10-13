@@ -1380,7 +1380,11 @@ module RunarCompiler
       # `i = i - 1` / `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and
       # Java parsers; and the effect-free no-op sentinel (a literal or a bare
       # identifier) that the while-shaped parsers synthesize when the source has
-      # no continue expression at all.
+      # no continue expression at all -- but only on a loop whose condition
+      # does not test its declared iterator (already refused by the condition
+      # rule). On a real iterator a no-op update never advances it:
+      # `var i = 3; while (i < 5) : (i)` compiled two laps over i = 3, 4
+      # (N-116).
       #
       # The advanced variable must be the declared iterator or the identifier
       # the condition tests. Both are needed: the Zig parser only folds
@@ -1395,7 +1399,15 @@ module RunarCompiler
           allowed << stmt.condition.left.name
         end
 
-        return if representable_for_update?(allowed, stmt.update)
+        # N-116: the no-op sentinel is tolerated only on a loop the condition
+        # rule already refuses (placeholder iterator). On a real iterator it
+        # never advances, yet the unrolled loop would still step by one.
+        cond_tests_iter = !stmt.init.nil? &&
+                          stmt.condition.is_a?(BinaryExpr) &&
+                          stmt.condition.left.is_a?(Identifier) &&
+                          stmt.condition.left.name == stmt.init.name
+
+        return if representable_for_update?(allowed, stmt.update, !cond_tests_iter)
 
         add_error(LOOP_UPDATE_DIAGNOSTIC, loc: stmt.source_location)
       end
@@ -1411,7 +1423,7 @@ module RunarCompiler
         expr.is_a?(BigIntLiteral) && expr.value == 1
       end
 
-      def representable_for_update?(allowed, update)
+      def representable_for_update?(allowed, update, accept_no_op_sentinel)
         case update
         when ExpressionStmt
           e = update.expr
@@ -1420,8 +1432,10 @@ module RunarCompiler
           # The no-op sentinel a while-shaped frontend synthesizes when the
           # source carries no continue expression: zig's `while (c) {}`, move's
           # `while (c) {}`, go's `for c {}`. Reading a literal or a bare
-          # identifier has no effect, so discarding it loses nothing.
-          e.is_a?(BigIntLiteral) || e.is_a?(BoolLiteral) || e.is_a?(Identifier)
+          # identifier has no effect, so discarding it loses nothing -- on a
+          # loop the condition rule already refuses (N-116).
+          accept_no_op_sentinel &&
+            (e.is_a?(BigIntLiteral) || e.is_a?(BoolLiteral) || e.is_a?(Identifier))
         when AssignmentStmt
           # `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
           return false unless allowed_loop_var?(allowed, update.target)

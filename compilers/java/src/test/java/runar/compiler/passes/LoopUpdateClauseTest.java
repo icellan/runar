@@ -252,4 +252,39 @@ class LoopUpdateClauseTest {
         assertTrue(err.contains("For loop must have an update expression"),
             "rejection must carry the TS reference diagnostic, got: " + err);
     }
+
+    // -----------------------------------------------------------------------
+    // N-116: an update that reads the iterator (or is a literal) without advancing it
+    // -----------------------------------------------------------------------
+
+    /**
+     * N-116: the validator accepted a bare identifier / literal update as the "no-op sentinel" the
+     * while-shaped parsers synthesize, and the step was then inferred as +1 from the comparison
+     * direction -- so {@code var i = 3; while (i < 5) : (i)}, a source loop that never terminates,
+     * unrolled to two laps over i = 3, 4.
+     *
+     * <p>Proves: the refusal, with the shared R-065 sentence, on the Zig continue expression and
+     * the TS for-update surface. Does not prove: anything about while loops whose update lives in
+     * the body (those keep a placeholder iterator and the condition rule refuses them).
+     */
+    @Test
+    void n116ZigContinueThatOnlyReadsTheIteratorIsRejected() throws Exception {
+        String src = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+            .replace("var i: i64 = 0;", "var i: i64 = 3;")
+            .replace("while (i < 5) : (i += 1)", "while (i < 5) : (i)");
+        assertRejectedWithSharedDiagnostic(src, "BoundedLoop.runar.zig",
+            "`: (i)` never advances i; the source loop never terminates");
+    }
+
+    @Test
+    void n116TsUpdateThatOnlyReadsTheIteratorIsRejected() {
+        assertRejectedWithSharedDiagnostic(tsWithUpdate("i"), "UpdateProbe.runar.ts",
+            "`for (...; i)` does not advance i");
+    }
+
+    @Test
+    void n116TsLiteralUpdateIsRejected() {
+        assertRejectedWithSharedDiagnostic(tsWithUpdate("0n"), "UpdateProbe.runar.ts",
+            "`for (...; 0n)` does not advance i");
+    }
 }

@@ -1381,7 +1381,13 @@ export function ternaryOutputIntrinsicMessage(intrinsic: string, via?: string): 
  * `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
  * the effect-free no-op sentinel (a literal or a bare identifier) that the
  * while-shaped parsers synthesize when the source has no continue expression
- * at all.
+ * at all -- but only on a loop whose condition does not test its declared
+ * iterator. Such a loop carries a placeholder iterator and is already refused
+ * by the condition rule, so tolerating its sentinel just avoids a second
+ * diagnostic. On a loop whose condition DOES test the iterator a no-op update
+ * leaves it unchanged forever, yet the unrolled loop would still step it by
+ * one: `var i = 3; while (i < 5) : (i)` (Zig), `for (...; i)` and
+ * `for (...; 0n)` compiled two laps over i = 3, 4 (N-116).
  *
  * The advanced variable must be the declared iterator or the identifier the
  * condition tests. Both are needed: the Zig parser only folds
@@ -1403,7 +1409,12 @@ function validateForUpdate(
     allowed.push(stmt.condition.left.name);
   }
 
-  if (isRepresentableForUpdate(allowed, stmt.update)) return;
+  const conditionTestsIterator =
+    stmt.condition.kind === 'binary_expr' &&
+    stmt.condition.left.kind === 'identifier' &&
+    stmt.condition.left.name === stmt.init.name;
+
+  if (isRepresentableForUpdate(allowed, stmt.update, !conditionTestsIterator)) return;
 
   ctx.errors.push(makeDiagnostic(
     'For loop update must advance the loop variable by one (`i++`, `i--`, ' +
@@ -1428,7 +1439,11 @@ function isLiteralOne(expr: Expression): boolean {
   return expr.kind === 'bigint_literal' && expr.value === 1n;
 }
 
-function isRepresentableForUpdate(allowed: string[], update: Statement): boolean {
+function isRepresentableForUpdate(
+  allowed: string[],
+  update: Statement,
+  acceptNoOpSentinel: boolean,
+): boolean {
   if (update.kind === 'expression_statement') {
     const e = update.expression;
     if (e.kind === 'increment_expr' || e.kind === 'decrement_expr') {
@@ -1437,8 +1452,10 @@ function isRepresentableForUpdate(allowed: string[], update: Statement): boolean
     // The no-op sentinel a while-shaped frontend synthesizes when the source
     // carries no continue expression: zig's `while (c) {}`, move's
     // `while (c) {}`, go's `for c {}`. Reading a literal or a bare identifier
-    // has no effect, so discarding it loses nothing.
-    return e.kind === 'bigint_literal' || e.kind === 'bool_literal' || e.kind === 'identifier';
+    // has no effect, so discarding it loses nothing -- on a loop the condition
+    // rule already refuses. On a real iterator it does not advance (N-116).
+    return acceptNoOpSentinel &&
+      (e.kind === 'bigint_literal' || e.kind === 'bool_literal' || e.kind === 'identifier');
   }
 
   // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.

@@ -1560,16 +1560,20 @@ fn isLiteralOne(expr: Expression) bool {
 /// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig, Move and Java
 /// parsers; and the effect-free no-op sentinel (a literal or a bare identifier)
 /// that the while-shaped parsers synthesize when the source has no continue
-/// expression at all.
-fn isRepresentableForUpdate(allowed: []const u8, update: Statement) bool {
+/// expression at all -- but only on a loop whose condition does not test its
+/// declared iterator (already refused by the condition rule). On a real
+/// iterator a no-op update never advances it: `var i = 3; while (i < 5) : (i)`
+/// compiled two laps over i = 3, 4 (N-116).
+fn isRepresentableForUpdate(allowed: []const u8, update: Statement, accept_no_op_sentinel: bool) bool {
     return switch (update) {
         .expr_stmt => |e| switch (e.expr) {
             .increment => |inc| isAllowedLoopVar(allowed, inc.operand),
             .decrement => |dec| isAllowedLoopVar(allowed, dec.operand),
             // The no-op sentinel a while-shaped frontend synthesizes when the
             // source carries no continue expression. Reading a literal or a
-            // bare identifier has no effect, so discarding it loses nothing.
-            .literal_int, .literal_bool, .identifier => true,
+            // bare identifier has no effect, so discarding it loses nothing --
+            // on a loop the condition rule already refuses (N-116).
+            .literal_int, .literal_bool, .identifier => accept_no_op_sentinel,
             else => false,
         },
         // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
@@ -1748,8 +1752,14 @@ fn validateStatement(
                 // N-008: as in the reference, the update may advance the
                 // declared iterator or the variable the condition tests (an
                 // unfolded `.runar.zig` while carries the placeholder iterator).
-                const via_cond = if (f.cond_lhs_name) |c| isRepresentableForUpdate(c, u.*) else false;
-                if (!isRepresentableForUpdate(f.var_name, u.*) and !via_cond) {
+                //
+                // N-116: the no-op sentinel is tolerated only on a loop the
+                // condition rule already refuses (placeholder iterator). On a
+                // real iterator it never advances, yet the unrolled loop would
+                // still step by one.
+                const accept_sentinel = !f.cond_tests_iter;
+                const via_cond = if (f.cond_lhs_name) |c| isRepresentableForUpdate(c, u.*, accept_sentinel) else false;
+                if (!isRepresentableForUpdate(f.var_name, u.*, accept_sentinel) and !via_cond) {
                     try errors.append(allocator, .{
                         .message = loop_update_diagnostic,
                         .severity = .@"error",
