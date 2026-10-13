@@ -36,6 +36,7 @@ pub fn typecheck(contract: &ContractNode) -> TypeCheckResult {
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut checker = TypeChecker::new(contract, &mut errors);
 
+    checker.check_property_initializers();
     checker.check_constructor();
     for method in &contract.methods {
         checker.check_method(method);
@@ -581,6 +582,38 @@ impl<'a> TypeChecker<'a> {
         if let Expression::CallExpr { callee, .. } = target {
             if matches!(callee.as_ref(), Expression::Identifier { name } if name == "continuationAmount") {
                 self.add_error(CONTINUATION_AMOUNT_READ_ONLY);
+            }
+        }
+    }
+
+    /// N-234: a scalar property initializer whose literal type does not
+    /// match the declared property type compiled without complaint on every
+    /// tier (`readonly x: bigint = toByteString('ab')` emitted a locking
+    /// script that pushes a byte string where the contract's own arithmetic
+    /// expects a script NUMBER). The validator only checks that an
+    /// initializer IS a literal of one of the three families, never that it
+    /// is a literal OF THE DECLARED TYPE. FixedArray properties are skipped
+    /// here: their element-type check already lives in
+    /// expand_fixed_arrays.rs (N-133), which runs on the expanded array
+    /// elements, not the whole-array initializer this pass sees. Mirrors
+    /// the TS reference's method of the same name in 03-typecheck.ts.
+    fn check_property_initializers(&mut self) {
+        for prop in &self.contract.properties {
+            let Some(initializer) = &prop.initializer else { continue };
+            if matches!(prop.prop_type, TypeNode::FixedArray { .. }) {
+                continue;
+            }
+            let init_type = infer_expr_type_static(initializer);
+            if init_type == "<unknown>" {
+                continue;
+            }
+            let declared_type = type_node_to_ttype(&prop.prop_type);
+            if !is_subtype(&init_type, &declared_type) {
+                self.current_method_loc = Some(prop.source_location.clone());
+                self.add_error(format!(
+                    "Type '{}' is not assignable to type '{}'",
+                    init_type, declared_type
+                ));
             }
         }
     }
@@ -2759,6 +2792,95 @@ class C extends SmartContract {
 
     public unlock(n: bigint) {
         assert(substr(this.a, n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors, got: {:?}",
+            result.errors
+        );
+    }
+
+    // N-234: a property initializer of the wrong literal family compiled
+    // without complaint. Proves only the Rust tier's
+    // check_property_initializers; the 7-tier cross-compiler shape is
+    // conformance/negatives/N233-*.
+
+    #[test]
+    fn n234_rejects_bytestring_initializer_for_bigint_property() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+    readonly x: bigint = 'ab';
+
+    constructor() {
+        super();
+    }
+
+    public check() {
+        assert(this.x === 1n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Type 'ByteString' is not assignable to type 'bigint'")),
+            "expected the not-assignable diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n234_rejects_to_bytestring_call_initializer_for_bigint_property() {
+        let source = r#"
+import { SmartContract, toByteString } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+    readonly x: bigint = toByteString('ab');
+
+    constructor() {
+        super();
+    }
+
+    public check() {
+        assert(this.x === 1n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Type 'ByteString' is not assignable to type 'bigint'")),
+            "expected the not-assignable diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n234_still_accepts_well_typed_scalar_initializer() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class GoodScalarInit extends SmartContract {
+    readonly x: bigint = 1n;
+
+    constructor() {
+        super();
+    }
+
+    public check() {
+        assert(this.x === 1n);
     }
 }
 "#;

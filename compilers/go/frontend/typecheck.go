@@ -29,6 +29,7 @@ func (r *TypeCheckResult) ErrorStrings() []string {
 func TypeCheck(contract *ContractNode) *TypeCheckResult {
 	checker := newTypeChecker(contract)
 
+	checker.checkPropertyInitializers()
 	checker.checkConstructor()
 	for _, method := range contract.Methods {
 		checker.checkMethod(method)
@@ -535,6 +536,36 @@ func (tc *typeChecker) addError(msg string) {
 
 func (tc *typeChecker) addErrorWithLoc(msg string, loc *SourceLocation) {
 	tc.errors = append(tc.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: loc})
+}
+
+// checkPropertyInitializers is N-234's fix: a scalar property initializer
+// whose literal type does not match the declared property type compiled
+// without complaint on every tier (`readonly x: bigint = toByteString('ab')`
+// emitted a locking script that pushes a byte string where the contract's
+// own arithmetic expects a script NUMBER). The validator only checks that an
+// initializer IS a literal of one of the three families, never that it is a
+// literal OF THE DECLARED TYPE. FixedArray properties are skipped here:
+// their element-type check already lives in expand_fixed_arrays.go (N-133),
+// which runs on the expanded array elements, not the whole-array
+// initializer this pass sees. Mirrors the TS reference's method of the same
+// name in 03-typecheck.ts.
+func (tc *typeChecker) checkPropertyInitializers() {
+	for _, prop := range tc.contract.Properties {
+		if prop.Initializer == nil {
+			continue
+		}
+		if _, isArray := prop.Type.(FixedArrayType); isArray {
+			continue
+		}
+		initType := inferExprTypeStatic(prop.Initializer)
+		if initType == "<unknown>" {
+			continue
+		}
+		declaredType := typeNodeToString(prop.Type)
+		if !isSubtype(initType, declaredType) {
+			tc.addErrorWithLoc(fmt.Sprintf("type '%s' is not assignable to type '%s'", initType, declaredType), &prop.SourceLocation)
+		}
+	}
 }
 
 func (tc *typeChecker) checkConstructor() {

@@ -369,8 +369,18 @@ public final class ExpandFixedArrays {
             return null;
         }
 
-        /** The literal family of an initializer element, or null. N-133. */
+        /**
+         * The literal family of an initializer element, or null. N-133.
+         *
+         * <p>N-234: {@code toByteString('<hex>')} IS the ByteStringLiteral
+         * production (see {@code Validate.isToByteStringLiteral} and
+         * spec/grammar.md section 11). Checking only the bare {@code
+         * ByteStringLiteral} AST node let a call-wrapped ByteString element
+         * ({@code FixedArray<bigint, 2> = [toByteString('ab'), 0n]}) slip
+         * past this family check.
+         */
         private static String familyOfLiteral(Expression expr) {
+            if (Validate.isToByteStringLiteral(expr)) return "ByteString";
             if (expr instanceof BigIntLiteral) return "bigint";
             if (expr instanceof BoolLiteral) return "boolean";
             if (expr instanceof ByteStringLiteral) return "ByteString";

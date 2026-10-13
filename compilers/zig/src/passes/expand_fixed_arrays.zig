@@ -28,6 +28,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const typecheck = @import("typecheck.zig");
+const validate = @import("validate.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -148,7 +149,14 @@ fn familyOfElementType(t: RunarType) ?[]const u8 {
 }
 
 /// The literal family of an initializer element, or null. N-133.
+///
+/// N-234: `toByteString('<hex>')` IS the ByteStringLiteral production (see
+/// validate.zig's `isToByteStringLiteral` and spec/grammar.md section 11).
+/// Checking only the bare `literal_bytes` AST node let a call-wrapped
+/// ByteString element (`FixedArray<bigint, 2> = [toByteString('ab'), 0n]`)
+/// slip past this family check.
 fn familyOfLiteral(expr: Expression) ?[]const u8 {
+    if (validate.isToByteStringLiteral(expr)) return "ByteString";
     return switch (expr) {
         .literal_int => "bigint",
         .literal_bool => "boolean",

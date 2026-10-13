@@ -1127,6 +1127,88 @@ class Bad extends SmartContract {
             f"expected 'not callable' in error message, got: {tc_result.errors}"
         )
 
+    # N-234: a property initializer of the wrong literal family compiled
+    # without complaint. Proves only the Python tier's
+    # check_property_initializers; the 7-tier cross-compiler shape is
+    # conformance/negatives/N233-*.
+
+    def test_n234_rejects_bytestring_initializer_for_bigint_property(self):
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = 'ab';
+
+  constructor() {
+    super();
+  }
+
+  public check(): void {
+    assert(this.x === 1n);
+  }
+}
+"""
+        result = parse_source(source, "BadScalarInit.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert any(
+            "type 'ByteString' is not assignable to type 'bigint'" in e.message
+            for e in tc_result.errors
+        ), f"expected the not-assignable diagnostic, got: {tc_result.errors}"
+
+    def test_n234_rejects_to_bytestring_call_initializer_for_bigint_property(self):
+        source = """
+import { SmartContract, assert, toByteString } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = toByteString('ab');
+
+  constructor() {
+    super();
+  }
+
+  public check(): void {
+    assert(this.x === 1n);
+  }
+}
+"""
+        result = parse_source(source, "BadScalarInit.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert any(
+            "type 'ByteString' is not assignable to type 'bigint'" in e.message
+            for e in tc_result.errors
+        ), f"expected the not-assignable diagnostic, got: {tc_result.errors}"
+
+    def test_n234_still_accepts_well_typed_scalar_initializer(self):
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class GoodScalarInit extends SmartContract {
+  readonly x: bigint = 1n;
+
+  constructor() {
+    super();
+  }
+
+  public check(): void {
+    assert(this.x === 1n);
+  }
+}
+"""
+        result = parse_source(source, "GoodScalarInit.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert len(tc_result.errors) == 0, (
+            f"expected no type errors, got: {tc_result.errors}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # ANF lowering

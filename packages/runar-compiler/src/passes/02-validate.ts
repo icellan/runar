@@ -237,7 +237,7 @@ function isLiteralExpression(expr: Expression): boolean {
  * production; it stays an ordinary identity-cast call and remains a
  * non-literal initializer.
  */
-function isToByteStringLiteral(expr: Expression): boolean {
+export function isToByteStringLiteral(expr: Expression): boolean {
   return expr.kind === 'call_expr'
     && expr.callee.kind === 'identifier'
     && expr.callee.name === 'toByteString'

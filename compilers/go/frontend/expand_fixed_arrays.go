@@ -302,7 +302,16 @@ func familyOfElementType(t TypeNode) string {
 
 // familyOfLiteral reports the literal family of an initializer element, or ""
 // when the expression is not a literal this pass can judge. N-133.
+//
+// N-234: `toByteString('<hex>')` IS the ByteStringLiteral production (see
+// validator.go's isToByteStringLiteral and spec/grammar.md section 11).
+// Checking only the bare ByteStringLiteral AST node let a call-wrapped
+// ByteString element (`FixedArray<bigint, 2> = [toByteString('ab'), 0n]`)
+// slip past this family check.
 func familyOfLiteral(expr Expression) string {
+	if call, ok := expr.(CallExpr); ok && isToByteStringLiteral(call) {
+		return "ByteString"
+	}
 	switch expr.(type) {
 	case BigIntLiteral:
 		return "bigint"

@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use super::ast::*;
 use super::diagnostic::Diagnostic;
 use super::typecheck::{is_bigint_subtype, is_bytestring_subtype};
+use super::validator::is_to_byte_string_literal;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -135,7 +136,16 @@ fn family_of_element_type(t: &TypeNode) -> Option<&'static str> {
 
 /// The literal family of an initializer element, or `None` when the expression
 /// is not a literal this pass can judge. N-133.
+///
+/// N-234: `toByteString('<hex>')` IS the ByteStringLiteral production (see
+/// validator.rs's `is_to_byte_string_literal` and spec/grammar.md section
+/// 11). Checking only the bare `ByteStringLiteral` AST node let a
+/// call-wrapped ByteString element (`FixedArray<bigint, 2> =
+/// [toByteString('ab'), 0n]`) slip past this family check.
 fn family_of_literal(expr: &Expression) -> Option<&'static str> {
+    if is_to_byte_string_literal(expr) {
+        return Some("ByteString");
+    }
     match expr {
         Expression::BigIntLiteral { .. } => Some("bigint"),
         Expression::BoolLiteral { .. } => Some("boolean"),

@@ -379,9 +379,39 @@ public final class Typecheck {
         }
 
         void check() {
+            checkPropertyInitializers();
             checkConstructor();
             for (MethodNode m : contract.methods()) {
                 checkMethod(m);
+            }
+        }
+
+        /**
+         * N-234: a scalar property initializer whose literal type does not
+         * match the declared property type compiled without complaint on
+         * every tier ({@code readonly x: bigint = toByteString('ab')}
+         * emitted a locking script that pushes a byte string where the
+         * contract's own arithmetic expects a script NUMBER). Validation
+         * only checks that an initializer IS a literal of one of the three
+         * families, never that it is a literal OF THE DECLARED TYPE.
+         * {@code FixedArray} properties are skipped here: their
+         * element-type check already lives in {@code ExpandFixedArrays}
+         * (N-133), which runs on the expanded array elements, not the
+         * whole-array initializer this pass sees. Mirrors the TS
+         * reference's method of the same name in {@code 03-typecheck.ts}.
+         */
+        private void checkPropertyInitializers() {
+            for (PropertyNode p : contract.properties()) {
+                if (p.initializer() == null) continue;
+                if (p.type() instanceof FixedArrayType) continue;
+                String initType = staticInferType(p.initializer());
+                if ("<unknown>".equals(initType)) continue;
+                String declaredType = typeToString(p.type());
+                if (!isSubtype(initType, declaredType)) {
+                    currentMethodLoc = p.sourceLocation();
+                    currentStmtLoc = null;
+                    error("type '" + initType + "' is not assignable to type '" + declaredType + "'");
+                }
             }
         }
 

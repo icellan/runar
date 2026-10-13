@@ -45,6 +45,7 @@
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "typecheck"
+require_relative "validator"
 
 module RunarCompiler
   module Frontend
@@ -315,7 +316,15 @@ module RunarCompiler
       end
 
       # The literal family of an initializer element, or +nil+.  N-133.
+      #
+      # N-234: `toByteString('<hex>')` IS the ByteStringLiteral production
+      # (see validator.rb's `to_byte_string_literal?` and
+      # spec/grammar.md section 11). Checking only the bare
+      # +ByteStringLiteral+ AST node let a call-wrapped ByteString element
+      # (`FixedArray<bigint, 2> = [toByteString('ab'), 0n]`) slip past this
+      # family check.
       def family_of_literal(expr)
+        return "ByteString" if Frontend.to_byte_string_literal?(expr)
         return "bigint" if expr.is_a?(BigIntLiteral)
         return "boolean" if expr.is_a?(BoolLiteral)
         return "ByteString" if expr.is_a?(ByteStringLiteral)

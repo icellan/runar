@@ -46,6 +46,7 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
     var checker = try TypeChecker.init(allocator, contract);
     defer checker.deinit();
 
+    checker.checkPropertyInitializers();
     checker.checkConstructor();
     for (contract.methods) |method| {
         checker.checkMethod(method);
@@ -552,6 +553,32 @@ const TypeChecker = struct {
     // ------------------------------------------------------------------
     // Top-level checks
     // ------------------------------------------------------------------
+
+    /// N-234: a scalar property initializer whose literal type does not
+    /// match the declared property type compiled without complaint on
+    /// every tier (`readonly x: bigint = toByteString('ab')` emitted a
+    /// locking script that pushes a byte string where the contract's own
+    /// arithmetic expects a script NUMBER). The validator only checks that
+    /// an initializer IS a literal of one of the three families, never
+    /// that it is a literal OF THE DECLARED TYPE. FixedArray properties
+    /// are skipped here: their element-type check already lives in
+    /// expand_fixed_arrays.zig (N-133), which runs on the expanded array
+    /// elements, not the whole-array initializer this pass sees. Mirrors
+    /// the TS reference's method of the same name in 03-typecheck.ts.
+    fn checkPropertyInitializers(self: *TypeChecker) void {
+        for (self.contract.properties) |prop| {
+            const initializer = prop.initializer orelse continue;
+            if (prop.type_info == .fixed_array) continue;
+            const init_type = inferExprTypeStatic(initializer);
+            if (init_type == .unknown) continue;
+            if (!isSubtype(init_type, prop.type_info)) {
+                self.addError("type '{s}' is not assignable to type '{s}'", .{
+                    types.runarTypeToString(init_type),
+                    types.runarTypeToString(prop.type_info),
+                });
+            }
+        }
+    }
 
     fn checkConstructor(self: *TypeChecker) void {
         var env = TypeEnv.init(self.allocator) catch return;
@@ -2108,6 +2135,92 @@ test "typeCheck: type mismatch in variable declaration" {
     defer result.deinit(allocator);
     try std.testing.expectEqual(1, result.errors.len);
     try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "not assignable") != null);
+}
+
+// N-234: a property initializer of the wrong literal family compiled
+// without complaint. Proves only the Zig tier's checkPropertyInitializers;
+// the 7-tier cross-compiler shape is conformance/negatives/N233-*.
+
+test "typeCheck: N-234 rejects a ByteString literal initializing a bigint property" {
+    const allocator = std.testing.allocator;
+
+    // readonly x: bigint = 'ab';
+    const properties = try allocator.alloc(types.PropertyNode, 1);
+    defer allocator.free(properties);
+    properties[0] = .{
+        .name = "x",
+        .type_info = .bigint,
+        .readonly = true,
+        .initializer = .{ .literal_bytes = "ab" },
+    };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = properties,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = &.{},
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(1, result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "type 'ByteString' is not assignable to type 'bigint'") != null);
+}
+
+test "typeCheck: N-234 rejects a toByteString(...) literal initializing a bigint property" {
+    const allocator = std.testing.allocator;
+
+    // readonly x: bigint = toByteString('ab');
+    var args = [_]Expression{.{ .literal_bytes = "ab" }};
+    const call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(call);
+    call.* = .{ .callee = "toByteString", .args = args[0..] };
+
+    const properties = try allocator.alloc(types.PropertyNode, 1);
+    defer allocator.free(properties);
+    properties[0] = .{
+        .name = "x",
+        .type_info = .bigint,
+        .readonly = true,
+        .initializer = .{ .call = call },
+    };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = properties,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = &.{},
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(1, result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "type 'ByteString' is not assignable to type 'bigint'") != null);
+}
+
+test "typeCheck: N-234 still accepts a well-typed scalar initializer" {
+    const allocator = std.testing.allocator;
+
+    // readonly x: bigint = 1;
+    const properties = try allocator.alloc(types.PropertyNode, 1);
+    defer allocator.free(properties);
+    properties[0] = .{
+        .name = "x",
+        .type_info = .bigint,
+        .readonly = true,
+        .initializer = .{ .literal_int = 1 },
+    };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = properties,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = &.{},
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(0, result.errors.len);
 }
 
 test "typeCheck: if condition must be boolean" {

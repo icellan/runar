@@ -2504,3 +2504,65 @@ class C extends SmartContract {
 		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// N-234: a property initializer of the wrong literal family compiled
+// without complaint. Proves only the Go tier's checkPropertyInitializers;
+// the 7-tier cross-compiler shape is conformance/negatives/N233-*.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_N234_RejectsByteStringInitializerForBigintProperty(t *testing.T) {
+	source := `
+import { SmartContract, assert } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = 'ab';
+  constructor() { super(); }
+  public check(): void { assert(this.x === 1n); }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) == 0 {
+		t.Fatalf("expected a type error for a ByteString literal initializing a bigint property, got none")
+	}
+	joined := strings.Join(res.ErrorStrings(), "; ")
+	if !strings.Contains(joined, "type 'ByteString' is not assignable to type 'bigint'") {
+		t.Fatalf("expected the not-assignable diagnostic, got: %s", joined)
+	}
+}
+
+func TestTypeCheck_N234_RejectsToByteStringCallInitializerForBigintProperty(t *testing.T) {
+	source := `
+import { SmartContract, assert, toByteString } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = toByteString('ab');
+  constructor() { super(); }
+  public check(): void { assert(this.x === 1n); }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) == 0 {
+		t.Fatalf("expected a type error for a toByteString(...) literal initializing a bigint property, got none")
+	}
+	joined := strings.Join(res.ErrorStrings(), "; ")
+	if !strings.Contains(joined, "type 'ByteString' is not assignable to type 'bigint'") {
+		t.Fatalf("expected the not-assignable diagnostic, got: %s", joined)
+	}
+}
+
+func TestTypeCheck_N234_StillAcceptsWellTypedScalarInitializer(t *testing.T) {
+	source := `
+import { SmartContract, assert } from 'runar-lang';
+
+class GoodScalarInit extends SmartContract {
+  readonly x: bigint = 1n;
+  constructor() { super(); }
+  public check(): void { assert(this.x === 1n); }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+	}
+}

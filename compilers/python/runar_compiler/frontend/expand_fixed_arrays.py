@@ -101,6 +101,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.typecheck import is_bigint_family, is_byte_family
+from runar_compiler.frontend.validator import is_to_byte_string_literal
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +130,16 @@ def _family_of_element_type(type_node: TypeNode) -> Optional[str]:
 
 
 def _family_of_literal(expr: Expression) -> Optional[str]:
-    """The literal family of an initializer element, or None. N-133."""
+    """The literal family of an initializer element, or None. N-133.
+
+    N-234: ``toByteString('<hex>')`` IS the ByteStringLiteral production (see
+    validator's ``is_to_byte_string_literal`` and spec/grammar.md section
+    11). Checking only the bare ``ByteStringLiteral`` AST node let a
+    call-wrapped ByteString element (``FixedArray[bigint, 2] =
+    [toByteString('ab'), 0]``) slip past this family check.
+    """
+    if is_to_byte_string_literal(expr):
+        return "ByteString"
     if isinstance(expr, BigIntLiteral):
         return "bigint"
     if isinstance(expr, BoolLiteral):

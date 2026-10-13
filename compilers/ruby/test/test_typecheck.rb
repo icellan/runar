@@ -877,4 +877,43 @@ class TestTypecheck < Minitest::Test
     TS
     assert_typecheck_clean source
   end
+
+  # ---------------------------------------------------------------------------
+  # N-234: a property initializer of the wrong literal family compiled
+  # without complaint. Proves only the Ruby tier's check_property_initializers;
+  # the 7-tier cross-compiler shape is conformance/negatives/N233-*.
+  # ---------------------------------------------------------------------------
+
+  def test_n234_rejects_bytestring_initializer_for_bigint_property
+    source = <<~TS
+      class BadScalarInit extends SmartContract {
+        readonly x: bigint = 'ab';
+        constructor() { super(); }
+        public check() { assert(this.x === 1n); }
+      }
+    TS
+    assert_typecheck_error source, "type 'ByteString' is not assignable to type 'bigint'"
+  end
+
+  def test_n234_rejects_to_bytestring_call_initializer_for_bigint_property
+    source = <<~TS
+      class BadScalarInit extends SmartContract {
+        readonly x: bigint = toByteString('ab');
+        constructor() { super(); }
+        public check() { assert(this.x === 1n); }
+      }
+    TS
+    assert_typecheck_error source, "type 'ByteString' is not assignable to type 'bigint'"
+  end
+
+  def test_n234_still_accepts_well_typed_scalar_initializer
+    source = <<~TS
+      class GoodScalarInit extends SmartContract {
+        readonly x: bigint = 1n;
+        constructor() { super(); }
+        public check() { assert(this.x === 1n); }
+      }
+    TS
+    assert_typecheck_clean source
+  end
 end

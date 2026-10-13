@@ -269,6 +269,7 @@ module RunarCompiler
     def self.type_check(contract)
       checker = TypeChecker.new(contract)
 
+      checker.check_property_initializers
       checker.check_constructor
       contract.methods.each { |method| checker.check_method(method) }
 
@@ -399,6 +400,33 @@ module RunarCompiler
             ret_type = TypeChecker.infer_method_return_type(method)
           end
           @method_sigs[method.name] = FuncSig.new(params: params, return_type: ret_type)
+        end
+      end
+
+      # N-234: a scalar property initializer whose literal type does not
+      # match the declared property type compiled without complaint on
+      # every tier (`readonly x: bigint = toByteString('ab')` emitted a
+      # locking script that pushes a byte string where the contract's own
+      # arithmetic expects a script NUMBER). The validator only checks that
+      # an initializer IS a literal of one of the three families, never
+      # that it is a literal OF THE DECLARED TYPE. FixedArray properties
+      # are skipped here: their element-type check already lives in
+      # expand_fixed_arrays.rb (N-133), which runs on the expanded array
+      # elements, not the whole-array initializer this pass sees. Mirrors
+      # the TS reference's method of the same name in 03-typecheck.ts.
+      def check_property_initializers
+        @contract.properties.each do |prop|
+          next if prop.initializer.nil?
+          next if prop.type.is_a?(FixedArrayType)
+
+          init_type = TypeChecker.infer_expr_type_static(prop.initializer)
+          next if init_type == "<unknown>"
+
+          declared_type = type_node_to_string(prop.type)
+          next if Frontend.subtype?(init_type, declared_type)
+
+          @current_method_loc = prop.source_location
+          add_error("type '#{init_type}' is not assignable to type '#{declared_type}'")
         end
       end
 

@@ -66,6 +66,7 @@ def type_check(contract: ContractNode) -> TypeCheckResult:
     """Type-check a Runar AST. Returns the same AST plus any errors."""
     checker = _TypeChecker(contract)
 
+    checker.check_property_initializers()
     checker.check_constructor()
     for method in contract.methods:
         checker.check_method(method)
@@ -520,6 +521,34 @@ class _TypeChecker:
     def _add_error(self, msg: str) -> None:
         loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
+
+    def check_property_initializers(self) -> None:
+        """N-234: a scalar property initializer whose literal type does not
+        match the declared property type compiled without complaint on
+        every tier (``readonly x: bigint = toByteString('ab')`` emitted a
+        locking script that pushes a byte string where the contract's own
+        arithmetic expects a script NUMBER). The validator only checks that
+        an initializer IS a literal of one of the three families, never
+        that it is a literal OF THE DECLARED TYPE. FixedArray properties
+        are skipped here: their element-type check already lives in
+        expand_fixed_arrays.py (N-133), which runs on the expanded array
+        elements, not the whole-array initializer this pass sees. Mirrors
+        the TS reference's method of the same name in 03-typecheck.ts.
+        """
+        for prop in self.contract.properties:
+            if prop.initializer is None:
+                continue
+            if isinstance(prop.type, FixedArrayType):
+                continue
+            init_type = _infer_expr_type_static(prop.initializer)
+            if init_type == "<unknown>":
+                continue
+            declared_type = _type_node_to_string(prop.type)
+            if not is_subtype(init_type, declared_type):
+                self._current_method_loc = prop.source_location
+                self._add_error(
+                    f"type '{init_type}' is not assignable to type '{declared_type}'"
+                )
 
     def check_constructor(self) -> None:
         ctor = self.contract.constructor

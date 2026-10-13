@@ -37,6 +37,7 @@ export function typecheck(contract: ContractNode): TypeCheckResult {
   const errors: CompilerDiagnostic[] = [];
   const checker = new TypeChecker(contract, errors);
 
+  checker.checkPropertyInitializers();
   checker.checkConstructor();
   for (const method of contract.methods) {
     checker.checkMethod(method);
@@ -516,6 +517,36 @@ class TypeChecker {
         params: method.params.map(p => typeNodeToTType(p.type)),
         returnType: method.visibility === 'public' ? 'void' : inferMethodReturnType(method),
       });
+    }
+  }
+
+  /**
+   * N-234: a scalar property initializer whose literal type does not match
+   * the declared property type compiled without complaint on every tier
+   * (`readonly x: bigint = toByteString('ab')` emitted a locking script that
+   * pushes a byte string where the contract's own arithmetic expects a
+   * script NUMBER — a different program from the one the author wrote).
+   *
+   * 02-validate only checks that an initializer IS a literal (of any of the
+   * three literal families), never that it is a literal OF THE DECLARED
+   * TYPE. `FixedArray` properties are skipped here: their element-type check
+   * already lives in 03b-expand-fixed-arrays (N-133), which runs on the
+   * expanded array elements, not the whole-array initializer this pass sees.
+   */
+  checkPropertyInitializers(): void {
+    for (const prop of this.contract.properties) {
+      if (prop.initializer === undefined) continue;
+      if (prop.type.kind === 'fixed_array_type') continue;
+      const initType = inferExprTypeStatic(prop.initializer);
+      if (initType === '<unknown>') continue;
+      const declaredType = typeNodeToTType(prop.type);
+      if (!isSubtype(initType, declaredType)) {
+        this.errors.push(makeDiagnostic(
+          `Type '${initType}' is not assignable to type '${declaredType}'`,
+          'error',
+          prop.sourceLocation,
+        ));
+      }
     }
   }
 

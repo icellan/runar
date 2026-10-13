@@ -96,6 +96,7 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { isBigintFamilyType, isByteStringFamilyType } from './03-typecheck.js';
+import { isToByteStringLiteral } from './02-validate.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -176,6 +177,13 @@ function familyOfElementType(type: TypeNode): LiteralFamily | null {
 }
 
 function familyOfLiteral(expr: Expression): LiteralFamily | null {
+  // N-234: `toByteString('<hex>')` IS the ByteStringLiteral production (see
+  // 02-validate's `isToByteStringLiteral` and spec/grammar.md section 11),
+  // and is the form the Rust DSL surface's `init()`-lifted initializers use.
+  // Checking only the bare `bytestring_literal` AST node let a call-wrapped
+  // ByteString element (`FixedArray<bigint, 2> = [toByteString('ab'), 0n]`)
+  // slip past this family check on every tier.
+  if (isToByteStringLiteral(expr)) return 'ByteString';
   switch (expr.kind) {
     case 'bigint_literal': return 'bigint';
     case 'bool_literal': return 'boolean';
