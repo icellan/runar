@@ -924,17 +924,28 @@ func (c *RunarContract) PrepareCall(
 	needsOpPushTx := preimageIndex >= 0 || isStateful
 
 	// Compute method selector (needed for both terminal and non-terminal)
+	//
+	// N-270: methodIndex must be the REAL index among public methods
+	// whenever getCodeSepIndex(methodIndex) is going to use it — not just
+	// when isStateful (len(StateFields) > 0). A zero-mutable-field
+	// StatefulSmartContract has empty StateFields (isStateful false) but
+	// still auto-injects checkPreimage per method, each with its OWN
+	// OP_CODESEPARATOR offset, so a call to any method but the first used
+	// to sign against method 0's offset. methodSelectorHex stays gated on
+	// isStateful: it is appended only by the isStateful unlock-building
+	// branch below — the stateless branch pushes its own selector via
+	// BuildUnlockingScript(), independent of this variable.
 	methodSelectorHex := ""
 	methodIndex := 0
-	if isStateful {
-		publicMethods := c.getPublicMethods()
-		if len(publicMethods) > 1 {
-			for i, m := range publicMethods {
-				if m.Name == methodName {
-					methodIndex = i
+	publicMethodsForIndex := c.getPublicMethods()
+	if len(publicMethodsForIndex) > 1 {
+		for i, m := range publicMethodsForIndex {
+			if m.Name == methodName {
+				methodIndex = i
+				if isStateful {
 					methodSelectorHex = encodeScriptNumber(int64(i))
-					break
 				}
+				break
 			}
 		}
 	}

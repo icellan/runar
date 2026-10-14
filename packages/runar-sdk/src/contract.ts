@@ -1167,15 +1167,27 @@ export class RunarContract {
     const needsOpPushTx = preimageIndex >= 0 || isStateful;
 
     // Compute method selector and method index (needed for both terminal and non-terminal)
+    //
+    // N-270: `methodIndex` must be the REAL index among public methods
+    // whenever `computeOpPushTxWithCodeSep` is going to use it to look up
+    // `codeSeparatorIndices` / a method's `sigHashType` — not just when
+    // `isStateful` (stateFields.length > 0). A zero-mutable-field
+    // StatefulSmartContract has empty `stateFields` (`isStateful` false) but
+    // still auto-injects checkPreimage per method, each with its OWN
+    // OP_CODESEPARATOR offset, so a call to any method but the first used to
+    // sign against method 0's offset. `methodSelectorHex` stays gated on
+    // `isStateful`: it is appended only by the isStateful unlock-building
+    // branch below — the stateless branch pushes its own selector via
+    // `buildUnlockingScript()`, independent of this variable.
     let methodSelectorHex = '';
     let methodIndex = 0;
-    if (isStateful) {
-      const publicMethods = this.artifact.abi.methods.filter((m) => m.isPublic);
-      if (publicMethods.length > 1) {
-        const idx = publicMethods.findIndex((m) => m.name === methodName);
-        if (idx >= 0) {
+    const publicMethodsForIndex = this.artifact.abi.methods.filter((m) => m.isPublic);
+    if (publicMethodsForIndex.length > 1) {
+      const idx = publicMethodsForIndex.findIndex((m) => m.name === methodName);
+      if (idx >= 0) {
+        methodIndex = idx;
+        if (isStateful) {
           methodSelectorHex = encodeScriptNumber(BigInt(idx));
-          methodIndex = idx;
         }
       }
     }
