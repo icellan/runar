@@ -55,15 +55,14 @@ frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`) unless a row says otherwise
 
 ### Examples that exist only under `ts/` (R-195)
 
-Four contract directories have no counterpart in any other tree. Measured, not
+Three contract directories have no counterpart in any other tree. Measured, not
 remembered — `examples/ts/*/` compared against the eight peer trees:
 
 | Directory | Contracts | Why it is TS-only |
 |---|---|---|
 | `companion-verifier/` | `CompanionVerifier`, `AttributedToken` | A two-input CROSS-CONTRACT covenant: two contracts in one directory, spent together in a single transaction. It does not fit the one-contract-per-directory shape the other trees use, and neither `runStatefulSpend` nor the sdk-output driver protocol can compose a two-input spend — see [testing-guide.md](../docs/testing-guide.md) "UNCOVERED", which carries its close plan. The pattern itself is documented in [cross-covenant-pattern.md](../docs/cross-covenant-pattern.md). |
-| `compiler-directives/` | `Directives` | The ONLY one of the four that is TS-only because the other tiers genuinely cannot take it. `@embedAlways` and `@sighash` are read from comments on the `.runar.ts` surface alone, and the other eight parsers REJECT a source carrying either — deliberately, because silently dropping a directive would change DCE or signing semantics without saying so. A `.runar.py` translation of this contract is a parse error by design, so there is nothing to port. Added by R-209, which found both directives had zero example usage anywhere in the repo. |
+| `compiler-directives/` | `Directives` | The ONLY one of the three that is TS-only because the other tiers genuinely cannot take it. `@embedAlways` and `@sighash` are read from comments on the `.runar.ts` surface alone, and the other eight parsers REJECT a source carrying either — deliberately, because silently dropping a directive would change DCE or signing semantics without saying so. A `.runar.py` translation of this contract is a parse error by design, so there is nothing to port. Added by R-209, which found both directives had zero example usage anywhere in the repo. |
 | `nested-if-multi-reassign/` | `StackTrackerRepro` | A REGRESSION REPRO for issue #34 (the ANF parameter-type lookup that searched every method's parameters, lowering `1n + x` to OP_CAT instead of OP_ADD). It pins a defect that lived in one pass of one tier; a translation into eight more surfaces would exercise eight more parsers on a contract whose point is what happens AFTER parsing. Its test (added by R-106) asserts the ANF node, a concrete spend, and interpreter/ScriptVM agreement on that spend. |
-| `token-wallet-naive-INSECURE/` | `WalletToken` | The contract the SDKs' `TokenWallet` helper is written for (state `supply`/`holder`, `transfer(sig, to: Addr)`, `merge(sig, otherSupply, otherHolder)`), shipped by N-042 so the wallet is tested against a real file rather than an inline copy. The TS, Go, Rust, Python and Ruby SDKs' TokenWallet tests read this `.runar.ts` by path and compiles it with its own tier's compiler, so surface translations would add nothing. NOT a sound token: `transfer` cannot re-key the holder and `merge` cannot authenticate its companion input (the holder can inflate supply) — both limits are inherent to that ABI; see the contract header and use `token-ft/` for a real token. |
 
 The first two are NOT TS-only because of anything the other tiers cannot do.
 Both compile in all seven tiers today from their `.runar.ts` source — verified
