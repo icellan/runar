@@ -462,7 +462,7 @@ impl RustDslParser {
             return nesting_refusal(None);
         }
         if contract_name.is_empty() {
-            self.errors.push(Diagnostic::error("No Rúnar contract struct found", None));
+            self.errors.push(Diagnostic::error("no Rúnar contract struct found in Rust source", None));
             return ParseResult { contract: None, errors: self.errors, source_size_err: None };
         }
 

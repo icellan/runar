@@ -766,7 +766,7 @@ const Parser = struct {
         }
 
         if (contract_name.len == 0) {
-            self.addError("no Runar contract struct found in Rust source");
+            self.addError("no Rúnar contract struct found in Rust source");
             return .{ .contract = null, .errors = self.errors.items };
         }
 

@@ -453,6 +453,14 @@ class RustParser extends ParserCore<RustToken> {
       this.advance();
     }
 
+    // N-284: no #[runar::contract] struct means there is no contract to
+    // compile. Refuse it like Go/Rust/Zig/Ruby (null contract + one error)
+    // instead of silently inventing an "UnnamedContract" placeholder.
+    if (this.contractName === '') {
+      this.errors.push(makeDiagnostic('no Rúnar contract struct found in Rust source', 'error'));
+      return { contract: null, errors: this.errors };
+    }
+
     // Process init() method: extract property initializers
     const finalMethods: MethodNode[] = [];
     for (const m of methods) {

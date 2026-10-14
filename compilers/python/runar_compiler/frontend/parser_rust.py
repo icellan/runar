@@ -772,7 +772,7 @@ class _RustParser:
             parent_class = "StatefulSmartContract"
 
         if not contract_name:
-            self.add_error("No Runar contract struct found")
+            self.add_error("no Rúnar contract struct found in Rust source")
             return ContractNode(
                 name="",
                 parent_class=parent_class,

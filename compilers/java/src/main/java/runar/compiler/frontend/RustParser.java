@@ -925,7 +925,7 @@ public final class RustParser {
         }
 
         if (contractName.isEmpty()) {
-            s.addError("No Runar contract struct found");
+            s.addError("no Rúnar contract struct found in Rust source");
             SourceLocation loc = new SourceLocation(s.filename, 1, 0);
             return new ContractNode(
                 "",
