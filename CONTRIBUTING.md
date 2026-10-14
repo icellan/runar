@@ -80,7 +80,8 @@ seven-tier invariant. A new language feature needs a fixture under
   ports.
 - **Stamp goldens from the TypeScript reference compiler.** `expected-ir.json`
   is canonical JSON (RFC 8785); `expected-script.hex` is the compiled script.
-  Use `runar compile … --ir` / `runar compile …`, or `pnpm run update-golden`.
+  Use `runar compile … --ir` / `runar compile …`, or
+  `cd conformance && pnpm run update-golden`.
 - **Goldens are stamped fold-OFF.** CI runs the suite **twice**: once with
   `--disable-constant-folding` (matches the checked-in goldens *and* enforces
   cross-tier parity) and once with `RUNAR_DISABLE_CONSTANT_FOLDING=0` (folding
@@ -95,7 +96,7 @@ seven-tier invariant. A new language feature needs a fixture under
   [`conformance/README.md`](conformance/README.md).
 
 SDK changes additionally need coverage in `conformance/sdk-output/` (byte-
-identical locking script across all seven SDKs) — run `pnpm run sdk-output`.
+identical locking script across all seven SDKs) — run `pnpm run conformance:sdk`.
 
 ## Pull Request Expectations
 
