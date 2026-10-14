@@ -12,11 +12,13 @@
 //! Proves: for every `cases` row, the prelude builtin and the interpreter return
 //! the on-chain value, or refuse (panic / `Err`) where the script aborts —
 //! never a value — including clamp with lo > hi and log2 of n <= 0.
-//! Does not prove: the `wideCases` rows (operands beyond i64: log2 saturating
-//! at 64, gcd's 256-step partial remainder, sqrt's 2^495 guard). Both the
-//! prelude `Int` and this interpreter's integer value are i64, so those inputs
-//! cannot be expressed here at all; every bigint-capable tier replays them.
-//! Nor inputs outside the file, or the script itself (the oracle).
+//! Does not prove: that the `wideCases` rows (operands beyond i64: log2
+//! saturating at 64, gcd's 256-step partial remainder, sqrt's 2^495 guard) are
+//! COMPUTED. Both the prelude `Int` and this interpreter's integer value are
+//! i64; the prelude cannot express them at all, and the interpreter refuses
+//! them (N-163, `n163_anf_interpreter_wide_cases_fail_closed`). Every
+//! bigint-capable tier replays them. Nor inputs outside the file, or the
+//! script itself (the oracle).
 
 use std::collections::HashMap;
 use std::panic;
@@ -157,4 +159,105 @@ fn n030_prelude_math_matches_onchain_vectors() {
     }
     panic::set_hook(prev);
     assert!(failures.is_empty(), "prelude diverges from the script:\n{}", failures.join("\n"));
+}
+
+/// Run `result = func(args...)` with each operand passed as the caller would
+/// pass a beyond-i64 value: `SdkValue::BigInt`.
+fn run_anf_bigint(func: &str, args: &[num_bigint::BigInt]) -> Result<i64, String> {
+    let anf = probe_anf(func, args.len());
+    let names = ["a", "b", "c"];
+    let named: HashMap<String, SdkValue> = args
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (names[i].to_string(), SdkValue::BigInt(v.clone())))
+        .collect();
+    let mut state = HashMap::new();
+    state.insert("result".to_string(), SdkValue::Int(0));
+    let out = compute_new_state(&anf, "probe", &state, &named, &[])?;
+    match out.get("result") {
+        Some(SdkValue::Int(v)) => Ok(*v),
+        Some(SdkValue::Bool(b)) => Ok(*b as i64),
+        other => Err(format!("unexpected result {:?}", other)),
+    }
+}
+
+/// N-163: the `wideCases` rows (operands or results beyond i64). This
+/// interpreter's integer value is i64, so it cannot compute most of them —
+/// but it must fail closed: every row yields an error, or exactly the on-chain
+/// value. It used to read a beyond-i64 `SdkValue::BigInt` as 0
+/// (`unwrap_or(0)`) and wrap `pow(10, 32)` / `*` / `mulDiv` / `percentOf`
+/// past i64, deriving a post-state the script never produces.
+///
+/// Proves: no `wideCases` row yields a value other than the on-chain one, and
+/// a beyond-i64 operand or result is refused rather than zeroed or wrapped.
+/// Does not prove: that the interpreter computes these rows (it refuses them;
+/// bigint support would be a refactor), nor any input outside the file.
+#[test]
+fn n163_anf_interpreter_wide_cases_fail_closed() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../runar-zig/src/fixtures/f033-math-builtins-onchain.json"
+    );
+    let text = std::fs::read_to_string(path).expect("shared math vectors");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("vectors JSON");
+    let wide = doc["wideCases"].as_array().expect("wideCases");
+    assert!(!wide.is_empty());
+    let mut failures = Vec::new();
+    for c in wide {
+        let func = c["fn"].as_str().expect("fn");
+        let args: Vec<num_bigint::BigInt> = c["args"]
+            .as_array()
+            .expect("args")
+            .iter()
+            .map(|a| a.as_str().expect("wide args are decimal strings").parse().expect("decimal"))
+            .collect();
+        // On-chain value as a decimal string, or None where the script aborts.
+        let want: Option<String> = match &c["expect"] {
+            serde_json::Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
+            serde_json::Value::String(s) if s == "abort" => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            v => panic!("unexpected expect {:?}", v),
+        };
+        let got = panic::catch_unwind(|| run_anf_bigint(func, &args));
+        let ok = match (&want, &got) {
+            (_, Ok(Err(_))) => true,
+            (Some(w), Ok(Ok(g))) => *w == g.to_string(),
+            _ => false,
+        };
+        if !ok {
+            failures.push(format!("{}{:?}: script {:?}, interpreter {:?}", func, args, want, got.map_err(|_| "panic")));
+        }
+    }
+    assert!(failures.is_empty(), "interpreter returned a value the script does not:\n{}", failures.join("\n"));
+}
+
+/// N-163: `a * b` past i64 must be refused, not wrapped (`wrapping_mul`).
+/// Proves: the binop `*` fails closed on i64 overflow and still multiplies
+/// in range. Does not prove: `+` / `-` overflow (not covered by this item).
+#[test]
+fn n163_anf_interpreter_mul_overflow_fails_closed() {
+    let run = |a: i64, b: i64| -> Result<HashMap<String, SdkValue>, String> {
+        let anf: ANFProgram = serde_json::from_value(serde_json::json!({
+            "contractName": "MulProbe",
+            "properties": [{"name": "result", "type": "bigint", "readonly": false}],
+            "methods": [{"name": "probe", "params": [
+                {"name": "a", "type": "bigint"}, {"name": "b", "type": "bigint"}
+            ], "body": [
+                {"name": "t0", "value": {"kind": "load_param", "name": "a"}},
+                {"name": "t1", "value": {"kind": "load_param", "name": "b"}},
+                {"name": "r", "value": {"kind": "bin_op", "op": "*", "left": "t0", "right": "t1"}},
+                {"name": "u", "value": {"kind": "update_prop", "name": "result", "value": "r"}}
+            ], "isPublic": true}],
+        }))
+        .expect("mul ANF");
+        let mut named = HashMap::new();
+        named.insert("a".to_string(), SdkValue::Int(a));
+        named.insert("b".to_string(), SdkValue::Int(b));
+        let mut state = HashMap::new();
+        state.insert("result".to_string(), SdkValue::Int(0));
+        compute_new_state(&anf, "probe", &state, &named, &[])
+    };
+    assert!(matches!(run(6, -7).unwrap().get("result"), Some(SdkValue::Int(-42))));
+    let got = run(i64::MAX, 2);
+    assert!(got.is_err(), "i64::MAX * 2 must be refused, got {:?}", got);
 }

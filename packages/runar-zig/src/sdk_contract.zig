@@ -3806,10 +3806,8 @@ fn findLeaf(value: types.StateValue, index: usize, cursor: *usize) ?types.StateV
 fn stateValueToAnf(sv: types.StateValue) anf_interp.ANFValue {
     return switch (sv) {
         .int => |n| .{ .int = n },
-        .big_int => |s| {
-            // Best effort: try to fit into i64 for the ANF interpreter
-            return .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 };
-        },
+        // N-163: outside i64 -> `.wide` (refused on arithmetic use), never 0.
+        .big_int => |s| if (std.fmt.parseInt(i64, s, 10)) |n| .{ .int = n } else |_| .{ .wide = s },
         .boolean => |b| .{ .boolean = b },
         .bytes => |hex| .{ .bytes = hex },
         // Issue #106: EmptySig -> an empty signature push (empty bytes). The
@@ -3848,6 +3846,7 @@ fn anfToStateValue(allocator: std.mem.Allocator, av: anf_interp.ANFValue) !types
         .int => |n| .{ .int = n },
         .boolean => |b| .{ .boolean = b },
         .bytes => |hex| .{ .bytes = try allocator.dupe(u8, hex) },
+        .wide => |s| .{ .big_int = try allocator.dupe(u8, s) },
         .array => |items| {
             const out = try allocator.alloc(types.StateValue, items.len);
             errdefer allocator.free(out);
@@ -5718,4 +5717,139 @@ test "N-223 adjustCodeSepOffset refuses an out-of-range paramIndex, reached WITH
     defer contract.deinit();
 
     try std.testing.expectError(error.ConstructorArgParamIndexOutOfRange, contract.getCodeSepIndex(0));
+}
+
+// ---------------------------------------------------------------------------
+// N-163 (design B, refuse on use): a `StateValue.big_int` outside i64 used to
+// reach the ANF interpreter as 0 (`stateValueToAnf`: `parseInt(i64) catch 0`),
+// so arithmetic on it derived a post-state the script never produces.
+//
+// Proves: (i) a stateful method that carries wide values without computing
+// with them (the BlackjackBet shape: a wide `RabinPubKey` property and a wide
+// `RabinSig` param fed only to `verifyRabinSig`) still derives its post-state;
+// a wide value assigned to state comes back as the same `big_int`; (ii) a
+// wide value used as a `bin_op` / `unary_op` operand, a builtin argument, or
+// an output's satoshis is refused, never computed as 0.
+// Does NOT prove: arithmetic on wide values (refused; the on-chain script
+// computes it), wide literals inside the ANF itself, or the compiled script.
+// ---------------------------------------------------------------------------
+
+const N163 = struct {
+    // 2^300 + 12345 and 2^260 + 12345: both outside i64.
+    const wide_key = "2037035976334486086268445688409378161051468393665936250636140449354381299763336706183409721";
+    const wide_sig = "1852673427797059126777135760139006525652319754650249024631321344126610074251321";
+
+    fn run(a: std.mem.Allocator, params: []const anf_interp.ANFParam, body: []anf_interp.ANFBinding) !std.StringHashMap(anf_interp.ANFValue) {
+        var props = [_]anf_interp.ANFProperty{
+            .{ .name = "oraclePubKey", .type_name = "RabinPubKey", .readonly = true },
+            .{ .name = "count", .type_name = "bigint", .readonly = false },
+            .{ .name = "lastSig", .type_name = "RabinSig", .readonly = false },
+        };
+        var methods = [_]anf_interp.ANFMethod{
+            .{ .name = "settle", .params = @constCast(params), .body = body, .is_public = true },
+        };
+        const anf = anf_interp.ANFProgram{ .contract_name = "WideProbe", .properties = &props, .methods = &methods };
+        var cs = std.StringHashMap(anf_interp.ANFValue).init(a);
+        defer cs.deinit();
+        try cs.put("count", stateValueToAnf(.{ .int = 0 }));
+        try cs.put("lastSig", stateValueToAnf(.{ .int = 0 }));
+        var args = std.StringHashMap(anf_interp.ANFValue).init(a);
+        defer args.deinit();
+        try args.put("rabinSig", stateValueToAnf(.{ .big_int = wide_sig }));
+        try args.put("w", stateValueToAnf(.{ .big_int = wide_sig }));
+        try args.put("padding", stateValueToAnf(.{ .bytes = "00" }));
+        const ctor = [_]anf_interp.ANFValue{
+            stateValueToAnf(.{ .big_int = wide_key }),
+            stateValueToAnf(.{ .int = 0 }),
+            stateValueToAnf(.{ .int = 0 }),
+        };
+        return anf_interp.computeNewState(a, &anf, "settle", cs, args, &ctor);
+    }
+
+    const blackjack_params = [_]anf_interp.ANFParam{
+        .{ .name = "rabinSig", .type_name = "RabinSig" },
+        .{ .name = "padding", .type_name = "ByteString" },
+    };
+
+    fn blackjackBody(comptime extra: []const anf_interp.ANFBinding) [10 + extra.len]anf_interp.ANFBinding {
+        const v = anf_interp.ANFValue;
+        return [_]anf_interp.ANFBinding{
+            .{ .name = "m", .value = .{ .load_const = .{ .value = v{ .bytes = "aa" } } } },
+            .{ .name = "s", .value = .{ .load_param = .{ .name = "rabinSig" } } },
+            .{ .name = "p", .value = .{ .load_param = .{ .name = "padding" } } },
+            .{ .name = "k", .value = .{ .load_prop = .{ .name = "oraclePubKey" } } },
+            .{ .name = "v", .value = .{ .call = .{ .func = "verifyRabinSig", .args = &.{ "m", "s", "p", "k" } } } },
+            .{ .name = "a", .value = .{ .assert_node = .{ .value = "v" } } },
+            .{ .name = "c", .value = .{ .load_prop = .{ .name = "count" } } },
+            .{ .name = "one", .value = .{ .load_const = .{ .value = v{ .int = 1 } } } },
+            .{ .name = "n", .value = .{ .bin_op = .{ .op = "+", .left = "c", .right = "one" } } },
+            .{ .name = "u", .value = .{ .update_prop = .{ .name = "count", .value = "n" } } },
+        } ++ extra[0..extra.len].*;
+    }
+
+    /// `w` (wide param) and `c` (count) loaded, then `tail`.
+    fn refused(a: std.mem.Allocator, what: []const u8, comptime tail: []const anf_interp.ANFBinding) !void {
+        const w_params = [_]anf_interp.ANFParam{.{ .name = "w", .type_name = "bigint" }};
+        var body = [_]anf_interp.ANFBinding{
+            .{ .name = "w0", .value = .{ .load_param = .{ .name = "w" } } },
+            .{ .name = "c", .value = .{ .load_prop = .{ .name = "count" } } },
+        } ++ tail[0..tail.len].*;
+        if (run(a, &w_params, &body)) |ns_const| {
+            var ns = ns_const;
+            defer ns.deinit();
+            std.debug.print("N-163: {s} with a wide operand returned count={any}\n", .{ what, ns.get("count") });
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+};
+
+test "N-163: wide values carried without arithmetic still derive state (BlackjackBet shape)" {
+    const a = std.testing.allocator;
+    var body = N163.blackjackBody(&.{});
+    var ns = try N163.run(a, &N163.blackjack_params, &body);
+    defer ns.deinit();
+    try std.testing.expectEqual(@as(i64, 1), ns.get("count").?.int);
+}
+
+test "N-163: a wide value assigned to state round-trips exactly" {
+    const a = std.testing.allocator;
+    var body = N163.blackjackBody(&.{
+        .{ .name = "u2", .value = .{ .update_prop = .{ .name = "lastSig", .value = "s" } } },
+    });
+    var ns = try N163.run(a, &N163.blackjack_params, &body);
+    defer ns.deinit();
+    const sv = try anfToStateValue(a, ns.get("lastSig").?);
+    defer sv.deinit(a);
+    switch (sv) {
+        .big_int => |s| try std.testing.expectEqualStrings(N163.wide_sig, s),
+        else => {
+            std.debug.print("N-163: wide value reached state as {any}\n", .{sv});
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "N-163: a wide value used in arithmetic is refused, never computed as 0" {
+    const a = std.testing.allocator;
+    try N163.refused(a, "bin_op +", &.{
+        .{ .name = "n", .value = .{ .bin_op = .{ .op = "+", .left = "c", .right = "w0" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "count", .value = "n" } } },
+    });
+    try N163.refused(a, "bin_op > (readonly prop)", &.{
+        .{ .name = "k", .value = .{ .load_prop = .{ .name = "oraclePubKey" } } },
+        .{ .name = "n", .value = .{ .bin_op = .{ .op = ">", .left = "k", .right = "c" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "count", .value = "n" } } },
+    });
+    try N163.refused(a, "unary_op -", &.{
+        .{ .name = "n", .value = .{ .unary_op = .{ .op = "-", .operand = "w0" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "count", .value = "n" } } },
+    });
+    try N163.refused(a, "builtin abs", &.{
+        .{ .name = "n", .value = .{ .call = .{ .func = "abs", .args = &.{"w0"} } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "count", .value = "n" } } },
+    });
+    try N163.refused(a, "add_data_output satoshis", &.{
+        .{ .name = "sc", .value = .{ .load_const = .{ .value = .{ .bytes = "6a" } } } },
+        .{ .name = "o", .value = .{ .add_data_output = .{ .satoshis = "w0", .script_bytes = "sc" } } },
+    });
 }

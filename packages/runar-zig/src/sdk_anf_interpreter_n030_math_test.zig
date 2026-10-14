@@ -94,3 +94,85 @@ test "N-030: SDK ANF interpreter math builtins return the on-chain value for eve
     }
     try std.testing.expectEqual(@as(usize, 0), mismatches);
 }
+
+// N-163: the `wideCases` rows (operands or results beyond i64). This
+// interpreter's integer is i64, so it cannot compute them — but it must fail
+// closed: every row whose operands fit i64 (`pow(10, 32)`) yields an error, or
+// exactly the on-chain value; never a wrapped value. It used to wrap
+// `pow` / `mulDiv` / `percentOf` / `*` past i64 (`*%`).
+//
+// Proves: no i64-expressible `wideCases` row returns a value other than the
+// on-chain one. Does NOT prove: the rows whose operands are beyond i64 — they
+// cannot be expressed as an `ANFValue.int`; they enter the Zig SDK as
+// `StateValue.big_int` through `stateValueToAnf` (sdk_contract.zig), which
+// this test does not reach. Nor that the interpreter computes these rows.
+test "N-163: SDK ANF interpreter fails closed on every i64-expressible wideCases row" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, vectors_json, .{});
+    defer parsed.deinit();
+
+    const wide = parsed.value.object.get("wideCases").?.array.items;
+    var replayed: usize = 0;
+    var mismatches: usize = 0;
+    rows: for (wide) |c| {
+        const obj = c.object;
+        const name = obj.get("fn").?.string;
+        const arr = obj.get("args").?.array.items;
+        var args: [3]i64 = undefined;
+        for (arr, 0..) |v, i| {
+            args[i] = std.fmt.parseInt(i64, v.string, 10) catch continue :rows;
+        }
+        replayed += 1;
+        const got = runCall(allocator, name, args[0..arr.len]);
+        const ok = if (got) |g| switch (obj.get("expect").?) {
+            .string => |s| blk: {
+                var buf: [24]u8 = undefined;
+                break :blk std.mem.eql(u8, s, try std.fmt.bufPrint(&buf, "{d}", .{g}));
+            },
+            .bool => |w| g == @intFromBool(w),
+            else => false,
+        } else |_| true;
+        if (!ok) {
+            mismatches += 1;
+            std.debug.print("N-163 wide row returned a value the script does not: {s}({any}) interpreter={any}\n", .{
+                name, args[0..arr.len], got,
+            });
+        }
+    }
+    try std.testing.expect(replayed > 0);
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+// N-163: `a * b` past i64 must be refused, not wrapped (`*%`).
+// Proves: the binop `*` fails closed on i64 overflow and still multiplies in
+// range. Does NOT prove: `+` / `-` overflow (not covered by this item).
+test "N-163: SDK ANF interpreter refuses an i64-overflowing binop *" {
+    const H = struct {
+        fn mul(a: std.mem.Allocator, x: i64, y: i64) !i64 {
+            var body = [_]ANFBinding{
+                .{ .name = "a", .value = .{ .load_const = .{ .value = .{ .int = x } } } },
+                .{ .name = "b", .value = .{ .load_const = .{ .value = .{ .int = y } } } },
+                .{ .name = "r", .value = .{ .bin_op = .{ .op = "*", .left = "a", .right = "b" } } },
+                .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } },
+            };
+            var props = [_]ANFProperty{.{ .name = "result", .type_name = "int", .readonly = false }};
+            var methods = [_]ANFMethod{.{ .name = "run", .params = &.{}, .body = &body, .is_public = true }};
+            const anf = ANFProgram{ .contract_name = "MulProbe", .properties = &props, .methods = &methods };
+            var cs = std.StringHashMap(ANFValue).init(a);
+            defer cs.deinit();
+            try cs.put("result", .{ .int = 0 });
+            var call_args = std.StringHashMap(ANFValue).init(a);
+            defer call_args.deinit();
+            var ns = try interp.computeNewState(a, &anf, "run", cs, call_args, &.{});
+            defer ns.deinit();
+            return ns.get("result").?.int;
+        }
+    };
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(i64, -42), try H.mul(allocator, 6, -7));
+    const got = H.mul(allocator, std.math.maxInt(i64), 2);
+    if (got) |v| {
+        std.debug.print("N-163: maxInt(i64) * 2 returned {d}\n", .{v});
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}

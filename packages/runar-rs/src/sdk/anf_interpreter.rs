@@ -88,6 +88,11 @@ enum Val {
     /// going through an `array_literal` binding. Its only consumer is
     /// `checkMultiSig`; it never reaches state or outputs.
     Array(Vec<Val>),
+    /// N-163: a caller-supplied `SdkValue::BigInt` outside i64. Carried
+    /// unchanged (back to state as the same `BigInt`, into `verifyRabinSig`),
+    /// and refused wherever the interpreter would have to compute with it
+    /// (`refuses_wide` guards) — it used to be read as 0.
+    Wide(num_bigint::BigInt),
     Undefined,
 }
 
@@ -95,7 +100,11 @@ impl Val {
     fn from_sdk(v: &SdkValue) -> Self {
         match v {
             SdkValue::Int(n) => Val::Int(*n),
-            SdkValue::BigInt(n) => Val::Int(n.to_string().parse::<i64>().unwrap_or(0)),
+            // N-163: outside i64 -> `Wide`, never 0.
+            SdkValue::BigInt(n) => match i64::try_from(n) {
+                Ok(i) => Val::Int(i),
+                Err(_) => Val::Wide(n.clone()),
+            },
             SdkValue::Bool(b) => Val::Bool(*b),
             SdkValue::Bytes(s) => Val::Bytes(s.clone()),
             SdkValue::Auto => Val::Undefined,
@@ -121,6 +130,7 @@ impl Val {
             Val::Int(n) => SdkValue::Int(*n),
             Val::Bool(b) => SdkValue::Bool(*b),
             Val::Bytes(s) => SdkValue::Bytes(s.clone()),
+            Val::Wide(n) => SdkValue::BigInt(n.clone()),
             // An array never reaches state or outputs (N-259); like Undefined.
             Val::Array(_) | Val::Undefined => SdkValue::Int(0),
         }
@@ -131,6 +141,8 @@ impl Val {
             Val::Int(n) => *n,
             Val::Bool(b) => if *b { 1 } else { 0 },
             Val::Bytes(_) => 0,
+            // Unreached: every numeric consumer refuses a `Wide` first (N-163).
+            Val::Wide(_) => 0,
             Val::Array(_) | Val::Undefined => 0,
         }
     }
@@ -140,6 +152,8 @@ impl Val {
             Val::Int(n) => *n != 0,
             Val::Bool(b) => *b,
             Val::Bytes(s) => !s.is_empty() && s != "0" && s != "false",
+            // Outside i64, so never zero.
+            Val::Wide(_) => true,
             Val::Array(_) | Val::Undefined => false,
         }
     }
@@ -147,12 +161,21 @@ impl Val {
     fn as_hex(&self) -> String {
         match self {
             Val::Bytes(s) => s.clone(),
-            Val::Int(_) | Val::Bool(_) | Val::Array(_) | Val::Undefined => String::new(),
+            Val::Int(_) | Val::Bool(_) | Val::Array(_) | Val::Wide(_) | Val::Undefined => String::new(),
         }
     }
 
     fn is_bytes(&self) -> bool {
         matches!(self, Val::Bytes(_))
+    }
+
+    /// N-163: a `Wide` value, or an array holding one.
+    fn is_wide(&self) -> bool {
+        match self {
+            Val::Wide(_) => true,
+            Val::Array(items) => items.iter().any(Val::is_wide),
+            _ => false,
+        }
     }
 }
 
@@ -1056,6 +1079,9 @@ fn eval_value(
             let result_type = value.get("resultType").and_then(|v| v.as_str()).unwrap_or("");
             let left = env.get(&left_name).cloned().unwrap_or(Val::Undefined);
             let right = env.get(&right_name).cloned().unwrap_or(Val::Undefined);
+            if left.is_wide() || right.is_wide() {
+                return Err(wide_refusal(strict, binding_name));
+            }
 
             // Numeric byte-array ops (& | ^ << >>) thread the operands' real
             // stack bytes so chained expressions match the deployed script: a
@@ -1142,6 +1168,9 @@ fn eval_value(
             let operand_name = str_field(value, "operand");
             let result_type = value.get("resultType").and_then(|v| v.as_str()).unwrap_or("");
             let operand = env.get(&operand_name).cloned().unwrap_or(Val::Undefined);
+            if operand.is_wide() {
+                return Err(wide_refusal(strict, binding_name));
+            }
             // OP_INVERT threads the operand's real stack bytes so `~(2<<8)`
             // inverts the non-minimal [0x00] the shift left (-> -127), not the
             // minimal empty encoding of 0 (-> 0). Mirrors the bin_op threading.
@@ -1176,6 +1205,13 @@ fn eval_value(
             let args: Vec<Val> = arg_names.iter()
                 .map(|n| env.get(n).cloned().unwrap_or(Val::Undefined))
                 .collect();
+            // N-163: `verifyRabinSig` is the one builtin that legitimately
+            // takes values outside i64 (Rabin keys / signatures), and it does
+            // no integer math here. Every other builtin would compute with a
+            // `Wide` argument as 0.
+            if func != "verifyRabinSig" && args.iter().any(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             // The single funnel every numeric builtin (`abs`, `min`, `max`,
             // `within`, `safediv`, `clamp`, `sign`, `bool`, ...) reads its
             // operands through. Only a NUMERIC byte-op result ever carries
@@ -1210,6 +1246,15 @@ fn eval_value(
             // the spend; surface it through the rejection channel instead of
             // letting `eval_call` invent a value (F-134).
             if math_builtin_aborts(&func, &args) || split_builtin_aborts(&func, &args) {
+                return Err(AssertionFailureError {
+                    method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                    binding_name: binding_name.to_string(),
+                });
+            }
+            // N-163: not an on-chain abort — the script computes the value,
+            // but it lies outside the i64 this interpreter represents. Refuse
+            // through the same channel rather than return a wrapped value.
+            if math_builtin_overflows_i64(&func, &args) {
                 return Err(AssertionFailureError {
                     method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
                     binding_name: binding_name.to_string(),
@@ -1453,6 +1498,9 @@ fn eval_value(
             // a method may interleave raw outputs around it, and the on-chain
             // covenant folds them into hashOutputs in exactly this order.
             let sat_ref = str_field(value, "satoshis");
+            if env.get(&sat_ref).is_some_and(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
             ordered_outputs.push(OrderedOutputEntry {
                 kind: OrderedOutputKind::State,
@@ -1466,6 +1514,9 @@ fn eval_value(
             // Resolve the two arg refs from env and record the data output.
             let sat_ref = str_field(value, "satoshis");
             let script_ref = str_field(value, "scriptBytes");
+            if env.get(&sat_ref).is_some_and(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
             let script_hex = env.get(&script_ref).map(|v| v.as_hex()).unwrap_or_default();
             data_outputs.push(DataOutputEntry { satoshis: sats, script: script_hex });
@@ -1480,6 +1531,9 @@ fn eval_value(
             // output at the correct index.
             let sat_ref = str_field(value, "satoshis");
             let script_ref = str_field(value, "scriptBytes");
+            if env.get(&sat_ref).is_some_and(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
             let script_hex = env.get(&script_ref).map(|v| v.as_hex()).unwrap_or_default();
             raw_outputs.push(RawOutputEntry { satoshis: sats, script: script_hex.clone() });
@@ -1749,7 +1803,8 @@ fn eval_bin_op(op: &str, left: &Val, right: &Val, result_type: &str) -> Result<V
     Ok(match op {
         "+" => Val::Int(l.wrapping_add(r)),
         "-" => Val::Int(l.wrapping_sub(r)),
-        "*" => Val::Int(l.wrapping_mul(r)),
+        // N-163: refuse a product outside i64 rather than wrap it.
+        "*" => return l.checked_mul(r).map(Val::Int).ok_or(()),
         "/" => Val::Int(if r == 0 { 0 } else { l / r }),
         "%" => Val::Int(if r == 0 { 0 } else { l % r }),
         "==" | "===" => Val::Bool(l == r),
@@ -1814,6 +1869,33 @@ fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
         "mulDiv" => arg(2) == 0,
         "pow" => !(0..=32).contains(&arg(1)),
         "sqrt" => arg(0) < 0,
+        _ => false,
+    }
+}
+
+/// N-163: the refusal for a `Wide` value used where the interpreter would
+/// have to compute with it. Same channel as the math aborts; the binding name
+/// carries the reason, since `AssertionFailureError` has no other field.
+fn wide_refusal(strict: Option<&StrictCtx>, binding_name: &str) -> AssertionFailureError {
+    AssertionFailureError {
+        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+        binding_name: format!("{} (integer outside the i64 range this interpreter supports)", binding_name),
+    }
+}
+
+/// N-163: true when this math builtin's (non-aborting) result lies outside
+/// i64, so `eval_call` could only return a wrapped/truncated value. Callers
+/// check `math_builtin_aborts` first, so divisors are non-zero and the `pow`
+/// exponent is in 0..=32 here.
+fn math_builtin_overflows_i64(func: &str, args: &[Val]) -> bool {
+    let arg = |i: usize| args.get(i).map(|v| v.to_i64()).unwrap_or(0);
+    match func {
+        "pow" => (0..arg(1)).try_fold(1i64, |acc, _| acc.checked_mul(arg(0))).is_none(),
+        "mulDiv" => {
+            let c = args.get(2).map(|v| v.to_i64()).unwrap_or(1) as i128;
+            c != 0 && i64::try_from((arg(0) as i128 * arg(1) as i128) / c).is_err()
+        }
+        "percentOf" => i64::try_from((arg(0) as i128 * arg(1) as i128) / 10000).is_err(),
         _ => false,
     }
 }

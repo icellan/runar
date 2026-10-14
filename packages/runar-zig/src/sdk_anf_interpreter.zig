@@ -64,6 +64,12 @@ pub const ANFValue = union(enum) {
     /// per-call allocators owned by the caller cover the lifetime, matching
     /// how `bytes` storage is managed everywhere else in this file.
     array: []const ANFValue,
+    /// N-163: a caller-supplied integer outside i64, as its decimal text
+    /// (borrowed from the `StateValue.big_int`). Carried unchanged — back to
+    /// state as the same `big_int`, into `verifyRabinSig` — and refused
+    /// (`error.ScriptNumberError`) wherever the interpreter would have to
+    /// compute with it. It used to be read as 0.
+    wide: []const u8,
     none: void,
 };
 
@@ -922,6 +928,7 @@ fn evalNode(
         .bin_op => |bo| {
             const left = env.get(bo.left) orelse anf_none;
             const right = env.get(bo.right) orelse anf_none;
+            if (isWide(left) or isWide(right)) return error.ScriptNumberError;
             // Numeric byte-array ops (& | ^ << >>) thread the operands' real
             // stack bytes so CHAINED expressions match the deployed script (a
             // shift/bitwise result can be non-minimal; the next length-sensitive
@@ -965,6 +972,7 @@ fn evalNode(
         },
         .unary_op => |uo| {
             const operand = env.get(uo.operand) orelse anf_none;
+            if (isWide(operand)) return error.ScriptNumberError;
             // Numeric OP_INVERT threads raw stack bytes for chained expressions,
             // same as the bitwise/shift ops above. Bytes-typed `~` and other
             // unary ops use evalUnaryOp's minimal/native path (unchanged).
@@ -984,6 +992,15 @@ fn evalNode(
             return evalUnaryOp(allocator, uo.op, operand, uo.result_type);
         },
         .call => |c| {
+            // N-163: `verifyRabinSig` is the one builtin that legitimately takes
+            // values outside i64 (Rabin keys / signatures), and it does no
+            // integer math here. Every other builtin would compute with a
+            // `.wide` argument as 0.
+            if (!std.mem.eql(u8, c.func, "verifyRabinSig")) {
+                for (c.args) |arg_ref| {
+                    if (isWide(env.get(arg_ref) orelse anf_none)) return error.ScriptNumberError;
+                }
+            }
             // The single funnel every numeric builtin (`abs`, `min`, `max`,
             // `within`, `safediv`, `clamp`, `sign`, `bool`, ...) reads its
             // operands through. Only a NUMERIC byte-op result ever carries
@@ -1010,6 +1027,10 @@ fn evalNode(
             // invent a value (F-134).
             if (mathBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             if (splitBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
+            // N-163: not an on-chain abort — the script computes the value,
+            // but it lies outside the i64 this interpreter represents. Refuse
+            // through the same channel rather than return a wrapped value.
+            if (mathBuiltinOverflowsI64(c.func, c.args, env)) return error.ScriptNumberError;
             const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
             // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
             // encoding; it does not push false. Answering false let
@@ -1138,12 +1159,14 @@ fn evalNode(
             // method may interleave raw outputs around it, and the on-chain
             // covenant folds them into hashOutputs in exactly this order.
             const sat_val = env.get(ao.satoshis) orelse anf_none;
+            if (isWide(sat_val)) return error.ScriptNumberError;
             try eval_ctx.ordered_outputs.append(allocator, .{ .kind = .state, .satoshis = toInt(sat_val) });
             return anf_none;
         },
         .add_data_output => |ado| {
             // Resolve the two arg refs from env and record the data output.
             const sat_val = env.get(ado.satoshis) orelse anf_none;
+            if (isWide(sat_val)) return error.ScriptNumberError;
             const script_val = env.get(ado.script_bytes) orelse anf_none;
             const sats: i64 = toInt(sat_val);
             const script_bytes: []const u8 = switch (script_val) {
@@ -1165,6 +1188,7 @@ fn evalNode(
             // mode (matches TS reference at
             // packages/runar-sdk/src/anf-interpreter.ts).
             const sat_val = env.get(aro.satoshis) orelse anf_none;
+            if (isWide(sat_val)) return error.ScriptNumberError;
             const script_val = env.get(aro.script_bytes) orelse anf_none;
             const sats: i64 = toInt(sat_val);
             const script_bytes: []const u8 = switch (script_val) {
@@ -1487,7 +1511,8 @@ fn evalBinOp(allocator: std.mem.Allocator, op: []const u8, left: ANFValue, right
 
     if (std.mem.eql(u8, op, "+")) return .{ .int = l +% r };
     if (std.mem.eql(u8, op, "-")) return .{ .int = l -% r };
-    if (std.mem.eql(u8, op, "*")) return .{ .int = l *% r };
+    // N-163: refuse a product outside i64 rather than wrap it.
+    if (std.mem.eql(u8, op, "*")) return .{ .int = std.math.mul(i64, l, r) catch return error.ScriptNumberError };
     if (std.mem.eql(u8, op, "/")) return .{ .int = if (r == 0) 0 else @divTrunc(l, r) };
     if (std.mem.eql(u8, op, "%")) return .{ .int = if (r == 0) 0 else @rem(l, r) };
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "===")) return .{ .boolean = l == r };
@@ -1594,6 +1619,31 @@ fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *cons
         return exp < 0 or exp > 32;
     }
     if (eql(u8, func, "sqrt")) return toInt(getArg(arg_names, 0, env)) < 0;
+    return false;
+}
+
+/// N-163: true when this math builtin's (non-aborting) result lies outside
+/// i64, so `evalCall` could only return a wrapped value. Checked after
+/// `mathBuiltinAborts`, so divisors are non-zero and the `pow` exponent is in
+/// 0..32 here.
+fn mathBuiltinOverflowsI64(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    const a = toInt(getArg(arg_names, 0, env));
+    const b = toInt(getArg(arg_names, 1, env));
+    if (eql(u8, func, "pow")) {
+        var result: i64 = 1;
+        var i: i64 = 0;
+        while (i < b) : (i += 1) result = std.math.mul(i64, result, a) catch return true;
+        return false;
+    }
+    if (eql(u8, func, "mulDiv")) {
+        const c = toInt(getArg(arg_names, 2, env));
+        if (c == 0) return false;
+        return std.math.cast(i64, @divTrunc(@as(i128, a) * b, c)) == null;
+    }
+    if (eql(u8, func, "percentOf")) {
+        return std.math.cast(i64, @divTrunc(@as(i128, a) * b, 10000)) == null;
+    }
     return false;
 }
 
@@ -1788,12 +1838,13 @@ fn evalCall(
         const b = toInt(getArg(arg_names, 1, env));
         const c = toInt(getArg(arg_names, 2, env));
         if (c == 0) return .{ .int = 0 };
-        return .{ .int = @divTrunc(a *% b, c) };
+        // N-163: i128 product, so an intermediate past i64 is exact.
+        return .{ .int = @intCast(@divTrunc(@as(i128, a) * b, c)) };
     }
     if (std.mem.eql(u8, func, "percentOf")) {
         const a = toInt(getArg(arg_names, 0, env));
         const b = toInt(getArg(arg_names, 1, env));
-        return .{ .int = @divTrunc(a *% b, 10000) };
+        return .{ .int = @intCast(@divTrunc(@as(i128, a) * b, 10000)) };
     }
 
     // Byte operations
@@ -2284,7 +2335,20 @@ fn toInt(v: ANFValue) i64 {
         // mirror how `asHex` returns "" and the rest of the lenient
         // interpreter degrades gracefully on type mismatches.
         .array => 0,
+        // Unreached: every numeric consumer refuses a `.wide` first (N-163).
+        .wide => 0,
         .none => 0,
+    };
+}
+
+/// N-163: a `.wide` value, or an array holding one.
+fn isWide(v: ANFValue) bool {
+    return switch (v) {
+        .wide => true,
+        .array => |items| for (items) |it| {
+            if (isWide(it)) break true;
+        } else false,
+        else => false,
     };
 }
 
@@ -2296,6 +2360,8 @@ fn isTruthy(v: ANFValue) bool {
         // A non-empty array is truthy; an empty array is falsy. Matches the
         // TS / Java reference shapes (empty `[]` is falsy in lenient mode).
         .array => |a| a.len > 0,
+        // Outside i64, so never zero.
+        .wide => true,
         .none => false,
     };
 }
