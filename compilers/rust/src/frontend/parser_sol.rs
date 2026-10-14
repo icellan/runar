@@ -36,6 +36,7 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{char_index_positions, lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::resolve_native_sighash;
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, type_too_deep, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -695,13 +696,27 @@ impl<'a> SolParser<'a> {
 
         let type_node = self.parse_type();
 
-        // Handle "Type immutable name;" syntax (immutable after type)
-        let is_immutable = if !is_immutable && *self.peek() == Token::Immutable {
-            self.advance(); // consume 'immutable'
-            true
-        } else {
-            is_immutable
-        };
+        // Modifiers after the type, any order: `immutable` (readonly) and
+        // N-093's `embedAlways` (the native spelling of the `@embedAlways`
+        // directive). An `embedAlways` directly followed by `;` or `=` is the
+        // property NAME, not a modifier.
+        let mut is_immutable = is_immutable;
+        let mut embed_always = false;
+        loop {
+            if *self.peek() == Token::Immutable {
+                self.advance(); // consume 'immutable'
+                is_immutable = true;
+                continue;
+            }
+            if matches!(self.peek(), Token::Ident(w) if w == "embedAlways")
+                && !matches!(self.tokens.get(self.pos + 1), Some(Token::Semicolon) | Some(Token::Eq))
+            {
+                self.advance();
+                embed_always = true;
+                continue;
+            }
+            break;
+        }
 
         let name = self.expect_ident();
 
@@ -722,7 +737,7 @@ impl<'a> SolParser<'a> {
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         }
     }
 
@@ -875,6 +890,7 @@ impl<'a> SolParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_function(&mut self) -> MethodNode {
+        let location = self.loc();
         self.advance(); // consume 'function'
         let name = self.expect_ident();
         self.expect(&Token::LParen);
@@ -882,8 +898,12 @@ impl<'a> SolParser<'a> {
         self.expect(&Token::RParen);
 
         // Parse Solidity-style modifiers in any order: visibility (public/private/
-        // external/internal), state mutability (view/pure/payable), and returns.
+        // external/internal), state mutability (view/pure/payable), returns,
+        // and N-093's `sighash(FLAGS)` (the native spelling of the `@sighash`
+        // directive). FLAGS must be identifiers separated by `|`; any other
+        // token makes the spelling malformed.
         let mut visibility = Visibility::Private;
+        let mut sighash_specs: Vec<Option<String>> = Vec::new();
         loop {
             match self.peek().clone() {
                 Token::Public => {
@@ -902,6 +922,11 @@ impl<'a> SolParser<'a> {
                         }
                         "internal" | "view" | "pure" | "payable" => {
                             self.advance();
+                        }
+                        "sighash" if matches!(self.tokens.get(self.pos + 1), Some(Token::LParen)) => {
+                            self.advance();
+                            let spec = self.parse_sighash_flag_tokens();
+                            sighash_specs.push(spec);
                         }
                         "returns" => {
                             self.advance();
@@ -932,14 +957,55 @@ impl<'a> SolParser<'a> {
 
         let body = self.parse_block();
 
+        let sighash_type = match resolve_native_sighash(&name, visibility == Visibility::Public, &sighash_specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(Diagnostic::error(msg, Some(location)));
+                None
+            }
+            None => None,
+        };
+
         MethodNode {
             name,
             params,
             body,
             visibility,
             source_location: self.loc(),
-            sighash_type: None,
+            sighash_type,
         }
+    }
+
+    /// N-093: `( IDENT ( '|' IDENT )* )` after `sighash` → the flag text, or
+    /// `None` when anything else appears inside the parentheses. Always
+    /// consumes through the matching `)` so a malformed spelling does not
+    /// derail parsing. Mirrors `parseSighashFlagTokens` (01-parse-sol.ts).
+    fn parse_sighash_flag_tokens(&mut self) -> Option<String> {
+        self.expect(&Token::LParen);
+        let mut text = String::new();
+        let mut ok = true;
+        let mut depth = 1;
+        while *self.peek() != Token::Eof {
+            match self.peek().clone() {
+                Token::LParen => {
+                    depth += 1;
+                    ok = false;
+                }
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    ok = false;
+                }
+                Token::Ident(n) => text.push_str(&n),
+                Token::BitOr => text.push('|'),
+                _ => ok = false,
+            }
+            self.advance();
+        }
+        self.expect(&Token::RParen);
+        if ok { Some(text) } else { None }
     }
 
     // -----------------------------------------------------------------------

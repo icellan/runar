@@ -176,11 +176,12 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
         return .{ .contract = null, .errors = errs };
     }
 
-    // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment
-    // directives are honoured ONLY on the `.runar.ts` surface (which implements
-    // them). The other eight surface parsers ignore comments, so they must
-    // reject a directive rather than silently drop it and change signing / DCE
-    // semantics. `.runar.ts` is exempt — its parser honours the directives.
+    // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) COMMENT
+    // directives are read only on the `.runar.ts` surface. The other eight
+    // surfaces spell both directives natively (N-093) and their parsers ignore
+    // comments, so they must reject a comment directive rather than silently
+    // drop it and change signing / DCE semantics; the message names the
+    // native spelling. `.runar.ts` is exempt — its parser honours the comments.
     if (format != .runar_ts) {
         // N-244: any occurrence of `@sighash`, glued or not (N-039's rule).
         if (std.mem.indexOf(u8, source, "@sighash") != null) {

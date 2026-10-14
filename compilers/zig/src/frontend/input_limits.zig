@@ -54,33 +54,58 @@ pub fn assertSourceBytesUnderLimit(source: []const u8) SourceSizeError!void {
 }
 
 // ---------------------------------------------------------------------------
-// Fail-closed guard for author-facing comment directives that the Zig frontend
-// honours ONLY on the `.runar.ts` surface (matching the TS reference compiler,
-// which implements them only there): `@sighash <FLAGS>` (#123, per-method
-// sighash type) and `@embedAlways` (#109, readonly-field DCE opt-out). The
-// eight non-TS surface parsers ignore comments, so silently dropping a
-// directive would change signing / DCE semantics — those formats reject rather
-// than diverge. The `.runar.ts` parse path is exempt (it implements the
-// directives) — the guard callers narrow accordingly.
+// Fail-closed guard for the author-facing COMMENT directives `@sighash <FLAGS>`
+// (#123, per-method sighash type) and `@embedAlways` (#109, readonly-field DCE
+// opt-out). They are read from comments only on the `.runar.ts` surface; the
+// eight non-TS surfaces spell both directives natively instead (N-093, user
+// decision R38 — see `nativeSpelling`), and their parsers drop comments, so a
+// COMMENT directive in one of those sources would be silently ignored and
+// change signing / DCE semantics. Those formats reject rather than diverge,
+// and the message names the native spelling to use. None of the native
+// spellings contains either marker, so the guard never trips on them. The
+// `.runar.ts` parse path is exempt — the guard callers narrow accordingly.
 // ---------------------------------------------------------------------------
 
-/// The `@sighash` refusal for the non-TS surface named `surface` ("Solidity",
-/// "Move", "Python", "Go DSL", "Rust", "Ruby", "Zig", "Java"). Identical text
-/// in all seven tiers (N-244). Detection is a plain substring match on
-/// `@sighash` (see `compiler_api.parseSource`), NOT `containsDirectiveToken`:
-/// N-039 made every occurrence of the marker a directive, so a glued
-/// `@sighashSINGLE|FORKID` is refused rather than read as prose.
-pub fn sighashDirectiveError(comptime surface: []const u8) []const u8 {
-    return "@sighash directive (issue #123) is not supported by the " ++ surface ++ " surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured";
+/// Per-surface format doc and native directive spellings (N-093), keyed by
+/// the surface name the guard messages use. Identical in all seven tiers (TS:
+/// NON_TS_SURFACES in 01-parse.ts).
+const NativeSpelling = struct { doc: []const u8, sighash: []const u8, embed: []const u8 };
+
+fn nativeSpelling(comptime surface: []const u8) NativeSpelling {
+    const table = .{
+        .{ "Solidity", NativeSpelling{ .doc = "solidity", .sighash = "the function modifier sighash(<FLAGS>)", .embed = "the property modifier embedAlways" } },
+        .{ "Move", NativeSpelling{ .doc = "move", .sighash = "the attribute #[sighash(<FLAGS>)]", .embed = "the attribute #[embed_always]" } },
+        .{ "Python", NativeSpelling{ .doc = "python", .sighash = "@public(sighash=\"<FLAGS>\")", .embed = "the wrapper type EmbedAlways[T]" } },
+        .{ "Go DSL", NativeSpelling{ .doc = "go", .sighash = "the directive //runar:sighash <FLAGS>", .embed = "the struct tag option runar:\"readonly,embedAlways\"" } },
+        .{ "Rust", NativeSpelling{ .doc = "rust", .sighash = "the attribute #[sighash(<FLAGS>)]", .embed = "the attribute #[embed_always]" } },
+        .{ "Ruby", NativeSpelling{ .doc = "ruby", .sighash = "runar_sighash '<FLAGS>'", .embed = "the prop option embed_always: true" } },
+        .{ "Zig", NativeSpelling{ .doc = "zig", .sighash = "the return type runar.Sighash(\"<FLAGS>\")", .embed = "the type function runar.EmbedAlways(T)" } },
+        .{ "Java", NativeSpelling{ .doc = "java", .sighash = "the annotation @Sighash(\"<FLAGS>\")", .embed = "the annotation @EmbedAlways" } },
+    };
+    inline for (table) |row| {
+        if (comptime std.mem.eql(u8, row[0], surface)) return row[1];
+    }
+    @compileError("unknown non-TS surface: " ++ surface);
 }
 
-/// The `@embedAlways` refusal for the non-TS surface named `surface`
+/// The `@sighash` comment refusal for the non-TS surface named `surface`
 /// ("Solidity", "Move", "Python", "Go DSL", "Rust", "Ruby", "Zig", "Java").
-/// Identical text in all seven tiers (N-268, mirroring N-244's `@sighash`
-/// fix — before N-268 this tier spoke its own, differently worded message
-/// that also did not name the surface).
+/// Identical text in all seven tiers (N-244, N-093). Detection is a plain
+/// substring match on `@sighash` (see `compiler_api.parseSource`), NOT
+/// `containsDirectiveToken`: N-039 made every occurrence of the marker a
+/// directive, so a glued `@sighashSINGLE|FORKID` is refused rather than read
+/// as prose.
+pub fn sighashDirectiveError(comptime surface: []const u8) []const u8 {
+    const n = comptime nativeSpelling(surface);
+    return "@sighash directive (issue #123) is not supported as a comment by the " ++ surface ++ " surface parser; write it as " ++ n.sighash ++ " (see docs/formats/" ++ n.doc ++ ".md)";
+}
+
+/// The `@embedAlways` comment refusal for the non-TS surface named `surface`
+/// ("Solidity", "Move", "Python", "Go DSL", "Rust", "Ruby", "Zig", "Java").
+/// Identical text in all seven tiers (N-268, N-093).
 pub fn embedAlwaysDirectiveError(comptime surface: []const u8) []const u8 {
-    return "@embedAlways directive (issue #109) is not supported by the " ++ surface ++ " surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured";
+    const n = comptime nativeSpelling(surface);
+    return "@embedAlways directive (issue #109) is not supported as a comment by the " ++ surface ++ " surface parser; write it as " ++ n.embed ++ " (see docs/formats/" ++ n.doc ++ ".md)";
 }
 
 fn isWordByte(c: u8) bool {

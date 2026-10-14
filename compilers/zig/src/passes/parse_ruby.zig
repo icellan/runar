@@ -32,6 +32,7 @@ const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -894,6 +895,15 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-093: one `runar_sighash` line: its flag text (null when the argument
+    /// is not exactly one string literal) and where it was written.
+    const PendingSighash = struct { spec: ?[]const u8, loc: types.SourceLocation };
+
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         const tok = self.peek();
@@ -1000,6 +1010,8 @@ const Parser = struct {
         // Pending visibility and param types for the next method
         var pending_public = false;
         var pending_param_types: ?ParamTypeMap = null;
+        // N-093: `runar_sighash 'FLAGS'` lines waiting for their `def`.
+        var pending_sighash: std.ArrayListUnmanaged(PendingSighash) = .empty;
 
         while (!self.check(.kw_end) and !self.check(.eof)) {
             self.skipNewlines();
@@ -1010,6 +1022,23 @@ const Parser = struct {
                 if (self.parseProp(parent_class)) |prop| {
                     properties.append(self.allocator, prop) catch {};
                 }
+                self.skipNewlines();
+                continue;
+            }
+
+            // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+            // `@sighash` directive; it applies to the next `def`.
+            if (self.checkIdent("runar_sighash")) {
+                const sighash_loc = self.currentSourceLoc();
+                _ = self.bump(); // 'runar_sighash'
+                const arg = self.peek();
+                var count: usize = 0;
+                while (!self.check(.newline) and !self.check(.eof)) {
+                    _ = self.bump();
+                    count += 1;
+                }
+                const is_str = arg.kind == .string_literal or arg.kind == .hex_string;
+                pending_sighash.append(self.allocator, .{ .spec = if (count == 1 and is_str) arg.text else null, .loc = sighash_loc }) catch {};
                 self.skipNewlines();
                 continue;
             }
@@ -1033,15 +1062,24 @@ const Parser = struct {
 
             // Method definition
             if (self.check(.kw_def)) {
-                const method = self.parseMethod(pending_public, pending_param_types);
+                var method = self.parseMethod(pending_public, pending_param_types);
                 if (std.mem.eql(u8, method.name, "constructor")) {
+                    // N-093: the constructor is not a spending entry point.
+                    for (pending_sighash.items) |p| self.addErrorAtLoc(p.loc, sighash_directive.LOST_SIGHASH_ERROR);
                     if (constructor != null) self.addError("duplicate constructor");
                     constructor = self.methodToConstructor(method);
                 } else {
+                    var specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+                    for (pending_sighash.items) |p| specs.append(self.allocator, p.spec) catch {};
+                    if (sighash_directive.resolveNativeSighash(self.allocator, method.name, method.is_public, specs.items)) |r| switch (r) {
+                        .value => |v| method.sighash_type = v,
+                        .err => |e| self.addErrorAtLoc(method.source_loc orelse self.currentSourceLoc(), e),
+                    };
                     methods.append(self.allocator, method) catch {};
                 }
                 pending_public = false;
                 pending_param_types = null;
+                pending_sighash = .empty;
                 self.skipNewlines();
                 continue;
             }
@@ -1057,6 +1095,9 @@ const Parser = struct {
             self.addErrorFmt(lex_diag.UNEXPECTED_CLASS_BODY_TOKEN_FMT, .{self.peek().text});
             _ = self.bump();
         }
+
+        // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+        for (pending_sighash.items) |p| self.addErrorAtLoc(p.loc, sighash_directive.LOST_SIGHASH_ERROR);
 
         _ = self.match(.kw_end); // end of class
 
@@ -1229,11 +1270,23 @@ const Parser = struct {
 
         // Check for optional trailing options: readonly: true/false, default: <literal>
         var is_readonly = false;
+        var embed_always = false;
         var initializer: ?Expression = null;
 
         while (self.check(.comma)) {
             _ = self.bump(); // ','
-            if (self.checkIdent("readonly")) {
+            if (self.checkIdent("embed_always")) {
+                // N-093: the native spelling of the `@embedAlways` directive.
+                _ = self.bump(); // 'embed_always'
+                if (self.expect(.colon) == null) break;
+                if (self.check(.kw_true)) {
+                    _ = self.bump();
+                    embed_always = true;
+                } else if (self.check(.kw_false)) {
+                    _ = self.bump();
+                    embed_always = false;
+                }
+            } else if (self.checkIdent("readonly")) {
                 _ = self.bump(); // 'readonly'
                 if (self.expect(.colon) == null) break;
                 if (self.check(.kw_true)) {
@@ -1267,6 +1320,7 @@ const Parser = struct {
             .type_info = rb_type.info,
             .readonly = is_readonly,
             .initializer = initializer,
+            .embed_always = embed_always,
             // N-109: spelled type name + field-name token, for the validator's
             // unsupported-type diagnostic. Diagnostics only.
             .type_name = rb_type.name,

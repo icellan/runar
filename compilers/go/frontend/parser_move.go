@@ -93,7 +93,17 @@ const (
 	moveTokArrow     // ->
 	moveTokShl       // <<
 	moveTokShr       // >>
+	moveTokHash      // `#` directly before `[` (N-093 attribute opener)
 )
+
+// moveAttribute (N-093) is one parsed `#[...]` attribute (see parseAttributes).
+// kind is "embed_always" or "sighash"; flags is the sighash flag text, nil
+// when malformed.
+type moveAttribute struct {
+	kind  string
+	flags *string
+	loc   SourceLocation
+}
 
 type moveToken struct {
 	kind  moveTokenKind
@@ -186,6 +196,15 @@ func (p *moveParser) tokenize(source string) []moveToken {
 		}
 
 		startCol := col
+
+		// N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+		// A `#` not followed by `[` is skipped below like any unknown character.
+		if ch == '#' && i+1 < len(source) && source[i+1] == '[' {
+			tokens = append(tokens, moveToken{kind: moveTokHash, value: "#", line: line, col: startCol})
+			i++
+			col++
+			continue
+		}
 
 		// String literals
 		if ch == '"' || ch == '\'' {
@@ -628,6 +647,13 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	}
 
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
+		// N-093: attributes before a function (`#[sighash(...)]`). Anything
+		// else they precede reads neither directive, so each one is refused.
+		attrs := p.parseAttributes()
+		if len(attrs) > 0 && !p.checkIdent("public") && !p.checkIdent("fun") {
+			p.reportLostAttributes(attrs)
+		}
+
 		// Skip use declarations inside the module
 		if p.checkIdent("use") {
 			p.skipUseDecl()
@@ -650,7 +676,7 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 
 		// public fun or fun
 		if p.checkIdent("public") || p.checkIdent("fun") {
-			method, hasMutRecv := p.parseMoveFunction()
+			method, hasMutRecv := p.parseMoveFunction(attrs)
 			if hasMutRecv && !isUnsafe {
 				parentClass = "StatefulSmartContract"
 			}
@@ -707,6 +733,16 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 
 	var props []PropertyNode
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
+		// N-093: `#[embed_always]` before a field is the native spelling of
+		// `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+		embedAlways := false
+		for _, attr := range p.parseAttributes() {
+			if attr.kind == "embed_always" {
+				embedAlways = true
+			} else {
+				p.reportLostAttributes([]moveAttribute{attr})
+			}
+		}
 		nameTok := p.expect(moveTokIdent)
 		fieldName := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
@@ -735,6 +771,7 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 			Type:           typeNode,
 			Readonly:       readonly,
 			Initializer:    initializer,
+			EmbedAlways:    embedAlways,
 			SourceLocation: p.loc(),
 		})
 
@@ -894,7 +931,87 @@ func (p *moveParser) consumeMoveGenericClose() {
 // Function parsing
 // ---------------------------------------------------------------------------
 
-func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
+// parseAttributes (N-093) parses `#[...]` attributes. Only `#[embed_always]`
+// and `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+// otherwise be ignored). For `sighash`, flags is the `|`-joined identifier
+// list, or nil when the parentheses hold anything else or are missing.
+// Mirrors parseAttributes in the TS reference (01-parse-move.ts).
+func (p *moveParser) parseAttributes() []moveAttribute {
+	var attrs []moveAttribute
+	for p.check(moveTokHash) {
+		loc := p.loc()
+		p.advance()
+		p.expect(moveTokLBracket)
+		name := ""
+		if p.check(moveTokIdent) {
+			name = p.advance().value
+		}
+		var flags *string
+		hasArgs := false
+		if p.check(moveTokLParen) {
+			hasArgs = true
+			p.advance()
+			text := ""
+			ok := true
+			depth := 1
+			for !p.check(moveTokEOF) {
+				t := p.peek()
+				if t.kind == moveTokLParen {
+					depth++
+				}
+				if t.kind == moveTokRParen {
+					depth--
+					if depth == 0 {
+						break
+					}
+				}
+				if t.kind == moveTokIdent || t.kind == moveTokPipe {
+					text += t.value
+				} else {
+					ok = false
+				}
+				p.advance()
+			}
+			p.expect(moveTokRParen)
+			if ok {
+				flags = nativeSighashSpec(text)
+			}
+		}
+		for !p.check(moveTokRBracket) && !p.check(moveTokEOF) {
+			p.advance()
+		}
+		p.expect(moveTokRBracket)
+		switch {
+		case name == "embed_always" && !hasArgs:
+			attrs = append(attrs, moveAttribute{kind: "embed_always", loc: loc})
+		case name == "sighash":
+			attrs = append(attrs, moveAttribute{kind: "sighash", flags: flags, loc: loc})
+		default:
+			shown := name
+			if hasArgs {
+				shown += "(...)"
+			}
+			errLoc := loc
+			p.errors = append(p.errors, Diagnostic{Message: unknownMoveAttributeMessage(shown), Severity: SeverityError, Loc: &errLoc})
+		}
+	}
+	return attrs
+}
+
+// reportLostAttributes (N-093) refuses each attribute that annotates nothing
+// that reads it.
+func (p *moveParser) reportLostAttributes(attrs []moveAttribute) {
+	for _, attr := range attrs {
+		directive := "@embedAlways"
+		if attr.kind == "sighash" {
+			directive = "@sighash"
+		}
+		errLoc := attr.loc
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg(directive), Severity: SeverityError, Loc: &errLoc})
+	}
+}
+
+func (p *moveParser) parseMoveFunction(attrs []moveAttribute) (MethodNode, bool) {
 	loc := p.loc()
 	visibility := "private"
 
@@ -942,11 +1059,30 @@ func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
 		}
 	}
 
+	// N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+	// annotates nothing.
+	var lost []moveAttribute
+	var sighashSpecs []*string
+	for _, a := range attrs {
+		if a.kind == "sighash" {
+			sighashSpecs = append(sighashSpecs, a.flags)
+		} else {
+			lost = append(lost, a)
+		}
+	}
+	p.reportLostAttributes(lost)
+	sighashType, sighashErr := resolveNativeSighash(name, visibility == "public", sighashSpecs)
+	if sighashErr != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+	}
+
 	return MethodNode{
 		Name:           name,
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		SighashType:    sighashType,
 		SourceLocation: loc,
 	}, hasMutRecv
 }

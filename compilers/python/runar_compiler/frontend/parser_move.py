@@ -27,6 +27,11 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     with_lex_errors,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.sighash_directive import (
+    lost_directive_message,
+    resolve_native_sighash,
+    unknown_move_attribute_message,
+)
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 from runar_compiler.frontend.loop_condition import normalize_loop_condition  # N-115
 
@@ -80,6 +85,8 @@ TOK_QUESTION = 41
 TOK_ARROW = 42
 TOK_SHL = 43
 TOK_SHR = 44
+# N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+TOK_HASH = 45
 
 
 class Token:
@@ -288,6 +295,14 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
 
         start_col = col
 
+        # N-093: `#[` opens an attribute. A `#` not followed by `[` stays an
+        # unknown character below.
+        if ch == "#" and i + 1 < n and source[i + 1] == "[":
+            tokens.append(Token(TOK_HASH, "#", line, start_col))
+            i += 1
+            col += 1
+            continue
+
         # String literals
         if ch == '"' or ch == "'":
             quote = ch
@@ -424,6 +439,16 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
 # Parser
 # ---------------------------------------------------------------------------
 
+class _MoveAttribute:
+    """N-093: one parsed `#[...]` attribute (see `_parse_attributes`)."""
+    __slots__ = ("kind", "flags", "loc")
+
+    def __init__(self, kind: str, flags: str | None, loc: SourceLocation):
+        self.kind = kind  # "embed_always" | "sighash"
+        self.flags = flags
+        self.loc = loc
+
+
 class _MoveParser:
     def __init__(self, file_name: str):
         self.file_name = file_name
@@ -523,6 +548,12 @@ class _MoveParser:
             parent_class = "UnsafeSmartContract"
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            # N-093: attributes before a function (`#[sighash(...)]`). Anything
+            # else they precede reads neither directive, so each one is refused.
+            attrs = self._parse_attributes()
+            if attrs and not (self.check_ident("public") or self.check_ident("fun")):
+                self._report_lost_attributes(attrs)
+
             # Skip use declarations inside the module
             if self.check_ident("use"):
                 self._skip_use_decl()
@@ -543,7 +574,7 @@ class _MoveParser:
 
             # public fun or fun
             if self.check_ident("public") or self.check_ident("fun"):
-                method, has_mut = self._parse_move_function()
+                method, has_mut = self._parse_move_function(attrs)
                 if has_mut and not is_unsafe:
                     parent_class = "StatefulSmartContract"
                 methods.append(method)
@@ -590,6 +621,14 @@ class _MoveParser:
 
         props: list[PropertyNode] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            # N-093: `#[embed_always]` before a field is the native spelling of
+            # `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+            embed_always = False
+            for attr in self._parse_attributes():
+                if attr.kind == "embed_always":
+                    embed_always = True
+                else:
+                    self._report_lost_attributes([attr])
             name_tok = self.expect(TOK_IDENT)
             field_name = self.declare(name_tok.value)
 
@@ -617,6 +656,7 @@ class _MoveParser:
                 type=type_node,
                 readonly=readonly,
                 initializer=initializer,
+                embed_always=embed_always,
                 source_location=self.loc(),
             ))
 
@@ -740,8 +780,63 @@ class _MoveParser:
 
     # -- Function parsing ----------------------------------------------------
 
-    def _parse_move_function(self) -> tuple[MethodNode, bool]:
+    def _parse_attributes(self) -> list[_MoveAttribute]:
+        """N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+        `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+        otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+        identifier list, or `None` when the parentheses hold anything else or
+        are missing."""
+        attrs: list[_MoveAttribute] = []
+        while self.check(TOK_HASH):
+            loc = self.loc()
+            self.advance()
+            self.expect(TOK_LBRACKET)
+            name = self.advance().value if self.check(TOK_IDENT) else ""
+            flags: str | None = None
+            has_args = False
+            if self.check(TOK_LPAREN):
+                has_args = True
+                self.advance()
+                text = ""
+                ok = True
+                depth = 1
+                while not self.check(TOK_EOF):
+                    t = self.peek()
+                    if t.kind == TOK_LPAREN:
+                        depth += 1
+                    if t.kind == TOK_RPAREN:
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    if t.kind in (TOK_IDENT, TOK_PIPE):
+                        text += t.value
+                    else:
+                        ok = False
+                    self.advance()
+                self.expect(TOK_RPAREN)
+                flags = text if ok else None
+            while not self.check(TOK_RBRACKET) and not self.check(TOK_EOF):
+                self.advance()
+            self.expect(TOK_RBRACKET)
+            if name == "embed_always" and not has_args:
+                attrs.append(_MoveAttribute("embed_always", None, loc))
+            elif name == "sighash":
+                attrs.append(_MoveAttribute("sighash", flags, loc))
+            else:
+                self.errors.append(Diagnostic(
+                    message=unknown_move_attribute_message(name + ("(...)" if has_args else "")),
+                    severity=Severity.ERROR, loc=loc))
+        return attrs
+
+    def _report_lost_attributes(self, attrs: list[_MoveAttribute]) -> None:
+        for attr in attrs:
+            self.errors.append(Diagnostic(
+                message=lost_directive_message("@sighash" if attr.kind == "sighash" else "@embedAlways"),
+                severity=Severity.ERROR, loc=attr.loc))
+
+    def _parse_move_function(self, attrs: list[_MoveAttribute] | None = None) -> tuple[MethodNode, bool]:
         """Returns (method, has_mut_receiver)."""
+        attrs = attrs or []
         location = self.loc()
         visibility = "private"
 
@@ -788,11 +883,21 @@ class _MoveParser:
                     source_location=last.source_location,
                 )
 
+        # N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        # annotates nothing.
+        self._report_lost_attributes([a for a in attrs if a.kind != "sighash"])
+        sighash = resolve_native_sighash(
+            name, visibility == "public", [a.flags for a in attrs if a.kind == "sighash"],
+        )
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
+
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=location,
         ), has_mut
 

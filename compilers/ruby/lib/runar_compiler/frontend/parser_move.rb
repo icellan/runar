@@ -12,6 +12,7 @@ require_relative "parse_result"
 require_relative "identifier_collision"
 require_relative "input_limits"
 require_relative "loop_condition"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -61,6 +62,8 @@ module RunarCompiler
       TOK_ASSERTEQ_BANG = 38 # assert_eq!
       TOK_SHL          = 39  # <<
       TOK_SHR          = 40  # >>
+      # N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+      TOK_HASH         = 41
     end
 
     # A single token produced by the Move tokenizer.
@@ -320,6 +323,15 @@ module RunarCompiler
 
         start_col = col
 
+        # N-093: `#[` opens an attribute. A `#` not followed by `[` stays an
+        # unknown character below.
+        if ch == "#" && i + 1 < n && source[i + 1] == "["
+          tokens << MoveToken.new(kind: MoveTokens::TOK_HASH, value: "#", line: line, col: start_col)
+          i += 1
+          col += 1
+          next
+        end
+
         # Hex literal: 0x...
         # (lowercase x only, as the TS reference: `0X` is an invalid integer)
         if ch == "0" && i + 1 < n && source[i + 1] == "x"
@@ -522,6 +534,13 @@ module RunarCompiler
         methods = []
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          # N-093: attributes before a function (`#[sighash(...)]`). Anything
+          # else they precede reads neither directive, so each one is refused.
+          attrs = parse_attributes
+          if !attrs.empty? && !(check_ident("public") || check_ident("fun"))
+            report_lost_attributes(attrs)
+          end
+
           if check_ident("resource") || check_ident("struct")
             is_resource = peek.value == "resource"
             advance
@@ -548,6 +567,16 @@ module RunarCompiler
 
             while !check(TOK_RBRACE) && !check(TOK_EOF)
               prop_loc = loc
+              # N-093: `#[embed_always]` before a field is the native spelling
+              # of `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+              embed_always = false
+              parse_attributes.each do |attr|
+                if attr[:kind] == :embed_always
+                  embed_always = true
+                else
+                  report_lost_attributes([attr])
+                end
+              end
               prop_name_raw = expect(TOK_IDENT).value
               prop_name = declare(prop_name_raw)
               expect(TOK_COLON)
@@ -577,6 +606,7 @@ module RunarCompiler
                 type: type_node,
                 readonly: readonly,
                 initializer: initializer,
+                embed_always: embed_always,
                 source_location: prop_loc
               )
 
@@ -586,7 +616,7 @@ module RunarCompiler
 
             parent_class = "StatefulSmartContract" if (is_resource || has_mutable) && !is_unsafe
           elsif check_ident("public") || check_ident("fun")
-            method, has_mut_recv = parse_function_with_mut
+            method, has_mut_recv = parse_function_with_mut(attrs)
             parent_class = "StatefulSmartContract" if has_mut_recv && !is_unsafe
             methods << method
           else
@@ -702,8 +732,72 @@ module RunarCompiler
 
       # -- Function parsing -------------------------------------------------
 
+      # N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+      # `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+      # otherwise be ignored). For `sighash`, +:flags+ is the `|`-joined
+      # identifier list, or nil when the parentheses hold anything else or are
+      # missing.
+      def parse_attributes
+        attrs = []
+        while check(TOK_HASH)
+          attr_loc = loc
+          advance
+          expect(TOK_LBRACKET)
+          name = check(TOK_IDENT) ? advance.value : ""
+          flags = nil
+          has_args = false
+          if check(TOK_LPAREN)
+            has_args = true
+            advance
+            text = +""
+            ok = true
+            depth = 1
+            until check(TOK_EOF)
+              t = peek
+              depth += 1 if t.kind == TOK_LPAREN
+              if t.kind == TOK_RPAREN
+                depth -= 1
+                break if depth.zero?
+              end
+              if t.kind == TOK_IDENT || t.kind == TOK_PIPE
+                text << t.value
+              else
+                ok = false
+              end
+              advance
+            end
+            expect(TOK_RPAREN)
+            flags = ok ? text : nil
+          end
+          advance while !check(TOK_RBRACKET) && !check(TOK_EOF)
+          expect(TOK_RBRACKET)
+          if name == "embed_always" && !has_args
+            attrs << { kind: :embed_always, flags: nil, loc: attr_loc }
+          elsif name == "sighash"
+            attrs << { kind: :sighash, flags: flags, loc: attr_loc }
+          else
+            @errors << Diagnostic.new(
+              message: SighashDirective.unknown_move_attribute_message(name + (has_args ? "(...)" : "")),
+              severity: Severity::ERROR,
+              loc: attr_loc
+            )
+          end
+        end
+        attrs
+      end
+
+      def report_lost_attributes(attrs)
+        attrs.each do |attr|
+          @errors << Diagnostic.new(
+            message: SighashDirective.lost_directive_message(attr[:kind] == :sighash ? "@sighash" : "@embedAlways"),
+            severity: Severity::ERROR,
+            loc: attr[:loc]
+          )
+        end
+      end
+
       # Returns [MethodNode, has_mut_receiver]
-      def parse_function_with_mut
+      def parse_function_with_mut(attrs = [])
         location = loc
         visibility = "private"
         has_mut_receiver = false
@@ -814,12 +908,25 @@ module RunarCompiler
           )
         end
 
+        # N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        # annotates nothing.
+        report_lost_attributes(attrs.reject { |a| a[:kind] == :sighash })
+        sighash = SighashDirective.resolve_native_sighash(
+          name,
+          visibility == "public",
+          attrs.select { |a| a[:kind] == :sighash }.map { |a| a[:flags] }
+        )
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
+
         method = MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
         [method, has_mut_receiver]
       end

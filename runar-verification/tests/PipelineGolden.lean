@@ -820,7 +820,11 @@ number. It is pinned from both sides:
 -- baselineMatches) once Stack/Lower.lean lowered a public method's terminal
 -- if/else with assert-ended arms in TS's terminal mode (`lowerTerminalBindingsP`):
 -- 69 = baselineMatches (66) + (22 - 19).
-def expectedByteExact : Nat := 69
+--
+-- 2026-10-14 (N-093): N-093 added `compiler-directives` and
+-- `embed-always-fixed-array` (both byte-exact, baselineMatches):
+-- 71 = baselineMatches (68) + (22 - 19).
+def expectedByteExact : Nat := 71
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -837,8 +841,10 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-10-05 (N-090): 85 -> 86 for N-090's `hex-to-bytes-initializer` fixture.
 2026-10-05 (F-115): 86 -> 87 for F-115's `ec-chained-rewrite` fixture.
 2026-10-11 (F-148): 87 -> 88 for F-148's `price-bet` fixture (byte-exact, in `baselineMatches`).
+2026-10-14 (N-093): 88 -> 90 for N-093's `compiler-directives` and
+`embed-always-fixed-array` fixtures (both byte-exact, in `baselineMatches`).
 -/
-def expectedFixtureTotal : Nat := 88
+def expectedFixtureTotal : Nat := 90
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -859,11 +865,13 @@ def baselineMatches : List String := [
   "branch-merged-locals",
   "branched-readonly-len",
   "byte-builtins",
+  "compiler-directives",
   "cond-write-multi-field",
   "conditional-data-output-stateful",
   "countdown-loop",
   "covenant-vault",
   "cross-covenant",
+  "embed-always-fixed-array",
   "escrow",
   "fixed-array-index",
   "fixed-array-write",
@@ -1239,7 +1247,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 88 := by rfl
+        + lowerDivergencePending.length = 90 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

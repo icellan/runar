@@ -128,6 +128,40 @@ assert hash160(pub_key) == @pub_key_hash    # reads property
 
 ---
 
+## Compiler Directives
+
+```ruby
+class Directives < Runar::SmartContract
+  prop :pub_key_hash, Addr
+  prop :deploy_tag, ByteString, embed_always: true     # @embedAlways
+
+  runar_sighash 'SINGLE|FORKID'                        # @sighash
+  runar_public sig: Sig, pub_key: PubKey
+  def spend_single(sig, pub_key)
+    ...
+  end
+end
+```
+
+- `embed_always: true` is a `prop` option like `readonly: true`.
+- `runar_sighash 'FLAGS'` is a class macro that applies to the next `def`. It
+  may come before or after that method's `runar_public` line, and takes exactly
+  one string literal. (It is a separate macro, not a `runar_public` keyword,
+  because `runar_public`'s keywords are parameter names.) A `runar_sighash`
+  with no `def` after it is an error.
+- Both are understood by the `runar` gem, so the contract still runs as Ruby.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/ruby/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mappings
 
 | Ruby Type | Runar AST Type |

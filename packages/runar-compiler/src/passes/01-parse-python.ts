@@ -32,6 +32,7 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -802,16 +803,22 @@ class PyParser {
 
       // Decorators
       const decorators: string[] = [];
+      const sighashSpecs: Array<string | null> = [];
       while (this.peek().type === '@') {
         this.advance(); // '@'
         const decName = this.advance().value;
         decorators.push(decName);
+        // N-093: `@public(sighash="FLAGS")` is the native spelling of the
+        // `@sighash` directive.
+        if (decName === 'public' && this.peek().type === '(') {
+          sighashSpecs.push(...this.parsePublicDecoratorArgs());
+        }
         this.skipNewlines();
       }
 
       // Method definition
       if (this.peek().type === 'def') {
-        const method = this.parseMethodDef(decorators);
+        const method = this.parseMethodDef(decorators, sighashSpecs);
         if (method.name === 'constructor') {
           constructor = method;
         } else {
@@ -865,19 +872,20 @@ class PyParser {
     }
     this.advance(); // ':'
 
-    // Parse type (possibly Readonly[T])
+    // Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the
+    // native spelling of the `@embedAlways` directive; the two wrappers
+    // compose in either order.
     let isReadonly = false;
-    let typeNode: TypeNode;
-
-    if (this.checkIdent('Readonly')) {
-      isReadonly = true;
-      this.advance(); // 'Readonly'
+    let embedAlways = false;
+    let wrappers = 0;
+    while (this.checkIdent('Readonly') || this.checkIdent('EmbedAlways')) {
+      if (this.advance().value === 'Readonly') isReadonly = true;
+      else embedAlways = true;
       this.expect('[');
-      typeNode = this.parseType();
-      this.expect(']');
-    } else {
-      typeNode = this.parseType();
+      wrappers++;
     }
+    const typeNode: TypeNode = this.parseType();
+    for (let w = 0; w < wrappers; w++) this.expect(']');
 
     // In stateless contracts (SmartContract and UnsafeSmartContract),
     // all properties are automatically readonly.
@@ -901,6 +909,7 @@ class PyParser {
       type: typeNode,
       readonly: isReadonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
   }
@@ -927,7 +936,41 @@ class PyParser {
     return makePrimitiveOrCustom(mapped);
   }
 
-  private parseMethodDef(decorators: string[]): MethodNode {
+  /**
+   * N-093: the argument list of `@public(...)`. The only argument is the
+   * keyword `sighash=<str>`; each one yields its string, and any other
+   * argument (positional, another keyword, a non-str value) yields `null`,
+   * which is refused as a malformed spelling.
+   */
+  private parsePublicDecoratorArgs(): Array<string | null> {
+    const specs: Array<string | null> = [];
+    this.expect('(');
+    while (this.peek().type !== ')' && this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+      const isSighashKw = this.checkIdent('sighash') && this.tokens[this.pos + 1]?.type === '=';
+      if (isSighashKw) {
+        this.advance(); // 'sighash'
+        this.advance(); // '='
+      }
+      // One argument value: up to the next top-level ',' or ')'.
+      const first = this.peek();
+      let count = 0;
+      let depth = 0;
+      while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+        const t = this.peek().type;
+        if ((t === ',' || t === ')') && depth === 0) break;
+        if (t === '(' || t === '[') depth++;
+        if (t === ')' || t === ']') depth--;
+        this.advance();
+        count++;
+      }
+      specs.push(isSighashKw && count === 1 && first.type === 'string' ? first.value : null);
+      if (!this.match(',')) break;
+    }
+    this.expect(')');
+    return specs;
+  }
+
+  private parseMethodDef(decorators: string[], sighashSpecs: Array<string | null> = []): MethodNode {
     const loc = this.loc();
     this.expect('def');
 
@@ -962,6 +1005,10 @@ class PyParser {
 
     // Determine if this is the constructor
     if (rawName === '__init__') {
+      // N-093: the constructor is not a spending entry point.
+      if (sighashSpecs.length > 0) {
+        this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', loc));
+      }
       return {
         kind: 'method',
         name: 'constructor',
@@ -975,12 +1022,18 @@ class PyParser {
     const isPublic = decorators.includes('public');
     const methodName = this.declare(rawName);
 
+    const sighash = resolveNativeSighash(methodName, isPublic, sighashSpecs);
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', loc));
+    }
+
     return {
       kind: 'method',
       name: methodName,
       params,
       body,
       visibility: isPublic ? 'public' : 'private',
+      ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
       sourceLocation: loc,
     };
   }

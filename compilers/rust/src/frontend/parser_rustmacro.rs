@@ -10,6 +10,7 @@ use super::ast::{
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error, static_method_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -41,6 +42,13 @@ enum TokenType {
     Eq, PlusEq, MinusEq,
     // End
     Eof,
+}
+
+/// N-093: one field/method attribute, classified by `parse_directive_attribute`.
+enum DirectiveAttr {
+    EmbedAlways { loc: SourceLocation },
+    Sighash { flags: Option<String>, loc: SourceLocation },
+    Other(String),
 }
 
 #[derive(Debug, Clone)]
@@ -369,11 +377,23 @@ impl RustDslParser {
                     self.expect(&TokenType::LBrace);
 
                     while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
-                        // Check for #[readonly] attribute
+                        // Field attributes, any number and order: #[readonly],
+                        // and N-093's #[embed_always] (the native spelling of
+                        // `@embedAlways`). A #[sighash(...)] here annotates
+                        // nothing and is refused.
                         let mut readonly = false;
-                        if matches!(self.current().typ, TokenType::HashBracket) {
-                            let field_attr = self.parse_attribute();
-                            if field_attr == "readonly" { readonly = true; }
+                        let mut embed_always = false;
+                        while matches!(self.current().typ, TokenType::HashBracket) {
+                            match self.parse_directive_attribute() {
+                                DirectiveAttr::EmbedAlways { .. } => embed_always = true,
+                                DirectiveAttr::Sighash { loc, .. } => self.errors.push(Diagnostic::error(
+                                    lost_directive_message("@sighash"),
+                                    Some(loc),
+                                )),
+                                DirectiveAttr::Other(field_attr) => {
+                                    if field_attr == "readonly" { readonly = true; }
+                                }
+                            }
                         }
 
                         // Skip optional `pub` visibility modifier
@@ -402,7 +422,7 @@ impl RustDslParser {
                                     initializer: None,
                                     source_location: loc,
                                     synthetic_array_chain: None,
-                                    embed_always: false,
+                                    embed_always,
                                 });
                             }
                         } else {
@@ -451,6 +471,14 @@ impl RustDslParser {
         let mut final_methods = Vec::new();
         for m in methods {
             if m.name == "init" && m.params.is_empty() {
+                // N-093: init() is not a spending entry point, so a #[sighash]
+                // on it would be dropped with the method.
+                if m.sighash_type.is_some() {
+                    self.errors.push(Diagnostic::error(
+                        lost_directive_message("@sighash"),
+                        Some(m.source_location.clone()),
+                    ));
+                }
                 for stmt in &m.body {
                     if let Statement::Assignment { target, value, .. } = stmt {
                         if let Expression::PropertyAccess { property } = target {
@@ -541,13 +569,23 @@ impl RustDslParser {
 
         while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
             // #[public] is no longer supported — `pub fn` marks public methods.
+            // N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            // #[embed_always] on a method annotates nothing and is refused.
+            let mut sighash_specs: Vec<Option<String>> = Vec::new();
             while matches!(self.current().typ, TokenType::HashBracket) {
-                let method_attr = self.parse_attribute();
-                if method_attr == "public" {
-                    self.errors.push(Diagnostic::error(
-                        "#[public] is no longer supported — use 'pub fn' for public methods",
-                        None,
-                    ));
+                match self.parse_directive_attribute() {
+                    DirectiveAttr::Sighash { flags, .. } => sighash_specs.push(flags),
+                    DirectiveAttr::EmbedAlways { loc } => {
+                        self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
+                    }
+                    DirectiveAttr::Other(method_attr) => {
+                        if method_attr == "public" {
+                            self.errors.push(Diagnostic::error(
+                                "#[public] is no longer supported — use 'pub fn' for public methods",
+                                None,
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -556,10 +594,77 @@ impl RustDslParser {
                 self.advance_clone();
                 visibility = Visibility::Public;
             }
-            methods.push(self.parse_function(visibility));
+            if !matches!(self.current().typ, TokenType::Fn) {
+                // N-093: a #[sighash] not followed by a fn annotates nothing.
+                for _ in &sighash_specs {
+                    let loc = self.loc();
+                    self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(loc)));
+                }
+                methods.push(self.parse_function(visibility));
+                continue;
+            }
+            let mut method = self.parse_function(visibility);
+            match resolve_native_sighash(&method.name, method.visibility == Visibility::Public, &sighash_specs) {
+                Some(Ok(v)) => method.sighash_type = Some(v),
+                Some(Err(msg)) => {
+                    self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())))
+                }
+                None => {}
+            }
+            methods.push(method);
         }
         self.expect(&TokenType::RBrace);
         methods
+    }
+
+    /// N-093: classify a field/method attribute as one of the two directives.
+    /// `#[embed_always]` and `#[sighash(FLAGS)]` (optionally `runar::`-qualified)
+    /// are the native spellings of `@embedAlways` / `@sighash`. For `sighash`,
+    /// `flags` is the `|`-joined identifier list, or `None` when the
+    /// parentheses are missing or hold any other token. Every other attribute
+    /// is returned as `Other` with its compact text, exactly as before.
+    /// Mirrors `parseDirectiveAttribute` in the TS reference (01-parse-rust.ts).
+    fn parse_directive_attribute(&mut self) -> DirectiveAttr {
+        let loc = self.loc();
+        let start = self.pos;
+        let content = self.parse_attribute();
+        // Inside `#[` ... `]`. `parse_attribute` stops at the final token
+        // without advancing past it, so guard the end index.
+        let end = if matches!(self.tokens.get(self.pos.wrapping_sub(1)).map(|t| &t.typ), Some(TokenType::RBracket)) {
+            self.pos - 1
+        } else {
+            self.pos
+        };
+        let toks: Vec<TokenType> = self.tokens[(start + 1).min(end)..end].iter().map(|t| t.typ.clone()).collect();
+        let mut i = 0;
+        if matches!(toks.first(), Some(TokenType::Ident(n)) if n == "runar") && matches!(toks.get(1), Some(TokenType::ColonColon)) {
+            i = 2;
+        }
+        let name = match toks.get(i) {
+            Some(TokenType::Ident(n)) => n.clone(),
+            _ => String::new(),
+        };
+        let rest = toks.get(i + 1..).unwrap_or(&[]);
+        if name == "embed_always" && rest.is_empty() {
+            return DirectiveAttr::EmbedAlways { loc };
+        }
+        if name == "sighash" {
+            let ok = rest.len() >= 2
+                && matches!(rest[0], TokenType::LParen)
+                && matches!(rest[rest.len() - 1], TokenType::RParen)
+                && rest[1..rest.len() - 1].iter().all(|t| matches!(t, TokenType::Ident(_) | TokenType::Pipe));
+            let flags = ok.then(|| {
+                rest[1..rest.len() - 1]
+                    .iter()
+                    .map(|t| match t {
+                        TokenType::Ident(n) => n.as_str(),
+                        _ => "|",
+                    })
+                    .collect::<String>()
+            });
+            return DirectiveAttr::Sighash { flags, loc };
+        }
+        DirectiveAttr::Other(content)
     }
 
     fn parse_attribute(&mut self) -> String {

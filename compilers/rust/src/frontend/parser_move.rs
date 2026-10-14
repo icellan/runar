@@ -34,6 +34,7 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{char_index_positions, lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_move_attribute_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -247,6 +248,9 @@ enum Token {
     Colon,
     ColonColon, // ::
     Question,
+    /// N-093: `#` directly before `[`, opening an attribute (`#[embed_always]`,
+    /// `#[sighash(...)]`).
+    Hash,
 
     // Special
     Eof,
@@ -392,6 +396,7 @@ fn tokenize(
             '>' => { tokens.push(Token::Gt); i += 1; continue; }
             '!' => { tokens.push(Token::Bang); i += 1; continue; }
             '~' => { tokens.push(Token::Tilde); i += 1; continue; }
+            '#' if i + 1 < len && chars[i + 1] == '[' => { tokens.push(Token::Hash); i += 1; continue; }
             '&' => { tokens.push(Token::Amp); i += 1; continue; }
             '|' => { tokens.push(Token::Pipe); i += 1; continue; }
             '^' => { tokens.push(Token::Caret); i += 1; continue; }
@@ -525,6 +530,20 @@ fn tokenize(
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
+
+/// N-093: one parsed `#[...]` attribute (see `parse_attributes`).
+#[derive(Clone)]
+enum MoveAttrKind {
+    EmbedAlways,
+    Sighash,
+}
+
+#[derive(Clone)]
+struct MoveAttr {
+    kind: MoveAttrKind,
+    flags: Option<String>,
+    loc: SourceLocation,
+}
 
 struct MoveParser<'a> {
     tokens: Vec<Token>,
@@ -732,6 +751,13 @@ impl<'a> MoveParser<'a> {
         }
 
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+            // N-093: attributes before a function (`#[sighash(...)]`). Anything
+            // else they precede reads neither directive, so each one is refused.
+            let attrs = self.parse_attributes();
+            let item_loc = self.loc();
+            if !attrs.is_empty() && !matches!(self.peek(), Token::Public | Token::Fun) {
+                self.report_lost_attributes(&attrs);
+            }
             match self.peek().clone() {
                 Token::Use => {
                     // Skip use declarations that appear after other items
@@ -774,7 +800,7 @@ impl<'a> MoveParser<'a> {
                     // public fun name(...)
                     self.advance(); // consume 'public'
                     if *self.peek() == Token::Fun {
-                        methods.push(self.parse_fun(Visibility::Public));
+                        methods.push(self.parse_fun(Visibility::Public, &attrs, item_loc));
                     } else {
                         self.errors.push(Diagnostic::error(format!(
                             "Expected 'fun' after 'public', got {:?}",
@@ -784,7 +810,7 @@ impl<'a> MoveParser<'a> {
                     }
                 }
                 Token::Fun => {
-                    methods.push(self.parse_fun(Visibility::Private));
+                    methods.push(self.parse_fun(Visibility::Private, &attrs, item_loc));
                 }
                 _ => {
                     self.advance();
@@ -885,6 +911,16 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_struct_field(&mut self) -> PropertyNode {
+        // N-093: `#[embed_always]` before a field is the native spelling of
+        // `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+        let mut embed_always = false;
+        for attr in self.parse_attributes() {
+            if matches!(attr.kind, MoveAttrKind::EmbedAlways) {
+                embed_always = true;
+            } else {
+                self.report_lost_attributes(std::slice::from_ref(&attr));
+            }
+        }
         let field_name = self.expect_ident();
         self.expect(&Token::Colon);
 
@@ -917,7 +953,7 @@ impl<'a> MoveParser<'a> {
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         }
     }
 
@@ -972,7 +1008,78 @@ impl<'a> MoveParser<'a> {
     // Functions
     // -----------------------------------------------------------------------
 
-    fn parse_fun(&mut self, visibility: Visibility) -> MethodNode {
+    /// N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+    /// `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+    /// otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+    /// identifier list, or `None` when the parentheses hold anything else or
+    /// are missing. Mirrors `parseAttributes` (01-parse-move.ts).
+    fn parse_attributes(&mut self) -> Vec<MoveAttr> {
+        let mut attrs = Vec::new();
+        while *self.peek() == Token::Hash {
+            let loc = self.loc();
+            self.advance();
+            self.expect(&Token::LBracket);
+            let name = match self.peek().clone() {
+                Token::Ident(n) => {
+                    self.advance();
+                    n
+                }
+                _ => String::new(),
+            };
+            let mut flags: Option<String> = None;
+            let mut has_args = false;
+            if *self.peek() == Token::LParen {
+                has_args = true;
+                self.advance();
+                let mut text = String::new();
+                let mut ok = true;
+                let mut depth = 1;
+                while *self.peek() != Token::Eof {
+                    match self.peek().clone() {
+                        Token::LParen => {
+                            depth += 1;
+                            ok = false;
+                        }
+                        Token::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            ok = false;
+                        }
+                        Token::Ident(n) => text.push_str(&n),
+                        Token::Pipe => text.push('|'),
+                        _ => ok = false,
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RParen);
+                flags = if ok { Some(text) } else { None };
+            }
+            while *self.peek() != Token::RBracket && *self.peek() != Token::Eof {
+                self.advance();
+            }
+            self.expect(&Token::RBracket);
+            if name == "embed_always" && !has_args {
+                attrs.push(MoveAttr { kind: MoveAttrKind::EmbedAlways, flags: None, loc });
+            } else if name == "sighash" {
+                attrs.push(MoveAttr { kind: MoveAttrKind::Sighash, flags, loc });
+            } else {
+                let shown = if has_args { format!("{name}(...)") } else { name };
+                self.errors.push(Diagnostic::error(unknown_move_attribute_message(&shown), Some(loc)));
+            }
+        }
+        attrs
+    }
+
+    fn report_lost_attributes(&mut self, attrs: &[MoveAttr]) {
+        for attr in attrs {
+            let directive = if matches!(attr.kind, MoveAttrKind::Sighash) { "@sighash" } else { "@embedAlways" };
+            self.errors.push(Diagnostic::error(lost_directive_message(directive), Some(attr.loc.clone())));
+        }
+    }
+
+    fn parse_fun(&mut self, visibility: Visibility, attrs: &[MoveAttr], location: SourceLocation) -> MethodNode {
         self.advance(); // consume 'fun'
         let raw_name = self.expect_ident();
         let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
@@ -1021,13 +1128,31 @@ impl<'a> MoveParser<'a> {
             }
         }
 
+        // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        // annotates nothing.
+        let lost: Vec<MoveAttr> = attrs.iter().filter(|a| !matches!(a.kind, MoveAttrKind::Sighash)).cloned().collect();
+        self.report_lost_attributes(&lost);
+        let specs: Vec<Option<String>> = attrs
+            .iter()
+            .filter(|a| matches!(a.kind, MoveAttrKind::Sighash))
+            .map(|a| a.flags.clone())
+            .collect();
+        let sighash_type = match resolve_native_sighash(&name, visibility == Visibility::Public, &specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(Diagnostic::error(msg, Some(location)));
+                None
+            }
+            None => None,
+        };
+
         MethodNode {
             name,
             params,
             body,
             visibility,
             source_location: self.loc(),
-            sighash_type: None,
+            sighash_type,
         }
     }
 

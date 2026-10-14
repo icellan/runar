@@ -29,6 +29,7 @@ const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -683,12 +684,21 @@ const Parser = struct {
                     if (self.expect(.lbrace) == null) continue;
 
                     while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                        // Field may have #[readonly] attribute
+                        // Field attributes, any number and order:
+                        // #[readonly], and N-093's #[embed_always] (the
+                        // native spelling of `@embedAlways`). A
+                        // #[sighash(...)] here annotates nothing and is
+                        // refused.
                         var readonly = false;
-                        if (self.current.kind == .hash_bracket) {
-                            const field_attr = self.parseAttribute();
-                            if (std.mem.eql(u8, field_attr, "readonly")) {
-                                readonly = true;
+                        var embed_always = false;
+                        while (self.current.kind == .hash_bracket) {
+                            const field_attr = self.parseDirectiveAttribute();
+                            switch (field_attr.kind) {
+                                .embed_always => embed_always = true,
+                                .sighash => self.addErrorAtLoc(field_attr.loc, sighash_directive.LOST_SIGHASH_ERROR),
+                                .other => if (std.mem.eql(u8, field_attr.content, "readonly")) {
+                                    readonly = true;
+                                },
                             }
                         }
 
@@ -725,6 +735,7 @@ const Parser = struct {
                                     .name = camel_name,
                                     .type_info = type_info,
                                     .readonly = readonly,
+                                    .embed_always = embed_always,
                                     // N-109: spelled type name + field-name
                                     // token, for the validator's
                                     // unsupported-type diagnostic.
@@ -775,6 +786,11 @@ const Parser = struct {
         var final_methods: std.ArrayListUnmanaged(MethodNode) = .empty;
         for (methods.items) |m| {
             if (std.mem.eql(u8, m.name, "init") and m.params.len == 0) {
+                // N-093: init() is not a spending entry point, so a
+                // #[sighash] on it would be dropped with the method.
+                if (m.sighash_type != null) {
+                    self.addErrorAtLoc(m.source_loc orelse self.currentSourceLoc(), sighash_directive.LOST_SIGHASH_ERROR);
+                }
                 // Extract assignments as property initializers
                 for (m.body) |stmt| {
                     switch (stmt) {
@@ -853,6 +869,72 @@ const Parser = struct {
     // ==================================================================
     // Attribute parsing
     // ==================================================================
+
+    const DirectiveAttribute = struct {
+        kind: enum { embed_always, sighash, other },
+        /// `sighash` only: the `|`-joined flag identifiers, or null when the
+        /// parentheses are missing or hold any other token.
+        flags: ?[]const u8 = null,
+        /// `other` only: the compact attribute text `parseAttribute` returns.
+        content: []const u8 = "",
+        loc: types.SourceLocation,
+    };
+
+    /// N-093: classify a field/method attribute as one of the two directives.
+    /// `#[embed_always]` and `#[sighash(FLAGS)]` (optionally
+    /// `runar::`-qualified) are the native spellings of `@embedAlways` /
+    /// `@sighash`. Every other attribute is returned as `other` with the same
+    /// compact text `parseAttribute` produces.
+    fn parseDirectiveAttribute(self: *Parser) DirectiveAttribute {
+        const loc = self.currentSourceLoc();
+        _ = self.bump(); // consume #[
+        var toks: std.ArrayListUnmanaged(Token) = .empty;
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var depth: i32 = 1;
+        while (self.current.kind != .eof) {
+            const t = self.current;
+            if (t.kind == .lbracket) depth += 1;
+            if (t.kind == .rbracket) {
+                depth -= 1;
+                if (depth == 0) {
+                    _ = self.bump();
+                    break;
+                }
+            }
+            toks.append(self.allocator, t) catch {};
+            switch (t.kind) {
+                .ident => buf.appendSlice(self.allocator, t.text) catch {},
+                .colon_colon => buf.appendSlice(self.allocator, "::") catch {},
+                .lparen => buf.append(self.allocator, '(') catch {},
+                .rparen => buf.append(self.allocator, ')') catch {},
+                else => {},
+            }
+            _ = self.bump();
+        }
+        var items = toks.items;
+        if (items.len >= 2 and items[0].kind == .ident and std.mem.eql(u8, items[0].text, "runar") and items[1].kind == .colon_colon) items = items[2..];
+        const name: []const u8 = if (items.len > 0 and items[0].kind == .ident) items[0].text else "";
+        const rest = if (items.len > 0) items[1..] else items;
+        if (std.mem.eql(u8, name, "embed_always") and rest.len == 0) return .{ .kind = .embed_always, .loc = loc };
+        if (std.mem.eql(u8, name, "sighash")) {
+            var ok = rest.len >= 2 and rest[0].kind == .lparen and rest[rest.len - 1].kind == .rparen;
+            var text: std.ArrayListUnmanaged(u8) = .empty;
+            if (ok) {
+                for (rest[1 .. rest.len - 1]) |t| {
+                    if (t.kind == .ident or t.kind == .pipe) {
+                        text.appendSlice(self.allocator, t.text) catch {};
+                    } else ok = false;
+                }
+            }
+            return .{ .kind = .sighash, .flags = if (ok) text.items else null, .loc = loc };
+        }
+        return .{ .kind = .other, .content = buf.items, .loc = loc };
+    }
+
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
 
     /// Consume an already-peeked #[ and collect the attribute text up to the matching ].
     fn parseAttribute(self: *Parser) []const u8 {
@@ -965,10 +1047,17 @@ const Parser = struct {
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             // #[public] is no longer supported — `pub fn` marks public methods.
+            // N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            // #[embed_always] on a method annotates nothing and is refused.
+            var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
             while (self.current.kind == .hash_bracket) {
-                const method_attr = self.parseAttribute();
-                if (std.mem.eql(u8, method_attr, "public")) {
-                    self.addError("#[public] is no longer supported — use 'pub fn' for public methods");
+                const method_attr = self.parseDirectiveAttribute();
+                switch (method_attr.kind) {
+                    .sighash => sighash_specs.append(self.allocator, method_attr.flags) catch {},
+                    .embed_always => self.addErrorAtLoc(method_attr.loc, sighash_directive.LOST_EMBED_ALWAYS_ERROR),
+                    .other => if (std.mem.eql(u8, method_attr.content, "public")) {
+                        self.addError("#[public] is no longer supported — use 'pub fn' for public methods");
+                    },
                 }
             }
 
@@ -977,7 +1066,15 @@ const Parser = struct {
                 _ = self.bump();
                 visibility_public = true;
             }
-            const m = self.parseFunction(visibility_public);
+            if (!self.checkIdent("fn")) {
+                for (sighash_specs.items) |_| self.addErrorAtLoc(self.currentSourceLoc(), sighash_directive.LOST_SIGHASH_ERROR);
+                sighash_specs.clearRetainingCapacity();
+            }
+            var m = self.parseFunction(visibility_public);
+            if (sighash_directive.resolveNativeSighash(self.allocator, m.name, visibility_public, sighash_specs.items)) |r| switch (r) {
+                .value => |v| m.sighash_type = v,
+                .err => |e| self.addErrorAtLoc(m.source_loc orelse self.currentSourceLoc(), e),
+            };
             methods.append(self.allocator, m) catch {};
         }
         _ = self.expect(.rbrace);

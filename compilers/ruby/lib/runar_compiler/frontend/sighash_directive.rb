@@ -173,6 +173,48 @@ module RunarCompiler
         parts << "FORKID" if (value & FLAG_FORKID) != 0
         parts.join("|")
       end
+
+      # N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+      # (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+      # `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+      # `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java
+      # `@Sighash("...")`).
+      #
+      # +specs+ holds one entry per spelling found on the method: the flag text,
+      # or nil when the spelling's argument was not well formed. Returns nil when
+      # there is no spelling, else {value:} or {error:} -- the SAME diagnostics
+      # the `.runar.ts` comment directive produces, checked in the same order:
+      # non-public method, then more than one spelling, then malformed, then the
+      # flag grammar of parse_sighash_flags. Mirrors the TS reference's
+      # resolveNativeSighash.
+      def resolve_native_sighash(method_name, is_public, specs)
+        return nil if specs.empty?
+        unless is_public
+          return { error: "@sighash directive on non-public method '#{method_name}' has no effect " \
+                          "— only public methods are spending entry points" }
+        end
+        return { error: "Method '#{method_name}': #{SIGHASH_MULTIPLE_ERROR}" } if specs.length > 1
+
+        spec = specs[0]
+        return { error: "Method '#{method_name}': #{SIGHASH_MALFORMED_ERROR}" } if spec.nil?
+
+        result = parse_sighash_flags(spec)
+        return { error: "Method '#{method_name}': #{result[:error]}" } if result[:error]
+
+        result
+      end
+
+      # N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+      # exists; any other name is refused rather than ignored.
+      def unknown_go_directive_message(name)
+        "unknown Go DSL directive '//runar:#{name}'; the only directive is //runar:sighash <FLAGS>"
+      end
+
+      # N-093: an attribute on the Move surface other than the two directives.
+      def unknown_move_attribute_message(attr)
+        "unsupported Move attribute #[#{attr}]; the supported attributes are " \
+          "#[embed_always] and #[sighash(<FLAGS>)]"
+      end
     end
   end
 end

@@ -47,6 +47,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     with_lex_errors,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -737,15 +738,25 @@ class _JavaParser:
     # matching the TS reference (01-parse-java.ts, parseMember). Anything
     # else is a loud "unsupported annotation" diagnostic when `validate`
     # is requested, rather than a silent visibility downgrade.
-    _KNOWN_ANNOTATIONS = {"Readonly", "Public", "Stateful", "Override", "SuppressWarnings"}
+    # N-093: ``@EmbedAlways`` / ``@Sighash("FLAGS")`` are the native spellings
+    # of the ``@embedAlways`` / ``@sighash`` directives.
+    _KNOWN_ANNOTATIONS = {
+        "Readonly", "Public", "Stateful", "Override", "SuppressWarnings", "EmbedAlways", "Sighash",
+    }
 
-    def _skip_annotations(self, validate: bool = False) -> list[str]:
+    def _skip_annotations(
+        self,
+        validate: bool = False,
+        records: list[tuple[str, list[Token], SourceLocation]] | None = None,
+    ) -> list[str]:
         """Consume @Foo / @pkg.Foo(...) annotations, returning the simple
         (rightmost) names. F-205: a qualified name (@runar.lang.annotations
         .Public) is read in full, not just its leading segment. With
         validate=True — member position only, matching the TS reference —
         an annotation whose simple name is not recognized is reported as
-        "unsupported annotation @<name>" instead of being silently ignored."""
+        "unsupported annotation @<name>" instead of being silently ignored.
+        N-093: ``records``, when given, receives ``(name, argument tokens
+        from '(' through ')' or [], location of '@')`` for each annotation."""
         names: list[str] = []
         while self.check(TOK_AT):
             start_loc = self.loc()
@@ -766,6 +777,7 @@ class _JavaParser:
                 names.append(name)
             # Optional (...) arguments. We tolerate arbitrary token sequences
             # inside — they're ignored for our subset.
+            arg_start = self.pos
             if self.check(TOK_LPAREN):
                 self.advance()
                 depth = 1
@@ -778,6 +790,8 @@ class _JavaParser:
                             self.advance()
                             break
                     self.advance()
+            if records is not None and name:
+                records.append((name, self.tokens[arg_start:self.pos], start_loc))
             if validate and name and name not in self._KNOWN_ANNOTATIONS:
                 self.errors.append(Diagnostic(
                     message=f"unsupported annotation @{name}",
@@ -789,7 +803,9 @@ class _JavaParser:
     def _parse_member(self, class_name: str) -> PropertyNode | MethodNode | None:
         loc = self.loc()
 
-        anns = self._skip_annotations(validate=True)
+        # N-093: every member annotation with its arguments and location.
+        records: list[tuple[str, list[Token], SourceLocation]] = []
+        anns = self._skip_annotations(validate=True, records=records)
         readonly = any(a == "Readonly" for a in anns)
         is_public_ann = any(a == "Public" for a in anns)
 
@@ -803,11 +819,20 @@ class _JavaParser:
                 is_static = True
             self.advance()
         # Annotations can also appear between modifiers.
-        more_anns = self._skip_annotations(validate=True)
+        more_anns = self._skip_annotations(validate=True, records=records)
         if any(a == "Readonly" for a in more_anns):
             readonly = True
         if any(a == "Public" for a in more_anns):
             is_public_ann = True
+
+        # N-093: `@EmbedAlways` / `@Sighash("FLAGS")`.
+        embed_loc: SourceLocation | None = next((r[2] for r in records if r[0] == "EmbedAlways"), None)
+        sighash_recs = [r for r in records if r[0] == "Sighash"]
+        sighash_specs: list[str | None] = [
+            args[1].value if len(args) == 3 and args[1].kind == TOK_STRING else None
+            for _, args, _ in sighash_recs
+        ]
+        sighash_loc: SourceLocation | None = sighash_recs[0][2] if sighash_recs else None
 
         if self.check(TOK_RBRACE) or self.check(TOK_EOF):
             return None
@@ -815,7 +840,15 @@ class _JavaParser:
         # Constructor: Name(...) { ... }
         if self.peek().kind == TOK_IDENT and self.peek().value == class_name \
                 and self.peek(1).kind == TOK_LPAREN:
-            return self._parse_constructor(class_name, loc)
+            ctor = self._parse_constructor(class_name, loc)
+            # N-093: the constructor is neither a spending entry point nor a field.
+            if sighash_loc is not None:
+                self.errors.append(Diagnostic(
+                    message=lost_directive_message("@sighash"), severity=Severity.ERROR, loc=sighash_loc))
+            if embed_loc is not None:
+                self.errors.append(Diagnostic(
+                    message=lost_directive_message("@embedAlways"), severity=Severity.ERROR, loc=embed_loc))
+            return ctor
 
         # Otherwise it's a field or method. Both start with a type then a name.
         # If the token after the type+name is `(`, it's a method; else a field.
@@ -846,9 +879,21 @@ class _JavaParser:
                 self.errors.append(Diagnostic(
                     message=static_method_message(member_name),
                     severity=Severity.ERROR, loc=loc))
-            return self._parse_method(
+            method = self._parse_method(
                 member_name, type_node, is_public_ann, loc
             )
+            if embed_loc is not None:
+                self.errors.append(Diagnostic(
+                    message=lost_directive_message("@embedAlways"), severity=Severity.ERROR, loc=embed_loc))
+            sighash = resolve_native_sighash(member_name, is_public_ann, sighash_specs)
+            if sighash is not None and sighash.error is not None:
+                self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=loc))
+            elif sighash is not None:
+                method.sighash_type = sighash.value
+            return method
+        if sighash_loc is not None:
+            self.errors.append(Diagnostic(
+                message=lost_directive_message("@sighash"), severity=Severity.ERROR, loc=sighash_loc))
 
         # Field declaration: optional `= initializer`, then `;`.
         init_expr: Expression | None = None
@@ -861,6 +906,7 @@ class _JavaParser:
             type=type_node,
             readonly=readonly,
             initializer=init_expr,
+            embed_always=embed_loc is not None,
             source_location=loc,
         )
 

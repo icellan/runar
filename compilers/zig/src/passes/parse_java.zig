@@ -28,6 +28,7 @@ const loop_condition = @import("loop_condition.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -497,6 +498,11 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
     /// Like `addErrorFmt`, but positioned at an explicit token rather than
     /// `self.current` (which has already moved past it by the time some
     /// errors are discovered to apply, e.g. an annotation's `@`).
@@ -904,6 +910,11 @@ const Parser = struct {
         var is_readonly = false;
         var is_public_annotation = false;
         var is_static = false;
+        // N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+        // the `@embedAlways` / `@sighash` directives.
+        var embed_always: ?types.SourceLocation = null;
+        var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        var sighash_loc: ?types.SourceLocation = null;
 
         while (true) {
             if (self.current.kind == .at) {
@@ -923,21 +934,49 @@ const Parser = struct {
                         simple_name = self.bump().text;
                     }
                 }
+                // Optional annotation argument list: @Foo(x = 1). N-093: for
+                // @Sighash it must be exactly one string literal.
+                var arg_count: usize = 0;
+                var first_arg: ?Token = null;
+                if (self.current.kind == .lparen) {
+                    _ = self.bump(); // '('
+                    var depth: i32 = 1;
+                    while (self.current.kind != .eof) {
+                        if (self.current.kind == .lparen) depth += 1;
+                        if (self.current.kind == .rparen) {
+                            depth -= 1;
+                            if (depth == 0) {
+                                _ = self.bump();
+                                break;
+                            }
+                        }
+                        if (first_arg == null) first_arg = self.current;
+                        arg_count += 1;
+                        _ = self.bump();
+                    }
+                }
+                const ann_loc = self.tokenSourceLoc(at_tok);
                 if (std.mem.eql(u8, simple_name, "Readonly")) is_readonly = true;
                 if (std.mem.eql(u8, simple_name, "Public")) is_public_annotation = true;
+                if (std.mem.eql(u8, simple_name, "EmbedAlways")) embed_always = ann_loc;
+                if (std.mem.eql(u8, simple_name, "Sighash")) {
+                    if (sighash_loc == null) sighash_loc = ann_loc;
+                    const ok = arg_count == 1 and first_arg.?.kind == .string_literal;
+                    sighash_specs.append(self.allocator, if (ok) first_arg.?.text else null) catch {};
+                }
                 // F-205: anything other than the names Rúnar recognizes at
                 // member position is a loud diagnostic, matching the TS
                 // reference — never a silent visibility downgrade.
                 if (!(std.mem.eql(u8, simple_name, "Readonly") or
                     std.mem.eql(u8, simple_name, "Public") or
+                    std.mem.eql(u8, simple_name, "EmbedAlways") or
+                    std.mem.eql(u8, simple_name, "Sighash") or
                     std.mem.eql(u8, simple_name, "Stateful") or
                     std.mem.eql(u8, simple_name, "Override") or
                     std.mem.eql(u8, simple_name, "SuppressWarnings")))
                 {
                     self.addErrorFmtAt(at_tok, lex_diag.UNSUPPORTED_ANNOTATION_FMT, .{simple_name});
                 }
-                // Optional annotation argument list: @Foo(x = 1)
-                if (self.current.kind == .lparen) self.skipBalancedParens();
                 continue;
             }
             if (self.checkIdent("public") or self.checkIdent("private") or
@@ -967,6 +1006,9 @@ const Parser = struct {
             if (self.current.kind == .lparen) {
                 // Constructor
                 const method = self.parseMethodAfterName("constructor", true, self.tokenSourceLoc(save_current));
+                // N-093: the constructor is neither a spending entry point nor a field.
+                if (sighash_loc) |l| self.addErrorAtLoc(l, sighash_directive.LOST_SIGHASH_ERROR);
+                if (embed_always) |l| self.addErrorAtLoc(l, sighash_directive.LOST_EMBED_ALWAYS_ERROR);
                 if (constructor_method.* != null) {
                     self.addErrorFmt("{s} has more than one constructor", .{contract_name});
                 } else {
@@ -998,10 +1040,16 @@ const Parser = struct {
             // N-050: a static method is not a contract method (`@Public static`
             // used to become a spending entry point).
             if (is_static) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{member_name});
-            const method = self.parseMethodAfterName(member_name, is_public_annotation, self.tokenSourceLoc(name_tok));
+            var method = self.parseMethodAfterName(member_name, is_public_annotation, self.tokenSourceLoc(name_tok));
+            if (embed_always) |l| self.addErrorAtLoc(l, sighash_directive.LOST_EMBED_ALWAYS_ERROR);
+            if (sighash_directive.resolveNativeSighash(self.allocator, member_name, is_public_annotation, sighash_specs.items)) |r| switch (r) {
+                .value => |v| method.sighash_type = v,
+                .err => |e| self.addErrorAtLoc(self.tokenSourceLoc(name_tok), e),
+            };
             methods.append(self.allocator, method) catch {};
             return;
         }
+        if (sighash_loc) |l| self.addErrorAtLoc(l, sighash_directive.LOST_SIGHASH_ERROR);
 
         // Field: `Type name [= init] ;`  (support `=` initializer and comma-separated declarators, though the latter is rare)
         var initializer: ?Expression = null;
@@ -1024,6 +1072,7 @@ const Parser = struct {
             .type_info = type_info,
             .readonly = is_readonly,
             .initializer = initializer,
+            .embed_always = embed_always != null,
             // N-109: spelled type name + field-name token, for the validator's
             // unsupported-type diagnostic. Diagnostics only.
             .type_name = types.typeNodeName(type_node),

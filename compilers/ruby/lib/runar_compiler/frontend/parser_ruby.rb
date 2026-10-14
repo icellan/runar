@@ -24,6 +24,7 @@ require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -866,6 +867,9 @@ module RunarCompiler
         # Pending visibility/param types for the next method
         pending_visibility = nil
         pending_param_types = nil
+        # N-093: pending +runar_sighash+ macros for the next +def+, each
+        # {spec: String or nil (malformed), loc: SourceLocation}.
+        pending_sighash = []
 
         while peek.kind != TOK_END && peek.kind != TOK_EOF
           skip_newlines
@@ -875,6 +879,23 @@ module RunarCompiler
           if check_ident("prop")
             prop = parse_prop(parent_class)
             properties << prop unless prop.nil?
+            skip_newlines
+            next
+          end
+
+          # N-093: +runar_sighash 'FLAGS'+ is the native spelling of the
+          # +@sighash+ directive; it applies to the next +def+.
+          if check_ident("runar_sighash")
+            sighash_loc = loc
+            advance # 'runar_sighash'
+            arg = peek
+            count = 0
+            while peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF
+              advance
+              count += 1
+            end
+            is_str = arg.kind == TOK_STRING || arg.kind == TOK_HEXSTRING
+            pending_sighash << { spec: count == 1 && is_str ? arg.value : nil, loc: sighash_loc }
             skip_newlines
             next
           end
@@ -900,12 +921,25 @@ module RunarCompiler
           if peek.kind == TOK_DEF
             method = parse_method(pending_visibility, pending_param_types)
             if method.name == "constructor"
+              # N-093: the constructor is not a spending entry point.
+              pending_sighash.each do |p|
+                @errors << located_message(p[:loc], SighashDirective.lost_directive_message("@sighash"))
+              end
               constructor = method
             else
+              sighash = SighashDirective.resolve_native_sighash(
+                method.name, method.visibility == "public", pending_sighash.map { |p| p[:spec] }
+              )
+              if sighash && sighash[:error]
+                @errors << located_message(method.source_location, sighash[:error])
+              elsif sighash
+                method.sighash_type = sighash[:value]
+              end
               methods << method
             end
             pending_visibility = nil
             pending_param_types = nil
+            pending_sighash = []
             skip_newlines
             next
           end
@@ -920,6 +954,11 @@ module RunarCompiler
           # N-004: refuse anything else (an indented +=begin+ lexes as +=+).
           stray = advance
           @errors << "#{@file}:#{stray.line}:#{stray.col}: #{Frontend.unexpected_class_body_token_message(stray.value)}"
+        end
+
+        # N-093: a +runar_sighash+ with no +def+ after it annotates nothing.
+        pending_sighash.each do |p|
+          @errors << located_message(p[:loc], SighashDirective.lost_directive_message("@sighash"))
         end
 
         match_tok(TOK_END) # end of class
@@ -1023,13 +1062,26 @@ module RunarCompiler
         type_node = parse_type
 
         is_readonly = false
+        embed_always = false
         initializer = nil
 
-        # Check for optional trailing +readonly: true+ or +default: value+
+        # Check for optional trailing +readonly: true+, +embed_always: true+
+        # or +default: value+
         while peek.kind == TOK_COMMA
           advance # ','
 
-          if check_ident("readonly")
+          if check_ident("embed_always")
+            # N-093: the native spelling of the +@embedAlways+ directive.
+            advance # 'embed_always'
+            expect(TOK_COLON, ":")
+            if peek.kind == TOK_TRUE
+              advance
+              embed_always = true
+            elsif peek.kind == TOK_FALSE
+              advance
+              embed_always = false
+            end
+          elsif check_ident("readonly")
             advance # 'readonly'
             expect(TOK_COLON, ":")
             if peek.kind == TOK_TRUE
@@ -1058,8 +1110,14 @@ module RunarCompiler
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
+          embed_always: embed_always,
           source_location: current_loc
         )
+      end
+
+      # This parser's error-string convention: +file:line:col: message+.
+      def located_message(location, message)
+        "#{@file}:#{location.line}:#{location.column}: #{message}"
       end
 
       def parse_type

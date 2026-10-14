@@ -84,6 +84,67 @@ RSpec.describe Runar::DSL do
     end
   end
 
+  # N-093: the native Ruby spellings of the compiler directives. The
+  # compiler reads them from the source; at runtime embed_always: is only
+  # recorded in the property metadata and runar_sighash does nothing.
+  describe 'prop embed_always:' do
+    it 'records embed_always: true in the property metadata' do
+      klass = Class.new(Runar::SmartContract) do
+        prop :deploy_tag, ByteString, embed_always: true
+      end
+
+      expect(klass.runar_properties).to contain_exactly(
+        { name: :deploy_tag, type: String, readonly: true, default: nil, embed_always: true }
+      )
+    end
+
+    it 'composes with readonly: and default:' do
+      klass = Class.new(Runar::StatefulSmartContract) do
+        prop :tags, Bigint, readonly: true, embed_always: true, default: 7
+      end
+
+      expect(klass.runar_properties).to contain_exactly(
+        { name: :tags, type: Integer, readonly: true, default: 7, embed_always: true }
+      )
+      obj = klass.new
+      expect(obj).not_to respond_to(:tags=)
+    end
+
+    it 'leaves the metadata unchanged for embed_always: false' do
+      klass = Class.new(Runar::SmartContract) do
+        prop :deploy_tag, ByteString, embed_always: false
+      end
+
+      expect(klass.runar_properties).to contain_exactly(
+        { name: :deploy_tag, type: String, readonly: true, default: nil }
+      )
+    end
+  end
+
+  describe 'runar_sighash' do
+    it 'is a no-op that keeps the next method public with its param types' do
+      klass = Class.new(Runar::SmartContract) do
+        runar_sighash 'SINGLE|FORKID'
+        runar_public sig: Sig, pub_key: PubKey
+        def spend_single(sig, pub_key); end
+      end
+
+      expect(klass.runar_methods[:spend_single]).to eq(
+        { visibility: :public, param_types: { sig: String, pub_key: String } }
+      )
+    end
+
+    it 'can follow runar_public' do
+      klass = Class.new(Runar::SmartContract) do
+        runar_public
+        runar_sighash 'ALL|FORKID'
+        def spend; end
+      end
+
+      expect(klass.runar_methods[:spend][:visibility]).to eq(:public)
+    end
+  end
+
   describe 'runar_properties and runar_methods' do
     it 'returns empty arrays/hashes when nothing is declared' do
       klass = Class.new(Runar::SmartContract)

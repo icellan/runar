@@ -22,8 +22,8 @@ public record PropertyNode(
      * {@code // @embedAlways}) comment directive immediately precedes a readonly
      * field. It opts the field OUT of dead-code elimination so its deploy-time
      * bytes survive into the on-chain locking script. Only meaningful on
-     * readonly fields, and only honoured on the {@code .runar.ts} surface
-     * (mirrors the TypeScript reference).
+     * readonly fields. The eight non-TS surfaces set it from their native
+     * spelling (N-093), e.g. Java {@code @EmbedAlways}.
      */
     boolean embedAlways
 ) {

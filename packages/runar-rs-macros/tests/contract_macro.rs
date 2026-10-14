@@ -167,3 +167,50 @@ fn add_output_omits_implicit_preimage() {
     assert_eq!(c.balance, 7);
     assert_eq!(c.tx_preimage_backup, vec![0xbb]);
 }
+
+// N-093: `#[embed_always]` (the native spelling of `@embedAlways`) is stripped
+// like `#[readonly]`, in either order, and does NOT make a field readonly: a
+// field with only `#[embed_always]` stays a mutable state slot, so
+// `add_output` takes it positionally. `#[sighash(...)]` (the native spelling
+// of `@sighash`) is a pass-through on a plain `impl` method. Proves the
+// annotated contract compiles and behaves as plain Rust; does not prove
+// anything about the Rúnar frontend's reading of the flags (the compiler's
+// n093_native_directives test does that).
+#[stateful_contract]
+pub struct StripsEmbedAlways {
+    #[readonly]
+    #[embed_always]
+    pub tag: Vec<u8>,
+    #[embed_always]
+    #[readonly]
+    pub other_tag: Vec<u8>,
+    #[embed_always]
+    pub count: i64,
+}
+
+impl StripsEmbedAlways {
+    #[sighash(SINGLE | FORKID)]
+    pub fn bump(&mut self) {
+        self.count += 1;
+        self.add_output(0, self.count);
+    }
+
+    #[runar_lang_macros::sighash(ALL | ANYONECANPAY | FORKID)]
+    pub fn tag_len(&self) -> usize {
+        self.tag.len() + self.other_tag.len()
+    }
+}
+
+use runar_lang_macros::sighash;
+
+#[test]
+fn n093_embed_always_stripped_and_sighash_passes_through() {
+    let mut c = StripsEmbedAlways { tag: vec![1, 2], other_tag: vec![3], count: 0 };
+    c.bump();
+    assert_eq!(c.count, 1);
+    assert_eq!(c.tag_len(), 3);
+    assert_eq!(
+        StripsEmbedAlways::take_outputs(),
+        vec![StripsEmbedAlwaysOutput { satoshis: 0, count: 1 }]
+    );
+}

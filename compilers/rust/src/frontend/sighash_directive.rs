@@ -204,6 +204,53 @@ pub fn describe_sighash(value: i64) -> String {
     parts.join("|")
 }
 
+/// N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+/// (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+/// `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+/// `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java `@Sighash("...")`).
+///
+/// `specs` holds one entry per spelling found on the method: the flag text, or
+/// `None` when the spelling's argument was not well formed (a non-identifier
+/// token, a non-string argument, ...). Returns `None` when there is no
+/// spelling, else the numeric type or the diagnostic — the SAME diagnostics the
+/// `.runar.ts` comment directive produces, checked in the same order:
+/// non-public method, then more than one spelling, then malformed, then the
+/// flag grammar of `parse_sighash_flags`. Mirrors `resolveNativeSighash` in the
+/// TS reference (sighash-directive.ts); identical in all seven tiers.
+pub fn resolve_native_sighash(
+    method_name: &str,
+    is_public: bool,
+    specs: &[Option<String>],
+) -> Option<Result<i64, String>> {
+    if specs.is_empty() {
+        return None;
+    }
+    if !is_public {
+        return Some(Err(format!(
+            "@sighash directive on non-public method '{method_name}' has no effect — only public methods are spending entry points"
+        )));
+    }
+    if specs.len() > 1 {
+        return Some(Err(format!("Method '{method_name}': {SIGHASH_MULTIPLE_ERROR}")));
+    }
+    let Some(spec) = &specs[0] else {
+        return Some(Err(format!("Method '{method_name}': {SIGHASH_MALFORMED_ERROR}")));
+    };
+    Some(parse_sighash_flags(spec).map_err(|e| format!("Method '{method_name}': {e}")))
+}
+
+/// N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+/// exists; any other name is refused rather than ignored, so a typo such as
+/// `//runar:sighsh` cannot silently drop the declaration.
+pub fn unknown_go_directive_message(name: &str) -> String {
+    format!("unknown Go DSL directive '//runar:{name}'; the only directive is //runar:sighash <FLAGS>")
+}
+
+/// N-093: an attribute on the Move surface other than the two directives.
+pub fn unknown_move_attribute_message(attr: &str) -> String {
+    format!("unsupported Move attribute #[{attr}]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

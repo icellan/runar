@@ -22,6 +22,7 @@ import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -229,6 +230,7 @@ class SolParser {
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
   private peek(): Token { return this.current(); }
+  private peekAt(n: number): Token { return this.tokens[this.pos + n] ?? this.tokens[this.tokens.length - 1]!; }
   private advance(): Token { const t = this.current(); this.pos++; return t; }
 
   private expect(type: TokenType): Token {
@@ -347,10 +349,24 @@ class SolParser {
     const location = this.loc();
     // Type [immutable] name [= value];
     const typeName = this.parseType();
+    // Modifiers, any order: `immutable` (readonly) and N-093's `embedAlways`
+    // (the native spelling of the `@embedAlways` directive). An `embedAlways`
+    // directly followed by `;` or `=` is the property NAME, not a modifier.
     let readonly = false;
-    if (this.current().type === 'immutable') {
-      this.advance();
-      readonly = true;
+    let embedAlways = false;
+    for (;;) {
+      if (this.current().type === 'immutable') {
+        this.advance();
+        readonly = true;
+        continue;
+      }
+      if (this.current().type === 'ident' && this.current().value === 'embedAlways' &&
+          this.peekAt(1).type !== ';' && this.peekAt(1).type !== '=') {
+        this.advance();
+        embedAlways = true;
+        continue;
+      }
+      break;
     }
     const name = this.expect('ident').value;
 
@@ -368,6 +384,7 @@ class SolParser {
       type: typeName,
       readonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: location,
     };
   }
@@ -480,10 +497,22 @@ class SolParser {
     }
     this.expect(')');
 
-    // Visibility modifier
+    // Modifiers, any order: visibility and N-093's `sighash(FLAGS)` (the
+    // native spelling of the `@sighash` directive). FLAGS must be identifiers
+    // separated by `|`; any other token makes the spelling malformed.
     let visibility: 'public' | 'private' = 'private';
-    if (this.current().type === 'public') { this.advance(); visibility = 'public'; }
-    else if (this.current().type === 'private') { this.advance(); }
+    const sighashSpecs: Array<string | null> = [];
+    for (;;) {
+      if (this.current().type === 'public') { this.advance(); visibility = 'public'; continue; }
+      if (this.current().type === 'private') { this.advance(); continue; }
+      if (this.current().type === 'ident' && this.current().value === 'sighash' &&
+          this.peekAt(1).type === '(') {
+        this.advance();
+        sighashSpecs.push(this.parseSighashFlagTokens());
+        continue;
+      }
+      break;
+    }
 
     // Return type (skip)
     if (this.current().type === 'ident' && this.current().value === 'returns') {
@@ -500,7 +529,37 @@ class SolParser {
     }
     this.expect('}');
 
-    return { kind: 'method', name, params, body, visibility, sourceLocation: location };
+    const sighash = resolveNativeSighash(name, visibility === 'public', sighashSpecs);
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', location));
+    }
+    return {
+      kind: 'method', name, params, body, visibility,
+      ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+      sourceLocation: location,
+    };
+  }
+
+  /**
+   * N-093: `( IDENT ( '|' IDENT )* )` after `sighash` → the flag text, or
+   * `null` when anything else appears inside the parentheses. Always consumes
+   * through the matching `)` so a malformed spelling does not derail parsing.
+   */
+  private parseSighashFlagTokens(): string | null {
+    this.expect('(');
+    let text = '';
+    let ok = true;
+    let depth = 1;
+    while (this.current().type !== 'eof') {
+      const t = this.current();
+      if (t.type === '(') depth++;
+      if (t.type === ')' && --depth === 0) break;
+      if (t.type === 'ident' || t.type === '|') text += t.value;
+      else ok = false;
+      this.advance();
+    }
+    this.expect(')');
+    return ok ? text : null;
   }
 
   private parseStatement(): Statement {

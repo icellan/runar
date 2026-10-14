@@ -25,6 +25,7 @@ require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -695,7 +696,8 @@ module RunarCompiler
             type: prop.type,
             readonly: readonly,
             initializer: prop.initializer,
-            source_location: prop.source_location
+            source_location: prop.source_location,
+            embed_always: prop.embed_always
           )
         end
 
@@ -761,6 +763,7 @@ module RunarCompiler
           type: parsed_type[:type],
           readonly: parsed_type[:readonly] || false,
           initializer: initializer,
+          embed_always: parsed_type[:embed_always] || false,
           source_location: source_location
         )
       end
@@ -783,8 +786,28 @@ module RunarCompiler
                                     severity: Severity::ERROR, loc: source_location)
         end
 
-        # Skip return type if present (not a `{`)
-        unless check(TOK_LBRACE)
+        # Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+        # native spelling of the `@sighash` directive (natively it is `void`).
+        sighash_specs = []
+        if check_ident("runar") && peek_at(1).kind == TOK_DOT &&
+           peek_at(2).kind == TOK_IDENT && peek_at(2).value == "Sighash"
+          3.times { advance }
+          expect(TOK_LPAREN)
+          arg = peek
+          count = 0
+          depth = 0
+          until check(TOK_EOF)
+            k = peek.kind
+            break if k == TOK_RPAREN && depth.zero?
+
+            depth += 1 if k == TOK_LPAREN
+            depth -= 1 if k == TOK_RPAREN
+            advance
+            count += 1
+          end
+          expect(TOK_RPAREN)
+          sighash_specs << (count == 1 && arg.kind == TOK_STRING ? arg.value : nil)
+        elsif !check(TOK_LBRACE)
           parse_type
         end
 
@@ -794,6 +817,11 @@ module RunarCompiler
         @stateful_context_names = Set.new(param_result[:stateful_context_names])
 
         if name == "init"
+          # N-093: the constructor is not a spending entry point.
+          unless sighash_specs.empty?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                      severity: Severity::ERROR, loc: source_location)
+          end
           @constructor_node = parse_constructor(source_location, param_result[:params])
           @self_names = prev_self_names
           @stateful_context_names = prev_stateful_context_names
@@ -804,12 +832,18 @@ module RunarCompiler
         @self_names = prev_self_names
         @stateful_context_names = prev_stateful_context_names
 
+        sighash = SighashDirective.resolve_native_sighash(name, is_public, sighash_specs)
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: source_location)
+        end
+
         MethodNode.new(
           name: name,
           params: param_result[:params],
           body: body,
           visibility: is_public ? "public" : "private",
-          source_location: source_location
+          source_location: source_location,
+          sighash_type: sighash && sighash[:value]
         )
       end
 
@@ -903,7 +937,15 @@ module RunarCompiler
             expect(TOK_LPAREN)
             inner = nested { parse_type }
             expect(TOK_RPAREN)
-            return { type: inner[:type], raw_name: inner[:raw_name], readonly: true }
+            return inner.merge(readonly: true)
+          end
+
+          # N-093: runar.EmbedAlways(T), the native spelling of `@embedAlways`.
+          if name == "EmbedAlways" && check(TOK_LPAREN)
+            expect(TOK_LPAREN)
+            inner = nested { parse_type }
+            expect(TOK_RPAREN)
+            return inner.merge(embed_always: true)
           end
 
           mapped = Frontend.map_zig_type(name)
@@ -1740,7 +1782,8 @@ module RunarCompiler
           params: method.params,
           body: rewrite_statements(method.body, method_names, scope),
           visibility: method.visibility,
-          source_location: method.source_location
+          source_location: method.source_location,
+          sighash_type: method.sighash_type
         )
       end
 

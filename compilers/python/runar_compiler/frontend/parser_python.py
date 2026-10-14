@@ -30,6 +30,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message, unsupported_statement_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +104,16 @@ def _py_token_text(tok) -> str:
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "is_bytes")
 
-    def __init__(self, kind: int, value: str, line: int, col: int):
+    def __init__(self, kind: int, value: str, line: int, col: int, is_bytes: bool = False):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # N-093: a ``b"..."`` literal (TS lexes it as a distinct ``hexstring``
+        # token), so ``@public(sighash=b"...")`` is refused as malformed.
+        self.is_bytes = is_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +446,7 @@ def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> 
             _, hex_val, esc_err = _decode_py_literal(val, True)
             if esc_err is not None:
                 lex.append(lex_error(esc_err, file_name, line, start_col))
-            tokens.append(Token(TOK_STRING, hex_val, line, start_col))
+            tokens.append(Token(TOK_STRING, hex_val, line, start_col, is_bytes=True))
             continue
 
         # String literals
@@ -834,11 +838,29 @@ class _PyParser:
             # method may carry several (`@public @staticmethod`), so read them all.
             if self.check(TOK_AT):
                 decorators: list[str] = []
+                sighash_specs: list[str | None] = []
                 while self.check(TOK_AT):
                     self.advance()
-                    decorators.append(self.expect(TOK_IDENT).value)
+                    dec_name = self.expect(TOK_IDENT).value
+                    decorators.append(dec_name)
+                    # N-093: ``@public(sighash="FLAGS")`` is the native
+                    # spelling of the ``@sighash`` directive.
+                    if dec_name == "public" and self.check(TOK_LPAREN):
+                        sighash_specs.extend(self._parse_public_decorator_args())
                     self.skip_newlines()
                 decorator = decorators[-1]
+
+                if (
+                    self.check_ident("def")
+                    and sighash_specs
+                    and self.pos + 1 < len(self.tokens)
+                    and self.tokens[self.pos + 1].value == "__init__"
+                ):
+                    # N-093: the constructor is not a spending entry point.
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@sighash"),
+                        severity=Severity.ERROR, loc=self.loc()))
+                    sighash_specs = []
 
                 if self.check_ident("def"):
                     if "staticmethod" in decorators or "classmethod" in decorators:
@@ -847,7 +869,9 @@ class _PyParser:
                         self.errors.append(Diagnostic(
                             message=static_method_message(name),
                             severity=Severity.ERROR, loc=self.loc()))
-                    method = self.parse_method("public" if "public" in decorators else "private")
+                    method = self.parse_method(
+                        "public" if "public" in decorators else "private", sighash_specs,
+                    )
                     methods.append(method)
                 else:
                     self.add_error(f"line {self.peek().line}: expected 'def' after @{decorator}")
@@ -909,15 +933,27 @@ class _PyParser:
         prop_name = self.declare(name_tok.value)
         self.expect(TOK_COLON)
 
+        # Parse type (possibly Readonly[T]). N-093: ``EmbedAlways[T]`` is the
+        # native spelling of the ``@embedAlways`` directive; the two wrappers
+        # compose in either order.
         is_readonly = False
-        if self.check_ident("Readonly"):
-            is_readonly = True
+        embed_always = False
+        wrappers = 0
+        while self.check_ident("Readonly") or self.check_ident("EmbedAlways"):
+            if self.advance().value == "Readonly":
+                is_readonly = True
+            else:
+                embed_always = True
+            self.expect(TOK_LBRACKET)
+            wrappers += 1
         # In SmartContract (and UnsafeSmartContract), all properties are
         # automatically readonly.
         if parent_class in ("SmartContract", "UnsafeSmartContract"):
             is_readonly = True
 
         typ_node = self.parse_type_annotation()
+        for _ in range(wrappers):
+            self.expect(TOK_RBRACKET)
 
         # Parse optional initializer: = value
         initializer = None
@@ -933,6 +969,7 @@ class _PyParser:
             type=typ_node,
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=embed_always,
             source_location=location,
         )
 
@@ -998,7 +1035,44 @@ class _PyParser:
 
     # -- Method parsing ------------------------------------------------------
 
-    def parse_method(self, visibility: str) -> MethodNode:
+    def _parse_public_decorator_args(self) -> list[str | None]:
+        """N-093: the argument list of ``@public(...)``. The only argument is
+        the keyword ``sighash=<str>``; each one yields its string, and any other
+        argument (positional, another keyword, a non-str value) yields ``None``,
+        which is refused as a malformed spelling."""
+        specs: list[str | None] = []
+        self.expect(TOK_LPAREN)
+        while not self.check(TOK_RPAREN) and not self.check(TOK_NEWLINE) and not self.check(TOK_EOF):
+            is_sighash_kw = (
+                self.check_ident("sighash")
+                and self.pos + 1 < len(self.tokens)
+                and self.tokens[self.pos + 1].kind == TOK_ASSIGN
+            )
+            if is_sighash_kw:
+                self.advance()  # 'sighash'
+                self.advance()  # '='
+            # One argument value: up to the next top-level ',' or ')'.
+            first = self.peek()
+            count = 0
+            depth = 0
+            while not self.check(TOK_NEWLINE) and not self.check(TOK_EOF):
+                k = self.peek().kind
+                if k in (TOK_COMMA, TOK_RPAREN) and depth == 0:
+                    break
+                if k in (TOK_LPAREN, TOK_LBRACKET):
+                    depth += 1
+                if k in (TOK_RPAREN, TOK_RBRACKET):
+                    depth -= 1
+                self.advance()
+                count += 1
+            ok = is_sighash_kw and count == 1 and first.kind == TOK_STRING and not first.is_bytes
+            specs.append(first.value if ok else None)
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RPAREN)
+        return specs
+
+    def parse_method(self, visibility: str, sighash_specs: list[str | None] | None = None) -> MethodNode:
         location = self.loc()
         self.expect_ident("def")
         name_tok = self.expect(TOK_IDENT)
@@ -1015,11 +1089,16 @@ class _PyParser:
         self.expect(TOK_COLON)
         body = self.parse_block()
 
+        sighash = resolve_native_sighash(name, visibility == "public", sighash_specs or [])
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
+
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=location,
         )
 

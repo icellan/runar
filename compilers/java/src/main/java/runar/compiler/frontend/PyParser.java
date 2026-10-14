@@ -43,6 +43,7 @@ import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.py} source into a Rúnar {@link ContractNode}.
@@ -166,12 +167,22 @@ public final class PyParser {
         final String value;
         final int line;
         final int col;
+        /**
+         * Marks a STRING token that came from a {@code b'..'} literal (its
+         * value is hex). N-093: only a str literal is a sighash flag spec.
+         */
+        final boolean isBytes;
 
         Token(TokKind kind, String value, int line, int col) {
+            this(kind, value, line, col, false);
+        }
+
+        Token(TokKind kind, String value, int line, int col, boolean isBytes) {
             this.kind = kind;
             this.value = value;
             this.line = line;
             this.col = col;
+            this.isBytes = isBytes;
         }
     }
 
@@ -548,7 +559,7 @@ public final class PyParser {
                 // F-203: escapes decode as in a CPython bytes literal.
                 PyLiteral dec = decodePyLiteral(val, true);
                 if (dec.error() != null) lex.add(LexDiag.at(filename, line, startCol, dec.error()));
-                tokens.add(new Token(TokKind.STRING, dec.hex(), line, startCol));
+                tokens.add(new Token(TokKind.STRING, dec.hex(), line, startCol, true));
                 continue;
             }
 
@@ -1003,18 +1014,41 @@ public final class PyParser {
                 // them all.
                 if (check(TokKind.AT)) {
                     List<String> decorators = new ArrayList<>();
+                    List<String> sighashSpecs = new ArrayList<>();
                     while (check(TokKind.AT)) {
                         advance();
-                        decorators.add(expect(TokKind.IDENT).value);
+                        String decName = expect(TokKind.IDENT).value;
+                        decorators.add(decName);
+                        // N-093: `@public(sighash="FLAGS")` is the native
+                        // spelling of the `@sighash` directive.
+                        if (decName.equals("public") && check(TokKind.LPAREN)) {
+                            sighashSpecs.addAll(parsePublicDecoratorArgs());
+                        }
                         skipNewlines();
                     }
                     String decorator = decorators.get(decorators.size() - 1);
+                    // N-093: the constructor is not a spending entry point.
+                    if (!sighashSpecs.isEmpty() && checkIdent("def")
+                        && pos + 1 < tokens.size() && tokens.get(pos + 1).value.equals("__init__")) {
+                        addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                        sighashSpecs.clear();
+                    }
                     if (checkIdent("def")) {
                         if (decorators.contains("staticmethod") || decorators.contains("classmethod")) {
                             // N-050: a class-level function is not a contract method.
                             addError(LexDiag.staticMethod(pos + 1 < tokens.size() ? tokens.get(pos + 1).value : ""));
                         }
-                        methods.add(parseMethod(decorators.contains("public") ? "public" : "private"));
+                        String visibility = decorators.contains("public") ? "public" : "private";
+                        MethodNode method = parseMethod(visibility);
+                        SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                            method.name(), visibility.equals("public"), sighashSpecs);
+                        if (sighash != null && sighash.isError()) {
+                            addError(sighash.error());
+                        } else if (sighash != null) {
+                            method = new MethodNode(method.name(), method.params(), method.body(),
+                                method.visibility(), method.sourceLocation(), sighash.value());
+                        }
+                        methods.add(method);
                     } else {
                         addError("line " + peek().line + ": expected 'def' after @" + decorator);
                     }
@@ -1075,9 +1109,17 @@ public final class PyParser {
             String propName = idents.declare(nameTok.value, pyConvertName(nameTok.value));
             expect(TokKind.COLON);
 
+            // Readonly[T]. N-093: `EmbedAlways[T]` is the native spelling of
+            // the `@embedAlways` directive; the two wrappers compose in either
+            // order.
             boolean isReadonly = false;
-            if (checkIdent("Readonly")) {
-                isReadonly = true;
+            boolean embedAlways = false;
+            int wrappers = 0;
+            while (checkIdent("Readonly") || checkIdent("EmbedAlways")) {
+                if (advance().value.equals("Readonly")) isReadonly = true;
+                else embedAlways = true;
+                expect(TokKind.LBRACKET);
+                wrappers++;
             }
             // In SmartContract (and UnsafeSmartContract), all properties
             // are automatically readonly.
@@ -1087,6 +1129,9 @@ public final class PyParser {
             }
 
             TypeNode typeNode = parseTypeAnnotation();
+            for (int w = 0; w < wrappers; w++) {
+                expect(TokKind.RBRACKET);
+            }
 
             Expression initializer = null;
             if (match(TokKind.ASSIGN)) {
@@ -1096,7 +1141,45 @@ public final class PyParser {
             expectStatementEnd();
             skipNewlines();
 
-            return new PropertyNode(propName, typeNode, isReadonly, initializer, location, null);
+            return new PropertyNode(propName, typeNode, isReadonly, initializer, location, null, embedAlways);
+        }
+
+        /**
+         * N-093: the argument list of {@code @public(...)}. The only argument
+         * is the keyword {@code sighash=<str>}; each one yields its string, and
+         * any other argument (positional, another keyword, a non-str value)
+         * yields {@code null}, which is refused as a malformed spelling.
+         * Mirrors parsePublicDecoratorArgs in the TS reference
+         * (01-parse-python.ts).
+         */
+        List<String> parsePublicDecoratorArgs() {
+            List<String> specs = new ArrayList<>();
+            expect(TokKind.LPAREN);
+            while (!check(TokKind.RPAREN) && !check(TokKind.NEWLINE) && !check(TokKind.EOF)) {
+                boolean isSighashKw = checkIdent("sighash")
+                    && pos + 1 < tokens.size() && tokens.get(pos + 1).kind == TokKind.ASSIGN;
+                if (isSighashKw) {
+                    advance(); // 'sighash'
+                    advance(); // '='
+                }
+                // One argument value: up to the next top-level ',' or ')'.
+                Token first = peek();
+                int count = 0;
+                int depth = 0;
+                while (!check(TokKind.NEWLINE) && !check(TokKind.EOF)) {
+                    TokKind k = peek().kind;
+                    if ((k == TokKind.COMMA || k == TokKind.RPAREN) && depth == 0) break;
+                    if (k == TokKind.LPAREN || k == TokKind.LBRACKET) depth++;
+                    if (k == TokKind.RPAREN || k == TokKind.RBRACKET) depth--;
+                    advance();
+                    count++;
+                }
+                specs.add(isSighashKw && count == 1 && first.kind == TokKind.STRING && !first.isBytes
+                    ? first.value : null);
+                if (!match(TokKind.COMMA)) break;
+            }
+            expect(TokKind.RPAREN);
+            return specs;
         }
 
         // -- Constructor parsing ---------------------------------------------

@@ -22,6 +22,7 @@ import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.j
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { normalizeLoopCondition } from './loop-condition.js';
+import { lostDirectiveMessage, resolveNativeSighash, unknownMoveAttributeMessage } from './sighash-directive.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
@@ -40,7 +41,15 @@ type TokenType =
   | '<<' | '>>'
   | '&' | '|' | '^' | '~' | '!'
   | '=' | '+=' | '-='
+  | '#'
   | 'eof';
+
+/** N-093: one parsed `#[...]` attribute (see `parseAttributes`). */
+interface MoveAttribute {
+  kind: 'embed_always' | 'sighash';
+  flags: string | null;
+  loc: SourceLocation;
+}
 
 interface Token {
   type: TokenType;
@@ -94,6 +103,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       }
       continue;
     }
+
+    // N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+    // A `#` not followed by `[` stays an unexpected character below.
+    if (ch === '#' && peekN(1) === '[') { advance(); add('#', '#', l, c); continue; }
 
     // Two-char ops
     if (ch === ':' && peekN(1) === ':') { advance(); advance(); add('::', '::', l, c); continue; }
@@ -300,6 +313,12 @@ class MoveParser {
     const methods: MethodNode[] = [];
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
+      // N-093: attributes before a function (`#[sighash(...)]`). Anything
+      // else they precede reads neither directive, so each one is refused.
+      const attrs = this.parseAttributes();
+      if (attrs.length > 0 && this.current().type !== 'public' && this.current().type !== 'fun') {
+        this.reportLostAttributes(attrs);
+      }
       if (this.current().type === 'resource' || this.current().type === 'struct') {
         const isResource = this.current().type === 'resource';
         this.advance();
@@ -318,6 +337,13 @@ class MoveParser {
         let hasMutableField = false;
         while (this.current().type !== '}' && this.current().type !== 'eof') {
           const propLoc = this.loc();
+          // N-093: `#[embed_always]` before a field is the native spelling
+          // of `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+          let embedAlways = false;
+          for (const attr of this.parseAttributes()) {
+            if (attr.kind === 'embed_always') embedAlways = true;
+            else this.reportLostAttributes([attr]);
+          }
           const propName = this.declare(this.expect('ident').value);
           this.expect(':');
 
@@ -347,6 +373,7 @@ class MoveParser {
             type: typeName,
             readonly,
             initializer,
+            ...(embedAlways ? { embedAlways: true } : {}),
             sourceLocation: propLoc,
           });
 
@@ -361,7 +388,7 @@ class MoveParser {
           parentClass = 'StatefulSmartContract';
         }
       } else if (this.current().type === 'public' || this.current().type === 'fun') {
-        const { method, hasMutReceiver: hasMut } = this.parseFunction();
+        const { method, hasMutReceiver: hasMut } = this.parseFunction(attrs);
         if (hasMut && !isUnsafe) parentClass = 'StatefulSmartContract';
         methods.push(method);
       } else {
@@ -479,7 +506,63 @@ class MoveParser {
     this.expect('>');
   }
 
-  private parseFunction(): { method: MethodNode; hasMutReceiver: boolean } {
+  /**
+   * N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+   * `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+   * otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+   * identifier list, or `null` when the parentheses hold anything else or are
+   * missing.
+   */
+  private parseAttributes(): MoveAttribute[] {
+    const attrs: MoveAttribute[] = [];
+    while (this.current().type === '#') {
+      const loc = this.loc();
+      this.advance();
+      this.expect('[');
+      const name = this.current().type === 'ident' ? this.advance().value : '';
+      let flags: string | null = null;
+      let hasArgs = false;
+      if (this.current().type === '(') {
+        hasArgs = true;
+        this.advance();
+        let text = '';
+        let ok = true;
+        let depth = 1;
+        while (this.current().type !== 'eof') {
+          const t = this.current();
+          if (t.type === '(') depth++;
+          if (t.type === ')' && --depth === 0) break;
+          if (t.type === 'ident' || t.type === '|') text += t.value;
+          else ok = false;
+          this.advance();
+        }
+        this.expect(')');
+        flags = ok ? text : null;
+      }
+      while (this.current().type !== ']' && this.current().type !== 'eof') this.advance();
+      this.expect(']');
+      if (name === 'embed_always' && !hasArgs) {
+        attrs.push({ kind: 'embed_always', flags: null, loc });
+      } else if (name === 'sighash') {
+        attrs.push({ kind: 'sighash', flags, loc });
+      } else {
+        this.errors.push(makeDiagnostic(unknownMoveAttributeMessage(name + (hasArgs ? '(...)' : '')), 'error', loc));
+      }
+    }
+    return attrs;
+  }
+
+  private reportLostAttributes(attrs: MoveAttribute[]): void {
+    for (const attr of attrs) {
+      this.errors.push(makeDiagnostic(
+        lostDirectiveMessage(attr.kind === 'sighash' ? '@sighash' : '@embedAlways'),
+        'error',
+        attr.loc,
+      ));
+    }
+  }
+
+  private parseFunction(attrs: MoveAttribute[] = []): { method: MethodNode; hasMutReceiver: boolean } {
     const location = this.loc();
     let visibility: 'public' | 'private' = 'private';
     if (this.current().type === 'public') {
@@ -591,8 +674,24 @@ class MoveParser {
       }
     }
 
+    // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+    // annotates nothing.
+    this.reportLostAttributes(attrs.filter((a) => a.kind !== 'sighash'));
+    const sighash = resolveNativeSighash(
+      name,
+      visibility === 'public',
+      attrs.filter((a) => a.kind === 'sighash').map((a) => a.flags),
+    );
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', location));
+    }
+
     return {
-      method: { kind: 'method', name, params, body, visibility, sourceLocation: location },
+      method: {
+        kind: 'method', name, params, body, visibility,
+        ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+        sourceLocation: location,
+      },
       hasMutReceiver,
     };
   }

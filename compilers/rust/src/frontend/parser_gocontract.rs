@@ -43,6 +43,7 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_go_directive_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -73,8 +74,10 @@ fn parse_go_contract_on_parse_stack(source: &str, file_name: Option<&str>) -> Pa
     let file = file_name.unwrap_or("contract.runar.go");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source, file, &mut errors);
+    let mut directives: Vec<GoDirective> = Vec::new();
+    let tokens = tokenize(source, file, &mut errors, &mut directives);
     let mut parser = GoParser::new(tokens, file, &mut errors);
+    parser.directives = directives;
 
     let contract = parser.parse();
     // F-213 measure (A), then measure (B) on the finished tree.
@@ -329,7 +332,40 @@ struct Token {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
+/// N-093: the comma-separated options of a struct tag's `runar` key (the
+/// first match of `(?:^|\s)runar:"([^"]*)"`), trimmed; empty when there is no
+/// such key. Mirrors the TS reference (01-parse-go.ts).
+fn runar_tag_options(tag: &str) -> Vec<String> {
+    let key = "runar:\"";
+    let mut from = 0;
+    while let Some(rel) = tag[from..].find(key) {
+        let at = from + rel;
+        let boundary = at == 0 || tag[..at].chars().next_back().is_some_and(char::is_whitespace);
+        if boundary {
+            let rest = &tag[at + key.len()..];
+            if let Some(end) = rest.find('"') {
+                return rest[..end].split(',').map(|o| o.trim().to_string()).collect();
+            }
+        }
+        from = at + 1;
+    }
+    Vec::new()
+}
+
+/// N-093: a Go DSL directive comment `//runar:<name> <args>` (Go's own `//go:`
+/// convention: no space after `//`). `token_index` is the index of the first
+/// token after the comment, so a directive attaches to the declaration that
+/// follows it, with only comments and blank lines in between. Mirrors
+/// `GoDirective` in the TS reference (01-parse-go.ts).
+struct GoDirective {
+    name: String,
+    args: String,
+    token_index: usize,
+    line: usize,
+    col: usize,
+}
+
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: &mut Vec<GoDirective>) -> Vec<Token> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut pos = 0usize;
@@ -355,8 +391,22 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
 
         // Line comments
         if ch == '/' && pos + 1 < chars.len() && chars[pos + 1] == '/' {
+            let start = pos;
             while pos < chars.len() && chars[pos] != '\n' {
                 pos += 1;
+            }
+            // N-093: `//runar:<name> <args>` is a directive, not prose.
+            let text: String = chars[start..pos].iter().collect();
+            let text = text.strip_suffix('\r').unwrap_or(&text);
+            if let Some(body) = text.strip_prefix("//runar:") {
+                let n = body.find([' ', '\t']).unwrap_or(body.len());
+                directives.push(GoDirective {
+                    name: body[..n].to_string(),
+                    args: body[n..].to_string(),
+                    token_index: tokens.len(),
+                    line: l,
+                    col: c,
+                });
             }
             continue;
         }
@@ -690,6 +740,10 @@ struct GoParser<'a> {
     ladder_top: Option<BinaryOp>,
     /// F-213 measure (A): parse nesting.
     nest: NestingCounter,
+    /// N-093: every `//runar:` directive in the file, in source order, and
+    /// which of them a func declaration consumed.
+    directives: Vec<GoDirective>,
+    consumed: Vec<bool>,
 }
 
 impl<'a> GoParser<'a> {
@@ -703,6 +757,51 @@ impl<'a> GoParser<'a> {
             idents: Default::default(),
             ladder_top: None,
             nest: NestingCounter::new(),
+            directives: Vec::new(),
+            consumed: Vec::new(),
+        }
+    }
+
+    /// N-093: resolve the `//runar:sighash` directives attached to the func
+    /// declaration starting at token `token_index` (directly above it, with
+    /// only comments and blank lines between), with the shared diagnostics.
+    /// A malformed argument segment yields a `None` spec. Mirrors
+    /// `takeSighashDirectives` + `resolveNativeSighash` (01-parse-go.ts).
+    fn take_sighash(&mut self, token_index: usize, method: &mut MethodNode) {
+        self.consumed.resize(self.directives.len(), false);
+        let mut specs: Vec<Option<String>> = Vec::new();
+        for (i, d) in self.directives.iter().enumerate() {
+            if d.token_index != token_index || d.name != "sighash" {
+                continue;
+            }
+            self.consumed[i] = true;
+            let ok = d.args.is_empty()
+                || (d.args.starts_with([' ', '\t'])
+                    && d.args.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|' || c == ' ' || c == '\t'));
+            specs.push(if ok { Some(d.args.clone()) } else { None });
+        }
+        match resolve_native_sighash(&method.name, method.visibility == Visibility::Public, &specs) {
+            Some(Ok(v)) => method.sighash_type = Some(v),
+            Some(Err(msg)) => self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone()))),
+            None => {}
+        }
+    }
+
+    /// N-093: refuse every directive that is unknown or attached to no func
+    /// declaration that becomes a contract method.
+    fn report_stray_directives(&mut self) {
+        self.consumed.resize(self.directives.len(), false);
+        for (i, d) in self.directives.iter().enumerate() {
+            if self.consumed[i] {
+                continue;
+            }
+            let msg = if d.name == "sighash" {
+                lost_directive_message("@sighash")
+            } else {
+                unknown_go_directive_message(&format!("{}{}", d.name, d.args))
+            };
+            let loc = SourceLocation { file: self.file.clone(), line: d.line, column: d.col };
+            self.errors.push(Diagnostic::error(msg, Some(loc)));
         }
     }
 
@@ -838,11 +937,16 @@ impl<'a> GoParser<'a> {
         while !matches!(self.current().typ, TokenType::Eof) {
             self.skip_semis();
             if matches!(self.current().typ, TokenType::Func) {
+                // N-093: the `//runar:sighash` directives directly above this func.
+                let func_token_index = self.pos;
                 self.advance(); // consume 'func'
                 if matches!(self.current().typ, TokenType::LParen) {
                     // Method: func (recv *Type) MethodName(...)
-                    funcs.push(self.parse_method());
-                } else if let Some((func, go_name)) = self.parse_standalone_func() {
+                    let (mut method, go_name, recv) = self.parse_method();
+                    self.take_sighash(func_token_index, &mut method);
+                    funcs.push((method, go_name, recv));
+                } else if let Some((mut func, go_name)) = self.parse_standalone_func() {
+                    self.take_sighash(func_token_index, &mut func);
                     funcs.push((func, go_name, None));
                 }
             } else if matches!(self.current().typ, TokenType::Type) {
@@ -884,6 +988,8 @@ impl<'a> GoParser<'a> {
                 self.advance();
             }
         }
+
+        self.report_stray_directives();
 
         if contract_name.is_empty() {
             self.errors.push(Diagnostic::error(GO_NO_CONTRACT_MESSAGE, None));
@@ -1107,13 +1213,16 @@ impl<'a> GoParser<'a> {
             let prop_type = self.parse_type();
             let prop_name = self.idents.declare(&first_name, go_to_camel(&first_name));
 
-            // Check for struct tag
+            // Check for struct tag. The `runar` key holds comma-separated
+            // options (N-093): `readonly`, and `embedAlways` — the native
+            // spelling of the `@embedAlways` directive — in any order.
             let mut readonly = false;
+            let mut embed_always = false;
             if let TokenType::StringLit(tag) = self.current().typ.clone() {
                 self.advance();
-                if tag.contains(r#"runar:"readonly""#) {
-                    readonly = true;
-                }
+                let options = runar_tag_options(&tag);
+                readonly = options.iter().any(|o| o == "readonly");
+                embed_always = options.iter().any(|o| o == "embedAlways");
             }
 
             let loc = SourceLocation { file: self.file.clone(), line, column: col_start };
@@ -1124,7 +1233,7 @@ impl<'a> GoParser<'a> {
                 initializer: None,
                 source_location: loc,
                 synthetic_array_chain: None,
-                embed_always: false,
+                embed_always,
             });
 
             self.skip_semis();

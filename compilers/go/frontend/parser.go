@@ -76,61 +76,27 @@ func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 
 	lower := strings.ToLower(fileName)
 
-	// The TypeScript surface parser (Parse, the default branch) now honours the
+	// The TypeScript surface parser (Parse, the default branch) reads the
 	// `@sighash` (#123, per-method sighash type) and `@embedAlways` (#109,
-	// readonly-field DCE opt-out) comment directives, matching the TS reference
-	// compiler. The eight non-TS surface parsers below do NOT read comments, so
-	// they would silently drop these directives and change signing / DCE
-	// semantics. Fail closed on those formats rather than miscompile — this is
-	// strictly safer than the TS reference (which silently ignores the
-	// directives in its non-.ts frontends) and has zero conformance impact (no
-	// fixture uses the directives). The `.runar.ts` surface is exempt because
-	// Parse now implements the directives.
-	switch {
-	case strings.HasSuffix(lower, ".runar.sol"):
-		if msg := unsupportedDirectiveError(source, "Solidity"); msg != "" {
-			return directiveGuardResult(msg)
+	// readonly-field DCE opt-out) directives from COMMENTS. The eight non-TS
+	// surfaces spell both directives natively instead (N-093, user decision
+	// R38: a modifier mirroring each surface's readonly idiom — see
+	// nonTSSurfaces), and their parsers drop comments, so a COMMENT directive in
+	// one of those sources would be silently ignored and change signing / DCE
+	// semantics. Fail closed on those formats rather than miscompile, and name
+	// the native spelling to use. None of the native spellings contains either
+	// marker, so this guard never trips on them. Mirrors the TS reference
+	// (01-parse.ts NON_TS_SURFACES).
+	for _, s := range nonTSSurfaces {
+		if strings.HasSuffix(lower, s.ext) {
+			if msg := unsupportedDirectiveError(source, s); msg != "" {
+				return directiveGuardResult(msg)
+			}
+			return s.parse(source, fileName)
 		}
-		return ParseSolidity(source, fileName)
-	case strings.HasSuffix(lower, ".runar.move"):
-		if msg := unsupportedDirectiveError(source, "Move"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParseMove(source, fileName)
-	case strings.HasSuffix(lower, ".runar.go"):
-		if msg := unsupportedDirectiveError(source, "Go DSL"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParseGoContract(source, fileName)
-	case strings.HasSuffix(lower, ".runar.py"):
-		if msg := unsupportedDirectiveError(source, "Python"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParsePython(source, fileName)
-	case strings.HasSuffix(lower, ".runar.rs"):
-		if msg := unsupportedDirectiveError(source, "Rust"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParseRustMacro(source, fileName)
-	case strings.HasSuffix(lower, ".runar.rb"):
-		if msg := unsupportedDirectiveError(source, "Ruby"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParseRuby(source, fileName)
-	case strings.HasSuffix(lower, ".runar.zig"):
-		if msg := unsupportedDirectiveError(source, "Zig"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParseZig(source, fileName)
-	case strings.HasSuffix(lower, ".runar.java"):
-		if msg := unsupportedDirectiveError(source, "Java"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return ParseJava(source, fileName)
-	default:
-		// TypeScript surface: honours @sighash / @embedAlways directly.
-		return Parse(source, fileName)
 	}
+	// TypeScript surface: honours @sighash / @embedAlways directly.
+	return Parse(source, fileName)
 }
 
 // Directive markers for the fail-closed guard. `@embedAlways` is word-boundary
@@ -147,17 +113,37 @@ func directiveGuardResult(msg string) *ParseResult {
 	return &ParseResult{Errors: []Diagnostic{{Message: msg, Severity: SeverityError}}}
 }
 
+// nonTSSurface is one non-TS surface: its extension, the human-readable
+// surface name for the diagnostic, its format doc, the native spelling of each
+// directive on it (N-093), and its parser. `.runar.ts` is intentionally absent:
+// the default branch implements the comment directives.
+type nonTSSurface struct {
+	ext, name, doc, sighashSpelling, embedSpelling string
+	parse                                          func([]byte, string) *ParseResult
+}
+
+var nonTSSurfaces = []nonTSSurface{
+	{".runar.sol", "Solidity", "solidity", "the function modifier sighash(<FLAGS>)", "the property modifier embedAlways", ParseSolidity},
+	{".runar.move", "Move", "move", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]", ParseMove},
+	{".runar.go", "Go DSL", "go", "the directive //runar:sighash <FLAGS>", `the struct tag option runar:"readonly,embedAlways"`, ParseGoContract},
+	{".runar.py", "Python", "python", `@public(sighash="<FLAGS>")`, "the wrapper type EmbedAlways[T]", ParsePython},
+	{".runar.rs", "Rust", "rust", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]", ParseRustMacro},
+	{".runar.rb", "Ruby", "ruby", "runar_sighash '<FLAGS>'", "the prop option embed_always: true", ParseRuby},
+	{".runar.zig", "Zig", "zig", `the return type runar.Sighash("<FLAGS>")`, "the type function runar.EmbedAlways(T)", ParseZig},
+	{".runar.java", "Java", "java", `the annotation @Sighash("<FLAGS>")`, "the annotation @EmbedAlways", ParseJava},
+}
+
 // unsupportedDirectiveError returns a non-empty diagnostic message when the
-// source carries a `@sighash` (#123) or `@embedAlways` (#109) directive on a
-// surface format whose parser does not read comments (so the directive would be
-// silently dropped), or "" when the source is clean. surfaceName names the
-// non-TS format for the diagnostic.
-func unsupportedDirectiveError(source []byte, surfaceName string) string {
+// source carries a `@sighash` (#123) or `@embedAlways` (#109) COMMENT directive
+// on a non-TS surface whose parser ignores comments (so the directive would be
+// silently dropped), or "" when the source is clean. The message names the
+// surface's native spelling (N-093).
+func unsupportedDirectiveError(source []byte, s nonTSSurface) string {
 	if sighashDirectiveRE.Match(source) {
-		return fmt.Sprintf("@sighash directive (issue #123) is not supported by the %s surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured", surfaceName)
+		return fmt.Sprintf("@sighash directive (issue #123) is not supported as a comment by the %s surface parser; write it as %s (see docs/formats/%s.md)", s.name, s.sighashSpelling, s.doc)
 	}
 	if embedAlwaysDirectiveRE.Match(source) {
-		return fmt.Sprintf("@embedAlways directive (issue #109) is not supported by the %s surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured", surfaceName)
+		return fmt.Sprintf("@embedAlways directive (issue #109) is not supported as a comment by the %s surface parser; write it as %s (see docs/formats/%s.md)", s.name, s.embedSpelling, s.doc)
 	}
 	return ""
 }

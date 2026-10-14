@@ -544,6 +544,9 @@ type zigParsedType struct {
 	typeNode TypeNode
 	rawName  string
 	readonly bool
+	// embedAlways: `runar.EmbedAlways(T)`, the native spelling of
+	// `@embedAlways` (N-093).
+	embedAlways bool
 }
 
 func (p *zigParser) parseType() zigParsedType {
@@ -574,6 +577,13 @@ func (p *zigParser) parseType() zigParsedType {
 			inner := nested(&p.nest, p.loc(), p.parseType)
 			p.expect(zigTokRParen)
 			inner.readonly = true
+			return inner
+		}
+		if name == "EmbedAlways" && p.check(zigTokLParen) {
+			p.expect(zigTokLParen)
+			inner := nested(&p.nest, p.loc(), p.parseType)
+			p.expect(zigTokRParen)
+			inner.embedAlways = true
 			return inner
 		}
 		mapped := zigMapType(name)
@@ -833,6 +843,7 @@ func (p *zigParser) parseField() PropertyNode {
 		Type:           parsedType.typeNode,
 		Readonly:       parsedType.readonly,
 		Initializer:    initializer,
+		EmbedAlways:    parsedType.embedAlways,
 		SourceLocation: loc,
 	}
 }
@@ -858,8 +869,40 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
 	}
 
-	// Skip return type if present (anything before '{')
-	if !p.check(zigTokLBrace) {
+	// Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+	// native spelling of the `@sighash` directive (natively it is `void`).
+	var sighashSpecs []*string
+	if p.checkIdent("runar") && p.peekAt(1).kind == zigTokDot &&
+		p.peekAt(2).kind == zigTokIdent && p.peekAt(2).value == "Sighash" {
+		p.advance()
+		p.advance()
+		p.advance()
+		p.expect(zigTokLParen)
+		arg := p.peek()
+		count := 0
+		depth := 0
+		for !p.check(zigTokEOF) {
+			k := p.peek().kind
+			if k == zigTokRParen && depth == 0 {
+				break
+			}
+			if k == zigTokLParen {
+				depth++
+			}
+			if k == zigTokRParen {
+				depth--
+			}
+			p.advance()
+			count++
+		}
+		p.expect(zigTokRParen)
+		if count == 1 && arg.kind == zigTokString {
+			sighashSpecs = append(sighashSpecs, nativeSighashSpec(arg.value))
+		} else {
+			sighashSpecs = append(sighashSpecs, nil)
+		}
+	} else if !p.check(zigTokLBrace) {
+		// Skip return type if present (anything before '{')
 		p.parseType()
 	}
 
@@ -876,6 +919,11 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 	}
 
 	if name == "init" {
+		// N-093: the constructor is not a spending entry point.
+		if len(sighashSpecs) > 0 {
+			errLoc := loc
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+		}
 		ctor := p.parseConstructorMethod(loc, params, properties)
 		p.selfNames = prevSelfNames
 		p.statefulContextNames = prevStatefulCtx
@@ -891,11 +939,18 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 		visibility = "public"
 	}
 
+	sighashType, sighashErr := resolveNativeSighash(name, isPublic, sighashSpecs)
+	if sighashErr != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+	}
+
 	return &MethodNode{
 		Name:           name,
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		SighashType:    sighashType,
 		SourceLocation: loc,
 	}
 }

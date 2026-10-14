@@ -46,6 +46,7 @@ use super::diagnostic::{
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use super::identifier_collision::DeclaredIdents;
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -1185,6 +1186,7 @@ impl<'a> PyParser<'a> {
 
             // Decorators
             let mut decorators: Vec<String> = Vec::new();
+            let mut sighash_specs: Vec<Option<String>> = Vec::new();
             while *self.peek() == Token::At {
                 self.advance(); // '@'
                 let dec_name = match self.advance() {
@@ -1195,13 +1197,19 @@ impl<'a> PyParser<'a> {
                         String::new()
                     }
                 };
+                // N-093: `@public(sighash="FLAGS")` is the native spelling of
+                // the `@sighash` directive.
+                if dec_name == "public" && *self.peek() == Token::LParen {
+                    let specs = self.parse_public_decorator_args();
+                    sighash_specs.extend(specs);
+                }
                 decorators.push(dec_name);
                 self.skip_newlines();
             }
 
             // Method definition
             if *self.peek() == Token::Def {
-                let method = self.parse_method_def(&decorators);
+                let method = self.parse_method_def(&decorators, &sighash_specs);
                 if method.name == "constructor" {
                     constructor = Some(method);
                 } else {
@@ -1283,22 +1291,27 @@ impl<'a> PyParser<'a> {
         }
         self.advance(); // consume ':'
 
-        // Parse type (possibly Readonly[T])
+        // Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the
+        // native spelling of the `@embedAlways` directive; the two wrappers
+        // compose in either order.
         let mut is_readonly = false;
-        let type_node;
-
-        if let Token::Ident(ref name) = *self.peek() {
+        let mut embed_always = false;
+        let mut wrappers = 0;
+        while let Token::Ident(name) = self.peek().clone() {
             if name == "Readonly" {
                 is_readonly = true;
-                self.advance(); // consume 'Readonly'
-                self.expect(&Token::LBracket);
-                type_node = self.parse_type();
-                self.expect(&Token::RBracket);
+            } else if name == "EmbedAlways" {
+                embed_always = true;
             } else {
-                type_node = self.parse_type();
+                break;
             }
-        } else {
-            type_node = self.parse_type();
+            self.advance(); // consume the wrapper name
+            self.expect(&Token::LBracket);
+            wrappers += 1;
+        }
+        let type_node = self.parse_type();
+        for _ in 0..wrappers {
+            self.expect(&Token::RBracket);
         }
 
         // In stateless contracts (SmartContract and UnsafeSmartContract), all
@@ -1325,7 +1338,7 @@ impl<'a> PyParser<'a> {
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         })
     }
 
@@ -1368,7 +1381,52 @@ impl<'a> PyParser<'a> {
     // Method definitions
     // -----------------------------------------------------------------------
 
-    fn parse_method_def(&mut self, decorators: &[String]) -> MethodNode {
+    /// N-093: the argument list of `@public(...)`. The only argument is the
+    /// keyword `sighash=<str>`; each one yields its string, and any other
+    /// argument (positional, another keyword, a non-str value) yields `None`,
+    /// which is refused as a malformed spelling. Mirrors
+    /// `parsePublicDecoratorArgs` (01-parse-python.ts).
+    fn parse_public_decorator_args(&mut self) -> Vec<Option<String>> {
+        let mut specs = Vec::new();
+        self.expect(&Token::LParen);
+        while !matches!(self.peek(), Token::RParen | Token::Newline | Token::Eof) {
+            let is_sighash_kw = matches!(self.peek(), Token::Ident(n) if n == "sighash")
+                && matches!(self.tokens.get(self.pos + 1), Some(Token::Eq));
+            if is_sighash_kw {
+                self.advance(); // 'sighash'
+                self.advance(); // '='
+            }
+            // One argument value: up to the next top-level ',' or ')'.
+            let first = self.peek().clone();
+            let mut count = 0;
+            let mut depth: i32 = 0;
+            while !matches!(self.peek(), Token::Newline | Token::Eof) {
+                let t = self.peek().clone();
+                if matches!(t, Token::Comma | Token::RParen) && depth == 0 {
+                    break;
+                }
+                if matches!(t, Token::LParen | Token::LBracket) {
+                    depth += 1;
+                }
+                if matches!(t, Token::RParen | Token::RBracket) {
+                    depth -= 1;
+                }
+                self.advance();
+                count += 1;
+            }
+            specs.push(match first {
+                Token::StringLit(v) if is_sighash_kw && count == 1 => Some(v),
+                _ => None,
+            });
+            if !self.match_tok(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RParen);
+        specs
+    }
+
+    fn parse_method_def(&mut self, decorators: &[String], sighash_specs: &[Option<String>]) -> MethodNode {
         let def_loc = self.loc();
         self.expect(&Token::Def);
 
@@ -1384,7 +1442,7 @@ impl<'a> PyParser<'a> {
         // N-050: @staticmethod / @classmethod declare a class-level function,
         // not a contract method; `@public @staticmethod` used to be an entry point.
         if decorators.iter().any(|d| d == "staticmethod" || d == "classmethod") {
-            self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(def_loc)));
+            self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(def_loc.clone())));
         }
 
         // N-046: reset local tracking for this method's scope.
@@ -1409,6 +1467,10 @@ impl<'a> PyParser<'a> {
 
         // Determine if this is the constructor
         if raw_name == "__init__" {
+            // N-093: the constructor is not a spending entry point.
+            if !sighash_specs.is_empty() {
+                self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(def_loc.clone())));
+            }
             return MethodNode {
                 name: "constructor".to_string(),
                 params,
@@ -1422,6 +1484,15 @@ impl<'a> PyParser<'a> {
         let is_public = decorators.contains(&"public".to_string());
         let method_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
+        let sighash_type = match resolve_native_sighash(&method_name, is_public, sighash_specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(Diagnostic::error(msg, Some(def_loc)));
+                None
+            }
+            None => None,
+        };
+
         MethodNode {
             name: method_name,
             params,
@@ -1432,7 +1503,7 @@ impl<'a> PyParser<'a> {
                 Visibility::Private
             },
             source_location: self.loc(),
-            sighash_type: None,
+            sighash_type,
         }
     }
 

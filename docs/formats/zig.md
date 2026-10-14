@@ -129,6 +129,40 @@ Unsupported or intentionally narrow:
 
 ---
 
+## Compiler Directives
+
+Both directives are type functions from the `runar` package, so the contract
+still compiles as Zig:
+
+```zig
+pub const Directives = struct {
+    pub const Contract = runar.SmartContract;
+
+    pubKeyHash: runar.Addr,
+    deployTag: runar.EmbedAlways(runar.ByteString),          // @embedAlways
+
+    pub fn spendSingle(self: *const Directives, sig: runar.Sig, pubKey: runar.PubKey) runar.Sighash("SINGLE|FORKID") {   // @sighash
+        ...
+    }
+};
+```
+
+- `runar.EmbedAlways(T)` wraps a field type like `runar.Readonly(T)`, and the
+  two compose in either order. It evaluates to `T`.
+- `runar.Sighash("FLAGS")` replaces `void` as the return type of a `pub fn`. It
+  evaluates to `void`. The argument must be one string literal.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/zig/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mapping
 
 | Zig type | Rúnar type |

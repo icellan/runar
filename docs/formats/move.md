@@ -226,6 +226,37 @@ Values are positional, matching mutable properties in declaration order. The fun
 
 ---
 
+## Compiler Directives
+
+Both directives are attributes, the Move spelling for item annotations:
+
+```move
+struct Directives {
+    pub_key_hash: Addr,
+    #[embed_always]                       // @embedAlways
+    deploy_tag: ByteString,
+}
+
+#[sighash(SINGLE | FORKID)]               // @sighash
+public fun spend_single(contract: &Directives, sig: Sig, pub_key: PubKey) { ... }
+```
+
+- `#[embed_always]` goes on the line before a struct field.
+- `#[sighash(FLAGS)]` goes before a `public fun`. Inside the parentheses only
+  flag names and `|` may appear.
+- These are the only two attributes; any other `#[...]` is an error.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/move/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Examples
 
 ### P2PKH

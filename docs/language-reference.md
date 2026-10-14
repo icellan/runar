@@ -807,10 +807,31 @@ The BSV node default is `DEFAULT_MAX_SCRIPT_SIZE_POLICY_AFTER_GENESIS = 500 * ON
 
 ## Compiler Directives
 
-Two comment directives change what the compiler emits. Both are read **only on
-the `.runar.ts` surface** — the other eight parsers reject a source carrying
-either one rather than ignoring it, because silently dropping a directive would
-change signing or dead-code semantics without saying so.
+Two directives change what the compiler emits. On the `.runar.ts` surface they
+are comments, shown below. The other eight surfaces spell each one as a native
+modifier that mirrors how that surface spells `readonly` (N-093); every tier
+reads all nine spellings into the same AST, so the bytes are identical:
+
+| Surface | `@embedAlways` (readonly property) | `@sighash` (public method) |
+|---|---|---|
+| `.runar.ts` | `/** @embedAlways */` above the field | `/** @sighash SINGLE\|FORKID */` above the method |
+| `.runar.sol` | property modifier: `ByteString immutable embedAlways deployTag;` | function modifier: `function f(...) public sighash(SINGLE \| FORKID) {` |
+| `.runar.move` | attribute: `#[embed_always]` before the field | attribute: `#[sighash(SINGLE \| FORKID)]` before `public fun` |
+| `.runar.go` | struct-tag option: `` `runar:"readonly,embedAlways"` `` | directive comment directly above the func: `//runar:sighash SINGLE\|FORKID` |
+| `.runar.rs` | attribute: `#[embed_always]` (with `#[readonly]`) | attribute: `#[sighash(SINGLE \| FORKID)]` before `pub fn` |
+| `.runar.py` | wrapper type: `deploy_tag: EmbedAlways[ByteString]` | decorator argument: `@public(sighash="SINGLE\|FORKID")` |
+| `.runar.zig` | type function: `deployTag: runar.EmbedAlways(runar.ByteString)` | return type: `pub fn f(...) runar.Sighash("SINGLE\|FORKID") {` |
+| `.runar.rb` | prop option: `prop :deploy_tag, ByteString, embed_always: true` | class macro before the `def`: `runar_sighash 'SINGLE\|FORKID'` |
+| `.runar.java` | annotation: `@EmbedAlways` | annotation: `@Sighash("SINGLE\|FORKID")` |
+
+The non-TS parsers drop comments, so a COMMENT directive (`// @sighash ...`) on
+one of those eight surfaces is rejected rather than ignored — silently dropping
+it would change signing or dead-code semantics without saying so — and the
+error names that surface's native spelling. Each native spelling is validated
+exactly like the comment: the same flag grammar, and the same errors for a
+directive on a non-public method, two directives on one method, a malformed
+argument, or a directive on the wrong kind of member. See the format guides in
+[`docs/formats/`](formats/) for each surface's details.
 
 ### `@embedAlways`
 
@@ -821,7 +842,7 @@ deploy-time metadata you intend to read back off the script later.
 
 ```typescript
 class Directives extends SmartContract {
-  readonly ownerPKH: Addr;
+  readonly pubKeyHash: Addr;
 
   /** @embedAlways */
   readonly deployTag: ByteString;
@@ -843,8 +864,8 @@ which lists the declared signature and keeps the parameter either way:
 
 | | `constructorSlots` |
 |---|---|
-| with `@embedAlways` | `["deployTag", "ownerPKH", "ownerPKH"]` |
-| without | `["ownerPKH", "ownerPKH"]` |
+| with `@embedAlways` | `["deployTag", "pubKeyHash", "pubKeyHash"]` |
+| without | `["pubKeyHash", "pubKeyHash"]` |
 
 So the constructor still takes the argument; the value just never reaches the
 script.
@@ -900,7 +921,10 @@ error. See
 [`conformance/sdk-call/SingleCounter.runar.ts`](../conformance/sdk-call/SingleCounter.runar.ts).
 
 Worked example, with both directives and their falsifications:
-[`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/).
+[`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/), with a
+port in every other surface under `examples/<format>/compiler-directives/`. The
+conformance fixtures `compiler-directives` and `embed-always-fixed-array` pin
+the bytes across all seven compilers.
 
 ---
 

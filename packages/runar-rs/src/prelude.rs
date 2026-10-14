@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
 // Re-export macros so `use runar::prelude::*` gets them too.
-pub use runar_lang_macros::{contract, stateful_contract, unsafe_contract};
+pub use runar_lang_macros::{contract, sighash, stateful_contract, unsafe_contract};
 
 // ---------------------------------------------------------------------------
 // Scalar types — type aliases so Rust arithmetic operators work directly

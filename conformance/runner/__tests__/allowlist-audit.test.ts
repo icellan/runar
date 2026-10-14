@@ -171,7 +171,12 @@ describe('conformance allowlist audit', () => {
   // javax.tools.JavaCompiler — and `runar.lang.types.FixedArray` was withdrawn
   // under N-122 rather than left as a trap. The Java COMPILER is still a full
   // parity target for these fixtures' other eight surfaces.
+  //
+  // N-093 added the third, `embed-always-fixed-array`, for the same reason
+  // (user decision R38: the one approved `.runar.java` skip, like the other
+  // FixedArray fixtures).
   const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
+    'embed-always-fixed-array': ['.runar.java'],
     'fixed-array-index': ['.runar.java'],
     'fixed-array-write': ['.runar.java'],
   };

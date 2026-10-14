@@ -13,6 +13,9 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * hole N-039 closed on `.runar.ts`. The refusal text also differed per tier
  * (Zig, Ruby and Java each had their own).
  *
+ * N-093: those surfaces now spell the directive natively (a modifier, not a
+ * comment), so the shared refusal for a COMMENT directive names that spelling.
+ *
  * What this proves:
  *   - for each of the eight non-TS surfaces, every tier refuses a glued
  *     `@sighashSINGLE|FORKID` comment AND a well-formed `@sighash SINGLE|FORKID`
@@ -47,8 +50,20 @@ const FIXTURES: ReadonlyArray<readonly [string, string]> = [
   ['N252-java-sighash-glued.runar.java', 'Java'],
 ];
 
+// N-093: the refusal names the surface's native spelling of the directive.
+const NATIVE: Record<string, [doc: string, sighash: string, embed: string]> = {
+  Solidity: ['solidity', 'the function modifier sighash(<FLAGS>)', 'the property modifier embedAlways'],
+  Move: ['move', 'the attribute #[sighash(<FLAGS>)]', 'the attribute #[embed_always]'],
+  Python: ['python', '@public(sighash="<FLAGS>")', 'the wrapper type EmbedAlways[T]'],
+  'Go DSL': ['go', 'the directive //runar:sighash <FLAGS>', 'the struct tag option runar:"readonly,embedAlways"'],
+  Rust: ['rust', 'the attribute #[sighash(<FLAGS>)]', 'the attribute #[embed_always]'],
+  Zig: ['zig', 'the return type runar.Sighash("<FLAGS>")', 'the type function runar.EmbedAlways(T)'],
+  Ruby: ['ruby', "runar_sighash '<FLAGS>'", 'the prop option embed_always: true'],
+  Java: ['java', 'the annotation @Sighash("<FLAGS>")', 'the annotation @EmbedAlways'],
+};
+
 const message = (surface: string): string =>
-  `@sighash directive (issue #123) is not supported by the ${surface} surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured`;
+  `@sighash directive (issue #123) is not supported as a comment by the ${surface} surface parser; write it as ${NATIVE[surface]![1]} (see docs/formats/${NATIVE[surface]![0]}.md)`;
 
 /** The fixture with its glued marker replaced, written under its own file name
  *  (the extension selects the surface) in a fresh temp directory. */

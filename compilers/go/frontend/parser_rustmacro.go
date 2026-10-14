@@ -530,11 +530,21 @@ func (p *rustMacroParser) parse() *ContractNode {
 				p.expect(rustTokLBrace)
 
 				for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
-					// Field may have a #[readonly] attribute
+					// Field attributes, any number and order: #[readonly], and
+					// N-093's #[embed_always] (the native spelling of
+					// `@embedAlways`). A #[sighash(...)] here annotates
+					// nothing and is refused.
 					readonly := false
-					if p.current().kind == rustTokHashBracket {
-						fieldAttr := p.parseAttribute()
-						if fieldAttr == "readonly" {
+					embedAlways := false
+					for p.current().kind == rustTokHashBracket {
+						fieldAttr := p.parseDirectiveAttribute()
+						switch {
+						case fieldAttr.kind == "embed_always":
+							embedAlways = true
+						case fieldAttr.kind == "sighash":
+							errLoc := fieldAttr.loc
+							p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+						case fieldAttr.content == "readonly":
 							readonly = true
 						}
 					}
@@ -557,6 +567,7 @@ func (p *rustMacroParser) parse() *ContractNode {
 								Name:           camelName,
 								Type:           fieldType,
 								Readonly:       readonly,
+								EmbedAlways:    embedAlways,
 								SourceLocation: loc,
 							})
 						}
@@ -610,6 +621,12 @@ func (p *rustMacroParser) parse() *ContractNode {
 	var finalMethods []MethodNode
 	for _, m := range methods {
 		if m.Name == "init" && len(m.Params) == 0 {
+			// N-093: init() is not a spending entry point, so a #[sighash]
+			// on it would be dropped with the method.
+			if m.SighashType != nil {
+				errLoc := m.SourceLocation
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+			}
 			for _, stmt := range m.Body {
 				if assign, ok := stmt.(AssignmentStmt); ok {
 					if pa, ok := assign.Target.(PropertyAccessExpr); ok {
@@ -684,6 +701,69 @@ func (p *rustMacroParser) parse() *ContractNode {
 // ---------------------------------------------------------------------------
 // Attribute parsing
 // ---------------------------------------------------------------------------
+
+// rustDirectiveAttr (N-093) classifies one field/method attribute: kind is
+// "embed_always", "sighash" (flags = the |-joined identifier list, nil when
+// malformed) or "other" (content = the compact attribute text).
+type rustDirectiveAttr struct {
+	kind    string
+	flags   *string
+	content string
+	loc     SourceLocation
+}
+
+// parseDirectiveAttribute (N-093) parses one attribute and classifies it as
+// one of the two directives. `#[embed_always]` and `#[sighash(FLAGS)]`
+// (optionally `runar::`-qualified) are the native spellings of
+// `@embedAlways` / `@sighash`. For `sighash`, flags is the `|`-joined
+// identifier list, or nil when the parentheses are missing or hold any other
+// token. Every other attribute is returned as "other" with its compact text,
+// exactly as parseAttribute returns it. Mirrors the TS reference
+// parseDirectiveAttribute (01-parse-rust.ts).
+func (p *rustMacroParser) parseDirectiveAttribute() rustDirectiveAttr {
+	loc := p.loc()
+	start := p.pos
+	content := p.parseAttribute()
+	end := p.pos - 1 // the closing `]`
+	if end < start+1 {
+		end = start + 1
+	}
+	toks := p.tokens[start+1 : end] // inside `#[` ... `]`
+	i := 0
+	if len(toks) >= 2 && toks[0].kind == rustTokIdent && toks[0].value == "runar" && toks[1].kind == rustTokColonColon {
+		i = 2
+	}
+	name := ""
+	if i < len(toks) && toks[i].kind == rustTokIdent {
+		name = toks[i].value
+	}
+	rest := toks[min(i+1, len(toks)):]
+	if name == "embed_always" && len(rest) == 0 {
+		return rustDirectiveAttr{kind: "embed_always", loc: loc}
+	}
+	if name == "sighash" {
+		ok := len(rest) >= 2 && rest[0].kind == rustTokLParen && rest[len(rest)-1].kind == rustTokRParen
+		text := ""
+		if ok {
+			for _, t := range rest[1 : len(rest)-1] {
+				switch t.kind {
+				case rustTokIdent:
+					text += t.value
+				case rustTokPipe:
+					text += "|"
+				default:
+					ok = false
+				}
+			}
+		}
+		var flags *string
+		if ok {
+			flags = nativeSighashSpec(text)
+		}
+		return rustDirectiveAttr{kind: "sighash", flags: flags, loc: loc}
+	}
+	return rustDirectiveAttr{kind: "other", content: content}
+}
 
 // parseAttribute consumes an already-peeked HashBracket (#[) and collects
 // the attribute text up to the matching ].
@@ -810,9 +890,17 @@ func (p *rustMacroParser) parseImplBlock() []MethodNode {
 
 	for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
 		// #[public] is no longer supported — `pub fn` marks public methods.
+		// N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+		// #[embed_always] on a method annotates nothing and is refused.
+		var sighashSpecs []*string
 		for p.current().kind == rustTokHashBracket {
-			methodAttr := p.parseAttribute()
-			if methodAttr == "public" {
+			methodAttr := p.parseDirectiveAttribute()
+			if methodAttr.kind == "sighash" {
+				sighashSpecs = append(sighashSpecs, methodAttr.flags)
+			} else if methodAttr.kind == "embed_always" {
+				errLoc := methodAttr.loc
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@embedAlways"), Severity: SeverityError, Loc: &errLoc})
+			} else if methodAttr.content == "public" {
 				p.errors = append(p.errors, Diagnostic{
 					Message:  "#[public] is no longer supported — use 'pub fn' for public methods",
 					Severity: SeverityError,
@@ -825,7 +913,21 @@ func (p *rustMacroParser) parseImplBlock() []MethodNode {
 			p.advance()
 			visibility = "public"
 		}
-		methods = append(methods, p.parseFunction(visibility))
+		if p.current().kind != rustTokFn {
+			for range sighashSpecs {
+				errLoc := p.loc()
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+			}
+			sighashSpecs = nil
+		}
+		method := p.parseFunction(visibility)
+		sighashType, sighashErr := resolveNativeSighash(method.Name, visibility == "public", sighashSpecs)
+		if sighashErr != "" {
+			errLoc := method.SourceLocation
+			p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+		}
+		method.SighashType = sighashType
+		methods = append(methods, method)
 	}
 	p.expect(rustTokRBrace)
 	return methods

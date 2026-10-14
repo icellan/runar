@@ -211,6 +211,61 @@ public final class SighashDirective {
         return parseSighashFlags(seg);
     }
 
+    /**
+     * N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+     * (Solidity {@code sighash(...)}, Move/Rust {@code #[sighash(...)]}, Go
+     * {@code //runar:sighash ...}, Python {@code @public(sighash="...")}, Zig
+     * {@code runar.Sighash("...")}, Ruby {@code runar_sighash '...'}, Java
+     * {@code @Sighash("...")}).
+     *
+     * <p>{@code specs} holds one entry per spelling found on the method: the
+     * flag text, or {@code null} when the spelling's argument was not well
+     * formed (a non-identifier token, a non-string argument, ...). Returns
+     * {@code null} when there is no spelling, else the numeric type or the
+     * diagnostic — the SAME diagnostics the {@code .runar.ts} comment directive
+     * produces, checked in the same order: non-public method, then more than
+     * one spelling, then malformed, then the flag grammar of
+     * {@link #parseSighashFlags}. Mirrors {@code resolveNativeSighash} in the TS
+     * reference (sighash-directive.ts); identical in all seven tiers.
+     */
+    public static Result resolveNativeSighash(String methodName, boolean isPublic, java.util.List<String> specs) {
+        if (specs.isEmpty()) {
+            return null;
+        }
+        if (!isPublic) {
+            return Result.err("@sighash directive on non-public method '" + methodName
+                + "' has no effect — only public methods are spending entry points");
+        }
+        if (specs.size() > 1) {
+            return Result.err("Method '" + methodName + "': " + SIGHASH_MULTIPLE_ERROR);
+        }
+        String spec = specs.get(0);
+        if (spec == null) {
+            return Result.err("Method '" + methodName + "': " + SIGHASH_MALFORMED_ERROR);
+        }
+        Result result = parseSighashFlags(spec);
+        if (result.isError()) {
+            return Result.err("Method '" + methodName + "': " + result.error());
+        }
+        return result;
+    }
+
+    /**
+     * N-093: the Go DSL directive comment {@code //runar:<name> ...}. Only
+     * {@code sighash} exists; any other name is refused rather than ignored, so
+     * a typo such as {@code //runar:sighsh} cannot silently drop the
+     * declaration.
+     */
+    public static String unknownGoDirectiveMessage(String name) {
+        return "unknown Go DSL directive '//runar:" + name + "'; the only directive is //runar:sighash <FLAGS>";
+    }
+
+    /** N-093: an attribute on the Move surface other than the two directives. */
+    public static String unknownMoveAttributeMessage(String attr) {
+        return "unsupported Move attribute #[" + attr
+            + "]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]";
+    }
+
     /** Human-readable rendering of a sighash value (for diagnostics). */
     public static String describeSighash(int value) {
         java.util.List<String> parts = new java.util.ArrayList<>();

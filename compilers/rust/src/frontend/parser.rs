@@ -693,26 +693,58 @@ fn directive_present(text: &str, marker: &str) -> bool {
     false
 }
 
-/// Fail-closed guard for author-facing comment directives on non-TS surfaces.
+/// One non-TS surface: its extension, the human-readable surface name for the
+/// diagnostic, its format doc, the native spelling of each directive on it
+/// (N-093), and its parser. `.runar.ts` is intentionally absent: the default
+/// branch implements the comment directives. Mirrors the TS reference
+/// (01-parse.ts `NON_TS_SURFACES`).
+struct NonTsSurface {
+    ext: &'static str,
+    name: &'static str,
+    doc: &'static str,
+    sighash_spelling: &'static str,
+    embed_spelling: &'static str,
+    parse: fn(&str, Option<&str>) -> ParseResult,
+}
+
+const NON_TS_SURFACES: &[NonTsSurface] = &[
+    NonTsSurface { ext: ".runar.sol", name: "Solidity", doc: "solidity", sighash_spelling: "the function modifier sighash(<FLAGS>)", embed_spelling: "the property modifier embedAlways", parse: super::parser_sol::parse_solidity },
+    NonTsSurface { ext: ".runar.move", name: "Move", doc: "move", sighash_spelling: "the attribute #[sighash(<FLAGS>)]", embed_spelling: "the attribute #[embed_always]", parse: super::parser_move::parse_move },
+    NonTsSurface { ext: ".runar.rs", name: "Rust", doc: "rust", sighash_spelling: "the attribute #[sighash(<FLAGS>)]", embed_spelling: "the attribute #[embed_always]", parse: super::parser_rustmacro::parse_rust_dsl },
+    NonTsSurface { ext: ".runar.py", name: "Python", doc: "python", sighash_spelling: "@public(sighash=\"<FLAGS>\")", embed_spelling: "the wrapper type EmbedAlways[T]", parse: super::parser_python::parse_python },
+    NonTsSurface { ext: ".runar.go", name: "Go DSL", doc: "go", sighash_spelling: "the directive //runar:sighash <FLAGS>", embed_spelling: "the struct tag option runar:\"readonly,embedAlways\"", parse: super::parser_gocontract::parse_go_contract },
+    NonTsSurface { ext: ".runar.rb", name: "Ruby", doc: "ruby", sighash_spelling: "runar_sighash '<FLAGS>'", embed_spelling: "the prop option embed_always: true", parse: super::parser_ruby::parse_ruby },
+    NonTsSurface { ext: ".runar.zig", name: "Zig", doc: "zig", sighash_spelling: "the return type runar.Sighash(\"<FLAGS>\")", embed_spelling: "the type function runar.EmbedAlways(T)", parse: super::parser_zig::parse_zig },
+    NonTsSurface { ext: ".runar.java", name: "Java", doc: "java", sighash_spelling: "the annotation @Sighash(\"<FLAGS>\")", embed_spelling: "the annotation @EmbedAlways", parse: super::parser_java::parse_java },
+];
+
+/// Fail-closed guard for author-facing COMMENT directives on non-TS surfaces.
 /// `@sighash` (#123, per-method sighash type) and `@embedAlways` (#109,
-/// readonly-field DCE opt-out) are honoured only by the TypeScript (.runar.ts)
-/// parser, which reads leading trivia. The eight non-TS surface parsers ignore
-/// comments, so a directive there would be silently dropped and change signing
-/// / DCE semantics — reject rather than miscompile. `@embedAlways` is
-/// word-boundary matched (via `directive_present`) so an identifier like
-/// `sighashType` does not trip it; `@sighash` is a plain substring match
-/// (N-244): N-039 made every occurrence of the marker a directive, so a glued
-/// `@sighashSINGLE|FORKID` is refused too, with the message every tier shares.
-/// Returns a diagnostic message, or `None` when the source is clean.
-fn unsupported_directive_error(source: &str, surface_name: &str) -> Option<String> {
+/// readonly-field DCE opt-out) are read from comments only by the TypeScript
+/// (.runar.ts) parser, which reads leading trivia. The eight non-TS surfaces
+/// spell both directives natively instead (N-093, user decision R38: a
+/// modifier mirroring each surface's readonly idiom — see `NON_TS_SURFACES`),
+/// and their parsers ignore comments, so a comment directive there would be
+/// silently dropped and change signing / DCE semantics — reject rather than
+/// miscompile, and name the native spelling to use. None of the native
+/// spellings contains either marker, so this guard never trips on them.
+/// `@embedAlways` is word-boundary matched (via `directive_present`) so an
+/// identifier like `sighashType` does not trip it; `@sighash` is a plain
+/// substring match (N-244): N-039 made every occurrence of the marker a
+/// directive, so a glued `@sighashSINGLE|FORKID` is refused too, with the
+/// message every tier shares. Returns a diagnostic message, or `None` when the
+/// source is clean.
+fn unsupported_directive_error(source: &str, s: &NonTsSurface) -> Option<String> {
     if source.contains("@sighash") {
         return Some(format!(
-            "@sighash directive (issue #123) is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured"
+            "@sighash directive (issue #123) is not supported as a comment by the {} surface parser; write it as {} (see docs/formats/{}.md)",
+            s.name, s.sighash_spelling, s.doc
         ));
     }
     if directive_present(source, "@embedAlways") {
         return Some(format!(
-            "@embedAlways directive (issue #109) is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured"
+            "@embedAlways directive (issue #109) is not supported as a comment by the {} surface parser; write it as {} (see docs/formats/{}.md)",
+            s.name, s.embed_spelling, s.doc
         ));
     }
     None
@@ -2242,57 +2274,18 @@ fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
         };
     }
     let name = file_name.unwrap_or("contract.ts");
-    // Fail-closed directive guard: `@sighash` / `@embedAlways` are honoured only
-    // on the TypeScript (.runar.ts) surface; the eight non-TS surface parsers
-    // below ignore comments, so a directive there would be silently dropped.
-    // Reject rather than miscompile. The default TS branch is exempt.
-    if name.ends_with(".runar.sol") {
-        if let Some(msg) = unsupported_directive_error(source, "Solidity") {
-            return directive_guard_result(msg);
+    // Fail-closed directive guard: `@sighash` / `@embedAlways` COMMENTS are
+    // read only on the TypeScript (.runar.ts) surface; the eight non-TS surface
+    // parsers below ignore comments, so a comment directive there would be
+    // silently dropped. Reject rather than miscompile, naming the surface's
+    // native spelling (N-093). The default TS branch is exempt.
+    for s in NON_TS_SURFACES {
+        if name.ends_with(s.ext) {
+            if let Some(msg) = unsupported_directive_error(source, s) {
+                return directive_guard_result(msg);
+            }
+            return (s.parse)(source, file_name);
         }
-        return super::parser_sol::parse_solidity(source, file_name);
-    }
-    if name.ends_with(".runar.move") {
-        if let Some(msg) = unsupported_directive_error(source, "Move") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_move::parse_move(source, file_name);
-    }
-    if name.ends_with(".runar.rs") {
-        if let Some(msg) = unsupported_directive_error(source, "Rust") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_rustmacro::parse_rust_dsl(source, file_name);
-    }
-    if name.ends_with(".runar.py") {
-        if let Some(msg) = unsupported_directive_error(source, "Python") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_python::parse_python(source, file_name);
-    }
-    if name.ends_with(".runar.go") {
-        if let Some(msg) = unsupported_directive_error(source, "Go DSL") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_gocontract::parse_go_contract(source, file_name);
-    }
-    if name.ends_with(".runar.rb") {
-        if let Some(msg) = unsupported_directive_error(source, "Ruby") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_ruby::parse_ruby(source, file_name);
-    }
-    if name.ends_with(".runar.zig") {
-        if let Some(msg) = unsupported_directive_error(source, "Zig") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_zig::parse_zig(source, file_name);
-    }
-    if name.ends_with(".runar.java") {
-        if let Some(msg) = unsupported_directive_error(source, "Java") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_java::parse_java(source, file_name);
     }
     // Default: TypeScript parser
     parse(source, file_name)

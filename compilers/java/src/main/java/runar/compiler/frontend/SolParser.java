@@ -41,6 +41,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.sol} (Solidity-like) source into a Rúnar
@@ -460,6 +461,13 @@ public final class SolParser {
             return new Token(TOK_EOF, "", 0, 0);
         }
 
+        Token peekAt(int n) {
+            if (pos + n < tokens.size()) {
+                return tokens.get(pos + n);
+            }
+            return new Token(TOK_EOF, "", 0, 0);
+        }
+
         Token advance() {
             Token tok = peek();
             if (pos < tokens.size()) {
@@ -649,10 +657,25 @@ public final class SolParser {
             String typeName = typeTok.value;
             TypeNode propType = parseSolFixedArraySuffix(parseSolType(typeName));
 
+            // Modifiers, any order: `immutable` (readonly) and N-093's
+            // `embedAlways` (the native spelling of the `@embedAlways`
+            // directive). An `embedAlways` directly followed by `;` or `=` is
+            // the property NAME, not a modifier.
             boolean isReadonly = false;
-            if (checkIdent("immutable")) {
-                advance();
-                isReadonly = true;
+            boolean embedAlways = false;
+            for (;;) {
+                if (checkIdent("immutable")) {
+                    advance();
+                    isReadonly = true;
+                    continue;
+                }
+                if (checkIdent("embedAlways")
+                    && peekAt(1).kind != TOK_SEMICOLON && peekAt(1).kind != TOK_ASSIGN) {
+                    advance();
+                    embedAlways = true;
+                    continue;
+                }
+                break;
             }
 
             Token nameTok = expect(TOK_IDENT);
@@ -671,7 +694,8 @@ public final class SolParser {
                 isReadonly,
                 initializer,
                 location,
-                null
+                null,
+                embedAlways
             );
         }
 
@@ -772,12 +796,21 @@ public final class SolParser {
 
             List<ParamNode> params = parseSolParams(false);
 
+            // Modifiers. N-093: `sighash(FLAGS)` among them is the native
+            // spelling of the `@sighash` directive; FLAGS must be identifiers
+            // separated by `|`, any other token makes the spelling malformed.
             Visibility visibility = Visibility.PRIVATE;
+            List<String> sighashSpecs = new ArrayList<>();
             while (checkIdent("public") || checkIdent("private")
                 || checkIdent("external") || checkIdent("internal")
                 || checkIdent("view") || checkIdent("pure")
-                || checkIdent("returns") || checkIdent("payable")) {
+                || checkIdent("returns") || checkIdent("payable")
+                || (checkIdent("sighash") && peekAt(1).kind == TOK_LPAREN)) {
                 Token tok = advance();
+                if (tok.value.equals("sighash")) {
+                    sighashSpecs.add(parseSighashFlagTokens());
+                    continue;
+                }
                 if (tok.value.equals("public") || tok.value.equals("external")) {
                     visibility = Visibility.PUBLIC;
                 }
@@ -796,7 +829,38 @@ public final class SolParser {
 
             List<Statement> body = parseSolBlock();
 
-            return new MethodNode(name, params, body, visibility, location);
+            SighashDirective.Result sighash =
+                SighashDirective.resolveNativeSighash(name, visibility == Visibility.PUBLIC, sighashSpecs);
+            if (sighash != null && sighash.isError()) {
+                addError(sighash.error());
+            }
+            return new MethodNode(name, params, body, visibility, location,
+                sighash == null || sighash.isError() ? null : sighash.value());
+        }
+
+        /**
+         * N-093: {@code ( IDENT ( '|' IDENT )* )} after {@code sighash} -> the
+         * flag text, or {@code null} when anything else appears inside the
+         * parentheses. Always consumes through the matching {@code )} so a
+         * malformed spelling does not derail parsing. Mirrors the TS reference
+         * parseSighashFlagTokens.
+         */
+        String parseSighashFlagTokens() {
+            expect(TOK_LPAREN);
+            StringBuilder text = new StringBuilder();
+            boolean ok = true;
+            int depth = 1;
+            while (!check(TOK_EOF)) {
+                Token t = peek();
+                if (t.kind == TOK_LPAREN) depth++;
+                if (t.kind == TOK_RPAREN && --depth == 0) break;
+                if (t.kind == TOK_IDENT) text.append(t.value);
+                else if (t.kind == TOK_PIPE) text.append('|');
+                else ok = false;
+                advance();
+            }
+            expect(TOK_RPAREN);
+            return ok ? text.toString() : null;
         }
 
         // ---- Parameter list -------------------------------------------

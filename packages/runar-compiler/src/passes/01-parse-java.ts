@@ -50,6 +50,7 @@ import {
 } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -505,6 +506,11 @@ class JavaParser {
     // Annotations precede modifiers.
     let readonly = false;
     let publicAnn = false;
+    // N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+    // the `@embedAlways` / `@sighash` directives.
+    let embedAlways: SourceLocation | null = null;
+    const sighashSpecs: Array<string | null> = [];
+    let sighashLoc: SourceLocation | null = null;
     while (this.current().type === '@') {
       const start = this.pos;
       this.expect('@');
@@ -519,6 +525,7 @@ class JavaParser {
         name = this.expect('ident').value;
       }
       // optional (...)
+      const argStart = this.pos;
       if (this.current().type === '(') {
         let depth = 0;
         while (this.current().type !== 'eof') {
@@ -527,8 +534,15 @@ class JavaParser {
           else this.advance();
         }
       }
+      const args = this.tokens.slice(argStart, this.pos); // `(` ... `)`, or empty
+      const annLoc = { file: this.file, line: this.tokens[start]!.line, column: this.tokens[start]!.column };
       if (name === 'Readonly') readonly = true;
       else if (name === 'Public') publicAnn = true;
+      else if (name === 'EmbedAlways') embedAlways = annLoc;
+      else if (name === 'Sighash') {
+        sighashLoc ??= annLoc;
+        sighashSpecs.push(args.length === 3 && args[1]!.type === 'string' ? args[1]!.value : null);
+      }
       else if (name === 'Stateful' || name === 'Override' || name === 'SuppressWarnings') {
         // accepted but ignored
       } else {
@@ -556,6 +570,9 @@ class JavaParser {
         && this.current().value === className
         && this.lookahead(1).type === '(') {
       const method = this.parseConstructor(className, loc);
+      // N-093: the constructor is neither a spending entry point nor a field.
+      if (sighashLoc) this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', sighashLoc));
+      if (embedAlways) this.errors.push(makeDiagnostic(lostDirectiveMessage('@embedAlways'), 'error', embedAlways));
       return { kind: 'method', method, isConstructor: true };
     }
 
@@ -583,8 +600,16 @@ class JavaParser {
         this.errors.push(makeDiagnostic(staticMethodMessage(memberName), 'error', loc));
       }
       const method = this.parseMethodBody(memberName, type, publicAnn, loc);
+      if (embedAlways) this.errors.push(makeDiagnostic(lostDirectiveMessage('@embedAlways'), 'error', embedAlways));
+      const sighash = resolveNativeSighash(memberName, publicAnn, sighashSpecs);
+      if (sighash && 'error' in sighash) {
+        this.errors.push(makeDiagnostic(sighash.error, 'error', loc));
+      } else if (sighash) {
+        method.sighashType = sighash.value;
+      }
       return { kind: 'method', method, isConstructor: false };
     }
+    if (sighashLoc) this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', sighashLoc));
 
     // Field declaration
     let initializer: Expression | undefined;
@@ -603,6 +628,7 @@ class JavaParser {
       type,
       readonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
     return prop;

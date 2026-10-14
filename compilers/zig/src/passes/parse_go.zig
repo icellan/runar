@@ -32,6 +32,7 @@ const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -93,6 +94,7 @@ pub fn parseGo(allocator: Allocator, source: []const u8, file_name: []const u8) 
         return .{ .contract = null, .errors = errs };
     }
     var parser = Parser.init(allocator, source, file_name);
+    parser.directives = collectGoDirectives(allocator, source);
     const r = parser.parse();
     // F-213: an over-nested source is refused with the one shared diagnostic,
     // before anything here or downstream recurses over the tree.
@@ -110,6 +112,110 @@ pub fn parseGo(allocator: Allocator, source: []const u8, file_name: []const u8) 
     return .{ .contract = r.contract, .errors = errs };
 }
 
+
+// ============================================================================
+// N-093: Go DSL directive comments
+// ============================================================================
+
+/// A Go DSL directive comment `//runar:<name> <args>` (Go's own `//go:`
+/// convention: no space after `//`). `attach_line`/`attach_col` locate the
+/// first token after the comment, so a directive attaches to the declaration
+/// that follows it, with only comments and blank lines in between.
+const GoDirective = struct {
+    name: []const u8,
+    args: []const u8,
+    line: u32,
+    col: u32,
+    attach_line: u32,
+    attach_col: u32,
+    consumed: bool = false,
+};
+
+/// Every `//runar:` directive comment in `source`, in source order. Walks the
+/// real tokenizer so a `//runar:` inside a string literal is never read as a
+/// directive; each whitespace/comment gap between two tokens is re-scanned
+/// for line comments (the gap holds nothing else, so the re-scan is exact).
+fn collectGoDirectives(allocator: Allocator, source: []const u8) []GoDirective {
+    var out: std.ArrayListUnmanaged(GoDirective) = .empty;
+    var t = Tokenizer.init(source);
+    var guard: usize = 0;
+    while (guard <= source.len) : (guard += 1) {
+        const gap_start = t.pos;
+        var line = t.line;
+        var col = t.col;
+        t.skipWhitespaceAndComments();
+        const first = out.items.len;
+        var i = gap_start;
+        while (i < t.pos) {
+            const c = source[i];
+            if (c == '/' and i + 1 < t.pos and source[i + 1] == '/') {
+                const start = i;
+                const start_col = col;
+                while (i < t.pos and source[i] != '\n') : (i += 1) col += 1;
+                var text = source[start..i];
+                if (text.len > 0 and text[text.len - 1] == '\r') text = text[0 .. text.len - 1];
+                const prefix = "//runar:";
+                if (std.mem.startsWith(u8, text, prefix)) {
+                    const body = text[prefix.len..];
+                    const name_end = std.mem.indexOfAny(u8, body, " \t") orelse body.len;
+                    out.append(allocator, .{
+                        .name = body[0..name_end],
+                        .args = body[name_end..],
+                        .line = line,
+                        .col = start_col,
+                        .attach_line = 0,
+                        .attach_col = 0,
+                    }) catch {};
+                }
+                continue;
+            }
+            if (c == '/' and i + 1 < t.pos and source[i + 1] == '*') {
+                i += 2;
+                col += 2;
+                while (i < t.pos) {
+                    if (source[i] == '*' and i + 1 < t.pos and source[i + 1] == '/') {
+                        i += 2;
+                        col += 2;
+                        break;
+                    }
+                    if (source[i] == '\n') {
+                        line += 1;
+                        col = 1;
+                    } else col += 1;
+                    i += 1;
+                }
+                continue;
+            }
+            if (c == '\n') {
+                line += 1;
+                col = 1;
+            } else col += 1;
+            i += 1;
+        }
+        for (out.items[first..]) |*d| {
+            d.attach_line = t.line;
+            d.attach_col = t.col;
+        }
+        if (t.next().kind == .eof) break;
+    }
+    return out.items;
+}
+
+/// N-093: the value of the `runar:"..."` key of a Go struct tag (the key must
+/// start the tag or follow whitespace), or null when the tag has no such key.
+/// Mirrors the TS reference's `/(?:^|\s)runar:"([^"]*)"/`.
+fn goRunarTagValue(tag: []const u8) ?[]const u8 {
+    const key = "runar:\"";
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, tag, from, key)) |pos| {
+        from = pos + 1;
+        if (pos > 0 and !std.ascii.isWhitespace(tag[pos - 1])) continue;
+        const start = pos + key.len;
+        const end = std.mem.indexOfScalarPos(u8, tag, start, '"') orelse return null;
+        return tag[start..end];
+    }
+    return null;
+}
 
 // ============================================================================
 // Token Types
@@ -761,6 +867,8 @@ const Parser = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
     nest_error: ?[]const u8 = null,
+    /// N-093: every `//runar:` directive in the file, in source order.
+    directives: []GoDirective = &.{},
     receiver_name: []const u8, // current method's receiver variable name (e.g. "c", "m", "self")
     contract_name: []const u8, // the contract struct name
     /// F-017: declared (spelling, Rúnar name) pairs.
@@ -768,6 +876,36 @@ const Parser = struct {
     /// N-056: binary nodes that are expression operands (parenthesised
     /// groups, BigintBig rewrites) and so are atoms to the precedence check.
     go_atoms: std.AutoHashMapUnmanaged(*BinaryOp, void) = .empty,
+
+    /// N-093: the flag specs of the `//runar:sighash` directives attached to
+    /// the declaration whose first token is at `line`/`col` (null for a
+    /// malformed one).
+    fn takeSighashDirectives(self: *Parser, line: u32, col: u32) []const ?[]const u8 {
+        var specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        for (self.directives) |*d| {
+            if (d.attach_line != line or d.attach_col != col or !std.mem.eql(u8, d.name, "sighash")) continue;
+            d.consumed = true;
+            var ok = d.args.len == 0 or d.args[0] == ' ' or d.args[0] == '\t';
+            for (d.args) |ch| {
+                if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '|' or ch == ' ' or ch == '\t')) ok = false;
+            }
+            specs.append(self.allocator, if (ok) d.args else null) catch {};
+        }
+        return specs.items;
+    }
+
+    /// N-093: refuse every directive that is unknown or attached to no func.
+    fn reportStrayDirectives(self: *Parser) void {
+        for (self.directives) |d| {
+            if (d.consumed) continue;
+            const msg = if (std.mem.eql(u8, d.name, "sighash"))
+                sighash_directive.LOST_SIGHASH_ERROR
+            else
+                sighash_directive.unknownGoDirectiveMessage(self.allocator, std.mem.concat(self.allocator, u8, &.{ d.name, d.args }) catch d.name);
+            const full = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, d.line, lex_diag.diagCol(d.col), msg }) catch continue;
+            self.errors.append(self.allocator, full) catch {};
+        }
+    }
 
     /// Convert a DECLARED identifier and record it for the F-017 collision
     /// rule (see identifier_collision.zig).
@@ -936,6 +1074,7 @@ const Parser = struct {
                 _ = self.bump();
             }
         }
+        self.reportStrayDirectives();
 
         if (!found_struct) {
             self.addError(go_no_contract_message);
@@ -1126,12 +1265,20 @@ const Parser = struct {
             // parse_python.zig.
             const parsed_type = self.parseGoFieldType();
 
-            // Check for struct tag
+            // Check for struct tag. The `runar` key holds comma-separated
+            // options (N-093): `readonly`, and `embedAlways` — the native
+            // spelling of the `@embedAlways` directive — in any order.
             var is_readonly = false;
+            var embed_always = false;
             if (self.current.kind == .backtick_string) {
                 const tag = self.bump().text;
-                if (std.mem.indexOf(u8, tag, "runar:\"readonly\"") != null) {
-                    is_readonly = true;
+                if (goRunarTagValue(tag)) |value| {
+                    var opts = std.mem.splitScalar(u8, value, ',');
+                    while (opts.next()) |raw_opt| {
+                        const opt = std.mem.trim(u8, raw_opt, " \t\r\n");
+                        if (std.mem.eql(u8, opt, "readonly")) is_readonly = true;
+                        if (std.mem.eql(u8, opt, "embedAlways")) embed_always = true;
+                    }
                 }
             }
 
@@ -1142,6 +1289,7 @@ const Parser = struct {
                 .name = field_name,
                 .type_info = parsed_type.type_info,
                 .readonly = readonly,
+                .embed_always = embed_always,
                 // N-109: spelled type name + field-name token, for the
                 // validator's unsupported-type diagnostic. Diagnostics only.
                 .type_name = parsed_type.type_name,
@@ -1312,6 +1460,9 @@ const Parser = struct {
     /// name (`*` stripped) or null for a free function; parse() checks it
     /// against the contract struct once the whole file is read (F-010).
     fn parseFuncDecl(self: *Parser) ?FuncDecl {
+        // N-093: the `//runar:sighash` directives directly above this func.
+        const func_line = self.current.line;
+        const func_col = self.current.col;
         _ = self.bump(); // consume 'func'
 
         // Check for receiver: (c *Type)
@@ -1366,14 +1517,24 @@ const Parser = struct {
         // Parse body
         const body = self.parseBlock();
 
+        // Standalone function: a private helper. F-010: exported ones too,
+        // exactly as in the TS reference.
+        const final_public = has_receiver and is_public;
+        var sighash_type: ?i32 = null;
+        if (sighash_directive.resolveNativeSighash(self.allocator, method_name, final_public, self.takeSighashDirectives(func_line, func_col))) |r| switch (r) {
+            .value => |v| sighash_type = v,
+            .err => |e| {
+                const full = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, method_loc.line, lex_diag.diagCol(method_loc.column), e }) catch e;
+                self.errors.append(self.allocator, full) catch {};
+            },
+        };
+
         if (!has_receiver) {
-            // Standalone function: a private helper. F-010: exported ones
-            // too, exactly as in the TS reference.
             self.receiver_name = "";
-            return .{ .method = .{ .name = method_name, .is_public = false, .params = params, .body = body, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = null };
+            return .{ .method = .{ .name = method_name, .is_public = false, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = null };
         }
 
-        return .{ .method = .{ .name = method_name, .is_public = is_public, .params = params, .body = body, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = receiver_type };
+        return .{ .method = .{ .name = method_name, .is_public = is_public, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = receiver_type };
     }
 
     fn parseGoParams(self: *Parser) []ParamNode {

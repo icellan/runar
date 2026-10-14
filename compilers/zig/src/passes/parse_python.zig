@@ -31,6 +31,7 @@ const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -901,6 +902,42 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-093: the argument list of `@public(...)`. The only argument is the
+    /// keyword `sighash=<str>`; each one yields its string, and any other
+    /// argument (positional, another keyword, a non-str value) yields null,
+    /// which is refused as a malformed spelling.
+    fn parsePublicDecoratorArgs(self: *Parser, specs: *std.ArrayListUnmanaged(?[]const u8)) void {
+        _ = self.expect(.lparen);
+        while (self.current.kind != .rparen and self.current.kind != .newline and self.current.kind != .eof) {
+            const is_sighash_kw = self.checkIdent("sighash") and self.tokenizer.peek().kind == .assign;
+            if (is_sighash_kw) {
+                _ = self.bump(); // 'sighash'
+                _ = self.bump(); // '='
+            }
+            // One argument value: up to the next top-level ',' or ')'.
+            const first = self.current;
+            var count: usize = 0;
+            var depth: i32 = 0;
+            while (self.current.kind != .newline and self.current.kind != .eof) {
+                const k = self.current.kind;
+                if ((k == .comma or k == .rparen) and depth == 0) break;
+                if (k == .lparen or k == .lbracket) depth += 1;
+                if (k == .rparen or k == .rbracket) depth -= 1;
+                _ = self.bump();
+                count += 1;
+            }
+            const spec: ?[]const u8 = if (is_sighash_kw and count == 1 and first.kind == .string_literal) first.text else null;
+            specs.append(self.allocator, spec) catch {};
+            if (!self.match(.comma)) break;
+        }
+        _ = self.expect(.rparen);
+    }
+
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
@@ -1050,11 +1087,17 @@ const Parser = struct {
                 var decorator: []const u8 = "";
                 var any_public = false;
                 var any_static = false;
+                var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
                 while (self.current.kind == .at_sign) {
                     _ = self.bump(); // consume '@'
                     decorator = if (self.current.kind == .ident) self.bump().text else "";
                     if (std.mem.eql(u8, decorator, "public")) any_public = true;
                     if (std.mem.eql(u8, decorator, "staticmethod") or std.mem.eql(u8, decorator, "classmethod")) any_static = true;
+                    // N-093: `@public(sighash="FLAGS")` is the native
+                    // spelling of the `@sighash` directive.
+                    if (std.mem.eql(u8, decorator, "public") and self.current.kind == .lparen) {
+                        self.parsePublicDecoratorArgs(&sighash_specs);
+                    }
                     self.skipNewlines();
                 }
                 // The next thing should be a def
@@ -1063,7 +1106,16 @@ const Parser = struct {
                         // N-050: a class-level function is not a contract method.
                         self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{self.tokenizer.peek().text});
                     }
-                    const method = self.parsePyMethod(if (any_public) "public" else "private");
+                    const def_loc = self.currentSourceLoc();
+                    const is_init = std.mem.eql(u8, self.tokenizer.peek().text, "__init__");
+                    var method = self.parsePyMethod(if (any_public) "public" else "private");
+                    if (is_init) {
+                        // N-093: the constructor is not a spending entry point.
+                        if (sighash_specs.items.len > 0) self.addErrorAtLoc(def_loc, sighash_directive.LOST_SIGHASH_ERROR);
+                    } else if (sighash_directive.resolveNativeSighash(self.allocator, method.name, method.is_public, sighash_specs.items)) |r| switch (r) {
+                        .value => |v| method.sighash_type = v,
+                        .err => |e| self.addErrorAtLoc(def_loc, e),
+                    };
                     methods.append(self.allocator, method) catch {};
                 } else {
                     self.addErrorFmt("expected 'def' after @{s} decorator", .{decorator});
@@ -1133,10 +1185,15 @@ const Parser = struct {
 
         _ = self.expect(.colon); // consume ':'
 
-        // Check for Readonly[T]
+        // Readonly[T]. N-093: `EmbedAlways[T]` is the native spelling of the
+        // `@embedAlways` directive; the two wrappers compose in either order.
         var is_readonly = false;
-        if (self.checkIdent("Readonly")) {
-            is_readonly = true;
+        var embed_always = false;
+        var wrappers: usize = 0;
+        while (self.checkIdent("Readonly") or self.checkIdent("EmbedAlways")) {
+            if (std.mem.eql(u8, self.bump().text, "Readonly")) is_readonly = true else embed_always = true;
+            _ = self.expect(.lbracket);
+            wrappers += 1;
         }
         // In SmartContract (and UnsafeSmartContract), all properties are
         // automatically readonly.
@@ -1145,6 +1202,7 @@ const Parser = struct {
         }
 
         const type_node = self.parsePyTypeAnnotation();
+        for (0..wrappers) |_| _ = self.expect(.rbracket);
         const type_info = typeNodeToRunarType(type_node);
 
         // Optional initializer: = value
@@ -1177,6 +1235,7 @@ const Parser = struct {
             .type_info = type_info,
             .readonly = is_readonly,
             .initializer = initializer,
+            .embed_always = embed_always,
             // N-109: spelled type name + field-name token, for the validator's
             // unsupported-type diagnostic. Diagnostics only.
             .type_name = types.typeNodeName(type_node),

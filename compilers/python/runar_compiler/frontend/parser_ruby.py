@@ -30,6 +30,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nesting, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
@@ -861,6 +862,8 @@ class _RbParser:
         # Pending visibility/param types for the next method
         pending_visibility: str | None = None
         pending_param_types: dict[str, TypeNode] | None = None
+        # N-093: ``runar_sighash`` flag specs awaiting the next ``def``.
+        pending_sighash: list[str | None] = []
 
         while self._peek().kind not in (TOK_END, TOK_EOF):
             self._skip_newlines()
@@ -872,6 +875,20 @@ class _RbParser:
                 prop = self._parse_prop(parent_class)
                 if prop is not None:
                     properties.append(prop)
+                self._skip_newlines()
+                continue
+
+            # N-093: ``runar_sighash 'FLAGS'`` is the native spelling of the
+            # ``@sighash`` directive; it applies to the next ``def``.
+            if self._check_ident("runar_sighash"):
+                self._advance()  # 'runar_sighash'
+                arg = self._peek()
+                count = 0
+                while self._peek().kind not in (TOK_NEWLINE, TOK_EOF):
+                    self._advance()
+                    count += 1
+                is_str = arg.kind in (TOK_STRING, TOK_HEXSTRING)
+                pending_sighash.append(arg.value if count == 1 and is_str else None)
                 self._skip_newlines()
                 continue
 
@@ -894,11 +911,22 @@ class _RbParser:
             if self._peek().kind == TOK_DEF:
                 method = self._parse_method(pending_visibility, pending_param_types)
                 if method.name == "constructor":
+                    # N-093: the constructor is not a spending entry point.
+                    for _ in pending_sighash:
+                        self._errors.append(lost_directive_message("@sighash"))
                     constructor = method
                 else:
+                    sighash = resolve_native_sighash(
+                        method.name, method.visibility == "public", pending_sighash,
+                    )
+                    if sighash is not None and sighash.error is not None:
+                        self._errors.append(sighash.error)
+                    elif sighash is not None:
+                        method.sighash_type = sighash.value
                     methods.append(method)
                 pending_visibility = None
                 pending_param_types = None
+                pending_sighash = []
                 self._skip_newlines()
                 continue
 
@@ -911,6 +939,10 @@ class _RbParser:
             # N-004: refuse anything else (an indented ``=begin`` lexes as ``=``).
             stray = self._advance()
             self._errors.append(unexpected_class_body_token_message(stray.value))
+
+        # N-093: a ``runar_sighash`` with no ``def`` after it annotates nothing.
+        for _ in pending_sighash:
+            self._errors.append(lost_directive_message("@sighash"))
 
         self._match(TOK_END)  # end of class
 
@@ -1008,13 +1040,25 @@ class _RbParser:
         type_node = self._parse_type()
 
         is_readonly = False
+        embed_always = False
         initializer: Expression | None = None
 
         # Check for optional trailing ``readonly: true`` or ``default: value``
         while self._peek().kind == TOK_COMMA:
             self._advance()  # ','
 
-            if self._check_ident("readonly"):
+            if self._check_ident("embed_always"):
+                # N-093: the native spelling of the ``@embedAlways`` directive.
+                self._advance()  # 'embed_always'
+                self._expect(TOK_COLON, ":")
+                if self._peek().kind == TOK_TRUE:
+                    self._advance()
+                    embed_always = True
+                elif self._peek().kind == TOK_FALSE:
+                    self._advance()
+                    embed_always = False
+
+            elif self._check_ident("readonly"):
                 self._advance()  # 'readonly'
                 self._expect(TOK_COLON, ":")
                 if self._peek().kind == TOK_TRUE:
@@ -1043,6 +1087,7 @@ class _RbParser:
             type=type_node,
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=embed_always,
             source_location=loc,
         )
 

@@ -133,6 +133,36 @@ Special identifiers:
 
 ---
 
+## Compiler Directives
+
+Both directives are annotations from `runar.lang.annotations`:
+
+```java
+class Directives extends SmartContract {
+    @Readonly Addr pubKeyHash;
+    @Readonly @EmbedAlways ByteString deployTag;          // @embedAlways
+
+    @Public
+    @Sighash("SINGLE|FORKID")                              // @sighash
+    void spendSingle(Sig sig, PubKey pubKey) { ... }
+}
+```
+
+- `@EmbedAlways` is a field annotation, next to `@Readonly`.
+- `@Sighash("FLAGS")` is a method annotation, next to `@Public`. Its argument
+  must be one string literal.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/java/src/main/java/runar/examples/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mappings
 
 | Java Type | Rúnar AST Type |

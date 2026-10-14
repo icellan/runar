@@ -218,6 +218,45 @@ assert!(x >= self.threshold);
 
 ---
 
+## Compiler Directives
+
+Both directives are attributes:
+
+```rust
+#[runar::contract]
+pub struct Directives {
+    #[readonly]
+    pub pub_key_hash: Addr,
+    #[readonly]
+    #[embed_always]                       // @embedAlways
+    pub deploy_tag: ByteString,
+}
+
+impl Directives {
+    #[sighash(SINGLE | FORKID)]           // @sighash
+    pub fn spend_single(&self, sig: &Sig, pub_key: &PubKey) { ... }
+}
+```
+
+- `#[embed_always]` is a field attribute, stackable with `#[readonly]` in either
+  order. `#[runar::contract]` (and the stateful / unsafe variants) strips it, as
+  it strips `#[readonly]`, so the struct still compiles as Rust.
+- `#[sighash(FLAGS)]` is a method attribute before `pub fn`. In Rust it is a
+  pass-through attribute macro exported by `runar::prelude`, so the impl block
+  compiles unchanged; `#[runar::sighash(FLAGS)]` is the same attribute. Inside
+  the parentheses only flag names and `|` may appear.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/rust/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mapping
 
 | Rust type | Rúnar type |

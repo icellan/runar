@@ -53,13 +53,15 @@ use super::diagnostic::{
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 
 // F-205: the annotation names Rúnar recognizes at member position, matching
 // the TS reference (01-parse-java.ts, parseMember). Anything else is a loud
 // "unsupported annotation" diagnostic rather than a silent visibility
-// downgrade.
-const F205_KNOWN_ANNOTATIONS: [&str; 5] =
-    ["Readonly", "Public", "Stateful", "Override", "SuppressWarnings"];
+// downgrade. N-093 adds `@EmbedAlways` / `@Sighash("FLAGS")`, the native
+// spellings of the `@embedAlways` / `@sighash` directives.
+const F205_KNOWN_ANNOTATIONS: [&str; 7] =
+    ["Readonly", "Public", "Stateful", "Override", "SuppressWarnings", "EmbedAlways", "Sighash"];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -837,6 +839,10 @@ impl<'a> JavaParser<'a> {
         // the TS reference's parseMember), never a silent visibility
         // downgrade.
         let mut annotations: Vec<String> = Vec::new();
+        // N-093: `@EmbedAlways` / `@Sighash("FLAGS")` locations and specs.
+        let mut embed_always: Option<SourceLocation> = None;
+        let mut sighash_specs: Vec<Option<String>> = Vec::new();
+        let mut sighash_loc: Option<SourceLocation> = None;
         while matches!(self.current().typ, TokenType::At) {
             let at_loc = self.loc();
             self.advance();
@@ -848,6 +854,7 @@ impl<'a> JavaParser<'a> {
                 name = self.expect_ident();
             }
             // Annotations may carry arguments (e.g. `@Foo("bar")`).
+            let arg_start = self.pos;
             if matches!(self.current().typ, TokenType::LParen) {
                 self.advance();
                 let mut depth = 1usize;
@@ -869,6 +876,17 @@ impl<'a> JavaParser<'a> {
                         }
                     }
                 }
+            }
+            // `(` ... `)`, or empty.
+            let args: Vec<TokenType> = self.tokens[arg_start..self.pos].iter().map(|t| t.typ.clone()).collect();
+            if name == "EmbedAlways" {
+                embed_always = Some(at_loc.clone());
+            } else if name == "Sighash" {
+                sighash_loc.get_or_insert_with(|| at_loc.clone());
+                sighash_specs.push(match args.as_slice() {
+                    [TokenType::LParen, TokenType::StringLit(v), TokenType::RParen] => Some(v.clone()),
+                    _ => None,
+                });
             }
             if !F205_KNOWN_ANNOTATIONS.contains(&name.as_str()) {
                 self.errors.push(Diagnostic::error(
@@ -915,6 +933,13 @@ impl<'a> JavaParser<'a> {
                 let body = self.parse_block();
                 if constructor.is_some() {
                     self.error(format!("{} has more than one constructor", class_name));
+                }
+                // N-093: the constructor is neither a spending entry point nor a field.
+                if let Some(loc) = sighash_loc {
+                    self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(loc)));
+                }
+                if let Some(loc) = embed_always {
+                    self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
                 }
                 *constructor = Some(MethodNode {
                     name: "constructor".to_string(),
@@ -979,6 +1004,19 @@ impl<'a> JavaParser<'a> {
                 Visibility::Private
             };
 
+            if let Some(loc) = embed_always {
+                self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
+            }
+            let sighash_type =
+                match resolve_native_sighash(&member_name, visibility == Visibility::Public, &sighash_specs) {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(msg)) => {
+                        self.errors.push(Diagnostic::error(msg, Some(member_loc.clone())));
+                        None
+                    }
+                    None => None,
+                };
+
             let _ = member_type; // return type not used structurally
             methods.push(MethodNode {
                 name: member_name,
@@ -986,9 +1024,12 @@ impl<'a> JavaParser<'a> {
                 body,
                 visibility,
                 source_location: member_loc,
-                sighash_type: None,
+                sighash_type,
             });
             return;
+        }
+        if let Some(loc) = sighash_loc {
+            self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(loc)));
         }
 
         // Field declaration: optional `= initializer`, then `;`.
@@ -1009,7 +1050,7 @@ impl<'a> JavaParser<'a> {
             initializer,
             source_location: member_loc,
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always: embed_always.is_some(),
         });
     }
 

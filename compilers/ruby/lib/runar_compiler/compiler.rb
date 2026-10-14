@@ -213,52 +213,49 @@ module RunarCompiler
   end
   private_class_method :_parse_source_dispatch
 
-  # Non-TS extension -> human-readable surface name for the shared @sighash
-  # diagnostic (N-244). Same names as every other tier's guard.
-  NON_TS_SURFACE_NAMES = {
-    ".runar.sol" => "Solidity",
-    ".runar.move" => "Move",
-    ".runar.py" => "Python",
-    ".runar.go" => "Go DSL",
-    ".runar.rs" => "Rust",
-    ".runar.rb" => "Ruby",
-    ".runar.zig" => "Zig",
-    ".runar.java" => "Java",
+  # Non-TS extension -> [human-readable surface name, format doc, native
+  # @sighash spelling, native @embedAlways spelling] for the shared guard
+  # diagnostic (N-244, N-093). Same table as every other tier's guard.
+  NON_TS_SURFACES = {
+    ".runar.sol" => ["Solidity", "solidity", "the function modifier sighash(<FLAGS>)", "the property modifier embedAlways"],
+    ".runar.move" => ["Move", "move", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"],
+    ".runar.py" => ["Python", "python", '@public(sighash="<FLAGS>")', "the wrapper type EmbedAlways[T]"],
+    ".runar.go" => ["Go DSL", "go", "the directive //runar:sighash <FLAGS>", 'the struct tag option runar:"readonly,embedAlways"'],
+    ".runar.rs" => ["Rust", "rust", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"],
+    ".runar.rb" => ["Ruby", "ruby", "runar_sighash '<FLAGS>'", "the prop option embed_always: true"],
+    ".runar.zig" => ["Zig", "zig", 'the return type runar.Sighash("<FLAGS>")', "the type function runar.EmbedAlways(T)"],
+    ".runar.java" => ["Java", "java", 'the annotation @Sighash("<FLAGS>")', "the annotation @EmbedAlways"],
   }.freeze
-  private_constant :NON_TS_SURFACE_NAMES
+  private_constant :NON_TS_SURFACES
 
-  # Detect the first unsupported author-facing comment directive in +source+,
+  # Detect the first unsupported author-facing COMMENT directive in +source+,
   # or nil when the source is clean. +@embedAlways+ is word-boundary matched
   # (\b) so an identifier like +sighashType+ does not trip the guard;
   # +@sighash+ is a plain substring match (N-244): N-039 made every occurrence
   # of the marker a directive, so a glued +@sighashSINGLE|FORKID+ is refused
   # too, with the message every tier shares.
   #
-  # The directives are honored ONLY on the +.runar.ts+ surface (matching the
-  # TypeScript reference). For +.runar.ts+ the implemented directives are
-  # allowed through to the parser; the other 8 formats always fail closed.
+  # The comment directives are read ONLY on the +.runar.ts+ surface (matching
+  # the TypeScript reference). The other 8 surfaces spell both directives
+  # natively (N-093, user decision R38) and their parsers drop comments, so a
+  # COMMENT directive there would be silently ignored: fail closed and name
+  # the native spelling. None of the native spellings contains either marker.
   def self._unsupported_directive_error(source, file_name)
     lower = file_name.downcase
-    is_ts = lower.end_with?(".runar.ts")
+    # An unrecognised extension has no surface entry and is refused by the
+    # dispatcher's unsupported-format error instead; .runar.ts is absent.
+    entry = NON_TS_SURFACES.find { |ext, _| lower.end_with?(ext) }&.last
+    return nil if entry.nil?
 
-    # @sighash (#123) is implemented for the .runar.ts surface; only the other
-    # 8 formats fail closed. An unrecognised extension has no surface name and
-    # is refused by the dispatcher's unsupported-format error instead.
-    surface = NON_TS_SURFACE_NAMES.find { |ext, _| lower.end_with?(ext) }&.last
-    if source.include?("@sighash") && !is_ts && !surface.nil?
-      return "@sighash directive (issue #123) is not supported by the #{surface} " \
-             "surface parser; write the contract in TypeScript (.runar.ts) where " \
-             "@sighash is honoured"
+    surface, doc, sighash_spelling, embed_spelling = entry
+    if source.include?("@sighash")
+      return "@sighash directive (issue #123) is not supported as a comment by the #{surface} " \
+             "surface parser; write it as #{sighash_spelling} (see docs/formats/#{doc}.md)"
     end
 
-    # @embedAlways (#109) is implemented for the .runar.ts surface; only the
-    # other 8 formats fail closed. Same shared-message shape as @sighash
-    # above (N-268, mirroring N-244): named by the actual surface that
-    # triggered it, not hardcoded to "Ruby" regardless of extension.
-    if source =~ /@embedAlways\b/ && !is_ts && !surface.nil?
-      return "@embedAlways directive (issue #109) is not supported by the #{surface} " \
-             "surface parser; write the contract in TypeScript (.runar.ts) where " \
-             "@embedAlways is honoured"
+    if source =~ /@embedAlways\b/
+      return "@embedAlways directive (issue #109) is not supported as a comment by the #{surface} " \
+             "surface parser; write it as #{embed_spelling} (see docs/formats/#{doc}.md)"
     end
 
     nil

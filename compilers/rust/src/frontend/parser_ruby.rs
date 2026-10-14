@@ -54,6 +54,7 @@ use super::diagnostic::{
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -1075,6 +1076,7 @@ impl<'a> RbParser<'a> {
         // Pending visibility/param types for the next method
         let mut pending_visibility: Option<Visibility> = None;
         let mut pending_param_types: Option<HashMap<String, TypeNode>> = None;
+        let mut pending_sighash: Vec<Option<String>> = Vec::new();
 
         while *self.peek() != Token::End && *self.peek() != Token::Eof {
             self.skip_newlines();
@@ -1087,6 +1089,24 @@ impl<'a> RbParser<'a> {
                 if let Some(prop) = self.parse_prop(&parent_class) {
                     properties.push(prop);
                 }
+                self.skip_newlines();
+                continue;
+            }
+
+            // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+            // `@sighash` directive; it applies to the next `def`.
+            if self.check_ident("runar_sighash") {
+                self.advance(); // 'runar_sighash'
+                let arg = self.peek().clone();
+                let mut count = 0;
+                while *self.peek() != Token::Newline && *self.peek() != Token::Eof {
+                    self.advance();
+                    count += 1;
+                }
+                pending_sighash.push(match arg {
+                    Token::StringLit(v) | Token::HexStringLit(v) if count == 1 => Some(v),
+                    _ => None,
+                });
                 self.skip_newlines();
                 continue;
             }
@@ -1114,13 +1134,24 @@ impl<'a> RbParser<'a> {
                     &pending_visibility,
                     &pending_param_types,
                 );
+                let mut method = method;
                 if method.name == "constructor" {
+                    // N-093: the constructor is not a spending entry point.
+                    for _ in &pending_sighash {
+                        self.errors.push(lost_directive_message("@sighash"));
+                    }
                     constructor = Some(method);
                 } else {
+                    match resolve_native_sighash(&method.name, method.visibility == Visibility::Public, &pending_sighash) {
+                        Some(Ok(v)) => method.sighash_type = Some(v),
+                        Some(Err(msg)) => self.errors.push(msg),
+                        None => {}
+                    }
                     methods.push(method);
                 }
                 pending_visibility = None;
                 pending_param_types = None;
+                pending_sighash.clear();
                 self.skip_newlines();
                 continue;
             }
@@ -1135,6 +1166,11 @@ impl<'a> RbParser<'a> {
             // N-004: refuse anything else (an indented `=begin` lexes as `=`).
             let stray = self.advance();
             self.errors.push(unexpected_class_body_token_message(&rb_token_text(&stray)));
+        }
+
+        // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+        for _ in &pending_sighash {
+            self.errors.push(lost_directive_message("@sighash"));
         }
 
         self.match_tok(&Token::End); // end of class
@@ -1287,10 +1323,22 @@ impl<'a> RbParser<'a> {
         // Check for optional trailing options: readonly: true/false, default: <literal>
         // Multiple options are comma-separated and may appear in any order.
         let mut is_readonly = false;
+        let mut embed_always = false;
         let mut initializer: Option<Expression> = None;
         while *self.peek() == Token::Comma {
             self.advance(); // ','
-            if self.check_ident("readonly") {
+            if self.check_ident("embed_always") {
+                // N-093: the native spelling of the `@embedAlways` directive.
+                self.advance(); // 'embed_always'
+                self.expect(&Token::Colon);
+                if *self.peek() == Token::TrueLit {
+                    self.advance();
+                    embed_always = true;
+                } else if *self.peek() == Token::FalseLit {
+                    self.advance();
+                    embed_always = false;
+                }
+            } else if self.check_ident("readonly") {
                 self.advance(); // 'readonly'
                 self.expect(&Token::Colon);
                 if *self.peek() == Token::TrueLit {
@@ -1331,7 +1379,7 @@ impl<'a> RbParser<'a> {
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         })
     }
 

@@ -25,6 +25,7 @@ require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -829,16 +830,20 @@ module RunarCompiler
 
           # Decorators
           decorators = []
+          sighash_specs = []
           while check(TOK_AT)
             advance # '@'
             dec_name = advance.value
             decorators << dec_name
+            # N-093: `@public(sighash="FLAGS")` is the native spelling of the
+            # `@sighash` directive.
+            sighash_specs.concat(parse_public_decorator_args) if dec_name == "public" && check(TOK_LPAREN)
             skip_newlines
           end
 
           # Method definition
           if check_ident("def")
-            method = parse_method_def(decorators)
+            method = parse_method_def(decorators, sighash_specs)
             if method.name == "constructor"
               constructor = method
             else
@@ -893,17 +898,23 @@ module RunarCompiler
         end
         advance # ':'
 
-        # Parse type (possibly Readonly[T])
+        # Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the
+        # native spelling of the `@embedAlways` directive; the two wrappers
+        # compose in either order.
         is_readonly = false
-        if check_ident("Readonly")
-          is_readonly = true
-          advance # 'Readonly'
+        embed_always = false
+        wrappers = 0
+        while check_ident("Readonly") || check_ident("EmbedAlways")
+          if advance.value == "Readonly"
+            is_readonly = true
+          else
+            embed_always = true
+          end
           expect(TOK_LBRACKET)
-          type_node = parse_type
-          expect(TOK_RBRACKET)
-        else
-          type_node = parse_type
+          wrappers += 1
         end
+        type_node = parse_type
+        wrappers.times { expect(TOK_RBRACKET) }
 
         # In stateless contracts (SmartContract and UnsafeSmartContract), all
         # properties are readonly.
@@ -924,6 +935,7 @@ module RunarCompiler
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
+          embed_always: embed_always,
           source_location: location
         )
       end
@@ -954,7 +966,40 @@ module RunarCompiler
 
       # -- Method definition -------------------------------------------------
 
-      def parse_method_def(decorators)
+      # N-093: the argument list of `@public(...)`. The only argument is the
+      # keyword `sighash=<str>`; each one yields its string, and any other
+      # argument (positional, another keyword, a non-str value) yields nil,
+      # which is refused as a malformed spelling.
+      def parse_public_decorator_args
+        specs = []
+        expect(TOK_LPAREN)
+        while !check(TOK_RPAREN) && !check(TOK_NEWLINE) && !check(TOK_EOF)
+          is_sighash_kw = check_ident("sighash") && @tokens[@pos + 1]&.kind == TOK_EQ
+          if is_sighash_kw
+            advance # 'sighash'
+            advance # '='
+          end
+          # One argument value: up to the next top-level ',' or ')'.
+          first = peek
+          count = 0
+          depth = 0
+          while !check(TOK_NEWLINE) && !check(TOK_EOF)
+            k = peek.kind
+            break if (k == TOK_COMMA || k == TOK_RPAREN) && depth.zero?
+
+            depth += 1 if k == TOK_LPAREN || k == TOK_LBRACKET
+            depth -= 1 if k == TOK_RPAREN || k == TOK_RBRACKET
+            advance
+            count += 1
+          end
+          specs << (is_sighash_kw && count == 1 && first.kind == TOK_STRING ? first.value : nil)
+          break unless match_tok(TOK_COMMA)
+        end
+        expect(TOK_RPAREN)
+        specs
+      end
+
+      def parse_method_def(decorators, sighash_specs = [])
         location = loc
         expect_ident("def")
 
@@ -990,6 +1035,11 @@ module RunarCompiler
 
         # Determine if this is the constructor
         if raw_name == "__init__"
+          # N-093: the constructor is not a spending entry point.
+          unless sighash_specs.empty?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                      severity: Severity::ERROR, loc: location)
+          end
           return MethodNode.new(
             name: "constructor",
             params: params,
@@ -1002,12 +1052,18 @@ module RunarCompiler
         is_public = decorators.include?("public")
         method_name = declare(raw_name)
 
+        sighash = SighashDirective.resolve_native_sighash(method_name, is_public, sighash_specs)
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
+
         MethodNode.new(
           name: method_name,
           params: params,
           body: body,
           visibility: is_public ? "public" : "private",
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
       end
 

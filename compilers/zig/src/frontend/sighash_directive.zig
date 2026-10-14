@@ -191,6 +191,54 @@ pub fn extractDirective(allocator: std.mem.Allocator, comment_text: []const u8) 
     return parseFlags(allocator, seg);
 }
 
+/// N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+/// (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+/// `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+/// `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java `@Sighash("...")`).
+///
+/// `specs` holds one entry per spelling found on the method: the flag text, or
+/// null when the spelling's argument was not well formed (a non-identifier
+/// token, a non-string argument, ...). Returns null when there is no spelling,
+/// else the numeric type or the diagnostic — the SAME diagnostics the
+/// `.runar.ts` comment directive produces, checked in the same order:
+/// non-public method, then more than one spelling, then malformed, then the
+/// flag grammar of `parseFlags`. Mirrors resolveNativeSighash in the TS
+/// reference (sighash-directive.ts); identical in all seven tiers. Error
+/// messages are allocated with `allocator`.
+pub fn resolveNativeSighash(
+    allocator: std.mem.Allocator,
+    method_name: []const u8,
+    is_public: bool,
+    specs: []const ?[]const u8,
+) ?ParseResult {
+    if (specs.len == 0) return null;
+    if (!is_public) {
+        return .{ .err = std.fmt.allocPrint(allocator, "@sighash directive on non-public method '{s}' has no effect — only public methods are spending entry points", .{method_name}) catch "@sighash directive on non-public method has no effect — only public methods are spending entry points" };
+    }
+    if (specs.len > 1) return .{ .err = methodError(allocator, method_name, SIGHASH_MULTIPLE_ERROR) };
+    const spec = specs[0] orelse return .{ .err = methodError(allocator, method_name, SIGHASH_MALFORMED_ERROR) };
+    return switch (parseFlags(allocator, spec)) {
+        .value => |v| .{ .value = v },
+        .err => |e| .{ .err = methodError(allocator, method_name, e) },
+    };
+}
+
+fn methodError(allocator: std.mem.Allocator, method_name: []const u8, msg: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "Method '{s}': {s}", .{ method_name, msg }) catch msg;
+}
+
+/// N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+/// exists; any other name is refused rather than ignored, so a typo such as
+/// `//runar:sighsh` cannot silently drop the declaration.
+pub fn unknownGoDirectiveMessage(allocator: std.mem.Allocator, name: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "unknown Go DSL directive '//runar:{s}'; the only directive is //runar:sighash <FLAGS>", .{name}) catch "unknown Go DSL directive; the only directive is //runar:sighash <FLAGS>";
+}
+
+/// N-093: an attribute on the Move surface other than the two directives.
+pub fn unknownMoveAttributeMessage(allocator: std.mem.Allocator, attr: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "unsupported Move attribute #[{s}]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]", .{attr}) catch "unsupported Move attribute; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]";
+}
+
 /// Render a sighash value as a human-readable flag string (for diagnostics).
 /// Caller owns the returned slice. Mirrors the TS describeSighash.
 pub fn describe(allocator: std.mem.Allocator, value: i32) ![]const u8 {

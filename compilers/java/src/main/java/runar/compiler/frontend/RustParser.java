@@ -40,6 +40,7 @@ import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.rs} (Rust proc-macro DSL) source into a Rúnar
@@ -649,6 +650,54 @@ public final class RustParser {
     // Attribute parsing
     // -----------------------------------------------------------------
 
+    /**
+     * N-093: one field/method attribute classified as one of the two
+     * directives. {@code kind} is {@code "embed_always"}, {@code "sighash"}
+     * ({@code flags} = the {@code |}-joined identifier list, {@code null} when
+     * malformed) or {@code "other"} ({@code content} = the compact attribute
+     * text, exactly as {@link #parseAttribute} returns it).
+     */
+    private record DirectiveAttr(String kind, String flags, String content) {}
+
+    /**
+     * N-093: parse one attribute and classify it. {@code #[embed_always]} and
+     * {@code #[sighash(FLAGS)]} (optionally {@code runar::}-qualified) are the
+     * native spellings of {@code @embedAlways} / {@code @sighash}. For
+     * {@code sighash}, the flags are the {@code |}-joined identifier list, or
+     * {@code null} when the parentheses are missing or hold any other token.
+     * Mirrors parseDirectiveAttribute in the TS reference (01-parse-rust.ts).
+     */
+    private static DirectiveAttr parseDirectiveAttribute(State s) {
+        int start = s.pos;
+        String content = parseAttribute(s);
+        int end = Math.max(s.pos - 1, start + 1); // the closing `]`
+        List<Token> toks = s.tokens.subList(start + 1, end); // inside `#[` ... `]`
+        int i = 0;
+        if (toks.size() >= 2 && toks.get(0).kind == TOK_IDENT && toks.get(0).value.equals("runar")
+            && toks.get(1).kind == TOK_COLONCOLON) {
+            i = 2;
+        }
+        String name = i < toks.size() && toks.get(i).kind == TOK_IDENT ? toks.get(i).value : "";
+        List<Token> rest = toks.subList(Math.min(i + 1, toks.size()), toks.size());
+        if (name.equals("embed_always") && rest.isEmpty()) {
+            return new DirectiveAttr("embed_always", null, content);
+        }
+        if (name.equals("sighash")) {
+            boolean ok = rest.size() >= 2 && rest.get(0).kind == TOK_LPAREN
+                && rest.get(rest.size() - 1).kind == TOK_RPAREN;
+            StringBuilder text = new StringBuilder();
+            if (ok) {
+                for (Token t : rest.subList(1, rest.size() - 1)) {
+                    if (t.kind == TOK_IDENT) text.append(t.value);
+                    else if (t.kind == TOK_PIPE) text.append('|');
+                    else ok = false;
+                }
+            }
+            return new DirectiveAttr("sighash", ok ? text.toString() : null, content);
+        }
+        return new DirectiveAttr("other", null, content);
+    }
+
     /** Parse {@code #[...]}. The {@code #[} token is the current peek. */
     private static String parseAttribute(State s) {
         s.advance(); // consume #[
@@ -801,10 +850,19 @@ public final class RustParser {
                     s.expect(TOK_LBRACE);
 
                     while (!s.check(TOK_RBRACE) && !s.check(TOK_EOF)) {
+                        // Field attributes, any number and order: #[readonly],
+                        // and N-093's #[embed_always] (the native spelling of
+                        // `@embedAlways`). A #[sighash(...)] here annotates
+                        // nothing and is refused.
                         boolean readonly = false;
-                        if (s.check(TOK_HASH_BRACKET)) {
-                            String fieldAttr = parseAttribute(s);
-                            if (fieldAttr.equals("readonly")) {
+                        boolean embedAlways = false;
+                        while (s.check(TOK_HASH_BRACKET)) {
+                            DirectiveAttr fieldAttr = parseDirectiveAttribute(s);
+                            if (fieldAttr.kind().equals("embed_always")) {
+                                embedAlways = true;
+                            } else if (fieldAttr.kind().equals("sighash")) {
+                                s.addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                            } else if (fieldAttr.content().equals("readonly")) {
                                 readonly = true;
                             }
                         }
@@ -829,7 +887,8 @@ public final class RustParser {
                                     readonly,
                                     null,
                                     fieldLoc,
-                                    null
+                                    null,
+                                    embedAlways
                                 ));
                             }
                         } else {
@@ -883,6 +942,11 @@ public final class RustParser {
         Map<String, Expression> initOverrides = new HashMap<>();
         for (MethodNode m : methods) {
             if (m.name().equals("init") && m.params().isEmpty()) {
+                // N-093: init() is not a spending entry point, so a #[sighash]
+                // on it would be dropped with the method.
+                if (m.sighashType() != null) {
+                    s.addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                }
                 for (Statement stmt : m.body()) {
                     if (stmt instanceof AssignmentStatement as
                         && as.target() instanceof PropertyAccessExpr pa) {
@@ -901,7 +965,7 @@ public final class RustParser {
                 if (init != null) {
                     updated.add(new PropertyNode(
                         p.name(), p.type(), p.readonly(), init,
-                        p.sourceLocation(), p.syntheticArrayChain()
+                        p.sourceLocation(), p.syntheticArrayChain(), p.embedAlways()
                     ));
                 } else {
                     updated.add(p);
@@ -967,9 +1031,16 @@ public final class RustParser {
 
         while (!s.check(TOK_RBRACE) && !s.check(TOK_EOF)) {
             // #[public] is no longer supported — `pub fn` marks public methods.
+            // N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            // #[embed_always] on a method annotates nothing and is refused.
+            List<String> sighashSpecs = new ArrayList<>();
             while (s.check(TOK_HASH_BRACKET)) {
-                String methodAttr = parseAttribute(s);
-                if (methodAttr.equals("public")) {
+                DirectiveAttr methodAttr = parseDirectiveAttribute(s);
+                if (methodAttr.kind().equals("sighash")) {
+                    sighashSpecs.add(methodAttr.flags());
+                } else if (methodAttr.kind().equals("embed_always")) {
+                    s.addError(SighashDirective.lostDirectiveMessage("@embedAlways"));
+                } else if (methodAttr.content().equals("public")) {
                     s.addError("#[public] is no longer supported — use 'pub fn' for public methods");
                 }
             }
@@ -979,7 +1050,22 @@ public final class RustParser {
                 s.advance();
                 visibility = Visibility.PUBLIC;
             }
-            methods.add(parseFunction(s, visibility));
+            if (!s.check(TOK_FN)) {
+                for (int k = 0; k < sighashSpecs.size(); k++) {
+                    s.addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                }
+                sighashSpecs.clear();
+            }
+            MethodNode method = parseFunction(s, visibility);
+            SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                method.name(), visibility == Visibility.PUBLIC, sighashSpecs);
+            if (sighash != null && sighash.isError()) {
+                s.addError(sighash.error());
+            } else if (sighash != null) {
+                method = new MethodNode(method.name(), method.params(), method.body(), method.visibility(),
+                    method.sourceLocation(), sighash.value());
+            }
+            methods.add(method);
         }
 
         s.expect(TOK_RBRACE);

@@ -56,10 +56,10 @@ describe('R-195: every TypeScript-only example is documented as one', () => {
     // If this ever goes empty because the scan broke, the test above would
     // pass for the wrong reason.
     //
-    // `compiler-directives` joined the set in R-209: `@embedAlways` and
-    // `@sighash` are read on the `.runar.ts` surface only — the other eight
-    // parsers reject a source carrying either — so unlike the other two its
-    // TS-only status is permanent rather than pending a translation.
+    // `compiler-directives` joined the set in R-209, when `@embedAlways` and
+    // `@sighash` could only be spelled on the `.runar.ts` surface, and left
+    // in N-093, which gave both directives a native spelling on the other
+    // eight surfaces and ported the example to every peer tree.
     //
     // `token-wallet-naive-INSECURE` joined in N-042 (it is the ABI fixture
     // the SDKs' TokenWallet helpers are tested against, read by path from
@@ -68,7 +68,6 @@ describe('R-195: every TypeScript-only example is documented as one', () => {
     // real port, not an empty directory — so it is no longer TS-only.
     expect(tsOnlyExamples()).toEqual([
       'companion-verifier',
-      'compiler-directives',
       'nested-if-multi-reassign',
     ]);
   });

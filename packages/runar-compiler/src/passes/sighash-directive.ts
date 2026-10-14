@@ -184,3 +184,50 @@ export function describeSighash(value: number): string {
   if (value & FLAG_FORKID) parts.push('FORKID');
   return parts.join('|');
 }
+
+/**
+ * N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+ * (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+ * `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+ * `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java `@Sighash("...")`).
+ *
+ * `specs` holds one entry per spelling found on the method: the flag text, or
+ * `null` when the spelling's argument was not well formed (a non-identifier
+ * token, a non-string argument, ...). Returns `undefined` when there is no
+ * spelling, else the numeric type or the diagnostic — the SAME diagnostics the
+ * `.runar.ts` comment directive produces, checked in the same order:
+ * non-public method, then more than one spelling, then malformed, then the
+ * flag grammar of `parseSighashFlags`. Identical in all seven tiers.
+ */
+export function resolveNativeSighash(
+  methodName: string,
+  isPublic: boolean,
+  specs: ReadonlyArray<string | null>,
+): { value: number } | { error: string } | undefined {
+  if (specs.length === 0) return undefined;
+  if (!isPublic) {
+    return {
+      error: `@sighash directive on non-public method '${methodName}' has no effect — only public methods are spending entry points`,
+    };
+  }
+  if (specs.length > 1) return { error: `Method '${methodName}': ${SIGHASH_MULTIPLE_ERROR}` };
+  const spec = specs[0]!;
+  if (spec === null) return { error: `Method '${methodName}': ${SIGHASH_MALFORMED_ERROR}` };
+  const result = parseSighashFlags(spec);
+  if ('error' in result) return { error: `Method '${methodName}': ${result.error}` };
+  return result;
+}
+
+/**
+ * N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+ * exists; any other name is refused rather than ignored, so a typo such as
+ * `//runar:sighsh` cannot silently drop the declaration.
+ */
+export function unknownGoDirectiveMessage(name: string): string {
+  return `unknown Go DSL directive '//runar:${name}'; the only directive is //runar:sighash <FLAGS>`;
+}
+
+/** N-093: an attribute on the Move surface other than the two directives. */
+export function unknownMoveAttributeMessage(attr: string): string {
+  return `unsupported Move attribute #[${attr}]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]`;
+}

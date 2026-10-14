@@ -6,6 +6,8 @@ Hand-written tokenizer + recursive descent parser for Go contract syntax.
 
 from __future__ import annotations
 
+import re
+
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -26,6 +28,11 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     with_lex_errors,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.sighash_directive import (
+    lost_directive_message,
+    resolve_native_sighash,
+    unknown_go_directive_message,
+)
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
@@ -298,13 +305,38 @@ def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize_go(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
+class _GoDirective:
+    """N-093: a Go DSL directive comment ``//runar:<name> <args>`` (Go's own
+    ``//go:`` convention: no space after ``//``). ``token_index`` is the index
+    of the first source token after the comment (an auto-inserted semicolon is
+    not a source token), so a directive attaches to the declaration that
+    follows it, with only comments and blank lines in between."""
+    __slots__ = ("name", "args", "token_index", "line", "column")
+
+    def __init__(self, name: str, args: str, token_index: int, line: int, column: int):
+        self.name = name
+        self.args = args
+        self.token_index = token_index
+        self.line = line
+        self.column = column
+
+
+_GO_SIGHASH_ARGS_RE = re.compile(r"[ \t][A-Za-z0-9_| \t]*")
+
+
+def _tokenize_go(
+    source: str,
+    lex: list | None = None,
+    file_name: str = "",
+    directives: list[_GoDirective] | None = None,
+) -> list[Token]:
     """Tokenize Go source code.
 
     Go uses automatic semicolon insertion: a newline acts as a semicolon
     after certain tokens (identifiers, numbers, closing brackets, ++, --).
     We insert TOK_SEMICOLON in those cases and skip other newlines.
     """
+    directives = directives if directives is not None else []
     tokens: list[Token] = []
     lex = lex if lex is not None else []
     line = 1
@@ -342,6 +374,11 @@ def _tokenize_go(source: str, lex: list | None = None, file_name: str = "") -> l
                 TOK_RPAREN, TOK_RBRACKET, TOK_RBRACE,
                 TOK_PLUSPLUS, TOK_MINUSMINUS,
             ):
+                # N-093: an inserted semicolon is not a source token, so a
+                # directive pointing here points past it.
+                for d in directives:
+                    if d.token_index == len(tokens):
+                        d.token_index += 1
                 tokens.append(Token(TOK_SEMICOLON, ";", cur_line, cur_col))
             continue
 
@@ -353,8 +390,16 @@ def _tokenize_go(source: str, lex: list | None = None, file_name: str = "") -> l
 
         # Line comment
         if ch == "/" and i + 1 < n and source[i + 1] == "/":
+            start = i
             while i < n and source[i] != "\n" and source[i] != "\r":
                 i += 1
+            # N-093: `//runar:<name> <args>` is a directive, not prose.
+            text = source[start:i]
+            if text.startswith("//runar:"):
+                body = text[len("//runar:"):]
+                m = re.match(r"[^ \t]*", body)
+                name = m.group(0) if m else ""
+                directives.append(_GoDirective(name, body[len(name):], len(tokens), line, col))
             continue
 
         # Block comment
@@ -572,6 +617,36 @@ class _GoParser:
         self._go_atoms: dict[int, Expression] = {}
         # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
         self._nest = NestingCounter()
+        # N-093: every `//runar:` directive in the file, in source order, and
+        # the id() of those attached to a func.
+        self.directives: list[_GoDirective] = []
+        self._consumed_directives: set[int] = set()
+
+    def _take_sighash_directives(self, token_index: int) -> list[str | None]:
+        """N-093: the flag specs of the `//runar:sighash` directives attached
+        to the declaration starting at token ``token_index`` (``None`` for a
+        malformed one)."""
+        specs: list[str | None] = []
+        for d in self.directives:
+            if d.token_index != token_index or d.name != "sighash":
+                continue
+            self._consumed_directives.add(id(d))
+            ok = len(d.args) == 0 or _GO_SIGHASH_ARGS_RE.fullmatch(d.args) is not None
+            specs.append(d.args if ok else None)
+        return specs
+
+    def _report_stray_directives(self) -> None:
+        """N-093: refuse every directive that is unknown or attached to no func."""
+        for d in self.directives:
+            if id(d) in self._consumed_directives:
+                continue
+            msg = (
+                lost_directive_message("@sighash") if d.name == "sighash"
+                else unknown_go_directive_message(d.name + d.args)
+            )
+            self.errors.append(Diagnostic(
+                message=msg, severity=Severity.ERROR,
+                loc=SourceLocation(file=self.file_name, line=d.line, column=d.column)))
 
     def declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -737,6 +812,7 @@ class _GoParser:
             else:
                 # Skip unknown top-level declarations
                 self.advance()
+        self._report_stray_directives()
 
         if not struct_found:
             return None
@@ -885,12 +961,19 @@ class _GoParser:
                 # Parse the type
                 field_type = self.parse_type()
 
-                # Check for struct tag
+                # Check for struct tag. The `runar` key holds comma-separated
+                # options (N-093): `readonly`, and `embedAlways` -- the native
+                # spelling of the `@embedAlways` directive -- in any order.
                 readonly = False
+                embed_always = False
                 if self.check(TOK_BACKTICK_STRING):
                     tag_tok = self.advance()
-                    if 'runar:"readonly"' in tag_tok.value:
+                    runar_tag = re.search(r'(?:^|\s)runar:"([^"]*)"', tag_tok.value)
+                    options = [o.strip() for o in runar_tag.group(1).split(",")] if runar_tag else []
+                    if "readonly" in options:
                         readonly = True
+                    if "embedAlways" in options:
+                        embed_always = True
 
                 for fname in field_names:
                     prop_name = self.declare(fname)
@@ -898,6 +981,7 @@ class _GoParser:
                         name=prop_name,
                         type=field_type,
                         readonly=readonly,
+                        embed_always=embed_always,
                         source_location=field_loc,
                     ))
 
@@ -962,6 +1046,8 @@ class _GoParser:
         free function); parse_file checks the receiver type (F-010).
         """
         location = self.loc()
+        # N-093: the `//runar:sighash` directives directly above this func.
+        func_token_index = self.pos
         self.expect_ident("func")
 
         # Check for receiver: func (recv *Type) Name(params) retType { ... }
@@ -1027,12 +1113,19 @@ class _GoParser:
         # Parse body
         body = self._parse_block()
 
+        sighash = resolve_native_sighash(
+            method_name, visibility == "public", self._take_sighash_directives(func_token_index),
+        )
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
+
         return (
             MethodNode(
                 name=method_name,
                 params=params,
                 body=body,
                 visibility=visibility,
+                sighash_type=sighash.value if sighash is not None else None,
                 source_location=location,
             ),
             func_name,
@@ -2030,7 +2123,7 @@ def parse_go(source: str, file_name: str) -> ParseResult:
 def _parse_go_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Go-syntax Runar contract (.runar.go)."""
     p = _GoParser(file_name)
-    p.tokens = _tokenize_go(source, lex, file_name)
+    p.tokens = _tokenize_go(source, lex, file_name, p.directives)
     p.pos = 0
 
     try:

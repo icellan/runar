@@ -1,9 +1,15 @@
 //! Proc-macro crate for Rúnar smart contract attributes.
 //!
 //! - `#[runar::contract]` / `#[runar::stateful_contract]` /
-//!   `#[runar::unsafe_contract]` — strip `#[readonly]` field annotations (since
-//!   Rust doesn't allow attribute macros on fields) and pass the struct
-//!   through.
+//!   `#[runar::unsafe_contract]` — strip the `#[readonly]` and `#[embed_always]`
+//!   field annotations (since Rust doesn't allow attribute macros on fields)
+//!   and pass the struct through. `#[embed_always]` (N-093) is the native
+//!   spelling of the `@embedAlways` directive; it does not make a field
+//!   readonly — only `#[readonly]` does.
+//! - `#[runar::sighash(<FLAGS>)]` / `#[sighash(<FLAGS>)]` (N-093) — the native
+//!   spelling of the `@sighash` directive on a public method. A pass-through:
+//!   it returns the method unchanged so it compiles as ordinary Rust; the Rúnar
+//!   `.runar.rs` frontend reads and validates the flags.
 //!
 //! All three expand identically, and deliberately so (R-150): the macro exists
 //! only to make the struct compile in Rust. Which base class a contract extends
@@ -24,8 +30,9 @@ use syn::{parse_macro_input, Fields, Item, ItemStruct};
 
 /// Marks a struct as a Rúnar smart contract.
 ///
-/// Strips `#[readonly]` annotations from fields so the struct compiles.
-/// The Rúnar compiler parses these annotations with its own parser.
+/// Strips `#[readonly]` and `#[embed_always]` annotations from fields so the
+/// struct compiles. The Rúnar compiler parses these annotations with its own
+/// parser.
 #[proc_macro_attribute]
 pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_contract_like(item, "contract")
@@ -64,7 +71,7 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
 
     let ident = s.ident.clone();
     let mut_fields = mutable_named_fields(&s.fields);
-    strip_readonly_from_fields(&mut s.fields);
+    strip_field_markers(&mut s.fields);
 
     let field_args = mut_fields.iter().map(|(n, ty)| quote! { #n: #ty });
     let field_names: Vec<_> = mut_fields.iter().map(|(n, _)| n.clone()).collect();
@@ -225,18 +232,28 @@ pub fn unsafe_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 
-/// Remove `#[readonly]` attributes from each field in the given `Fields`.
-/// Works for named, unnamed, and unit structs.
-fn strip_readonly_from_fields(fields: &mut Fields) {
+/// Marks a public method's BIP-143 sighash type (N-093), e.g.
+/// `#[sighash(SINGLE | FORKID)]` — the native spelling of the `@sighash`
+/// directive. A pass-through: the item is returned unchanged so the method
+/// compiles as ordinary Rust. The Rúnar `.runar.rs` frontend reads the flags
+/// from the source text and refuses a malformed or misplaced one.
+#[proc_macro_attribute]
+pub fn sighash(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Remove the `#[readonly]` and `#[embed_always]` field markers from each
+/// field in the given `Fields`. Works for named, unnamed, and unit structs.
+fn strip_field_markers(fields: &mut Fields) {
     match fields {
         Fields::Named(named) => {
             for field in named.named.iter_mut() {
-                field.attrs.retain(|a| !is_readonly_attr(a));
+                field.attrs.retain(|a| !is_field_marker_attr(a));
             }
         }
         Fields::Unnamed(unnamed) => {
             for field in unnamed.unnamed.iter_mut() {
-                field.attrs.retain(|a| !is_readonly_attr(a));
+                field.attrs.retain(|a| !is_field_marker_attr(a));
             }
         }
         Fields::Unit => {}
@@ -246,4 +263,10 @@ fn strip_readonly_from_fields(fields: &mut Fields) {
 /// Return true if the attribute is a bare `#[readonly]` marker.
 fn is_readonly_attr(attr: &syn::Attribute) -> bool {
     attr.path().is_ident("readonly")
+}
+
+/// Return true if the attribute is a field marker the Rúnar frontend reads:
+/// `#[readonly]`, or `#[embed_always]` (N-093).
+fn is_field_marker_attr(attr: &syn::Attribute) -> bool {
+    is_readonly_attr(attr) || attr.path().is_ident("embed_always")
 }

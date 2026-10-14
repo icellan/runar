@@ -26,6 +26,7 @@ require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -658,6 +659,12 @@ module RunarCompiler
         final_methods = []
         methods.each do |m|
           if m.name == "init" && m.params.empty?
+            # N-093: init() is not a spending entry point, so a #[sighash] on
+            # it would be dropped with the method.
+            unless m.sighash_type.nil?
+              @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                        severity: Severity::ERROR, loc: m.source_location)
+            end
             m.body.each do |stmt|
               if stmt.is_a?(AssignmentStmt) && stmt.target.is_a?(PropertyAccessExpr)
                 prop_name = stmt.target.property
@@ -731,6 +738,35 @@ module RunarCompiler
 
       # -- Attribute parsing: #[...] -> string content -----------------------
 
+      # N-093: classify a field/method attribute as one of the two directives.
+      # `#[embed_always]` and `#[sighash(FLAGS)]` (optionally
+      # `runar::`-qualified) are the native spellings of `@embedAlways` /
+      # `@sighash`. For `sighash`, +:flags+ is the `|`-joined identifier list,
+      # or nil when the parentheses are missing or hold any other token. Every
+      # other attribute is returned as +:other+ with its compact text, exactly
+      # as before.
+      def parse_directive_attribute
+        attr_loc = loc
+        start = @pos
+        content = parse_attribute
+        toks = @tokens[(start + 2)...(@pos - 1)] || [] # inside `#[` ... `]`
+        i = 0
+        if toks[0]&.kind == TOK_IDENT && toks[0].value == "runar" && toks[1]&.kind == TOK_COLONCOLON
+          i = 2
+        end
+        name = toks[i]&.kind == TOK_IDENT ? toks[i].value : ""
+        rest = toks[(i + 1)..] || []
+        return { kind: :embed_always, loc: attr_loc } if name == "embed_always" && rest.empty?
+
+        if name == "sighash"
+          inner = rest[1...-1] || []
+          ok = rest.length >= 2 && rest[0].kind == TOK_LPAREN && rest[-1].kind == TOK_RPAREN &&
+               inner.all? { |t| t.kind == TOK_IDENT || t.kind == TOK_PIPE }
+          return { kind: :sighash, flags: ok ? inner.map(&:value).join : nil, loc: attr_loc }
+        end
+        { kind: :other, content: content }
+      end
+
       def parse_attribute
         expect(TOK_HASH)
         expect(TOK_LBRACKET)
@@ -765,11 +801,22 @@ module RunarCompiler
         while !check(TOK_RBRACE) && !check(TOK_EOF)
           prop_loc = loc
           is_readonly = false
+          embed_always = false
 
-          # Check for #[readonly]
-          if check(TOK_HASH)
-            attr = parse_attribute
-            is_readonly = true if attr == "readonly"
+          # Field attributes, any number and order: #[readonly], and N-093's
+          # #[embed_always] (the native spelling of `@embedAlways`). A
+          # #[sighash(...)] here annotates nothing and is refused.
+          while check(TOK_HASH)
+            attr = parse_directive_attribute
+            case attr[:kind]
+            when :embed_always
+              embed_always = true
+            when :sighash
+              @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                        severity: Severity::ERROR, loc: attr[:loc])
+            else
+              is_readonly = true if attr[:content] == "readonly"
+            end
           end
 
           # Skip optional pub
@@ -795,6 +842,7 @@ module RunarCompiler
             name: field_name,
             type: prop_type,
             readonly: is_readonly,
+            embed_always: embed_always,
             source_location: prop_loc
           )
 
@@ -859,9 +907,20 @@ module RunarCompiler
 
         methods = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          # N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+          # #[embed_always] on a method annotates nothing and is refused.
+          sighash_specs = []
           while check(TOK_HASH)
-            attr = parse_attribute
-            add_error("#[public] is no longer supported -- use 'pub fn' for public methods") if attr == "public"
+            attr = parse_directive_attribute
+            case attr[:kind]
+            when :sighash
+              sighash_specs << attr[:flags]
+            when :embed_always
+              @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@embedAlways"),
+                                        severity: Severity::ERROR, loc: attr[:loc])
+            else
+              add_error("#[public] is no longer supported -- use 'pub fn' for public methods") if attr[:content] == "public"
+            end
           end
 
           # `pub fn` = public spending entry point, `fn` = private helper
@@ -873,8 +932,21 @@ module RunarCompiler
 
           if check(TOK_FN)
             method = parse_fn_decl(is_public)
-            methods << method if method
+            if method
+              sighash = SighashDirective.resolve_native_sighash(method.name, is_public, sighash_specs)
+              if sighash && sighash[:error]
+                @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR,
+                                          loc: method.source_location)
+              elsif sighash
+                method.sighash_type = sighash[:value]
+              end
+              methods << method
+            end
           else
+            sighash_specs.each do
+              @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                        severity: Severity::ERROR, loc: loc)
+            end
             advance
           end
         end

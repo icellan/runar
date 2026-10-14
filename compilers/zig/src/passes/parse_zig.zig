@@ -24,6 +24,7 @@ const readonly_inference = @import("../frontend/readonly_inference.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -277,6 +278,8 @@ const Parser = struct {
     const ParsedFieldType = struct {
         type_node: TypeNode,
         explicit_readonly: bool,
+        /// N-093: `runar.EmbedAlways(T)`, the native spelling of `@embedAlways`.
+        embed_always: bool = false,
     };
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
@@ -329,6 +332,48 @@ const Parser = struct {
     fn addError(self: *Parser, msg: []const u8) void {
         const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
+    }
+
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-093: `runar.Sighash("FLAGS")` in place of a return type is the native
+    /// spelling of the `@sighash` directive (natively it is `void`). Returns
+    /// null (consuming nothing) when the return type is not that spelling;
+    /// otherwise consumes it and returns the flag text, or null-in-optional
+    /// when the argument is not exactly one string literal.
+    fn parseSighashReturnType(self: *Parser) ??[]const u8 {
+        if (!self.checkIdent("runar")) return null;
+        const sp = self.tokenizer.pos; const sline = self.tokenizer.line;
+        const scol = self.tokenizer.col; const sc = self.current;
+        _ = self.bump();
+        if (self.current.kind != .dot) {
+            self.tokenizer.pos = sp; self.tokenizer.line = sline; self.tokenizer.col = scol; self.current = sc;
+            return null;
+        }
+        _ = self.bump();
+        if (!self.checkIdent("Sighash")) {
+            self.tokenizer.pos = sp; self.tokenizer.line = sline; self.tokenizer.col = scol; self.current = sc;
+            return null;
+        }
+        _ = self.bump();
+        _ = self.expect(.lparen);
+        const arg = self.current;
+        var count: usize = 0;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            const k = self.current.kind;
+            if (k == .rparen and depth == 0) break;
+            if (k == .lparen) depth += 1;
+            if (k == .rparen) depth -= 1;
+            _ = self.bump();
+            count += 1;
+        }
+        _ = self.expect(.rparen);
+        const spec: ?[]const u8 = if (count == 1 and arg.kind == .string_literal) arg.text else null;
+        return spec;
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
@@ -610,6 +655,7 @@ const Parser = struct {
             .type_info = typeNodeToRunarType(parsed_type.type_node),
             .readonly = false,
             .initializer = expr_val,
+            .embed_always = parsed_type.embed_always,
             // N-109: spelled type name + field-name token, for the validator's
             // unsupported-type diagnostic. Diagnostics only.
             .type_name = types.typeNodeName(parsed_type.type_node),
@@ -639,7 +685,15 @@ const Parser = struct {
                 }
                 const inner = self.nestedValue(ParsedFieldType, .{ .type_node = .{ .primitive_type = .void }, .explicit_readonly = false }, Parser.parseFieldTypeNode, .{});
                 _ = self.expect(.rparen);
-                return .{ .type_node = inner.type_node, .explicit_readonly = true };
+                return .{ .type_node = inner.type_node, .explicit_readonly = true, .embed_always = inner.embed_always };
+            }
+            // N-093: `runar.EmbedAlways(T)`, the native spelling of
+            // `@embedAlways`; composes with `runar.Readonly` in either order.
+            if (std.mem.eql(u8, name, "EmbedAlways") and self.current.kind == .lparen) {
+                _ = self.bump();
+                const inner = self.nestedValue(ParsedFieldType, .{ .type_node = .{ .primitive_type = .void }, .explicit_readonly = false }, Parser.parseFieldTypeNode, .{});
+                _ = self.expect(.rparen);
+                return .{ .type_node = inner.type_node, .explicit_readonly = inner.explicit_readonly, .embed_always = true };
             }
 
             return .{ .type_node = resolveRunarTypeNode(name), .explicit_readonly = false };
@@ -716,6 +770,7 @@ const Parser = struct {
     // ---- Constructor ----
 
     fn parseConstructor(self: *Parser, properties: []const PropertyNode) ?ConstructorNode {
+        const ctor_loc = self.currentSourceLoc();
         if (self.expect(.lparen) == null) return null;
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         while (self.current.kind != .rparen and self.current.kind != .eof) {
@@ -723,7 +778,11 @@ const Parser = struct {
             if (self.current.kind == .comma) _ = self.bump();
         }
         _ = self.expect(.rparen);
-        if (self.current.kind == .ident) _ = self.bump(); // return type
+        // N-093: the constructor is not a spending entry point, so a
+        // `runar.Sighash(...)` return type on `init` would be dropped.
+        if (self.parseSighashReturnType() != null) {
+            self.addErrorAtLoc(ctor_loc, sighash_directive.LOST_SIGHASH_ERROR);
+        } else if (self.current.kind == .ident) _ = self.bump(); // return type
         if (self.expect(.lbrace) == null) return null;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
         var found_struct_return = false;
@@ -835,10 +894,25 @@ const Parser = struct {
             if (self.current.kind == .comma) _ = self.bump();
         }
         _ = self.expect(.rparen);
-        if (self.current.kind != .lbrace) _ = self.parseTypeNode();
+        // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+        // native spelling of the `@sighash` directive.
+        var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        if (self.parseSighashReturnType()) |spec| {
+            sighash_specs.append(self.allocator, spec) catch {};
+        } else if (self.current.kind != .lbrace) _ = self.parseTypeNode();
         if (self.expect(.lbrace) == null) return null;
         const body = self.parseBlock();
-        return MethodNode{ .name = name, .is_public = is_public, .params = params.items, .body = body, .source_loc = method_loc };
+        var sighash_type: ?i32 = null;
+        if (std.mem.eql(u8, name, "init")) {
+            // N-093: a (non-`pub`) `fn init` is still the constructor's name,
+            // not a spending entry point (the TS reference checks the name
+            // before visibility).
+            if (sighash_specs.items.len > 0) self.addErrorAtLoc(method_loc, sighash_directive.LOST_SIGHASH_ERROR);
+        } else if (sighash_directive.resolveNativeSighash(self.allocator, name, is_public, sighash_specs.items)) |r| switch (r) {
+            .value => |v| sighash_type = v,
+            .err => |e| self.addErrorAtLoc(method_loc, e),
+        };
+        return MethodNode{ .name = name, .is_public = is_public, .params = params.items, .body = body, .sighash_type = sighash_type, .source_loc = method_loc };
     }
 
     fn parseParam(self: *Parser) ?ParamNode {

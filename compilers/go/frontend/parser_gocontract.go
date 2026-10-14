@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"go/types"
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -94,8 +95,10 @@ func parseGoContractSurface(source []byte, fileName string) *ParseResult {
 		file:     file,
 		fileName: fileName,
 	}
+	p.collectGoDirectives(source)
 
 	contract := p.extractContract()
+	p.reportStrayGoDirectives()
 	if contract == nil && len(p.errors) == 0 {
 		p.addError(goNoContractMessage)
 	}
@@ -160,7 +163,117 @@ type goContractParser struct {
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
+
+	// N-093: every `//runar:` directive comment in the file, in source order,
+	// and the `func` keyword offsets of the func declarations whose sighash
+	// directives were resolved (consumed).
+	directives []goDirective
+	consumed   map[int]bool
 }
+
+// goDirective (N-093) is a Go DSL directive comment `//runar:<name> <args>`
+// (Go's own `//go:` convention: no space after `//`). nextTok is the byte
+// offset of the first token after the comment, so a directive attaches to the
+// declaration that follows it with only comments and blank lines in between.
+type goDirective struct {
+	name, args string
+	nextTok    int
+	loc        SourceLocation
+}
+
+// collectGoDirectives (N-093) records every `//runar:` line comment and the
+// token that follows it. go/scanner is Go's own lexer, so comments, strings
+// and runes are recognised exactly; the semicolons it inserts at line ends
+// are not tokens of the source and are skipped. Mirrors the directive
+// capture of the TS reference tokenizer (01-parse-go.ts).
+func (p *goContractParser) collectGoDirectives(source []byte) {
+	p.consumed = map[int]bool{}
+	fset := token.NewFileSet()
+	f := fset.AddFile(p.fileName, -1, len(source))
+	var s scanner.Scanner
+	s.Init(f, source, func(token.Position, string) {}, scanner.ScanComments)
+	var pending []int // indices into p.directives awaiting their next token
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.SEMICOLON && lit == "\n" {
+			continue
+		}
+		off := f.Offset(pos)
+		if tok == token.COMMENT {
+			if strings.HasPrefix(lit, "//runar:") {
+				body := strings.TrimSuffix(lit[len("//runar:"):], "\r")
+				n := strings.IndexAny(body, " \t")
+				if n < 0 {
+					n = len(body)
+				}
+				p.directives = append(p.directives, goDirective{
+					name: body[:n],
+					args: body[n:],
+					loc:  p.locAt(f.Position(pos)),
+				})
+				pending = append(pending, len(p.directives)-1)
+			}
+			continue
+		}
+		for _, i := range pending {
+			p.directives[i].nextTok = off
+		}
+		pending = pending[:0]
+		if tok == token.EOF {
+			break
+		}
+	}
+}
+
+// goSighashFor (N-093) resolves the `//runar:sighash` directives attached to
+// the func declaration fd (directly above it, with only comments and blank
+// lines between), with the shared diagnostics.
+func (p *goContractParser) goSighashFor(fd *ast.FuncDecl, name string, isPublic bool, loc SourceLocation) *int {
+	off := p.fset.Position(fd.Pos()).Offset
+	p.consumed[off] = true
+	var specs []*string
+	for _, d := range p.directives {
+		if d.nextTok != off || d.name != "sighash" {
+			continue
+		}
+		if d.args == "" || goSighashArgsRE.MatchString(d.args) {
+			specs = append(specs, nativeSighashSpec(d.args))
+		} else {
+			specs = append(specs, nil)
+		}
+	}
+	v, msg := resolveNativeSighash(name, isPublic, specs)
+	if msg != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: &errLoc})
+	}
+	return v
+}
+
+// goSighashArgsRE is the segment rule of extractSighashDirective: the flag
+// text starts with a space/tab and holds only flag-name characters, `|`,
+// spaces and tabs.
+var goSighashArgsRE = regexp.MustCompile(`^[ \t][A-Za-z0-9_| \t]*$`)
+
+// reportStrayGoDirectives (N-093) refuses every directive that is unknown or
+// attached to no func declaration that becomes a contract method (a func the
+// parser skips — e.g. a package-level init() — would drop it silently).
+func (p *goContractParser) reportStrayGoDirectives() {
+	for _, d := range p.directives {
+		if d.name == "sighash" && p.consumed[d.nextTok] {
+			continue
+		}
+		msg := LostDirectiveMsg("@sighash")
+		if d.name != "sighash" {
+			msg = unknownGoDirectiveMessage(d.name + d.args)
+		}
+		errLoc := d.loc
+		p.errors = append(p.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: &errLoc})
+	}
+}
+
+// goRunarTagRE extracts the `runar` key of a struct tag (N-093).
+var goRunarTagRE = regexp.MustCompile(`(?:^|\s)runar:"([^"]*)"`)
 
 // F-010 diagnostics — emitted verbatim by every tier's .runar.go parser
 // (TS reference: goNoContractMessage / goMultipleContractsMessage /
@@ -273,12 +386,26 @@ func (p *goContractParser) extractContract() *ContractNode {
 					propName := p.idents.declare(name.Name, goFieldToCamel(name.Name))
 					propType := p.resolveType(field.Type)
 
-					// Check struct tag for readonly
+					// Check struct tag. The `runar` key holds comma-separated
+					// options (N-093): `readonly`, and `embedAlways` — the
+					// native spelling of the `@embedAlways` directive — in
+					// any order.
 					readonly := false
+					embedAlways := false
 					if field.Tag != nil {
 						tagStr := field.Tag.Value
-						if strings.Contains(tagStr, `runar:"readonly"`) {
-							readonly = true
+						if unq, err := strconv.Unquote(tagStr); err == nil {
+							tagStr = unq
+						}
+						if m := goRunarTagRE.FindStringSubmatch(tagStr); m != nil {
+							for _, o := range strings.Split(m[1], ",") {
+								switch strings.TrimSpace(o) {
+								case "readonly":
+									readonly = true
+								case "embedAlways":
+									embedAlways = true
+								}
+							}
 						}
 					}
 
@@ -287,6 +414,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 						Name:           propName,
 						Type:           propType,
 						Readonly:       readonly,
+						EmbedAlways:    embedAlways,
 						SourceLocation: p.locAt(pos),
 					})
 				}
@@ -347,6 +475,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			Params:         params,
 			Body:           body,
 			Visibility:     visibility,
+			SighashType:    p.goSighashFor(funcDecl, methodName, visibility == "public", p.locAt(pos)),
 			SourceLocation: p.locAt(pos),
 		})
 	}
@@ -379,6 +508,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			Params:         params,
 			Body:           body,
 			Visibility:     "private",
+			SighashType:    p.goSighashFor(funcDecl, methodName, false, p.locAt(pos)),
 			SourceLocation: p.locAt(pos),
 		})
 	}

@@ -255,3 +255,11 @@ path = "r1-k1-wallet/R1K1Wallet_test.rs"
 [[test]]
 name = "native_exclusions"
 path = "native-exclusions/exclusions_test.rs"
+
+[[test]]
+name = "directives"
+path = "compiler-directives/Directives_test.rs"
+
+[[test]]
+name = "embed_tags"
+path = "compiler-directives/EmbedTags_test.rs"

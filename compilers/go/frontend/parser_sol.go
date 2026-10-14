@@ -398,6 +398,13 @@ func (p *solParser) peek() solToken {
 	return solToken{kind: solTokEOF}
 }
 
+func (p *solParser) peekAt(n int) solToken {
+	if p.pos+n < len(p.tokens) {
+		return p.tokens[p.pos+n]
+	}
+	return solToken{kind: solTokEOF}
+}
+
 func (p *solParser) advance() solToken {
 	tok := p.peek()
 	if p.pos < len(p.tokens) {
@@ -607,11 +614,23 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 	typeName := typeTok.value
 	propType := p.parseSolFixedArraySuffix(parseSolType(typeName))
 
-	// Check for immutable keyword
+	// Modifiers, any order: `immutable` (readonly) and N-093's `embedAlways`
+	// (the native spelling of the `@embedAlways` directive). An `embedAlways`
+	// directly followed by `;` or `=` is the property NAME, not a modifier.
 	isReadonly := false
-	if p.checkIdent("immutable") {
-		p.advance()
-		isReadonly = true
+	embedAlways := false
+	for {
+		if p.checkIdent("immutable") {
+			p.advance()
+			isReadonly = true
+			continue
+		}
+		if p.checkIdent("embedAlways") && p.peekAt(1).kind != solTokSemicolon && p.peekAt(1).kind != solTokAssign {
+			p.advance()
+			embedAlways = true
+			continue
+		}
+		break
 	}
 
 	// Property name
@@ -631,6 +650,7 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 		Type:           propType,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
+		EmbedAlways:    embedAlways,
 		SourceLocation: loc,
 	}
 }
@@ -986,12 +1006,20 @@ func (p *solParser) parseFunction() MethodNode {
 
 	params := p.parseSolParams(false)
 
-	// Parse visibility modifiers
+	// Parse visibility modifiers. N-093: `sighash(FLAGS)` among them is the
+	// native spelling of the `@sighash` directive; FLAGS must be identifiers
+	// separated by `|`, any other token makes the spelling malformed.
 	visibility := "private"
+	var sighashSpecs []*string
 	for p.checkIdent("public") || p.checkIdent("private") || p.checkIdent("external") ||
 		p.checkIdent("internal") || p.checkIdent("view") || p.checkIdent("pure") ||
-		p.checkIdent("returns") || p.checkIdent("payable") {
+		p.checkIdent("returns") || p.checkIdent("payable") ||
+		(p.checkIdent("sighash") && p.peekAt(1).kind == solTokLParen) {
 		tok := p.advance()
+		if tok.value == "sighash" {
+			sighashSpecs = append(sighashSpecs, p.parseSighashFlagTokens())
+			continue
+		}
 		if tok.value == "public" || tok.value == "external" {
 			visibility = "public"
 		}
@@ -1015,13 +1043,54 @@ func (p *solParser) parseFunction() MethodNode {
 
 	body := p.parseSolBlock()
 
+	sighashType, sighashErr := resolveNativeSighash(name, visibility == "public", sighashSpecs)
+	if sighashErr != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+	}
+
 	return MethodNode{
 		Name:           name,
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		SighashType:    sighashType,
 		SourceLocation: loc,
 	}
+}
+
+// parseSighashFlagTokens (N-093): `( IDENT ( '|' IDENT )* )` after `sighash`
+// -> the flag text, or nil when anything else appears inside the parentheses.
+// Always consumes through the matching `)` so a malformed spelling does not
+// derail parsing. Mirrors the TS reference parseSighashFlagTokens.
+func (p *solParser) parseSighashFlagTokens() *string {
+	p.expect(solTokLParen)
+	text := ""
+	ok := true
+	depth := 1
+	for !p.check(solTokEOF) {
+		t := p.peek()
+		if t.kind == solTokLParen {
+			depth++
+		}
+		if t.kind == solTokRParen {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+		if t.kind == solTokIdent || t.kind == solTokPipe {
+			text += t.value
+		} else {
+			ok = false
+		}
+		p.advance()
+	}
+	p.expect(solTokRParen)
+	if !ok {
+		return nil
+	}
+	return nativeSighashSpec(text)
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Move-style ({@code .runar.move}) parser for the Rúnar Java compiler.
@@ -95,8 +96,17 @@ public final class MoveParser {
         PLUSPLUS, MINUSMINUS,
         PLUSEQ, MINUSEQ, STAREQ, SLASHEQ, PERCENTEQ,
         QUESTION, ARROW,
-        SHL, SHR
+        SHL, SHR,
+        /** N-093: {@code #} directly before {@code [} (an attribute opener). */
+        HASH
     }
+
+    /**
+     * N-093: one parsed {@code #[...]} attribute (see {@code parseAttributes}).
+     * {@code kind} is {@code "embed_always"} or {@code "sighash"}; {@code flags}
+     * is the sighash flag text, {@code null} when malformed.
+     */
+    private record MoveAttribute(String kind, String flags) {}
 
     private record Token(Kind kind, String value, int line, int column) {}
 
@@ -232,6 +242,16 @@ public final class MoveParser {
                     continue;
                 }
                 out.add(new Token(Kind.IDENT, source.substring(start, i), line, startCol));
+                continue;
+            }
+
+            // N-093: `#[` opens an attribute (`#[embed_always]`,
+            // `#[sighash(...)]`). A `#` not followed by `[` is skipped below
+            // like any unknown character.
+            if (ch == '#' && i + 1 < n && source.charAt(i + 1) == '[') {
+                out.add(new Token(Kind.HASH, "#", line, startCol));
+                i++;
+                col++;
                 continue;
             }
 
@@ -574,6 +594,14 @@ public final class MoveParser {
                 : ParentClass.SMART_CONTRACT;
 
             while (!check(Kind.RBRACE) && !check(Kind.EOF)) {
+                // N-093: attributes before a function (`#[sighash(...)]`).
+                // Anything else they precede reads neither directive, so each
+                // one is refused.
+                List<MoveAttribute> attrs = parseAttributes();
+                if (!attrs.isEmpty() && !checkIdent("public") && !checkIdent("fun")) {
+                    reportLostAttributes(attrs);
+                }
+
                 if (checkIdent("use")) {
                     skipUseDecl();
                     continue;
@@ -600,7 +628,7 @@ public final class MoveParser {
                 }
 
                 if (checkIdent("public") || checkIdent("fun")) {
-                    FnResult r = parseFunction();
+                    FnResult r = parseFunction(attrs);
                     if (r.hasMut && !isUnsafe) {
                         parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                     }
@@ -650,6 +678,14 @@ public final class MoveParser {
 
             List<PropertyNode> props = new ArrayList<>();
             while (!check(Kind.RBRACE) && !check(Kind.EOF)) {
+                // N-093: `#[embed_always]` before a field is the native
+                // spelling of `@embedAlways`; `#[sighash(...)]` here annotates
+                // nothing.
+                boolean embedAlways = false;
+                for (MoveAttribute attr : parseAttributes()) {
+                    if (attr.kind().equals("embed_always")) embedAlways = true;
+                    else reportLostAttributes(List.of(attr));
+                }
                 Token nameTok = expect(Kind.IDENT);
                 String fieldName = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
@@ -675,7 +711,8 @@ public final class MoveParser {
                     readonly,
                     initializer,
                     loc(),
-                    null
+                    null,
+                    embedAlways
                 ));
 
                 match(Kind.COMMA);
@@ -820,7 +857,62 @@ public final class MoveParser {
 
         private record FnResult(MethodNode method, boolean hasMut) {}
 
-        FnResult parseFunction() {
+        /**
+         * N-093: parse {@code #[...]} attributes. Only {@code #[embed_always]}
+         * and {@code #[sighash(FLAGS)]} exist; any other attribute is refused
+         * (it would otherwise be ignored). For {@code sighash}, the flags are
+         * the {@code |}-joined identifier list, or {@code null} when the
+         * parentheses hold anything else or are missing. Mirrors
+         * parseAttributes in the TS reference (01-parse-move.ts).
+         */
+        List<MoveAttribute> parseAttributes() {
+            List<MoveAttribute> attrs = new ArrayList<>();
+            while (check(Kind.HASH)) {
+                advance();
+                expect(Kind.LBRACKET);
+                String name = check(Kind.IDENT) ? advance().value() : "";
+                String flags = null;
+                boolean hasArgs = false;
+                if (check(Kind.LPAREN)) {
+                    hasArgs = true;
+                    advance();
+                    StringBuilder text = new StringBuilder();
+                    boolean ok = true;
+                    int depth = 1;
+                    while (!check(Kind.EOF)) {
+                        Token t = peek();
+                        if (t.kind() == Kind.LPAREN) depth++;
+                        if (t.kind() == Kind.RPAREN && --depth == 0) break;
+                        if (t.kind() == Kind.IDENT) text.append(t.value());
+                        else if (t.kind() == Kind.PIPE) text.append('|');
+                        else ok = false;
+                        advance();
+                    }
+                    expect(Kind.RPAREN);
+                    flags = ok ? text.toString() : null;
+                }
+                while (!check(Kind.RBRACKET) && !check(Kind.EOF)) advance();
+                expect(Kind.RBRACKET);
+                if (name.equals("embed_always") && !hasArgs) {
+                    attrs.add(new MoveAttribute("embed_always", null));
+                } else if (name.equals("sighash")) {
+                    attrs.add(new MoveAttribute("sighash", flags));
+                } else {
+                    errors.add(SighashDirective.unknownMoveAttributeMessage(name + (hasArgs ? "(...)" : "")));
+                }
+            }
+            return attrs;
+        }
+
+        /** N-093: refuse each attribute that annotates nothing that reads it. */
+        void reportLostAttributes(List<MoveAttribute> attrs) {
+            for (MoveAttribute attr : attrs) {
+                errors.add(SighashDirective.lostDirectiveMessage(
+                    attr.kind().equals("sighash") ? "@sighash" : "@embedAlways"));
+            }
+        }
+
+        FnResult parseFunction(List<MoveAttribute> attrs) {
             SourceLocation location = loc();
             Visibility visibility = Visibility.PRIVATE;
 
@@ -868,8 +960,24 @@ public final class MoveParser {
                 }
             }
 
+            // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]`
+            // here annotates nothing.
+            List<MoveAttribute> lost = new ArrayList<>();
+            List<String> sighashSpecs = new ArrayList<>();
+            for (MoveAttribute a : attrs) {
+                if (a.kind().equals("sighash")) sighashSpecs.add(a.flags());
+                else lost.add(a);
+            }
+            reportLostAttributes(lost);
+            SighashDirective.Result sighash =
+                SighashDirective.resolveNativeSighash(name, visibility == Visibility.PUBLIC, sighashSpecs);
+            if (sighash != null && sighash.isError()) {
+                errors.add(sighash.error());
+            }
+
             return new FnResult(
-                new MethodNode(name, params, body, visibility, location),
+                new MethodNode(name, params, body, visibility, location,
+                    sighash == null || sighash.isError() ? null : sighash.value()),
                 hasMut
             );
         }

@@ -112,6 +112,9 @@ type pyToken struct {
 	value string
 	line  int
 	col   int
+	// isBytes marks a pyTokString that came from a b'..' literal (its value
+	// is hex). N-093: only a str literal is a sighash flag spec.
+	isBytes bool
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +265,7 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			if decErr != "" {
 				p.errors = append(p.errors, lexDiag(decErr, p.fileName, line, startCol))
 			}
-			tokens = append(tokens, pyToken{kind: pyTokString, value: hexVal, line: line, col: startCol})
+			tokens = append(tokens, pyToken{kind: pyTokString, value: hexVal, line: line, col: startCol, isBytes: true})
 			continue
 		}
 
@@ -1060,13 +1063,26 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 		// method may carry several (`@public @staticmethod`), so read them all.
 		if p.check(pyTokAt) {
 			var decorators []string
+			var sighashSpecs []*string
 			for p.check(pyTokAt) {
 				p.advance()
 				decoratorTok := p.expect(pyTokIdent)
 				decorators = append(decorators, decoratorTok.value)
+				// N-093: `@public(sighash="FLAGS")` is the native spelling of
+				// the `@sighash` directive.
+				if decoratorTok.value == "public" && p.check(pyTokLParen) {
+					sighashSpecs = append(sighashSpecs, p.parsePublicDecoratorArgs()...)
+				}
 				p.skipNewlines()
 			}
 			decorator := decorators[len(decorators)-1]
+
+			// N-093: the constructor is not a spending entry point.
+			if len(sighashSpecs) > 0 && p.checkIdent("def") && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].value == "__init__" {
+				errLoc := p.loc()
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+				sighashSpecs = nil
+			}
 
 			// The next thing should be a def
 			if p.checkIdent("def") {
@@ -1089,6 +1105,12 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 					}
 				}
 				method := p.parsePyMethod(visibility)
+				sighashType, sighashErr := resolveNativeSighash(method.Name, visibility == "public", sighashSpecs)
+				if sighashErr != "" {
+					errLoc := method.SourceLocation
+					p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+				}
+				method.SighashType = sighashType
 				methods = append(methods, method)
 			} else {
 				p.addError(fmt.Sprintf("line %d: expected 'def' after @%s decorator", p.peek().line, decorator))
@@ -1204,10 +1226,20 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 
 	p.expect(pyTokColon)
 
-	// Check for Readonly[T]
+	// Check for Readonly[T]. N-093: `EmbedAlways[T]` is the native spelling
+	// of the `@embedAlways` directive; the two wrappers compose in either
+	// order.
 	isReadonly := false
-	if p.checkIdent("Readonly") {
-		isReadonly = true
+	embedAlways := false
+	wrappers := 0
+	for p.checkIdent("Readonly") || p.checkIdent("EmbedAlways") {
+		if p.advance().value == "Readonly" {
+			isReadonly = true
+		} else {
+			embedAlways = true
+		}
+		p.expect(pyTokLBracket)
+		wrappers++
 	}
 	// In SmartContract (and UnsafeSmartContract), all properties are
 	// automatically readonly.
@@ -1216,6 +1248,9 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 	}
 
 	typNode := p.parsePyTypeAnnotation()
+	for w := 0; w < wrappers; w++ {
+		p.expect(pyTokRBracket)
+	}
 
 	// Optional initializer: = value
 	var initializer Expression
@@ -1232,8 +1267,54 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 		Type:           typNode,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
+		EmbedAlways:    embedAlways,
 		SourceLocation: loc,
 	}
+}
+
+// parsePublicDecoratorArgs (N-093) parses the argument list of
+// `@public(...)`. The only argument is the keyword `sighash=<str>`; each one
+// yields its string, and any other argument (positional, another keyword, a
+// non-str value) yields nil, which is refused as a malformed spelling.
+// Mirrors parsePublicDecoratorArgs in the TS reference (01-parse-python.ts).
+func (p *pyParser) parsePublicDecoratorArgs() []*string {
+	var specs []*string
+	p.expect(pyTokLParen)
+	for !p.check(pyTokRParen) && !p.check(pyTokNewline) && !p.check(pyTokEOF) {
+		isSighashKw := p.checkIdent("sighash") && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].kind == pyTokAssign
+		if isSighashKw {
+			p.advance() // 'sighash'
+			p.advance() // '='
+		}
+		// One argument value: up to the next top-level ',' or ')'.
+		first := p.peek()
+		count := 0
+		depth := 0
+		for !p.check(pyTokNewline) && !p.check(pyTokEOF) {
+			k := p.peek().kind
+			if (k == pyTokComma || k == pyTokRParen) && depth == 0 {
+				break
+			}
+			if k == pyTokLParen || k == pyTokLBracket {
+				depth++
+			}
+			if k == pyTokRParen || k == pyTokRBracket {
+				depth--
+			}
+			p.advance()
+			count++
+		}
+		if isSighashKw && count == 1 && first.kind == pyTokString && !first.isBytes {
+			specs = append(specs, nativeSighashSpec(first.value))
+		} else {
+			specs = append(specs, nil)
+		}
+		if !p.match(pyTokComma) {
+			break
+		}
+	}
+	p.expect(pyTokRParen)
+	return specs
 }
 
 // ---------------------------------------------------------------------------

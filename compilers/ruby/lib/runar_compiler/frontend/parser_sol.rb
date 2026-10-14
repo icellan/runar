@@ -20,6 +20,7 @@ require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -435,6 +436,12 @@ module RunarCompiler
         advance while check(TOK_SEMICOLON)
       end
 
+      def peek_at(n)
+        return @tokens[@pos + n] if @pos + n < @tokens.length
+
+        Token.new(kind: TOK_EOF, value: "", line: 0, col: 0)
+      end
+
       def peek_next_kind
         return @tokens[@pos + 1].kind if @pos + 1 < @tokens.length
 
@@ -561,11 +568,24 @@ module RunarCompiler
         # Check for array type: Type[N]
         type_node = parse_sol_type_from_name(type_name)
 
-        # Check for immutable keyword
+        # Modifiers, any order: +immutable+ (readonly) and N-093's
+        # +embedAlways+ (the native spelling of the +@embedAlways+ directive).
+        # An +embedAlways+ directly followed by +;+ or +=+ is the property
+        # NAME, not a modifier.
         is_readonly = false
-        if check_ident("immutable")
-          advance
-          is_readonly = true
+        embed_always = false
+        loop do
+          if check_ident("immutable")
+            advance
+            is_readonly = true
+            next
+          end
+          if check_ident("embedAlways") && ![TOK_SEMICOLON, TOK_ASSIGN].include?(peek_at(1).kind)
+            advance
+            embed_always = true
+            next
+          end
+          break
         end
 
         # Property name
@@ -585,6 +605,7 @@ module RunarCompiler
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
+          embed_always: embed_always,
           source_location: location
         )
       end
@@ -682,13 +703,22 @@ module RunarCompiler
 
         params = parse_sol_params
 
-        # Parse visibility modifiers and other qualifiers
+        # Parse visibility modifiers and other qualifiers, and N-093's
+        # +sighash(FLAGS)+ (the native spelling of the +@sighash+ directive),
+        # in any order. FLAGS must be identifiers separated by +|+; any other
+        # token makes the spelling malformed.
         visibility = "private"
-        while check_ident("public") || check_ident("private") ||
+        sighash_specs = []
+        while (check_ident("sighash") && peek_at(1).kind == TOK_LPAREN) ||
+              check_ident("public") || check_ident("private") ||
               check_ident("external") || check_ident("internal") ||
               check_ident("view") || check_ident("pure") ||
               check_ident("returns") || check_ident("payable")
           tok = advance
+          if tok.value == "sighash"
+            sighash_specs << parse_sighash_flag_tokens
+            next
+          end
           visibility = "public" if tok.value == "public" || tok.value == "external"
           # Skip 'returns (Type)' clause
           if tok.value == "returns" && check(TOK_LPAREN)
@@ -704,13 +734,46 @@ module RunarCompiler
 
         body = parse_sol_block
 
+        sighash = SighashDirective.resolve_native_sighash(name, visibility == "public", sighash_specs)
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
+
         MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
+      end
+
+      # N-093: +( IDENT ( '|' IDENT )* )+ after +sighash+ -> the flag text, or
+      # nil when anything else appears inside the parentheses. Always consumes
+      # through the matching +)+ so a malformed spelling does not derail
+      # parsing.
+      def parse_sighash_flag_tokens
+        expect(TOK_LPAREN)
+        text = +""
+        ok = true
+        depth = 1
+        until check(TOK_EOF)
+          t = peek
+          depth += 1 if t.kind == TOK_LPAREN
+          if t.kind == TOK_RPAREN
+            depth -= 1
+            break if depth.zero?
+          end
+          if t.kind == TOK_IDENT || t.kind == TOK_PIPE
+            text << t.value
+          else
+            ok = false
+          end
+          advance
+        end
+        expect(TOK_RPAREN)
+        ok ? text : nil
       end
 
       # -- Parameter parsing: (Type name, Type name, ...) -------------------

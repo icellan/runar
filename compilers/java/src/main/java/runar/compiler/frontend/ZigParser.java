@@ -42,6 +42,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Hand-rolled tokenizer + recursive-descent parser for {@code .runar.zig}
@@ -658,7 +659,8 @@ public final class ZigParser {
                     readonly,
                     init,
                     prop.sourceLocation(),
-                    null
+                    null,
+                    prop.embedAlways()
                 ));
             }
             properties = normalized;
@@ -675,7 +677,7 @@ public final class ZigParser {
                 for (ParamNode p : m.params()) paramScope.add(p.name());
                 List<Statement> rewritten = rewriteStmts(m.body(), methodNames, paramScope);
                 rewrittenMethods.add(new MethodNode(
-                    m.name(), m.params(), rewritten, m.visibility(), m.sourceLocation()));
+                    m.name(), m.params(), rewritten, m.visibility(), m.sourceLocation(), m.sighashType()));
             }
             methods = rewrittenMethods;
 
@@ -729,7 +731,7 @@ public final class ZigParser {
             }
             match(Kind.COMMA);
 
-            return new PropertyNode(name, pt.type, pt.readonly, initializer, l, null);
+            return new PropertyNode(name, pt.type, pt.readonly, initializer, l, null, pt.embedAlways);
         }
 
         MethodNode parseMethod(boolean isPublic) {
@@ -747,8 +749,31 @@ public final class ZigParser {
                 errors.add(file + ":" + l.line() + ":" + l.column() + ": " + LexDiag.staticMethod(name));
             }
 
-            // Parse and discard the return type if present.
-            if (current().kind != Kind.LBRACE) {
+            // Return type, parsed and discarded. N-093: `runar.Sighash("FLAGS")`
+            // in its place is the native spelling of the `@sighash` directive
+            // (natively it is `void`).
+            List<String> sighashSpecs = new ArrayList<>();
+            if (current().kind == Kind.IDENT && "runar".equals(current().value)
+                    && peekAhead(1).kind == Kind.DOT
+                    && peekAhead(2).kind == Kind.IDENT && "Sighash".equals(peekAhead(2).value)) {
+                advance();
+                advance();
+                advance();
+                expect(Kind.LPAREN, "(");
+                Token arg = current();
+                int count = 0;
+                int depth = 0;
+                while (current().kind != Kind.EOF) {
+                    Kind k = current().kind;
+                    if (k == Kind.RPAREN && depth == 0) break;
+                    if (k == Kind.LPAREN) depth++;
+                    if (k == Kind.RPAREN) depth--;
+                    advance();
+                    count++;
+                }
+                expect(Kind.RPAREN, ")");
+                sighashSpecs.add(count == 1 && arg.kind == Kind.STRING ? arg.value : null);
+            } else if (current().kind != Kind.LBRACE) {
                 parseType();
             }
 
@@ -759,14 +784,24 @@ public final class ZigParser {
 
             try {
                 if ("init".equals(name)) {
+                    // N-093: the constructor is not a spending entry point.
+                    if (!sighashSpecs.isEmpty()) {
+                        errors.add(file + ":" + l.line() + ":" + l.column() + ": "
+                            + SighashDirective.lostDirectiveMessage("@sighash"));
+                    }
                     constructor = parseConstructor(l, plr.params);
                     return null;
                 }
                 List<Statement> body = parseBlockStatements();
+                SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(name, isPublic, sighashSpecs);
+                if (sighash != null && sighash.isError()) {
+                    errors.add(file + ":" + l.line() + ":" + l.column() + ": " + sighash.error());
+                }
                 return new MethodNode(
                     name, plr.params, body,
                     isPublic ? Visibility.PUBLIC : Visibility.PRIVATE,
-                    l);
+                    l,
+                    sighash == null || sighash.isError() ? null : sighash.value());
             } finally {
                 selfNames = prevSelf;
                 statefulContextNames = prevCtx;
@@ -834,11 +869,18 @@ public final class ZigParser {
             final TypeNode type;
             final String rawName;
             final boolean readonly;
+            /** N-093: {@code runar.EmbedAlways(T)}, the native spelling of {@code @embedAlways}. */
+            final boolean embedAlways;
 
             ParsedType(TypeNode type, String rawName, boolean readonly) {
+                this(type, rawName, readonly, false);
+            }
+
+            ParsedType(TypeNode type, String rawName, boolean readonly, boolean embedAlways) {
                 this.type = type;
                 this.rawName = rawName;
                 this.readonly = readonly;
+                this.embedAlways = embedAlways;
             }
         }
 
@@ -865,7 +907,13 @@ public final class ZigParser {
                     expect(Kind.LPAREN, "(");
                     ParsedType inner = nest.nested(this::parseType);
                     expect(Kind.RPAREN, ")");
-                    return new ParsedType(inner.type, inner.rawName, true);
+                    return new ParsedType(inner.type, inner.rawName, true, inner.embedAlways);
+                }
+                if ("EmbedAlways".equals(name) && current().kind == Kind.LPAREN) {
+                    expect(Kind.LPAREN, "(");
+                    ParsedType inner = nest.nested(this::parseType);
+                    expect(Kind.RPAREN, ")");
+                    return new ParsedType(inner.type, inner.rawName, inner.readonly, true);
                 }
                 String mapped = mapZigType(name);
                 return new ParsedType(makeTypeNode(mapped), name, false);

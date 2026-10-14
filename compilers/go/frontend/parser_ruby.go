@@ -845,6 +845,12 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 	// Pending visibility/param types for the next method
 	var pendingVisibility string          // "public" or ""
 	var pendingParamTypes map[string]TypeNode
+	// N-093: pending `runar_sighash` specs (nil = malformed) for the next def.
+	type rbPendingSighash struct {
+		spec *string
+		loc  SourceLocation
+	}
+	var pendingSighash []rbPendingSighash
 
 	for !p.check(rbTokEnd) && !p.check(rbTokEOF) {
 		p.skipNewlines()
@@ -858,6 +864,26 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 			if prop != nil {
 				properties = append(properties, *prop)
 			}
+			p.skipNewlines()
+			continue
+		}
+
+		// N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+		// `@sighash` directive; it applies to the next `def`.
+		if p.checkIdent("runar_sighash") {
+			sighashLoc := p.loc()
+			p.advance() // 'runar_sighash'
+			arg := p.peek()
+			count := 0
+			for !p.check(rbTokNewline) && !p.check(rbTokEOF) {
+				p.advance()
+				count++
+			}
+			var spec *string
+			if count == 1 && (arg.kind == rbTokString || arg.kind == rbTokHexString) {
+				spec = nativeSighashSpec(arg.value)
+			}
+			pendingSighash = append(pendingSighash, rbPendingSighash{spec: spec, loc: sighashLoc})
 			p.skipNewlines()
 			continue
 		}
@@ -883,12 +909,28 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		if p.check(rbTokDef) {
 			method := p.parseMethod(pendingVisibility, pendingParamTypes)
 			if method.Name == "constructor" {
+				// N-093: the constructor is not a spending entry point.
+				for _, ps := range pendingSighash {
+					errLoc := ps.loc
+					p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+				}
 				constructor = &method
 			} else {
+				specs := make([]*string, len(pendingSighash))
+				for i, ps := range pendingSighash {
+					specs[i] = ps.spec
+				}
+				sighashType, sighashErr := resolveNativeSighash(method.Name, method.Visibility == "public", specs)
+				if sighashErr != "" {
+					errLoc := method.SourceLocation
+					p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+				}
+				method.SighashType = sighashType
 				methods = append(methods, method)
 			}
 			pendingVisibility = ""
 			pendingParamTypes = nil
+			pendingSighash = nil
 			p.skipNewlines()
 			continue
 		}
@@ -903,6 +945,12 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		// N-004: refuse anything else (an indented `=begin` lexes as `=`).
 		stray := p.advance()
 		p.errors = append(p.errors, lexDiag(UnexpectedClassBodyTokenMsg(stray.value), p.fileName, stray.line, stray.col))
+	}
+
+	// N-093: a `runar_sighash` with no `def` after it annotates nothing.
+	for _, ps := range pendingSighash {
+		errLoc := ps.loc
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
 	}
 
 	p.match(rbTokEnd) // end of class
@@ -1038,10 +1086,22 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 	// Check for optional trailing options: readonly: true/false, default: <literal>
 	// Multiple options are comma-separated and may appear in any order.
 	isReadonly := false
+	embedAlways := false
 	var initializer Expression
 	for p.check(rbTokComma) {
 		p.advance() // ','
-		if p.checkIdent("readonly") {
+		if p.checkIdent("embed_always") {
+			// N-093: the native spelling of the `@embedAlways` directive.
+			p.advance() // 'embed_always'
+			p.expect(rbTokColon)
+			if p.check(rbTokTrue) {
+				p.advance()
+				embedAlways = true
+			} else if p.check(rbTokFalse) {
+				p.advance()
+				embedAlways = false
+			}
+		} else if p.checkIdent("readonly") {
 			p.advance() // 'readonly'
 			p.expect(rbTokColon)
 			if p.check(rbTokTrue) {
@@ -1077,6 +1137,7 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 		Type:           typeNode,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
+		EmbedAlways:    embedAlways,
 		SourceLocation: loc,
 	}
 }

@@ -32,6 +32,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nesting, with_nesting_limit  # F-213
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
@@ -774,6 +775,7 @@ class _ZigParser:
             type=parsed_type[0],
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=parsed_type[3],
             source_location=loc,
         )
 
@@ -793,8 +795,34 @@ class _ZigParser:
         if is_public and receiver_name is None and name != "init":
             self._errors.append(static_method_message(name))
 
-        # Parse optional return type (before the body block)
-        if self._current().kind != TOK_LBRACE:
+        # Parse optional return type (before the body block). N-093:
+        # `runar.Sighash("FLAGS")` in its place is the native spelling of the
+        # `@sighash` directive (natively it is `void`).
+        sighash_specs: list[str | None] = []
+        if (self._current().kind == TOK_IDENT and self._current().value == "runar"
+                and self._peek_ahead(1).kind == TOK_DOT
+                and self._peek_ahead(2).kind == TOK_IDENT
+                and self._peek_ahead(2).value == "Sighash"):
+            self._advance()
+            self._advance()
+            self._advance()
+            self._expect(TOK_LPAREN, "(")
+            arg = self._current()
+            count = 0
+            depth = 0
+            while self._current().kind != TOK_EOF:
+                k = self._current().kind
+                if k == TOK_RPAREN and depth == 0:
+                    break
+                if k == TOK_LPAREN:
+                    depth += 1
+                if k == TOK_RPAREN:
+                    depth -= 1
+                self._advance()
+                count += 1
+            self._expect(TOK_RPAREN, ")")
+            sighash_specs.append(arg.value if count == 1 and arg.kind == TOK_STRING else None)
+        elif self._current().kind != TOK_LBRACE:
             self._parse_type()
 
         prev_self_names = self._self_names
@@ -803,6 +831,9 @@ class _ZigParser:
         self._stateful_context_names = stateful_ctx_names
 
         if name == "init":
+            # N-093: the constructor is not a spending entry point.
+            if sighash_specs:
+                self._errors.append(lost_directive_message("@sighash"))
             self._constructor = self._parse_constructor(loc, params)
             self._self_names = prev_self_names
             self._stateful_context_names = prev_stateful_ctx_names
@@ -812,11 +843,16 @@ class _ZigParser:
         self._self_names = prev_self_names
         self._stateful_context_names = prev_stateful_ctx_names
 
+        sighash = resolve_native_sighash(name, is_public, sighash_specs)
+        if sighash is not None and sighash.error is not None:
+            self._errors.append(sighash.error)
+
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility="public" if is_public else "private",
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=loc,
         )
 
@@ -863,7 +899,7 @@ class _ZigParser:
         self._expect(TOK_RPAREN, ")")
         return params, receiver_name, stateful_ctx_names
 
-    def _parse_param_type(self) -> tuple[TypeNode, str, bool]:
+    def _parse_param_type(self) -> tuple[TypeNode, str, bool, bool]:
         """Parse a parameter type, skipping pointer/const qualifiers."""
         # Skip pointer qualifiers: *, &, const
         while self._current().kind in (TOK_STAR, TOK_AMP):
@@ -872,13 +908,15 @@ class _ZigParser:
             self._advance()
         return self._parse_type()
 
-    def _parse_type(self) -> tuple[TypeNode, str, bool]:
-        """Parse a type and return (TypeNode, rawName, readonly).
+    def _parse_type(self) -> tuple[TypeNode, str, bool, bool]:
+        """Parse a type and return (TypeNode, rawName, readonly, embedAlways).
 
         Handles:
         - ``[N]Type`` → FixedArrayType
         - ``runar.TypeName`` → mapped primitive or custom
         - ``runar.Readonly(Type)`` → inner type with readonly=True
+        - ``runar.EmbedAlways(Type)`` → inner type with embedAlways=True
+          (N-093, the native spelling of ``@embedAlways``)
         - ``void`` → void primitive
         - bare ident → mapped type
         """
@@ -893,6 +931,7 @@ class _ZigParser:
             return (
                 FixedArrayType(element=elem[0], length=length),
                 elem[1],
+                False,
                 False,
             )
 
@@ -909,24 +948,30 @@ class _ZigParser:
                 with self._nest.nested(self._loc):
                     inner = self._parse_type()
                 self._expect(TOK_RPAREN, ")")
-                return (inner[0], inner[1], True)
+                return (inner[0], inner[1], True, inner[3])
+            if name == "EmbedAlways" and self._current().kind == TOK_LPAREN:
+                self._expect(TOK_LPAREN, "(")
+                with self._nest.nested(self._loc):
+                    inner = self._parse_type()
+                self._expect(TOK_RPAREN, ")")
+                return (inner[0], inner[1], inner[2], True)
 
             mapped = _map_zig_type(name)
-            return (_make_type_node(mapped), name, False)
+            return (_make_type_node(mapped), name, False, False)
 
         # void keyword
         if self._current().kind == TOK_VOID:
             self._advance()
-            return (PrimitiveType(name="void"), "void", False)
+            return (PrimitiveType(name="void"), "void", False, False)
 
         # Bare identifier type
         if self._current().kind == TOK_IDENT:
             name = self._advance().value
             mapped = _map_zig_type(name)
-            return (_make_type_node(mapped), name, False)
+            return (_make_type_node(mapped), name, False, False)
 
         fallback = self._advance()
-        return (CustomType(name="unknown"), fallback.value or "unknown", False)
+        return (CustomType(name="unknown"), fallback.value or "unknown", False, False)
 
     def _parse_constructor(self, loc: SourceLocation, params: list[ParamNode]) -> MethodNode:
         """Parse a constructor body (``fn init(...)``)."""

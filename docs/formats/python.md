@@ -112,6 +112,36 @@ The snake_case to camelCase conversion is not injective: two different identifie
 
 ---
 
+## Compiler Directives
+
+```python
+class Directives(SmartContract):
+    pub_key_hash: Addr
+    deploy_tag: EmbedAlways[ByteString]       # @embedAlways
+
+    @public(sighash="SINGLE|FORKID")         # @sighash
+    def spend_single(self, sig: Sig, pub_key: PubKey):
+        ...
+```
+
+- `EmbedAlways[T]` is a wrapper type like `Readonly[T]`, and the two compose in
+  either order (`EmbedAlways[Readonly[T]]` or `Readonly[EmbedAlways[T]]`).
+- `@public(sighash="FLAGS")` takes exactly one keyword argument, a `str`.
+  Anything else inside `@public(...)` is an error.
+- Both are exported by the `runar` package, so the contract still runs as
+  Python.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/python/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mappings
 
 | Python Type | Runar AST Type |

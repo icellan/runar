@@ -906,6 +906,19 @@ func (p *javaParser) readAnnotationName() string {
 var javaKnownMemberAnnotations = map[string]bool{
 	"Readonly": true, "Public": true, "Stateful": true,
 	"Override": true, "SuppressWarnings": true,
+	// N-093: the native spellings of the `@embedAlways` / `@sighash`
+	// directives.
+	"EmbedAlways": true, "Sighash": true,
+}
+
+// javaAnnotationArgs (N-093) returns the `(` ... `)` tokens of the annotation
+// spanning tokens[start:end] (empty when it has no argument list).
+func (p *javaParser) javaAnnotationArgs(start, end int) []javaToken {
+	i := start + 1 // past `@`
+	for i < end && (p.tokens[i].kind == javaTokIdent || p.tokens[i].kind == javaTokDot) {
+		i++
+	}
+	return p.tokens[i:end]
 }
 
 // parseClassMember returns *PropertyNode or *MethodNode (or nil on an error
@@ -913,9 +926,30 @@ var javaKnownMemberAnnotations = map[string]bool{
 func (p *javaParser) parseClassMember(className string) interface{} {
 	// Collect annotations
 	annotations := map[string]bool{}
+	// N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+	// the `@embedAlways` / `@sighash` directives.
+	var embedAlwaysLoc, sighashLoc *SourceLocation
+	var sighashSpecs []*string
 	for p.current().kind == javaTokAt {
 		atLoc := p.loc()
+		start := p.pos
 		name := p.readAnnotationName()
+		switch name {
+		case "EmbedAlways":
+			l := atLoc
+			embedAlwaysLoc = &l
+		case "Sighash":
+			if sighashLoc == nil {
+				l := atLoc
+				sighashLoc = &l
+			}
+			args := p.javaAnnotationArgs(start, p.pos)
+			if len(args) == 3 && args[1].kind == javaTokString {
+				sighashSpecs = append(sighashSpecs, nativeSighashSpec(args[1].value))
+			} else {
+				sighashSpecs = append(sighashSpecs, nil)
+			}
+		}
 		if name != "" {
 			annotations[name] = true
 			if !javaKnownMemberAnnotations[name] {
@@ -956,6 +990,13 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 	if p.current().kind == javaTokIdent && p.current().value == className &&
 		p.peekAt(1).kind == javaTokLParen {
 		method := p.parseConstructor(className)
+		// N-093: the constructor is neither a spending entry point nor a field.
+		if sighashLoc != nil {
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: sighashLoc})
+		}
+		if embedAlwaysLoc != nil {
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@embedAlways"), Severity: SeverityError, Loc: embedAlwaysLoc})
+		}
 		return method
 	}
 
@@ -985,7 +1026,19 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 			p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
 		}
 		method := p.parseMethod(name, typ, annotations, loc)
+		if embedAlwaysLoc != nil {
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@embedAlways"), Severity: SeverityError, Loc: embedAlwaysLoc})
+		}
+		sighashType, sighashErr := resolveNativeSighash(name, annotations["Public"], sighashSpecs)
+		if sighashErr != "" {
+			errLoc := loc
+			p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+		}
+		method.SighashType = sighashType
 		return method
+	}
+	if sighashLoc != nil {
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: sighashLoc})
 	}
 
 	// Field: `= init;` or `;`
@@ -1001,6 +1054,7 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 		Type:           typ,
 		Readonly:       readonly,
 		Initializer:    init,
+		EmbedAlways:    embedAlwaysLoc != nil,
 		SourceLocation: loc,
 	}
 }

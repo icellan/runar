@@ -11,6 +11,7 @@ require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "identifier_collision"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -349,7 +350,13 @@ module RunarCompiler
       go_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_go(source, lex = [], file_name = "")
+    # +directives+ (N-093) collects every Go DSL directive comment
+    # `//runar:<name> <args>` (Go's own `//go:` convention: no space after
+    # `//`) as {name:, args:, token_index:, line:, column:}. +token_index+ is
+    # the index of the first token after the comment, so a directive attaches
+    # to the declaration that follows it, with only comments and blank lines
+    # in between.
+    def self.tokenize_go(source, lex = [], file_name = "", directives = [])
       tokens = []
       line = 1
       col = 0
@@ -385,8 +392,17 @@ module RunarCompiler
 
         # Single-line comment //
         if ch == "/" && i + 1 < n && source[i + 1] == "/"
+          comment_start = i
           while i < n && source[i] != "\n" && source[i] != "\r"
             i += 1
+          end
+          # N-093: `//runar:<name> <args>` is a directive, not prose.
+          text = source[comment_start...i]
+          if text.start_with?("//runar:")
+            body = text["//runar:".length..]
+            dname = body[/\A[^ \t]*/]
+            directives << { name: dname, args: body[dname.length..], token_index: tokens.length,
+                             line: line, column: col }
           end
           next
         end
@@ -602,6 +618,9 @@ module RunarCompiler
 
       attr_accessor :tokens, :pos, :errors
 
+      # N-093: every `//runar:` directive in the file, in source order.
+      attr_writer :directives
+
       # F-017: (source spelling, Rúnar name) of every declared identifier.
       attr_reader :declared
 
@@ -692,6 +711,7 @@ module RunarCompiler
             advance # skip unknown top-level tokens
           end
         end
+        report_stray_directives
 
         # F-010: the contract is THE struct embedding a Rúnar base class --
         # never "the last struct in the file". Any other struct is ignored,
@@ -857,11 +877,17 @@ module RunarCompiler
           # Parse type
           prop_type = parse_go_type
 
-          # Check for struct tag
+          # Check for struct tag. The `runar` key holds comma-separated
+          # options (N-093): `readonly`, and `embedAlways` -- the native
+          # spelling of the `@embedAlways` directive -- in any order.
           readonly = false
+          embed_always = false
           if check(TOK_BACKTICK)
             tag_value = peek.value
-            readonly = true if tag_value.include?('runar:"readonly"')
+            runar_tag = tag_value.match(/(?:\A|\s)runar:"([^"]*)"/)
+            options = runar_tag ? runar_tag[1].split(",", -1).map(&:strip) : []
+            readonly = true if options.include?("readonly")
+            embed_always = true if options.include?("embedAlways")
             advance
           end
 
@@ -870,6 +896,7 @@ module RunarCompiler
               name: declare(field_name),
               type: prop_type,
               readonly: readonly,
+              embed_always: embed_always,
               source_location: prop_loc
             )
           end
@@ -925,8 +952,42 @@ module RunarCompiler
 
       # -- Function/method declaration --------------------------------------
 
+      # N-093: the flag specs of the `//runar:sighash` directives attached to
+      # the declaration starting at token +token_index+ (nil for a malformed
+      # one).
+      def take_sighash_directives(token_index)
+        specs = []
+        (@directives || []).each do |d|
+          next if d[:token_index] != token_index || d[:name] != "sighash"
+
+          (@consumed_directives ||= Set.new.compare_by_identity) << d
+          specs << (d[:args].empty? || d[:args].match?(/\A[ \t][A-Za-z0-9_| \t]*\z/) ? d[:args] : nil)
+        end
+        specs
+      end
+
+      # N-093: refuse every directive that is unknown or attached to no func.
+      def report_stray_directives
+        consumed = @consumed_directives || Set.new.compare_by_identity
+        (@directives || []).each do |d|
+          next if consumed.include?(d)
+
+          msg = if d[:name] == "sighash"
+                  SighashDirective.lost_directive_message("@sighash")
+                else
+                  SighashDirective.unknown_go_directive_message(d[:name] + d[:args])
+                end
+          @errors << Diagnostic.new(
+            message: msg, severity: Severity::ERROR,
+            loc: SourceLocation.new(file: @file_name, line: d[:line], column: d[:column])
+          )
+        end
+      end
+
       def parse_func_decl
         location = loc
+        # N-093: the `//runar:sighash` directives directly above this func.
+        func_token_index = @pos
         expect_ident("func")
 
         # Check for receiver: (c *Type)
@@ -1027,12 +1088,20 @@ module RunarCompiler
         # Convert method name from Go PascalCase to Runar camelCase
         name = declare(func_name)
 
+        sighash = SighashDirective.resolve_native_sighash(
+          name, visibility == "public", take_sighash_directives(func_token_index)
+        )
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
+
         method = MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
         # F-010: parse_contract checks receiver_type against the contract.
         { method: method, go_name: func_name, receiver_type: receiver_type }
@@ -1658,7 +1727,9 @@ module RunarCompiler
 
     def self._parse_go_tokens(source, file_name, lex)
       p = GoParser.new(file_name)
-      p.tokens = tokenize_go(source, lex, file_name)
+      directives = []
+      p.tokens = tokenize_go(source, lex, file_name, directives)
+      p.directives = directives
       p.pos = 0
 
       begin

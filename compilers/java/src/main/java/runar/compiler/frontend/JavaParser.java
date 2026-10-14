@@ -87,6 +87,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.java} source into a Rúnar {@link ContractNode}.
@@ -422,6 +423,12 @@ public final class JavaParser {
     private static PropertyNode convertField(VariableTree v, String filename, Unit cu) {
         validateAnnotations(v.getModifiers());
         boolean readonly = hasAnnotation(v.getModifiers(), "Readonly");
+        // N-093: `@EmbedAlways` is the native spelling of the `@embedAlways`
+        // directive; a `@Sighash` here annotates nothing.
+        boolean embedAlways = hasAnnotation(v.getModifiers(), "EmbedAlways");
+        if (hasAnnotation(v.getModifiers(), "Sighash")) {
+            throw new ParseException(SighashDirective.lostDirectiveMessage("@sighash"));
+        }
         TypeNode type = convertType(v.getType(), filename);
         Expression init = v.getInitializer() != null ? convertExpression(v.getInitializer(), filename, cu) : null;
         return new PropertyNode(
@@ -430,7 +437,8 @@ public final class JavaParser {
             readonly,
             init,
             locationOf(v, cu, filename),
-            null
+            null,
+            embedAlways
         );
     }
 
@@ -441,6 +449,19 @@ public final class JavaParser {
     private static MethodNode convertMethod(MethodTree m, String filename, Unit cu, String className) {
         validateAnnotations(m.getModifiers());
         boolean isConstructor = m.getName().contentEquals("<init>") || m.getName().contentEquals(className);
+
+        // N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+        // the `@embedAlways` / `@sighash` directives. Neither applies to the
+        // constructor (not a spending entry point, not a field), nor
+        // `@EmbedAlways` to any method. Checked in the TS reference's order.
+        boolean sighashAnn = hasAnnotation(m.getModifiers(), "Sighash");
+        boolean embedAnn = hasAnnotation(m.getModifiers(), "EmbedAlways");
+        if (isConstructor && sighashAnn) {
+            throw new ParseException(SighashDirective.lostDirectiveMessage("@sighash"));
+        }
+        if (embedAnn) {
+            throw new ParseException(SighashDirective.lostDirectiveMessage("@embedAlways"));
+        }
 
         Visibility vis;
         if (isConstructor) {
@@ -461,7 +482,14 @@ public final class JavaParser {
             : convertStatements(m.getBody().getStatements(), filename, cu);
 
         String name = isConstructor ? "constructor" : m.getName().toString();
-        return new MethodNode(name, params, body, vis, locationOf(m, cu, filename));
+        SighashDirective.Result sighash = isConstructor
+            ? null
+            : SighashDirective.resolveNativeSighash(name, vis == Visibility.PUBLIC, sighashSpecs(m.getModifiers()));
+        if (sighash != null && sighash.isError()) {
+            throw new ParseException(sighash.error());
+        }
+        return new MethodNode(name, params, body, vis, locationOf(m, cu, filename),
+            sighash == null ? null : sighash.value());
     }
 
     private static MethodNode syntheticConstructor(List<PropertyNode> properties, String filename) {
@@ -1170,6 +1198,29 @@ public final class JavaParser {
         return false;
     }
 
+    /**
+     * N-093: the flag text of each {@code @Sighash} annotation in {@code mods},
+     * or {@code null} for one whose argument is not exactly one string literal
+     * ({@code @Sighash}, {@code @Sighash(1)}, {@code @Sighash(value = "...")},
+     * ...), which is refused as a malformed spelling.
+     */
+    private static List<String> sighashSpecs(ModifiersTree mods) {
+        List<String> specs = new ArrayList<>();
+        if (mods == null) return specs;
+        for (AnnotationTree a : mods.getAnnotations()) {
+            if (!typeSimpleName(a.getAnnotationType()).equals("Sighash")) continue;
+            List<? extends ExpressionTree> args = a.getArguments();
+            if (args.size() == 1
+                && args.get(0) instanceof LiteralTree lit
+                && lit.getKind() == Tree.Kind.STRING_LITERAL) {
+                specs.add((String) lit.getValue());
+            } else {
+                specs.add(null);
+            }
+        }
+        return specs;
+    }
+
     // F-205: the annotation names Rúnar recognizes at member position,
     // matching the TS reference (01-parse-java.ts, parseMember). Anything
     // else is a loud "unsupported annotation" diagnostic rather than a
@@ -1177,7 +1228,9 @@ public final class JavaParser {
     // parse with no error and leave the method at the default `private`
     // visibility.
     private static final java.util.Set<String> KNOWN_MEMBER_ANNOTATIONS =
-        java.util.Set.of("Readonly", "Public", "Stateful", "Override", "SuppressWarnings");
+        java.util.Set.of("Readonly", "Public", "Stateful", "Override", "SuppressWarnings",
+            // N-093: the native spellings of `@embedAlways` / `@sighash`.
+            "EmbedAlways", "Sighash");
 
     private static void validateAnnotations(ModifiersTree mods) {
         if (mods == null) return;

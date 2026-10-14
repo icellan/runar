@@ -81,46 +81,55 @@ export interface ParseResult {
 // ---------------------------------------------------------------------------
 
 // The author-facing comment directives `@sighash <FLAGS>` (#123, per-method
-// sighash type) and `@embedAlways` (#109, readonly-field DCE opt-out) are
-// honoured ONLY on the TypeScript (.runar.ts) surface below — the default
-// branch reads leading trivia / JSDoc. The eight non-TS surface parsers this
-// compiler dispatches to (.sol/.move/.py/.go/.rs/.rb/.zig/.java) ignore
-// comments, so a directive in one of those sources would be silently dropped
-// and change signing / DCE semantics. Fail closed on those formats rather than
-// miscompile — this matches the Go/Rust/Python/Zig/Ruby/Java tiers. No
-// conformance fixture uses either directive, so this has zero golden impact.
-// `@embedAlways` is word-boundary anchored so an identifier like `sighashType`
-// does not trip the guard. `@sighash` is NOT (N-244): N-039 made every
-// occurrence of the marker a directive on `.runar.ts`, so a glued
+// sighash type) and `@embedAlways` (#109, readonly-field DCE opt-out) are read
+// from COMMENTS only on the TypeScript (.runar.ts) surface below — the default
+// branch reads leading trivia / JSDoc. The eight non-TS surfaces spell both
+// directives natively instead (N-093, user decision R38: a modifier mirroring
+// each surface's readonly idiom — see NATIVE_DIRECTIVE_SPELLINGS), and their
+// parsers drop comments, so a COMMENT directive in one of those sources would
+// be silently ignored and change signing / DCE semantics. Fail closed on those
+// formats rather than miscompile, and name the native spelling to use. None
+// of the native spellings contains either marker, so this guard never trips
+// on them. `@embedAlways` is word-boundary anchored so an identifier like
+// `sighashType` does not trip the guard. `@sighash` is NOT (N-244): N-039
+// made every occurrence of the marker a directive on `.runar.ts`, so a glued
 // `@sighashSINGLE|FORKID` is refused here too instead of being read as prose.
 // The message is identical in all seven tiers.
 const SIGHASH_DIRECTIVE_RE = /@sighash/;
 const EMBED_ALWAYS_DIRECTIVE_RE = /@embedAlways\b/;
 
-// Extension → human-readable surface name for the diagnostic. `.runar.ts` is
-// intentionally absent: the default branch implements the directives.
-const NON_TS_SURFACES: ReadonlyArray<readonly [string, string]> = [
-  ['.runar.sol', 'Solidity'],
-  ['.runar.move', 'Move'],
-  ['.runar.py', 'Python'],
-  ['.runar.go', 'Go DSL'],
-  ['.runar.rs', 'Rust'],
-  ['.runar.rb', 'Ruby'],
-  ['.runar.zig', 'Zig'],
-  ['.runar.java', 'Java'],
+// Extension → human-readable surface name, the format doc, and the native
+// spelling of each directive on that surface (N-093). `.runar.ts` is
+// intentionally absent: the default branch implements the comment directives.
+const NON_TS_SURFACES: ReadonlyArray<readonly [string, string, string, string, string]> = [
+  ['.runar.sol', 'Solidity', 'solidity', 'the function modifier sighash(<FLAGS>)', 'the property modifier embedAlways'],
+  ['.runar.move', 'Move', 'move', 'the attribute #[sighash(<FLAGS>)]', 'the attribute #[embed_always]'],
+  ['.runar.py', 'Python', 'python', '@public(sighash="<FLAGS>")', 'the wrapper type EmbedAlways[T]'],
+  ['.runar.go', 'Go DSL', 'go', 'the directive //runar:sighash <FLAGS>', 'the struct tag option runar:"readonly,embedAlways"'],
+  ['.runar.rs', 'Rust', 'rust', 'the attribute #[sighash(<FLAGS>)]', 'the attribute #[embed_always]'],
+  ['.runar.rb', 'Ruby', 'ruby', "runar_sighash '<FLAGS>'", 'the prop option embed_always: true'],
+  ['.runar.zig', 'Zig', 'zig', 'the return type runar.Sighash("<FLAGS>")', 'the type function runar.EmbedAlways(T)'],
+  ['.runar.java', 'Java', 'java', 'the annotation @Sighash("<FLAGS>")', 'the annotation @EmbedAlways'],
 ];
 
 /**
  * Return a fail-closed diagnostic message when `source` carries a `@sighash`
- * (#123) or `@embedAlways` (#109) directive on a non-TS surface whose parser
- * ignores comments (so the directive would be silently dropped), else null.
+ * (#123) or `@embedAlways` (#109) COMMENT directive on a non-TS surface whose
+ * parser ignores comments (so the directive would be silently dropped), else
+ * null. The message names the surface's native spelling (N-093).
  */
-function unsupportedDirectiveError(source: string, surfaceName: string): string | null {
+function unsupportedDirectiveError(
+  source: string,
+  surfaceName: string,
+  doc: string,
+  sighashSpelling: string,
+  embedSpelling: string,
+): string | null {
   if (SIGHASH_DIRECTIVE_RE.test(source)) {
-    return `@sighash directive (issue #123) is not supported by the ${surfaceName} surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured`;
+    return `@sighash directive (issue #123) is not supported as a comment by the ${surfaceName} surface parser; write it as ${sighashSpelling} (see docs/formats/${doc}.md)`;
   }
   if (EMBED_ALWAYS_DIRECTIVE_RE.test(source)) {
-    return `@embedAlways directive (issue #109) is not supported by the ${surfaceName} surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured`;
+    return `@embedAlways directive (issue #109) is not supported as a comment by the ${surfaceName} surface parser; write it as ${embedSpelling} (see docs/formats/${doc}.md)`;
   }
   return null;
 }
@@ -159,9 +168,9 @@ function parseDispatch(source: string, fileName?: string): ParseResult {
   // Fail-closed directive guard: reject `@sighash` / `@embedAlways` on any
   // non-TS surface (whose parser ignores comments) before dispatching. The
   // `.runar.ts` / default branch is exempt because it honours the directives.
-  for (const [ext, surfaceName] of NON_TS_SURFACES) {
+  for (const [ext, surfaceName, doc, sighashSpelling, embedSpelling] of NON_TS_SURFACES) {
     if (file.endsWith(ext)) {
-      const directiveMsg = unsupportedDirectiveError(source, surfaceName);
+      const directiveMsg = unsupportedDirectiveError(source, surfaceName, doc, sighashSpelling, embedSpelling);
       if (directiveMsg) {
         return {
           contract: null,

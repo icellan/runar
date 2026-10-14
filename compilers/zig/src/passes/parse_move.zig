@@ -28,6 +28,7 @@ const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -98,6 +99,13 @@ pub fn parseMove(allocator: Allocator, source: []const u8, file_name: []const u8
 // ============================================================================
 // Token Types
 // ============================================================================
+
+/// N-093: one parsed `#[...]` attribute (see `Parser.parseAttributes`).
+const MoveAttribute = struct {
+    kind: enum { embed_always, sighash },
+    flags: ?[]const u8,
+    loc: types.SourceLocation,
+};
 
 const TokenKind = enum {
     eof,
@@ -678,6 +686,78 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-093: `#[` opens an attribute. The tokenizer yields an unknown `#` as
+    /// a one-byte ident; it starts an attribute only when `[` follows it
+    /// directly (a lone `#` stays the unexpected token it was).
+    fn atAttributeStart(self: *const Parser) bool {
+        if (self.current.kind != .ident or !std.mem.eql(u8, self.current.text, "#")) return false;
+        const t = &self.tokenizer;
+        return t.pos < t.source.len and t.source[t.pos] == '[';
+    }
+
+    /// N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+    /// `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+    /// otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+    /// identifier list, or null when the parentheses hold anything else or
+    /// are missing.
+    fn parseAttributes(self: *Parser) []MoveAttribute {
+        var attrs: std.ArrayListUnmanaged(MoveAttribute) = .empty;
+        while (self.atAttributeStart()) {
+            const loc = self.currentSourceLoc();
+            _ = self.bump(); // '#'
+            _ = self.expect(.lbracket);
+            const name: []const u8 = if (self.current.kind == .ident) self.bump().text else "";
+            var flags: ?[]const u8 = null;
+            var has_args = false;
+            if (self.current.kind == .lparen) {
+                has_args = true;
+                _ = self.bump();
+                var text: std.ArrayListUnmanaged(u8) = .empty;
+                var ok = true;
+                var depth: usize = 1;
+                while (self.current.kind != .eof) {
+                    const t = self.current;
+                    if (t.kind == .lparen) depth += 1;
+                    if (t.kind == .rparen) {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    }
+                    if (t.kind == .ident or t.kind == .pipe) {
+                        text.appendSlice(self.allocator, t.text) catch {};
+                    } else ok = false;
+                    _ = self.bump();
+                }
+                _ = self.expect(.rparen);
+                flags = if (ok) text.items else null;
+            }
+            while (self.current.kind != .rbracket and self.current.kind != .eof) _ = self.bump();
+            _ = self.expect(.rbracket);
+            if (std.mem.eql(u8, name, "embed_always") and !has_args) {
+                attrs.append(self.allocator, .{ .kind = .embed_always, .flags = null, .loc = loc }) catch {};
+            } else if (std.mem.eql(u8, name, "sighash")) {
+                attrs.append(self.allocator, .{ .kind = .sighash, .flags = flags, .loc = loc }) catch {};
+            } else {
+                const shown = if (has_args) std.fmt.allocPrint(self.allocator, "{s}(...)", .{name}) catch name else name;
+                self.addErrorAtLoc(loc, sighash_directive.unknownMoveAttributeMessage(self.allocator, shown));
+            }
+        }
+        return attrs.items;
+    }
+
+    fn reportLostAttributes(self: *Parser, attrs: []const MoveAttribute) void {
+        for (attrs) |attr| {
+            self.addErrorAtLoc(attr.loc, switch (attr.kind) {
+                .sighash => sighash_directive.LOST_SIGHASH_ERROR,
+                .embed_always => sighash_directive.LOST_EMBED_ALWAYS_ERROR,
+            });
+        }
+    }
+
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
@@ -784,6 +864,14 @@ const Parser = struct {
         var has_init_fn = false;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            // N-093: attributes before a function (`#[sighash(...)]`).
+            // Anything else they precede reads neither directive, so each one
+            // is refused.
+            const attrs = self.parseAttributes();
+            if (attrs.len > 0 and !self.checkIdent("public") and !self.checkIdent("fun")) {
+                self.reportLostAttributes(attrs);
+            }
+
             // Skip use declarations inside the module
             if (self.checkIdent("use")) {
                 self.skipUseDecl();
@@ -806,7 +894,7 @@ const Parser = struct {
 
             // public fun or fun
             if (self.checkIdent("public") or self.checkIdent("fun")) {
-                const method = self.parseMoveFunction();
+                const method = self.parseMoveFunction(attrs);
                 if (method) |m| {
                     if (std.mem.eql(u8, m.name, "init")) {
                         has_init_fn = true;
@@ -875,6 +963,13 @@ const Parser = struct {
         var props: std.ArrayListUnmanaged(PropertyNode) = .empty;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            // N-093: `#[embed_always]` before a field is the native spelling
+            // of `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+            var embed_always = false;
+            for (self.parseAttributes()) |attr| {
+                if (attr.kind == .embed_always) embed_always = true else self.reportLostAttributes(&.{attr});
+            }
+
             if (self.current.kind != .ident) {
                 _ = self.bump();
                 continue;
@@ -931,6 +1026,7 @@ const Parser = struct {
                 .type_info = type_info,
                 .readonly = readonly,
                 .initializer = initializer,
+                .embed_always = embed_always,
                 // N-109: spelled type name + field-name token, for the
                 // validator's unsupported-type diagnostic. Diagnostics only.
                 .type_name = types.typeNodeName(type_node),
@@ -1103,7 +1199,7 @@ const Parser = struct {
 
     // ---- Function parsing ----
 
-    fn parseMoveFunction(self: *Parser) ?MethodNode {
+    fn parseMoveFunction(self: *Parser, attrs: []const MoveAttribute) ?MethodNode {
         var is_public = false;
 
         if (self.matchIdent("public")) {
@@ -1165,11 +1261,24 @@ const Parser = struct {
             }
         }
 
+        // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        // annotates nothing.
+        var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        for (attrs) |attr| {
+            if (attr.kind == .sighash) sighash_specs.append(self.allocator, attr.flags) catch {} else self.reportLostAttributes(&.{attr});
+        }
+        var sighash_type: ?i32 = null;
+        if (sighash_directive.resolveNativeSighash(self.allocator, method_name, is_public, sighash_specs.items)) |r| switch (r) {
+            .value => |v| sighash_type = v,
+            .err => |e| self.addErrorAtLoc(method_loc, e),
+        };
+
         return MethodNode{
             .name = method_name,
             .is_public = is_public,
             .params = params,
             .body = body,
+            .sighash_type = sighash_type,
             .source_loc = method_loc,
         };
     }

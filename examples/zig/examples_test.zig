@@ -164,4 +164,6 @@ test {
     _ = @import("./stateful/Stateful_test.zig");
     _ = @import("./post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure_test.zig");
     _ = @import("./post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure_test.zig");
+    _ = @import("./compiler-directives/Directives_test.zig");
+    _ = @import("./compiler-directives/EmbedTags_test.zig");
 }

@@ -43,6 +43,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.rb} (Ruby) source into a Rúnar {@link ContractNode}.
@@ -789,6 +790,10 @@ public final class RbParser {
 
             String pendingVisibility = null;
             Map<String, TypeNode> pendingParamTypes = null;
+            // N-093: pending `runar_sighash` specs (null = malformed) for the
+            // next def, each with the location of its macro.
+            List<String> pendingSighash = new ArrayList<>();
+            List<SourceLocation> pendingSighashLocs = new ArrayList<>();
 
             while (peek().kind != TK.END && peek().kind != TK.EOF) {
                 skipNewlines();
@@ -797,6 +802,22 @@ public final class RbParser {
                 if (checkIdent("prop")) {
                     PropertyNode p = parseProp(parentClass);
                     if (p != null) properties.add(p);
+                    skipNewlines();
+                    continue;
+                }
+                // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+                // `@sighash` directive; it applies to the next `def`.
+                if (checkIdent("runar_sighash")) {
+                    pendingSighashLocs.add(loc());
+                    advance(); // 'runar_sighash'
+                    Token arg = peek();
+                    int count = 0;
+                    while (peek().kind != TK.NEWLINE && peek().kind != TK.EOF) {
+                        advance();
+                        count++;
+                    }
+                    boolean isStr = arg.kind == TK.STRING || arg.kind == TK.HEXSTRING;
+                    pendingSighash.add(count == 1 && isStr ? arg.value : null);
                     skipNewlines();
                     continue;
                 }
@@ -816,12 +837,28 @@ public final class RbParser {
                 if (peek().kind == TK.DEF) {
                     MethodNode m = parseMethod(pendingVisibility, pendingParamTypes);
                     if ("constructor".equals(m.name())) {
+                        // N-093: the constructor is not a spending entry point.
+                        for (SourceLocation sl : pendingSighashLocs) {
+                            errors.add(file + ":" + sl.line() + ":" + sl.column() + ": "
+                                + SighashDirective.lostDirectiveMessage("@sighash"));
+                        }
                         constructor = m;
                     } else {
+                        SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                            m.name(), m.visibility() == Visibility.PUBLIC, pendingSighash);
+                        if (sighash != null && sighash.isError()) {
+                            SourceLocation ml = m.sourceLocation();
+                            errors.add(file + ":" + ml.line() + ":" + ml.column() + ": " + sighash.error());
+                        } else if (sighash != null) {
+                            m = new MethodNode(m.name(), m.params(), m.body(), m.visibility(),
+                                m.sourceLocation(), sighash.value());
+                        }
                         methods.add(m);
                     }
                     pendingVisibility = null;
                     pendingParamTypes = null;
+                    pendingSighash = new ArrayList<>();
+                    pendingSighashLocs = new ArrayList<>();
                     skipNewlines();
                     continue;
                 }
@@ -835,6 +872,11 @@ public final class RbParser {
                 Token stray = advance();
                 errors.add(file + ":" + stray.line + ":" + stray.col + ": "
                     + LexDiag.unexpectedClassBodyToken(stray.value));
+            }
+            // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+            for (SourceLocation sl : pendingSighashLocs) {
+                errors.add(file + ":" + sl.line() + ":" + sl.column() + ": "
+                    + SighashDirective.lostDirectiveMessage("@sighash"));
             }
             match(TK.END);
 
@@ -888,7 +930,7 @@ public final class RbParser {
                     }
                 }
                 rewritten.add(new MethodNode(
-                    m.name(), m.params(), body, m.visibility(), m.sourceLocation()
+                    m.name(), m.params(), body, m.visibility(), m.sourceLocation(), m.sighashType()
                 ));
             }
 
@@ -935,11 +977,23 @@ public final class RbParser {
             TypeNode typeNode = parseType();
 
             boolean isReadonly = false;
+            boolean embedAlways = false;
             Expression initializer = null;
 
             while (peek().kind == TK.COMMA) {
                 advance();
-                if (checkIdent("readonly")) {
+                if (checkIdent("embed_always")) {
+                    // N-093: the native spelling of the `@embedAlways` directive.
+                    advance();
+                    expect(TK.COLON, ":");
+                    if (peek().kind == TK.TRUE) {
+                        advance();
+                        embedAlways = true;
+                    } else if (peek().kind == TK.FALSE) {
+                        advance();
+                        embedAlways = false;
+                    }
+                } else if (checkIdent("readonly")) {
                     advance();
                     expect(TK.COLON, ":");
                     if (peek().kind == TK.TRUE) {
@@ -972,7 +1026,8 @@ public final class RbParser {
                 isReadonly,
                 initializer,
                 propLoc,
-                null
+                null,
+                embedAlways
             );
         }
 

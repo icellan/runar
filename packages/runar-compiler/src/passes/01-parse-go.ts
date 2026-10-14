@@ -36,6 +36,7 @@ import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { identifierCollisionMessage } from './snake-to-camel.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { lostDirectiveMessage, resolveNativeSighash, unknownGoDirectiveMessage } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -72,7 +73,26 @@ const KEYWORDS = new Map<string, TokenType>([
   ['true', 'true'], ['false', 'false'],
 ]);
 
-function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): GoToken[] {
+/**
+ * N-093: a Go DSL directive comment `//runar:<name> <args>` (Go's own
+ * `//go:` convention: no space after `//`). `tokenIndex` is the index of the
+ * first token after the comment, so a directive attaches to the declaration
+ * that follows it, with only comments and blank lines in between.
+ */
+interface GoDirective {
+  name: string;
+  args: string;
+  tokenIndex: number;
+  line: number;
+  column: number;
+}
+
+function tokenize(
+  source: string,
+  file: string,
+  errors: CompilerDiagnostic[],
+  directives: GoDirective[] = [],
+): GoToken[] {
   const tokens: GoToken[] = [];
   let pos = 0;
   let line = 1;
@@ -104,7 +124,15 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
 
     // Line comments
     if (ch === '/' && peekN(1) === '/') {
+      const start = pos;
       while (pos < source.length && peek() !== '\n') advance();
+      // N-093: `//runar:<name> <args>` is a directive, not prose.
+      const text = source.slice(start, pos).replace(/\r$/, '');
+      if (text.startsWith('//runar:')) {
+        const body = text.slice('//runar:'.length);
+        const m = /^[^ \t]*/.exec(body)!;
+        directives.push({ name: m[0], args: body.slice(m[0].length), tokenIndex: tokens.length, line: l, column: c });
+      }
       continue;
     }
 
@@ -461,6 +489,34 @@ class GoParser extends ParserCore<GoToken> {
     return name;
   }
 
+  /** N-093: every `//runar:` directive in the file, in source order. */
+  directives: GoDirective[] = [];
+  private consumedDirectives = new Set<GoDirective>();
+
+  /**
+   * N-093: the flag specs of the `//runar:sighash` directives attached to the
+   * declaration starting at token `tokenIndex` (`null` for a malformed one).
+   */
+  private takeSighashDirectives(tokenIndex: number): Array<string | null> {
+    const specs: Array<string | null> = [];
+    for (const d of this.directives) {
+      if (d.tokenIndex !== tokenIndex || d.name !== 'sighash') continue;
+      this.consumedDirectives.add(d);
+      specs.push(d.args.length === 0 || /^[ \t][A-Za-z0-9_| \t]*$/.test(d.args) ? d.args : null);
+    }
+    return specs;
+  }
+
+  /** N-093: refuse every directive that is unknown or attached to no func. */
+  private reportStrayDirectives(): void {
+    for (const d of this.directives) {
+      if (this.consumedDirectives.has(d)) continue;
+      const loc = { file: this.file, line: d.line, column: d.column };
+      const msg = d.name === 'sighash' ? lostDirectiveMessage('@sighash') : unknownGoDirectiveMessage(d.name + d.args);
+      this.errors.push(makeDiagnostic(msg, 'error', loc));
+    }
+  }
+
   parse(): ParseResult {
     // Skip `package contract`
     if (this.current().type === 'package') {
@@ -484,6 +540,7 @@ class GoParser extends ParserCore<GoToken> {
         this.advance(); // skip unknown top-level tokens
       }
     }
+    this.reportStrayDirectives();
 
     // F-010: the contract is THE struct embedding a Rúnar base class — never
     // "the last struct in the file". Any other struct is ignored, and a
@@ -668,13 +725,17 @@ class GoParser extends ParserCore<GoToken> {
       // Parse type
       const propType = this.parseGoType();
 
-      // Check for struct tag
+      // Check for struct tag. The `runar` key holds comma-separated options
+      // (N-093): `readonly`, and `embedAlways` — the native spelling of the
+      // `@embedAlways` directive — in any order.
       let readonly = false;
+      let embedAlways = false;
       if (this.current().type === 'backtick') {
         const tagValue = this.current().value;
-        if (tagValue.includes('runar:"readonly"')) {
-          readonly = true;
-        }
+        const runarTag = /(?:^|\s)runar:"([^"]*)"/.exec(tagValue);
+        const options = runarTag ? runarTag[1]!.split(',').map((o) => o.trim()) : [];
+        if (options.includes('readonly')) readonly = true;
+        if (options.includes('embedAlways')) embedAlways = true;
         this.advance();
       }
 
@@ -684,6 +745,7 @@ class GoParser extends ParserCore<GoToken> {
           name: this.declare(fieldName),
           type: propType,
           readonly,
+          ...(embedAlways ? { embedAlways: true } : {}),
           sourceLocation: propLoc,
         });
       }
@@ -740,6 +802,8 @@ class GoParser extends ParserCore<GoToken> {
    */
   private parseFuncDecl(): { method: MethodNode; goName: string; receiverType: string | null } {
     const location = this.loc();
+    // N-093: the `//runar:sighash` directives directly above this func.
+    const funcTokenIndex = this.pos;
     this.expect('func');
 
     // Check for receiver: (c *Type)
@@ -859,6 +923,11 @@ class GoParser extends ParserCore<GoToken> {
     // Convert method name from Go PascalCase to Rúnar camelCase
     const name = this.declare(funcName);
 
+    const sighash = resolveNativeSighash(name, visibility === 'public', this.takeSighashDirectives(funcTokenIndex));
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', location));
+    }
+
     return {
       method: {
         kind: 'method',
@@ -866,6 +935,7 @@ class GoParser extends ParserCore<GoToken> {
         params,
         body,
         visibility,
+        ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
         sourceLocation: location,
       },
       goName: funcName,
@@ -1514,7 +1584,9 @@ export function parseGoSource(source: string, fileName?: string): ParseResult {
   assertSourceWithinLimits(source, 'parseGoSource');
   const file = fileName ?? 'contract.runar.go';
   const errors: CompilerDiagnostic[] = [];
-  const tokens = tokenize(source, file, errors);
+  const directives: GoDirective[] = [];
+  const tokens = tokenize(source, file, errors, directives);
   const parser = new GoParser(tokens, file, errors);
+  parser.directives = directives;
   return withNestingLimit(file, () => parser.parse());
 }

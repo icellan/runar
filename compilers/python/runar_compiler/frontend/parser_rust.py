@@ -27,6 +27,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +535,38 @@ class _RustParser:
 
     # -- Attribute parsing ---------------------------------------------------
 
+    def _parse_directive_attribute(self) -> tuple[str, str | None, str, SourceLocation]:
+        """N-093: classify a field/method attribute as one of the two
+        directives. ``#[embed_always]`` and ``#[sighash(FLAGS)]`` (optionally
+        ``runar::``-qualified) are the native spellings of ``@embedAlways`` /
+        ``@sighash``. Returns ``(kind, flags, content, loc)`` where ``kind`` is
+        ``"embed_always"``, ``"sighash"`` or ``"other"``; for ``sighash``,
+        ``flags`` is the ``|``-joined identifier list, or ``None`` when the
+        parentheses are missing or hold any other token. ``content`` is the
+        compact attribute text exactly as ``parse_attribute`` returns it."""
+        loc = self.loc()
+        start = self.pos
+        content = self.parse_attribute()
+        toks = self.tokens[start + 1:self.pos - 1]  # inside `#[` ... `]`
+        i = 0
+        if (
+            len(toks) >= 2 and toks[0].kind == TOK_IDENT and toks[0].value == "runar"
+            and toks[1].kind == TOK_COLONCOLON
+        ):
+            i = 2
+        name = toks[i].value if i < len(toks) and toks[i].kind == TOK_IDENT else ""
+        rest = toks[i + 1:]
+        if name == "embed_always" and not rest:
+            return ("embed_always", None, content, loc)
+        if name == "sighash":
+            inner = rest[1:-1]
+            ok = (
+                len(rest) >= 2 and rest[0].kind == TOK_LPAREN and rest[-1].kind == TOK_RPAREN
+                and all(t.kind in (TOK_IDENT, TOK_PIPE) for t in inner)
+            )
+            return ("sighash", "".join(t.value for t in inner) if ok else None, content, loc)
+        return ("other", None, content, loc)
+
     def parse_attribute(self) -> str:
         """Parse #[...] attribute content. The #[ token is already current."""
         self.advance()  # consume #[
@@ -670,11 +703,21 @@ class _RustParser:
                     self.expect(TOK_LBRACE)
 
                     while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-                        # Check for #[readonly] attribute on field
+                        # Field attributes, any number and order: #[readonly],
+                        # and N-093's #[embed_always] (the native spelling of
+                        # `@embedAlways`). A #[sighash(...)] here annotates
+                        # nothing and is refused.
                         readonly = False
-                        if self.check(TOK_HASH_BRACKET):
-                            field_attr = self.parse_attribute()
-                            if field_attr == "readonly":
+                        embed_always = False
+                        while self.check(TOK_HASH_BRACKET):
+                            kind, _, field_attr, attr_loc = self._parse_directive_attribute()
+                            if kind == "embed_always":
+                                embed_always = True
+                            elif kind == "sighash":
+                                self.errors.append(Diagnostic(
+                                    message=lost_directive_message("@sighash"),
+                                    severity=Severity.ERROR, loc=attr_loc))
+                            elif field_attr == "readonly":
                                 readonly = True
 
                         # Skip optional `pub` visibility modifier
@@ -697,6 +740,7 @@ class _RustParser:
                                     name=camel_name,
                                     type=field_type,
                                     readonly=readonly,
+                                    embed_always=embed_always,
                                     source_location=field_loc,
                                 ))
                         else:
@@ -747,6 +791,12 @@ class _RustParser:
         final_methods: list[MethodNode] = []
         for m in methods:
             if m.name == "init" and len(m.params) == 0:
+                # N-093: init() is not a spending entry point, so a #[sighash]
+                # on it would be dropped with the method.
+                if m.sighash_type is not None:
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@sighash"),
+                        severity=Severity.ERROR, loc=m.source_location))
                 for stmt in m.body:
                     if isinstance(stmt, AssignmentStmt) and isinstance(stmt.target, PropertyAccessExpr):
                         for prop in properties:
@@ -818,9 +868,18 @@ class _RustParser:
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             # #[public] is no longer supported — `pub fn` marks public methods.
+            # N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            # #[embed_always] on a method annotates nothing and is refused.
+            sighash_specs: list[str | None] = []
             while self.check(TOK_HASH_BRACKET):
-                method_attr = self.parse_attribute()
-                if method_attr == "public":
+                kind, flags, method_attr, attr_loc = self._parse_directive_attribute()
+                if kind == "sighash":
+                    sighash_specs.append(flags)
+                elif kind == "embed_always":
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@embedAlways"),
+                        severity=Severity.ERROR, loc=attr_loc))
+                elif method_attr == "public":
                     self.add_error(
                         "#[public] is no longer supported — use 'pub fn' "
                         "for public methods"
@@ -830,7 +889,20 @@ class _RustParser:
             if self.check(TOK_PUB):
                 self.advance()
                 visibility = "public"
-            methods.append(self.parse_function(visibility))
+            if not self.check(TOK_FN):
+                for _ in sighash_specs:
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@sighash"),
+                        severity=Severity.ERROR, loc=self.loc()))
+                sighash_specs = []
+            method = self.parse_function(visibility)
+            sighash = resolve_native_sighash(method.name, visibility == "public", sighash_specs)
+            if sighash is not None and sighash.error is not None:
+                self.errors.append(Diagnostic(
+                    message=sighash.error, severity=Severity.ERROR, loc=method.source_location))
+            elif sighash is not None:
+                method.sighash_type = sighash.value
+            methods.append(method)
 
         self.expect(TOK_RBRACE)
         return methods

@@ -212,6 +212,39 @@ compile unparenthesised exactly as before.
 
 ---
 
+## Compiler Directives
+
+```go
+type Directives struct {
+	runar.SmartContract
+	PubKeyHash runar.Addr       `runar:"readonly"`
+	DeployTag  runar.ByteString `runar:"readonly,embedAlways"`   // @embedAlways
+}
+
+//runar:sighash SINGLE|FORKID
+func (c *Directives) SpendSingle(sig runar.Sig, pubKey runar.PubKey) { ... }   // @sighash
+```
+
+- `embedAlways` is an option of the `runar` struct tag. The tag holds
+  comma-separated options in any order (`readonly`, `embedAlways`).
+- `//runar:sighash FLAGS` is a directive comment in Go's own `//go:` style: no
+  space after `//`, on its own line above the method. Other comment lines may
+  sit between it and the `func`. It must be followed by a space and the flag
+  list. `//runar:` with any other name, or a `//runar:sighash` not followed by a
+  method, is an error. (`// runar:sighash`, with a space, is an ordinary
+  comment.)
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/go/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mapping
 
 | Go type | Rúnar type |

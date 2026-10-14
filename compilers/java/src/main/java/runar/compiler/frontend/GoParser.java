@@ -43,6 +43,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.go} source into a Rúnar {@link ContractNode}.
@@ -89,10 +90,12 @@ public final class GoParser {
             throw new ParseException(e.getMessage());
         }
         List<String> lex = new ArrayList<>();
-        List<Token> tokens = tokenize(source, filename, lex);
+        List<GoDirective> directives = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex, directives);
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         ParserState state = new ParserState(filename, tokens);
+        state.directives.addAll(directives);
         // F-213: measures (A) and (B).
         ContractNode contract = SourceNesting.guard(state::parseFile, ParseException::new);
         String collision = state.idents.message();
@@ -126,6 +129,16 @@ public final class GoParser {
 
     /** A parsed {@code func}: the method, its Go name, and its receiver type or null. */
     private record FuncDecl(MethodNode method, String goName, String receiverType) {}
+
+    /**
+     * N-093: a Go DSL directive comment {@code //runar:<name> <args>} (Go's own
+     * {@code //go:} convention: no space after {@code //}). {@code tokenIndex}
+     * is the index of the first token after the comment, so a directive
+     * attaches to the declaration that follows it, with only comments and
+     * blank lines in between. Mirrors GoDirective in the TS reference
+     * (01-parse-go.ts).
+     */
+    private record GoDirective(String name, String args, int tokenIndex) {}
 
     /** Checked exception for parse-time problems. */
     public static class ParseException extends Exception {
@@ -373,7 +386,9 @@ public final class GoParser {
     // Tokenizer
     // ------------------------------------------------------------------
 
-    private static List<Token> tokenize(String source, String filename, List<String> lex) {
+    private static List<Token> tokenize(
+        String source, String filename, List<String> lex, List<GoDirective> directives
+    ) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -413,7 +428,18 @@ public final class GoParser {
 
             // Line comment
             if (ch == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
+                int start = i;
                 while (i < n && source.charAt(i) != '\n' && source.charAt(i) != '\r') i++;
+                // N-093: `//runar:<name> <args>` is a directive, not prose.
+                String text = source.substring(start, i);
+                if (text.startsWith("//runar:")) {
+                    String body = text.substring("//runar:".length());
+                    int nameEnd = 0;
+                    while (nameEnd < body.length() && body.charAt(nameEnd) != ' ' && body.charAt(nameEnd) != '\t') {
+                        nameEnd++;
+                    }
+                    directives.add(new GoDirective(body.substring(0, nameEnd), body.substring(nameEnd), tokens.size()));
+                }
                 continue;
             }
 
@@ -712,6 +738,18 @@ public final class GoParser {
         };
     }
 
+    /** N-093: the {@code runar} key of a struct tag. */
+    private static final java.util.regex.Pattern RUNAR_TAG =
+        java.util.regex.Pattern.compile("(?:^|\\s)runar:\"([^\"]*)\"");
+
+    /**
+     * N-093: the segment rule of extractSighashDirective: the flag text
+     * starts with a space/tab and holds only flag-name characters, {@code |},
+     * spaces and tabs.
+     */
+    private static final java.util.regex.Pattern GO_SIGHASH_ARGS =
+        java.util.regex.Pattern.compile("[ \t][A-Za-z0-9_| \t]*");
+
     private static final class ParserState {
         final String fileName;
         final List<Token> tokens;
@@ -724,6 +762,9 @@ public final class GoParser {
         String receiverName = "";
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
+        /** N-093: every {@code //runar:} directive in the file, in source order. */
+        final List<GoDirective> directives = new ArrayList<>();
+        final Set<GoDirective> consumedDirectives = Collections.newSetFromMap(new IdentityHashMap<>());
 
         ParserState(String fileName, List<Token> tokens) {
             this.fileName = fileName;
@@ -846,6 +887,7 @@ public final class GoParser {
                     advance();
                 }
             }
+            reportStrayDirectives();
 
             if (!structFound) return null;
 
@@ -877,7 +919,8 @@ public final class GoParser {
                                         prop.readonly(),
                                         as.value(),
                                         prop.sourceLocation(),
-                                        prop.syntheticArrayChain()
+                                        prop.syntheticArrayChain(),
+                                        prop.embedAlways()
                                     ));
                                     break;
                                 }
@@ -1004,11 +1047,20 @@ public final class GoParser {
                     }
                     TypeNode fieldType = parseType();
 
+                    // Struct tag. The `runar` key holds comma-separated options
+                    // (N-093): `readonly`, and `embedAlways` — the native
+                    // spelling of the `@embedAlways` directive — in any order.
                     boolean readonly = false;
+                    boolean embedAlways = false;
                     if (check(Tok.BACKTICK_STRING)) {
                         Token tagTok = advance();
-                        if (tagTok.value.contains("runar:\"readonly\"")) {
-                            readonly = true;
+                        java.util.regex.Matcher runarTag = RUNAR_TAG.matcher(tagTok.value);
+                        if (runarTag.find()) {
+                            for (String o : runarTag.group(1).split(",", -1)) {
+                                String option = o.trim();
+                                if (option.equals("readonly")) readonly = true;
+                                if (option.equals("embedAlways")) embedAlways = true;
+                            }
                         }
                     }
 
@@ -1020,7 +1072,8 @@ public final class GoParser {
                             readonly,
                             null,
                             fieldLoc,
-                            null
+                            null,
+                            embedAlways
                         ));
                     }
 
@@ -1119,6 +1172,8 @@ public final class GoParser {
          */
         FuncDecl parseFuncDecl() {
             SourceLocation location = loc();
+            // N-093: the `//runar:sighash` directives directly above this func.
+            int funcTokenIndex = pos;
             expectIdent("func");
 
             boolean hasReceiver = false;
@@ -1163,6 +1218,11 @@ public final class GoParser {
                 // Standalone functions: skip init and main. F-010: an exported
                 // standalone function is a private helper, as in the TS reference.
                 if ("init".equals(funcName) || "main".equals(funcName)) {
+                    // N-093: refused as on a private func, as the TS
+                    // reference (which parses these as private helpers) does.
+                    SighashDirective.Result skipped = SighashDirective.resolveNativeSighash(
+                        goFieldToCamel(funcName), false, takeSighashDirectives(funcTokenIndex));
+                    if (skipped != null && skipped.isError()) addError(skipped.error());
                     skipFuncBody();
                     return null;
                 }
@@ -1177,7 +1237,37 @@ public final class GoParser {
             }
             List<Statement> body = parseBlock();
 
-            return new FuncDecl(new MethodNode(methodName, params, body, visibility, location), funcName, receiverType);
+            SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                methodName, visibility == Visibility.PUBLIC, takeSighashDirectives(funcTokenIndex));
+            if (sighash != null && sighash.isError()) addError(sighash.error());
+
+            return new FuncDecl(new MethodNode(methodName, params, body, visibility, location,
+                sighash == null || sighash.isError() ? null : sighash.value()), funcName, receiverType);
+        }
+
+        /**
+         * N-093: the flag specs of the {@code //runar:sighash} directives
+         * attached to the declaration starting at token {@code tokenIndex}
+         * ({@code null} for a malformed one).
+         */
+        List<String> takeSighashDirectives(int tokenIndex) {
+            List<String> specs = new ArrayList<>();
+            for (GoDirective d : directives) {
+                if (d.tokenIndex() != tokenIndex || !d.name().equals("sighash")) continue;
+                consumedDirectives.add(d);
+                specs.add(d.args().isEmpty() || GO_SIGHASH_ARGS.matcher(d.args()).matches() ? d.args() : null);
+            }
+            return specs;
+        }
+
+        /** N-093: refuse every directive that is unknown or attached to no func. */
+        void reportStrayDirectives() {
+            for (GoDirective d : directives) {
+                if (consumedDirectives.contains(d)) continue;
+                addError(d.name().equals("sighash")
+                    ? SighashDirective.lostDirectiveMessage("@sighash")
+                    : SighashDirective.unknownGoDirectiveMessage(d.name() + d.args()));
+            }
         }
 
         boolean looksLikeReceiver() {

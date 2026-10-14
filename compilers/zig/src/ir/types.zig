@@ -169,8 +169,9 @@ pub const PropertyNode = struct {
     /// emitted), silently dropping deploy-time metadata an author intends to
     /// recover from the on-chain script later. When set, ANF lowering forces
     /// the field into the script (a constructor slot) so its bytes survive.
-    /// Only meaningful on readonly fields; honoured only on the `.runar.ts`
-    /// surface (the other 8 formats fail closed at the parse dispatch).
+    /// Only meaningful on readonly fields. The other 8 surfaces set it from
+    /// their native spelling (N-093; e.g. `runar.EmbedAlways(T)` on
+    /// `.runar.zig`) and refuse the comment form at the parse dispatch.
     embed_always: bool = false,
     /// Non-zero when `type_info == .fixed_array` (set by the parser) or when
     /// we want to remember the original outer length for post-expansion.
@@ -228,7 +229,8 @@ pub const MethodNode = struct {
     /// directive = the default ALL|FORKID (0x41), byte-identical to the
     /// historically-pinned mode. Drives the auto-injected preimage-type assert,
     /// the OP_PUSH_TX binding flag, the ABI sigHashType, and the SDK-side
-    /// preimage construction. Honoured only on the `.runar.ts` surface.
+    /// preimage construction. The other 8 surfaces set it from their native
+    /// spelling (N-093; e.g. `runar.Sighash("SINGLE|FORKID")` on `.runar.zig`).
     sighash_type: ?i32 = null,
 };
 pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "" };

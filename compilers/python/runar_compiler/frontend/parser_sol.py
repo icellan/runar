@@ -26,6 +26,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     with_lex_errors,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.sighash_directive import resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +340,11 @@ class _SolParser:
             return self.tokens[self.pos]
         return Token(TOK_EOF, "", 0, 0)
 
+    def _peek_at(self, n: int) -> Token:
+        if self.pos + n < len(self.tokens):
+            return self.tokens[self.pos + n]
+        return Token(TOK_EOF, "", 0, 0)
+
     def advance(self) -> Token:
         tok = self.peek()
         if self.pos < len(self.tokens):
@@ -496,11 +502,22 @@ class _SolParser:
         type_name = type_tok.value
         prop_type = self._parse_sol_fixed_array_suffix(_parse_sol_type(type_name))
 
-        # Check for immutable keyword
+        # Modifiers, any order: ``immutable`` (readonly) and N-093's
+        # ``embedAlways`` (the native spelling of the ``@embedAlways``
+        # directive). An ``embedAlways`` directly followed by ``;`` or ``=`` is
+        # the property NAME, not a modifier.
         is_readonly = False
-        if self.check_ident("immutable"):
-            self.advance()
-            is_readonly = True
+        embed_always = False
+        while True:
+            if self.check_ident("immutable"):
+                self.advance()
+                is_readonly = True
+                continue
+            if self.check_ident("embedAlways") and self._peek_at(1).kind not in (TOK_SEMICOLON, TOK_ASSIGN):
+                self.advance()
+                embed_always = True
+                continue
+            break
 
         # Property name
         name_tok = self.expect(TOK_IDENT)
@@ -518,6 +535,7 @@ class _SolParser:
             type=prop_type,
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=embed_always,
             source_location=location,
         )
 
@@ -609,10 +627,15 @@ class _SolParser:
 
         params = self.parse_sol_params()
 
-        # Parse visibility modifiers
+        # Parse visibility modifiers, and N-093's ``sighash(FLAGS)`` (the
+        # native spelling of the ``@sighash`` directive), in any order. FLAGS
+        # must be identifiers separated by ``|``; any other token makes the
+        # spelling malformed.
         visibility = "private"
+        sighash_specs: list[str | None] = []
         while (
-            self.check_ident("public")
+            (self.check_ident("sighash") and self._peek_at(1).kind == TOK_LPAREN)
+            or self.check_ident("public")
             or self.check_ident("private")
             or self.check_ident("external")
             or self.check_ident("internal")
@@ -622,6 +645,9 @@ class _SolParser:
             or self.check_ident("payable")
         ):
             tok = self.advance()
+            if tok.value == "sighash":
+                sighash_specs.append(self._parse_sighash_flag_tokens())
+                continue
             if tok.value in ("public", "external"):
                 visibility = "public"
             # Skip 'returns (Type)' clause
@@ -638,13 +664,43 @@ class _SolParser:
 
         body = self.parse_sol_block()
 
+        sighash = resolve_native_sighash(name, visibility == "public", sighash_specs)
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
+
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=location,
         )
+
+    def _parse_sighash_flag_tokens(self) -> str | None:
+        """N-093: ``( IDENT ( '|' IDENT )* )`` after ``sighash`` -> the flag
+        text, or ``None`` when anything else appears inside the parentheses.
+        Always consumes through the matching ``)`` so a malformed spelling does
+        not derail parsing."""
+        self.expect(TOK_LPAREN)
+        text = ""
+        ok = True
+        depth = 1
+        while not self.check(TOK_EOF):
+            t = self.peek()
+            if t.kind == TOK_LPAREN:
+                depth += 1
+            if t.kind == TOK_RPAREN:
+                depth -= 1
+                if depth == 0:
+                    break
+            if t.kind in (TOK_IDENT, TOK_PIPE):
+                text += t.value
+            else:
+                ok = False
+            self.advance()
+        self.expect(TOK_RPAREN)
+        return text if ok else None
 
     # -- Parameter parsing: (Type name, Type name, ...) ---------------------
 

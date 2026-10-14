@@ -207,3 +207,55 @@ func describeSighash(value int) string {
 	}
 	return strings.Join(parts, "|")
 }
+
+// resolveNativeSighash (N-093, R38) resolves a sighash declared with a
+// surface's NATIVE spelling (Solidity `sighash(...)`, Move/Rust
+// `#[sighash(...)]`, Go `//runar:sighash ...`, Python
+// `@public(sighash="...")`, Zig `runar.Sighash("...")`, Ruby
+// `runar_sighash '...'`, Java `@Sighash("...")`).
+//
+// specs holds one entry per spelling found on the method: the flag text, or
+// nil when the spelling's argument was not well formed (a non-identifier
+// token, a non-string argument, ...). Returns (nil, "") when there is no
+// spelling, else the numeric type or the diagnostic — the SAME diagnostics the
+// `.runar.ts` comment directive produces, checked in the same order:
+// non-public method, then more than one spelling, then malformed, then the
+// flag grammar of parseSighashFlags. Mirrors resolveNativeSighash in the TS
+// reference (sighash-directive.ts); identical in all seven tiers.
+func resolveNativeSighash(methodName string, isPublic bool, specs []*string) (*int, string) {
+	if len(specs) == 0 {
+		return nil, ""
+	}
+	if !isPublic {
+		return nil, fmt.Sprintf("@sighash directive on non-public method '%s' has no effect — only public methods are spending entry points", methodName)
+	}
+	if len(specs) > 1 {
+		return nil, fmt.Sprintf("Method '%s': %s", methodName, sighashMultipleError)
+	}
+	if specs[0] == nil {
+		return nil, fmt.Sprintf("Method '%s': %s", methodName, sighashMalformedError)
+	}
+	r := parseSighashFlags(*specs[0])
+	if !r.ok() {
+		return nil, fmt.Sprintf("Method '%s': %s", methodName, r.err)
+	}
+	v := r.value
+	return &v, ""
+}
+
+// unknownGoDirectiveMessage (N-093): the Go DSL directive comment
+// `//runar:<name> ...`. Only `sighash` exists; any other name is refused
+// rather than ignored, so a typo such as `//runar:sighsh` cannot silently drop
+// the declaration.
+func unknownGoDirectiveMessage(name string) string {
+	return fmt.Sprintf("unknown Go DSL directive '//runar:%s'; the only directive is //runar:sighash <FLAGS>", name)
+}
+
+// unknownMoveAttributeMessage (N-093): an attribute on the Move surface other
+// than the two directives.
+func unknownMoveAttributeMessage(attr string) string {
+	return fmt.Sprintf("unsupported Move attribute #[%s]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]", attr)
+}
+
+// nativeSighashSpec returns a pointer to s (a well-formed native sighash spec).
+func nativeSighashSpec(s string) *string { return &s }

@@ -53,6 +53,7 @@ use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use std::collections::HashSet;
 
 /// The `while (cond) : (upd) { ... }` desugaring's merge placeholder (N-009).
@@ -785,7 +786,7 @@ impl<'a> ZigParser<'a> {
     fn parse_field(&mut self) -> Option<PropertyNode> {
         let name = self.expect_ident();
         self.expect(&Token::Colon);
-        let (type_node, is_readonly) = self.parse_type();
+        let (type_node, is_readonly, embed_always) = self.parse_type_full();
         let mut initializer: Option<Expression> = None;
 
         // Optional field initializer: `= value`
@@ -804,7 +805,7 @@ impl<'a> ZigParser<'a> {
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         })
     }
 
@@ -814,6 +815,16 @@ impl<'a> ZigParser<'a> {
 
     /// Parse a type, returning (TypeNode, is_readonly).
     fn parse_type(&mut self) -> (TypeNode, bool) {
+        let (t, readonly, _) = self.parse_type_full();
+        (t, readonly)
+    }
+
+    /// Parse a type, returning (TypeNode, is_readonly, embed_always). N-093:
+    /// `runar.EmbedAlways(T)` is the native spelling of `@embedAlways`; it
+    /// composes with `runar.Readonly(T)` in either order. As in the TS
+    /// reference (01-parse-zig.ts `parseType`), an array type does not carry
+    /// its element's `EmbedAlways`.
+    fn parse_type_full(&mut self) -> (TypeNode, bool, bool) {
         // Array type: [N]T
         if *self.peek() == Token::LBracket {
             self.advance(); // [
@@ -834,6 +845,7 @@ impl<'a> ZigParser<'a> {
                     length,
                 },
                 readonly,
+                false,
             );
         }
 
@@ -848,32 +860,41 @@ impl<'a> ZigParser<'a> {
             // runar.Readonly(T)
             if name == "Readonly" && *self.peek() == Token::LParen {
                 self.advance(); // (
-                let (inner, _) =
-                    self.nested((TypeNode::Custom("_error".to_string()), false), |p| p.parse_type());
+                let (inner, _, embed) = self
+                    .nested((TypeNode::Custom("_error".to_string()), false, false), |p| p.parse_type_full());
                 self.expect(&Token::RParen);
-                return (inner, true);
+                return (inner, true, embed);
+            }
+
+            // runar.EmbedAlways(T)
+            if name == "EmbedAlways" && *self.peek() == Token::LParen {
+                self.advance(); // (
+                let (inner, readonly, _) = self
+                    .nested((TypeNode::Custom("_error".to_string()), false, false), |p| p.parse_type_full());
+                self.expect(&Token::RParen);
+                return (inner, readonly, true);
             }
 
             let mapped = map_zig_type(&name);
-            return (make_type_node(mapped), false);
+            return (make_type_node(mapped), false, false);
         }
 
         // void keyword
         if *self.peek() == Token::Void {
             self.advance();
-            return (TypeNode::Primitive(PrimitiveTypeName::Void), false);
+            return (TypeNode::Primitive(PrimitiveTypeName::Void), false, false);
         }
 
         // Plain identifier type
         if matches!(self.peek(), Token::Ident(_)) {
             let name = self.expect_ident();
             let mapped = map_zig_type(&name);
-            return (make_type_node(mapped), false);
+            return (make_type_node(mapped), false, false);
         }
 
         // Fallback
         self.advance();
-        (TypeNode::Custom("unknown".to_string()), false)
+        (TypeNode::Custom("unknown".to_string()), false, false)
     }
 
     /// Parse a parameter type, skipping pointer/const qualifiers.
@@ -932,8 +953,41 @@ impl<'a> ZigParser<'a> {
             self.errors.push(static_method_message(&method_name));
         }
 
-        // Skip return type (everything before '{')
-        if *self.peek() != Token::LBrace {
+        // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+        // native spelling of the `@sighash` directive (natively it is `void`).
+        let mut sighash_specs: Vec<Option<String>> = Vec::new();
+        if matches!(self.peek(), Token::Ident(n) if n == "runar")
+            && *self.peek_at(1) == Token::Dot
+            && matches!(self.peek_at(2), Token::Ident(n) if n == "Sighash")
+        {
+            self.advance(); // runar
+            self.advance(); // .
+            self.advance(); // Sighash
+            self.expect(&Token::LParen);
+            let arg = self.peek().clone();
+            let mut count = 0;
+            let mut depth: i32 = 0;
+            while *self.peek() != Token::Eof {
+                let t = self.peek().clone();
+                if t == Token::RParen && depth == 0 {
+                    break;
+                }
+                if t == Token::LParen {
+                    depth += 1;
+                }
+                if t == Token::RParen {
+                    depth -= 1;
+                }
+                self.advance();
+                count += 1;
+            }
+            self.expect(&Token::RParen);
+            sighash_specs.push(match arg {
+                Token::StringLit(v) if count == 1 => Some(v),
+                _ => None,
+            });
+        } else if *self.peek() != Token::LBrace {
+            // Skip return type (everything before '{')
             self.parse_type();
         }
 
@@ -950,6 +1004,10 @@ impl<'a> ZigParser<'a> {
         self.stateful_context_names = stateful_ctx_names;
 
         if method_name == "init" {
+            // N-093: the constructor is not a spending entry point.
+            if !sighash_specs.is_empty() {
+                self.errors.push(lost_directive_message("@sighash"));
+            }
             // Constructor
             let body = self.parse_constructor_body(&params);
             self.self_names = prev_self_names;
@@ -968,6 +1026,15 @@ impl<'a> ZigParser<'a> {
         self.self_names = prev_self_names;
         self.stateful_context_names = prev_stateful_ctx;
 
+        let sighash_type = match resolve_native_sighash(&method_name, is_public, &sighash_specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(msg);
+                None
+            }
+            None => None,
+        };
+
         Some(MethodNode {
             name: method_name,
             params,
@@ -978,7 +1045,7 @@ impl<'a> ZigParser<'a> {
                 Visibility::Private
             },
             source_location: self.loc(),
-            sighash_type: None,
+            sighash_type,
         })
     }
 

@@ -38,6 +38,7 @@ import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
@@ -456,6 +457,11 @@ class RustParser extends ParserCore<RustToken> {
     const finalMethods: MethodNode[] = [];
     for (const m of methods) {
       if (m.name === 'init' && m.params.length === 0) {
+        // N-093: init() is not a spending entry point, so a #[sighash] on it
+        // would be dropped with the method.
+        if (m.sighashType !== undefined) {
+          this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', m.sourceLocation));
+        }
         // Extract property assignments as initializers
         for (const stmt of m.body) {
           if (stmt.kind === 'assignment' && stmt.target.kind === 'property_access') {
@@ -538,6 +544,35 @@ class RustParser extends ParserCore<RustToken> {
   // Attribute parsing: #[...] -> returns the attribute content as a string
   // -----------------------------------------------------------------------
 
+  /**
+   * N-093: classify a field/method attribute as one of the two directives.
+   * `#[embed_always]` and `#[sighash(FLAGS)]` (optionally `runar::`-qualified)
+   * are the native spellings of `@embedAlways` / `@sighash`. For `sighash`,
+   * `flags` is the `|`-joined identifier list, or `null` when the
+   * parentheses are missing or hold any other token. Every other attribute
+   * is returned as `other` with its compact text, exactly as before.
+   */
+  private parseDirectiveAttribute():
+    | { kind: 'embed_always'; loc: SourceLocation }
+    | { kind: 'sighash'; flags: string | null; loc: SourceLocation }
+    | { kind: 'other'; content: string } {
+    const loc = this.loc();
+    const start = this.pos;
+    const content = this.parseAttribute();
+    const toks = this.tokens.slice(start + 2, this.pos - 1); // inside `#[` ... `]`
+    let i = 0;
+    if (toks[0]?.type === 'ident' && toks[0].value === 'runar' && toks[1]?.type === '::') i = 2;
+    const name = toks[i]?.type === 'ident' ? toks[i]!.value : '';
+    const rest = toks.slice(i + 1);
+    if (name === 'embed_always' && rest.length === 0) return { kind: 'embed_always', loc };
+    if (name === 'sighash') {
+      const ok = rest.length >= 2 && rest[0]!.type === '(' && rest[rest.length - 1]!.type === ')' &&
+        rest.slice(1, -1).every((t) => t.type === 'ident' || t.type === '|');
+      return { kind: 'sighash', flags: ok ? rest.slice(1, -1).map((t) => t.value).join('') : null, loc };
+    }
+    return { kind: 'other', content };
+  }
+
   private parseAttribute(): string {
     this.expect('#');
     this.expect('[');
@@ -582,11 +617,18 @@ class RustParser extends ParserCore<RustToken> {
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       const propLoc = this.loc();
       let readonly = false;
+      let embedAlways = false;
 
-      // Check for #[readonly] attribute
-      if (this.current().type === '#') {
-        const attr = this.parseAttribute();
-        if (attr === 'readonly') {
+      // Field attributes, any number and order: #[readonly], and N-093's
+      // #[embed_always] (the native spelling of `@embedAlways`). A
+      // #[sighash(...)] here annotates nothing and is refused.
+      while (this.current().type === '#') {
+        const attr = this.parseDirectiveAttribute();
+        if (attr.kind === 'embed_always') {
+          embedAlways = true;
+        } else if (attr.kind === 'sighash') {
+          this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', attr.loc));
+        } else if (attr.content === 'readonly') {
           readonly = true;
         }
       }
@@ -617,6 +659,7 @@ class RustParser extends ParserCore<RustToken> {
         name: fieldName,
         type: propType,
         readonly,
+        ...(embedAlways ? { embedAlways: true } : {}),
         sourceLocation: propLoc,
       });
 
@@ -684,9 +727,16 @@ class RustParser extends ParserCore<RustToken> {
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       // #[public] is no longer supported — `pub fn` marks public methods.
       // Emit a migration diagnostic for any leftover attribute, then recover.
+      // N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+      // #[embed_always] on a method annotates nothing and is refused.
+      const sighashSpecs: Array<string | null> = [];
       while (this.current().type === '#') {
-        const attr = this.parseAttribute();
-        if (attr === 'public') {
+        const attr = this.parseDirectiveAttribute();
+        if (attr.kind === 'sighash') {
+          sighashSpecs.push(attr.flags);
+        } else if (attr.kind === 'embed_always') {
+          this.errors.push(makeDiagnostic(lostDirectiveMessage('@embedAlways'), 'error', attr.loc));
+        } else if (attr.content === 'public') {
           this.errors.push(makeDiagnostic(
             "#[public] is no longer supported — use 'pub fn' for public methods",
             'error',
@@ -706,8 +756,19 @@ class RustParser extends ParserCore<RustToken> {
 
       if (this.current().type === 'fn') {
         const method = this.parseFnDecl(isPublic);
-        if (method) methods.push(method);
+        if (method) {
+          const sighash = resolveNativeSighash(method.name, isPublic, sighashSpecs);
+          if (sighash && 'error' in sighash) {
+            this.errors.push(makeDiagnostic(sighash.error, 'error', method.sourceLocation));
+          } else if (sighash) {
+            method.sighashType = sighash.value;
+          }
+          methods.push(method);
+        }
       } else {
+        for (const _ of sighashSpecs) {
+          this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', this.loc()));
+        }
         this.advance(); // skip unknown tokens in impl block
       }
     }

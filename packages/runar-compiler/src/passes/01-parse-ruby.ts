@@ -42,6 +42,7 @@ import {
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -768,6 +769,7 @@ class RbParser {
     // Pending visibility/param types for the next method
     let pendingVisibility: 'public' | 'private' | null = null;
     let pendingParamTypes: Map<string, TypeNode> | null = null;
+    let pendingSighash: Array<{ spec: string | null; loc: SourceLocation }> = [];
 
     while (this.peek().type !== 'end' && this.peek().type !== 'eof') {
       this.skipNewlines();
@@ -777,6 +779,23 @@ class RbParser {
       if (this.checkIdent('prop')) {
         const prop = this.parseProp(parentClass);
         if (prop) properties.push(prop);
+        this.skipNewlines();
+        continue;
+      }
+
+      // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+      // `@sighash` directive; it applies to the next `def`.
+      if (this.checkIdent('runar_sighash')) {
+        const sighashLoc = this.loc();
+        this.advance(); // 'runar_sighash'
+        const arg = this.peek();
+        let count = 0;
+        while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+          this.advance();
+          count++;
+        }
+        const isStr = arg.type === 'string' || arg.type === 'hexstring';
+        pendingSighash.push({ spec: count === 1 && isStr ? arg.value : null, loc: sighashLoc });
         this.skipNewlines();
         continue;
       }
@@ -802,12 +821,27 @@ class RbParser {
       if (this.peek().type === 'def') {
         const method = this.parseMethod(pendingVisibility, pendingParamTypes);
         if (method.name === 'constructor') {
+          // N-093: the constructor is not a spending entry point.
+          for (const p of pendingSighash) {
+            this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', p.loc));
+          }
           constructor = method;
         } else {
+          const sighash = resolveNativeSighash(
+            method.name,
+            method.visibility === 'public',
+            pendingSighash.map((p) => p.spec),
+          );
+          if (sighash && 'error' in sighash) {
+            this.errors.push(makeDiagnostic(sighash.error, 'error', method.sourceLocation));
+          } else if (sighash) {
+            method.sighashType = sighash.value;
+          }
           methods.push(method);
         }
         pendingVisibility = null;
         pendingParamTypes = null;
+        pendingSighash = [];
         this.skipNewlines();
         continue;
       }
@@ -826,6 +860,11 @@ class RbParser {
         'error',
         { file: this.file, line: stray.line, column: stray.column },
       ));
+    }
+
+    // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+    for (const p of pendingSighash) {
+      this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', p.loc));
     }
 
     this.match('end'); // end of class
@@ -951,10 +990,22 @@ class RbParser {
     // Check for optional trailing options: readonly: true/false, default: <literal>
     // Multiple options are comma-separated and may appear in any order.
     let isReadonly = false;
+    let embedAlways = false;
     let initializer: Expression | undefined;
     while (this.peek().type === ',') {
       this.advance(); // ','
-      if (this.checkIdent('readonly')) {
+      if (this.checkIdent('embed_always')) {
+        // N-093: the native spelling of the `@embedAlways` directive.
+        this.advance(); // 'embed_always'
+        this.expect(':');
+        if (this.peek().type === 'true') {
+          this.advance();
+          embedAlways = true;
+        } else if (this.peek().type === 'false') {
+          this.advance();
+          embedAlways = false;
+        }
+      } else if (this.checkIdent('readonly')) {
         this.advance(); // 'readonly'
         this.expect(':');
         if (this.peek().type === 'true') {
@@ -991,6 +1042,7 @@ class RbParser {
       type: typeNode,
       readonly: isReadonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
   }

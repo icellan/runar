@@ -32,6 +32,7 @@ require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -738,11 +739,14 @@ module RunarCompiler
       # -- Annotation parsing -----------------------------------------------
 
       # Parse an annotation: @Name [(args)]
-      # Returns the simple annotation name string.
+      # Returns the simple annotation name string. N-093: the argument tokens
+      # (`(` ... `)`, or empty) are kept in +@last_annotation_args+ for
+      # `@Sighash("FLAGS")`.
       def parse_annotation
         expect(TOK_AT, "'@'")
         name = expect_type_simple_name
-        # Optional annotation arguments (we consume them but ignore content).
+        arg_start = @pos
+        # Optional annotation arguments (consumed; only @Sighash reads them).
         if check(TOK_LPAREN)
           advance
           depth = 1
@@ -759,6 +763,7 @@ module RunarCompiler
             advance
           end
         end
+        @last_annotation_args = @tokens[arg_start...@pos] || []
         name
       end
 
@@ -782,6 +787,11 @@ module RunarCompiler
         readonly = false
         is_public_annotated = false
         is_stateful_annotated = false
+        # N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+        # the `@embedAlways` / `@sighash` directives.
+        embed_always_loc = nil
+        sighash_specs = []
+        sighash_loc = nil
 
         # Annotations. F-205: an annotation whose simple name Rúnar does not
         # recognize is a loud "unsupported annotation" diagnostic, matching
@@ -790,10 +800,15 @@ module RunarCompiler
         while check(TOK_AT)
           ann_loc = loc
           ann_name = parse_annotation
+          args = @last_annotation_args
           case ann_name
           when "Readonly" then readonly = true
           when "Public"   then is_public_annotated = true
           when "Stateful" then is_stateful_annotated = true
+          when "EmbedAlways" then embed_always_loc = ann_loc
+          when "Sighash"
+            sighash_loc ||= ann_loc
+            sighash_specs << (args.length == 3 && args[1].kind == TOK_STRING ? args[1].value : nil)
           when "Override", "SuppressWarnings"
             # accepted but ignored
           else
@@ -817,6 +832,15 @@ module RunarCompiler
           advance # ctor name
           ctor = parse_method_body(is_constructor: true, visibility: "public",
                                     location: member_loc)
+          # N-093: the constructor is neither a spending entry point nor a field.
+          unless sighash_loc.nil?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                      severity: Severity::ERROR, loc: sighash_loc)
+          end
+          unless embed_always_loc.nil?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@embedAlways"),
+                                      severity: Severity::ERROR, loc: embed_always_loc)
+          end
           return { kind: :constructor, node: ctor }
         end
 
@@ -846,7 +870,21 @@ module RunarCompiler
             visibility: visibility,
             location: member_loc
           )
+          unless embed_always_loc.nil?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@embedAlways"),
+                                      severity: Severity::ERROR, loc: embed_always_loc)
+          end
+          sighash = SighashDirective.resolve_native_sighash(name, is_public_annotated, sighash_specs)
+          if sighash && sighash[:error]
+            @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: member_loc)
+          elsif sighash
+            method.sighash_type = sighash[:value]
+          end
           return { kind: :method, node: method }
+        end
+        unless sighash_loc.nil?
+          @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                    severity: Severity::ERROR, loc: sighash_loc)
         end
 
         # Field: optional initializer, terminated by ';'
@@ -861,6 +899,7 @@ module RunarCompiler
           type: type_node,
           readonly: readonly,
           initializer: initializer,
+          embed_always: !embed_always_loc.nil?,
           source_location: member_loc
         )
         { kind: :property, node: prop }

@@ -17,9 +17,16 @@ import runar.compiler.ir.ast.ContractNode;
 public final class ParserDispatch {
     private ParserDispatch() {}
 
-    // Author-facing comment directives implemented only by the TypeScript
-    // compiler today: {@code @sighash <FLAGS>} (#123, per-method sighash type)
-    // and {@code @embedAlways} (#109, readonly-field DCE opt-out).
+    // The author-facing comment directives {@code @sighash <FLAGS>} (#123,
+    // per-method sighash type) and {@code @embedAlways} (#109, readonly-field
+    // DCE opt-out) are read from COMMENTS only on the TypeScript surface. The
+    // eight non-TS surfaces spell both directives natively instead (N-093, user
+    // decision R38: a modifier mirroring each surface's readonly idiom — see
+    // NON_TS_SURFACES), and their parsers drop comments, so a COMMENT directive
+    // in one of those sources would be silently ignored and change signing /
+    // DCE semantics. Fail closed on those formats rather than miscompile, and
+    // name the native spelling to use. None of the native spellings contains
+    // either marker, so this guard never trips on them.
     // {@code @embedAlways} is word-boundary anchored (\b) so an identifier like
     // {@code sighashType} does not trip the guard; {@code @sighash} is not
     // (N-244): N-039 made every occurrence of the marker a directive, so a glued
@@ -27,21 +34,25 @@ public final class ParserDispatch {
     // shares.
     private static final Pattern SIGHASH_DIRECTIVE = Pattern.compile("@sighash");
 
-    /** Non-TS suffix -> surface name in the shared {@code @sighash} diagnostic (N-244). */
+    /**
+     * Non-TS suffix -> surface name, format doc, and the native spelling of
+     * each directive on that surface (N-093), for the shared comment-guard
+     * diagnostic. Mirrors NON_TS_SURFACES in the TS reference (01-parse.ts).
+     */
     private static final String[][] NON_TS_SURFACES = {
-        {".runar.sol", "Solidity"},
-        {".runar.move", "Move"},
-        {".runar.py", "Python"},
-        {".runar.go", "Go DSL"},
-        {".runar.rs", "Rust"},
-        {".runar.rb", "Ruby"},
-        {".runar.zig", "Zig"},
-        {".runar.java", "Java"},
+        {".runar.sol", "Solidity", "solidity", "the function modifier sighash(<FLAGS>)", "the property modifier embedAlways"},
+        {".runar.move", "Move", "move", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"},
+        {".runar.py", "Python", "python", "@public(sighash=\"<FLAGS>\")", "the wrapper type EmbedAlways[T]"},
+        {".runar.go", "Go DSL", "go", "the directive //runar:sighash <FLAGS>", "the struct tag option runar:\"readonly,embedAlways\""},
+        {".runar.rs", "Rust", "rust", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"},
+        {".runar.rb", "Ruby", "ruby", "runar_sighash '<FLAGS>'", "the prop option embed_always: true"},
+        {".runar.zig", "Zig", "zig", "the return type runar.Sighash(\"<FLAGS>\")", "the type function runar.EmbedAlways(T)"},
+        {".runar.java", "Java", "java", "the annotation @Sighash(\"<FLAGS>\")", "the annotation @EmbedAlways"},
     };
 
-    private static String nonTsSurface(String lower) {
+    private static String[] nonTsSurface(String lower) {
         for (String[] s : NON_TS_SURFACES) {
-            if (lower.endsWith(s[0])) return s[1];
+            if (lower.endsWith(s[0])) return s;
         }
         return null;
     }
@@ -66,27 +77,22 @@ public final class ParserDispatch {
 
         String lower = filename == null ? "" : filename.toLowerCase();
 
-        // Fail-closed guard, NARROWED to the 8 non-TypeScript surface formats
-        // (#123/#109 port): the {@code @sighash} (#123, per-method sighash type)
-        // and {@code @embedAlways} (#109, readonly-field DCE opt-out) comment
-        // directives are honoured ONLY on the {@code .runar.ts} surface, which
-        // the {@link TsParser} now parses directly. The other 8 frontends still
-        // ignore comments, so they would silently drop these directives and
-        // change signing / DCE semantics — keep rejecting them there until (if
-        // ever) those tiers port the feature.
+        // Fail-closed guard on the 8 non-TypeScript surface formats: a
+        // {@code @sighash} (#123) / {@code @embedAlways} (#109) COMMENT
+        // directive would be silently dropped by those parsers (they ignore
+        // comments), so refuse it and name the surface's native spelling
+        // (N-093). The {@code .runar.ts} surface reads the comment form.
         if (source != null && !lower.endsWith(".runar.ts")) {
-            String surface = nonTsSurface(lower);
+            String[] surface = nonTsSurface(lower);
             if (surface != null && SIGHASH_DIRECTIVE.matcher(source).find()) {
                 throw new ParseException(
-                    "@sighash directive (issue #123) is not supported by the " + surface
-                    + " surface parser; write the contract in TypeScript (.runar.ts) where "
-                    + "@sighash is honoured");
+                    "@sighash directive (issue #123) is not supported as a comment by the " + surface[1]
+                    + " surface parser; write it as " + surface[3] + " (see docs/formats/" + surface[2] + ".md)");
             }
             if (surface != null && EMBED_ALWAYS_DIRECTIVE.matcher(source).find()) {
                 throw new ParseException(
-                    "@embedAlways directive (issue #109) is not supported by the " + surface
-                    + " surface parser; write the contract in TypeScript (.runar.ts) where "
-                    + "@embedAlways is honoured");
+                    "@embedAlways directive (issue #109) is not supported as a comment by the " + surface[1]
+                    + " surface parser; write it as " + surface[4] + " (see docs/formats/" + surface[2] + ".md)");
             }
         }
 

@@ -33,6 +33,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -305,6 +306,8 @@ interface ParsedType {
   type: TypeNode;
   rawName: string;
   readonly?: boolean;
+  /** N-093: `runar.EmbedAlways(T)`, the native spelling of `@embedAlways`. */
+  embedAlways?: boolean;
 }
 
 class ZigParser extends ParserCore<ZigToken> {
@@ -512,6 +515,7 @@ class ZigParser extends ParserCore<ZigToken> {
       type: parsedType.type,
       readonly: parsedType.readonly ?? false,
       initializer,
+      ...(parsedType.embedAlways ? { embedAlways: true } : {}),
       sourceLocation,
     };
   }
@@ -523,7 +527,28 @@ class ZigParser extends ParserCore<ZigToken> {
     const name = this.expect('ident').value;
     const { params, receiverName, statefulContextNames } = this.parseParamList();
 
-    if (this.current().type !== '{') {
+    // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+    // native spelling of the `@sighash` directive (natively it is `void`).
+    const sighashSpecs: Array<string | null> = [];
+    if (this.current().type === 'ident' && this.current().value === 'runar' &&
+        this.tokens[this.pos + 1]?.type === '.' &&
+        this.tokens[this.pos + 2]?.type === 'ident' && this.tokens[this.pos + 2]?.value === 'Sighash') {
+      this.advance(); this.advance(); this.advance();
+      this.expect('(');
+      const arg = this.current();
+      let count = 0;
+      let depth = 0;
+      while (this.current().type !== 'eof') {
+        const t = this.current().type;
+        if (t === ')' && depth === 0) break;
+        if (t === '(') depth++;
+        if (t === ')') depth--;
+        this.advance();
+        count++;
+      }
+      this.expect(')');
+      sighashSpecs.push(count === 1 && arg.type === 'string' ? arg.value : null);
+    } else if (this.current().type !== '{') {
       this.parseType();
     }
 
@@ -541,6 +566,10 @@ class ZigParser extends ParserCore<ZigToken> {
     }
 
     if (name === 'init') {
+      // N-093: the constructor is not a spending entry point.
+      if (sighashSpecs.length > 0) {
+        this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', sourceLocation));
+      }
       this.constructorNode = this.parseConstructor(sourceLocation, params);
       this.selfNames = previousSelfNames;
       this.statefulContextNames = previousStatefulContextNames;
@@ -551,12 +580,18 @@ class ZigParser extends ParserCore<ZigToken> {
     this.selfNames = previousSelfNames;
     this.statefulContextNames = previousStatefulContextNames;
 
+    const sighash = resolveNativeSighash(name, isPublic, sighashSpecs);
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', sourceLocation));
+    }
+
     return {
       kind: 'method',
       name,
       params,
       body,
       visibility: isPublic ? 'public' : 'private',
+      ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
       sourceLocation,
     };
   }
@@ -642,6 +677,12 @@ class ZigParser extends ParserCore<ZigToken> {
         const inner = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(')');
         return { ...inner, readonly: true };
+      }
+      if (name === 'EmbedAlways' && this.current().type === '(') {
+        this.expect('(');
+        const inner = this.nest.nested(this.loc(), () => this.parseType());
+        this.expect(')');
+        return { ...inner, embedAlways: true };
       }
       const mapped = mapZigType(name);
       return { type: makePrimitiveOrCustom(mapped), rawName: name };

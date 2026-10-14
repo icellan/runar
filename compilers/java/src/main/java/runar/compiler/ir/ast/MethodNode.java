@@ -12,12 +12,13 @@ public record MethodNode(
      * Issue #123: the BIP-143 sighash type declared via a {@code /** @sighash
      * <FLAGS> *&#47;} directive on a public method (e.g. {@code 0x43} for
      * SINGLE|FORKID). {@code null} = the default {@code ALL|FORKID} (0x41),
-     * byte-identical to the historically-pinned mode. Only honoured on the
-     * {@code .runar.ts} surface (mirrors the TypeScript reference).
+     * byte-identical to the historically-pinned mode. The eight non-TS
+     * surfaces set it from their native spelling (N-093), e.g. Java
+     * {@code @Sighash("SINGLE|FORKID")}.
      */
     Integer sighashType
 ) {
-    /** Backwards-compatible constructor for the 8 non-TS parsers (no directive). */
+    /** Convenience constructor for a method with no sighash directive. */
     public MethodNode(
         String name,
         List<ParamNode> params,

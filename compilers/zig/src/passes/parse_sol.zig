@@ -29,6 +29,7 @@ const loop_condition = @import("loop_condition.zig");
 
 const Allocator = std.mem.Allocator;
 const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -424,6 +425,48 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// Kind of the token after `current`, without consuming anything.
+    fn peekNextKind(self: *Parser) TokenKind {
+        const saved_pos = self.tokenizer.pos;
+        const saved_line = self.tokenizer.line;
+        const saved_col = self.tokenizer.col;
+        const next_tok = self.tokenizer.next();
+        self.tokenizer.pos = saved_pos;
+        self.tokenizer.line = saved_line;
+        self.tokenizer.col = saved_col;
+        return next_tok.kind;
+    }
+
+    /// N-093: `( IDENT ( '|' IDENT )* )` after `sighash` -> the flag text, or
+    /// null when anything else appears inside the parentheses. Always
+    /// consumes through the matching `)` so a malformed spelling does not
+    /// derail parsing.
+    fn parseSighashFlagTokens(self: *Parser) ?[]const u8 {
+        _ = self.expect(.lparen);
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        var ok = true;
+        var depth: usize = 1;
+        while (self.current.kind != .eof) {
+            const t = self.current;
+            if (t.kind == .lparen) depth += 1;
+            if (t.kind == .rparen) {
+                depth -= 1;
+                if (depth == 0) break;
+            }
+            if (t.kind == .ident or t.kind == .pipe) {
+                text.appendSlice(self.allocator, t.text) catch {};
+            } else ok = false;
+            _ = self.bump();
+        }
+        _ = self.expect(.rparen);
+        return if (ok) text.items else null;
+    }
+
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
@@ -609,11 +652,27 @@ const Parser = struct {
         // FixedArray<FixedArray<T, A>, B>.
         const type_node = self.parseSolFixedArraySuffix(.{ .primitive_type = .void }, type_name);
 
-        // Check for immutable keyword
+        // Modifiers, any order: `immutable` (readonly) and N-093's
+        // `embedAlways` (the native spelling of the `@embedAlways` directive).
+        // An `embedAlways` directly followed by `;` or `=` is the property
+        // NAME, not a modifier.
         var is_readonly = false;
-        if (self.checkIdent("immutable")) {
-            _ = self.bump();
-            is_readonly = true;
+        var embed_always = false;
+        while (true) {
+            if (self.checkIdent("immutable")) {
+                _ = self.bump();
+                is_readonly = true;
+                continue;
+            }
+            if (self.checkIdent("embedAlways")) {
+                const next = self.peekNextKind();
+                if (next != .semicolon and next != .assign) {
+                    _ = self.bump();
+                    embed_always = true;
+                    continue;
+                }
+            }
+            break;
         }
 
         // Property name
@@ -655,6 +714,7 @@ const Parser = struct {
             .type_info = types.typeNodeToRunarType(type_node),
             .readonly = readonly,
             .initializer = initializer,
+            .embed_always = embed_always,
             // N-109: spelled type name + field-name token, for the validator's
             // unsupported-type diagnostic. Diagnostics only.
             .type_name = types.typeNodeName(type_node),
@@ -1169,11 +1229,17 @@ const Parser = struct {
 
         const params = self.parseSolParams(false);
 
-        // Parse visibility modifiers and skip 'returns (Type)' clauses
+        // Parse visibility modifiers, N-093's `sighash(FLAGS)` (the native
+        // spelling of the `@sighash` directive; FLAGS must be identifiers
+        // separated by `|`) and skip 'returns (Type)' clauses
         var is_public = false;
+        var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
         while (self.current.kind == .ident) {
             const mod = self.current.text;
-            if (std.mem.eql(u8, mod, "public") or std.mem.eql(u8, mod, "external")) {
+            if (std.mem.eql(u8, mod, "sighash") and self.peekNextKind() == .lparen) {
+                _ = self.bump();
+                sighash_specs.append(self.allocator, self.parseSighashFlagTokens()) catch {};
+            } else if (std.mem.eql(u8, mod, "public") or std.mem.eql(u8, mod, "external")) {
                 is_public = true;
                 _ = self.bump();
             } else if (std.mem.eql(u8, mod, "private") or std.mem.eql(u8, mod, "internal")) {
@@ -1196,7 +1262,12 @@ const Parser = struct {
         }
 
         const body = self.parseBlock();
-        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .source_loc = loc };
+        var sighash_type: ?i32 = null;
+        if (sighash_directive.resolveNativeSighash(self.allocator, name, is_public, sighash_specs.items)) |r| switch (r) {
+            .value => |v| sighash_type = v,
+            .err => |e| self.addErrorAtLoc(loc, e),
+        };
+        return .{ .name = name, .is_public = is_public, .params = params, .body = body, .sighash_type = sighash_type, .source_loc = loc };
     }
 
     // ---- Parameters: (Type name, Type name, ...) ----
