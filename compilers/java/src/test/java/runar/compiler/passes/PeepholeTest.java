@@ -177,6 +177,55 @@ class PeepholeTest {
         assertTrue(r.get(0) instanceof OverOp);
     }
 
+    // F-392: the opcode-string form (OpcodeOp("OP_ROLL")/("OP_PICK")) folds
+    // the same as the typed RollOp/PickOp, at the three depths the typed
+    // rules cover. The depth comes from the preceding PushOp either way.
+    // Matches compilers/python/.../optimizer.py and compilers/ruby/.../
+    // optimizer.rb, which already accept both forms.
+
+    @Test
+    void push0OpcodeStringRollRemoved() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_ROLL")));
+        assertEquals(0, r.size());
+    }
+
+    @Test
+    void push1OpcodeStringRollBecomesSwap() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(1)), new OpcodeOp("OP_ROLL")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof SwapOp);
+    }
+
+    @Test
+    void push2OpcodeStringRollBecomesRot() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(2)), new OpcodeOp("OP_ROLL")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof RotOp);
+    }
+
+    @Test
+    void push0OpcodeStringPickBecomesDup() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_PICK")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof DupOp);
+    }
+
+    @Test
+    void push1OpcodeStringPickBecomesOver() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(1)), new OpcodeOp("OP_PICK")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof OverOp);
+    }
+
+    @Test
+    void push2OpcodeStringPickUntouched() {
+        // No typed rule exists at depth 2 for Pick either -- this item only
+        // teaches existing rules a second input representation, it does not
+        // add new depths.
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(2)), new OpcodeOp("OP_PICK")));
+        assertEquals(2, r.size());
+    }
+
     @Test
     void sha256Sha256BecomesHash256() {
         List<StackOp> r = Peephole.optimize(List.of(new OpcodeOp("OP_SHA256"), new OpcodeOp("OP_SHA256")));

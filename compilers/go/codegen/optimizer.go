@@ -191,27 +191,31 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 	}
 
 	// PUSH(0n) + Roll{depth:0} -> remove both (roll 0 is a no-op)
-	if isPushBigInt(a, 0) && b.Op == "roll" && b.Depth == 0 {
+	// F-392: also matches the opcode-string form (SLH-DSA-adjacent codegen
+	// emits Opcode("OP_ROLL")/("OP_PICK") instead of the typed node); the
+	// depth comes from the preceding PUSH either way. Matches
+	// compilers/python and compilers/ruby, which already accept both forms.
+	if isPushBigInt(a, 0) && ((b.Op == "roll" && b.Depth == 0) || isOpcodeOp(b, "OP_ROLL")) {
 		return nil, true
 	}
 
 	// PUSH(1n) + Roll{depth:1} -> SWAP
-	if isPushBigInt(a, 1) && b.Op == "roll" && b.Depth == 1 {
+	if isPushBigInt(a, 1) && ((b.Op == "roll" && b.Depth == 1) || isOpcodeOp(b, "OP_ROLL")) {
 		return []StackOp{{Op: "swap"}}, true
 	}
 
 	// PUSH(2n) + Roll{depth:2} -> ROT
-	if isPushBigInt(a, 2) && b.Op == "roll" && b.Depth == 2 {
+	if isPushBigInt(a, 2) && ((b.Op == "roll" && b.Depth == 2) || isOpcodeOp(b, "OP_ROLL")) {
 		return []StackOp{{Op: "rot"}}, true
 	}
 
 	// PUSH(0n) + Pick{depth:0} -> DUP
-	if isPushBigInt(a, 0) && b.Op == "pick" && b.Depth == 0 {
+	if isPushBigInt(a, 0) && ((b.Op == "pick" && b.Depth == 0) || isOpcodeOp(b, "OP_PICK")) {
 		return []StackOp{{Op: "dup"}}, true
 	}
 
 	// PUSH(1n) + Pick{depth:1} -> OVER
-	if isPushBigInt(a, 1) && b.Op == "pick" && b.Depth == 1 {
+	if isPushBigInt(a, 1) && ((b.Op == "pick" && b.Depth == 1) || isOpcodeOp(b, "OP_PICK")) {
 		return []StackOp{{Op: "over"}}, true
 	}
 

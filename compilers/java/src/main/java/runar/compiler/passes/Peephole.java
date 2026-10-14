@@ -249,15 +249,20 @@ public final class Peephole {
         if (a instanceof DropOp && b instanceof DropOp) return List.of(new OpcodeOp("OP_2DROP"));
 
         // PUSH 0 + Roll{0} → remove both
-        if (isPushBigInt(a, 0) && isRoll(b, 0)) return List.of();
+        // F-392: also matches the opcode-string form (OpcodeOp("OP_ROLL")/
+        // ("OP_PICK")) that some codegen paths emit instead of the typed
+        // node; the depth comes from the preceding PUSH either way. Matches
+        // compilers/python/.../optimizer.py and compilers/ruby/.../
+        // optimizer.rb, which already accept both forms.
+        if (isPushBigInt(a, 0) && (isRoll(b, 0) || isOpcode(b, "OP_ROLL"))) return List.of();
         // PUSH 1 + Roll{1} → SWAP
-        if (isPushBigInt(a, 1) && isRoll(b, 1)) return List.of(new SwapOp());
+        if (isPushBigInt(a, 1) && (isRoll(b, 1) || isOpcode(b, "OP_ROLL"))) return List.of(new SwapOp());
         // PUSH 2 + Roll{2} → ROT
-        if (isPushBigInt(a, 2) && isRoll(b, 2)) return List.of(new RotOp());
+        if (isPushBigInt(a, 2) && (isRoll(b, 2) || isOpcode(b, "OP_ROLL"))) return List.of(new RotOp());
         // PUSH 0 + Pick{0} → DUP
-        if (isPushBigInt(a, 0) && isPick(b, 0)) return List.of(new DupOp());
+        if (isPushBigInt(a, 0) && (isPick(b, 0) || isOpcode(b, "OP_PICK"))) return List.of(new DupOp());
         // PUSH 1 + Pick{1} → OVER
-        if (isPushBigInt(a, 1) && isPick(b, 1)) return List.of(new OverOp());
+        if (isPushBigInt(a, 1) && (isPick(b, 1) || isOpcode(b, "OP_PICK"))) return List.of(new OverOp());
 
         // OP_SHA256 + OP_SHA256 → OP_HASH256
         if (isOpcode(a, "OP_SHA256") && isOpcode(b, "OP_SHA256")) return List.of(new OpcodeOp("OP_HASH256"));

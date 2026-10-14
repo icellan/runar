@@ -1257,65 +1257,90 @@ describe('Optimizer: Peephole (Stack IR)', () => {
   // -----------------------------------------------------------------------
   // Opcode-string Roll/Pick forms
   //
-  // F-353 (resolved 2026-10): this block used to carry a comment claiming
-  // "SLH-DSA codegen emits Opcode('OP_ROLL') string form instead of typed
-  // Roll/Pick ops" and flagging the gap below as a "POTENTIAL BUG" with an
-  // open "Go/Rust/Python compilers may handle this differently" risk. Both
-  // claims were investigated and are stale/incorrect at HEAD:
+  // F-353 (resolved 2026-10) established that opcode-string push+ROLL/PICK
+  // at the depths the typed rules cover (0/1/2 for ROLL, 0/1 for PICK) does
+  // not occur on any live TS codegen path, and is behaviourally identical to
+  // the typed form when it is constructed synthetically (see
+  // 'string-form Roll/Pick execution equivalence' below). F-353 left the
+  // peephole rules typed-only on that basis ("generalizing would be
+  // speculative code for zero benefit").
   //
-  //   - SLH-DSA codegen (`slh-dsa-codegen.ts` `roll()`/`pick()`, lines
-  //     ~267-284) uses TYPED roll/pick ops, with its own depth 0/1/2
-  //     short-circuit to swap/rot/dup/over -- it never reaches the typed
-  //     push+roll{0..2}/pick{0..2} forms the rules below exist for, and it
-  //     never emits the opcode-string form at all.
-  //   - The only 5 places in `packages/runar-compiler/src` that DO emit
-  //     opcode-string `OP_ROLL`/`OP_PICK` are: `wots-codegen.ts` (push 2n +
-  //     OP_PICK once, push 3n + OP_ROLL twice), the `pow()` loop in
-  //     `05-stack-lower.ts` (push 2n + OP_PICK), and
-  //     `oppushtx-codegen.ts`'s `emitCheckPreimageBindingLegacy` (push 2n +
-  //     OP_ROLL) -- which is exported but called from nowhere in the
-  //     compiler; the live checkPreimage-binding path
-  //     (`emitCheckPreimageBindingRaw` -> `emitCheckPreimageBinding`) emits
-  //     the whole construction as one opaque `raw_bytes` span that contains
-  //     no OP_ROLL byte at all. None of the five real sites use depth 0 or
-  //     1, and none of the depths they do use (2 for PICK, 3 for ROLL) has a
-  //     typed-form optimization rule to diverge from either -- so the
-  //     asymmetry the tests below pin (depth 0, where a typed rule exists)
-  //     is not reachable from any live TS codegen path, and there is no
-  //     cross-tier byte-divergence risk to resolve.
-  //   - Independently of reachability, the pattern is behaviourally inert
-  //     even if it were reached: see 'string-form Roll/Pick execution
-  //     equivalence' below, which runs the un-reduced sequences through the
-  //     real @bsv/sdk Spend engine and shows they are semantically identical
-  //     to their typed-rule replacements. It is a missed optimization (extra
-  //     bytes), never a miscompile.
+  // F-392 revisits that call: the generalization is not speculative, it is
+  // a real cross-tier inconsistency. `compilers/python/.../optimizer.py` and
+  // `compilers/ruby/.../optimizer.rb` already match EITHER the typed node OR
+  // the opcode-string form for all five rules (explicitly commented "typed
+  // or string-form"); `compilers/go`, `compilers/rust`, and
+  // `compilers/java` match only the typed form, the same gap this file had.
+  // Since the pattern is proven byte-neutral (zero live occurrences in any
+  // tier's codegen, confirmed empirically via the full conformance corpus in
+  // both constant-folding modes, plus the whole `packages/runar-compiler`
+  // unit-test corpus), there is no reason for TS/Go/Rust/Java to special-case
+  // fewer representations of the same stack effect than Python/Ruby already
+  // do -- so this file, and the Go/Rust/Java peepholes, now match both forms
+  // too, using Python/Ruby's predicate.
   //
-  // The peephole optimizer still does NOT reduce the opcode-string forms
-  // (nothing below changes that -- there is no live site a generalized rule
-  // would help, so generalizing would be speculative code for zero benefit).
+  // `compilers/zig` is excluded: its unified instruction stream cannot
+  // distinguish a typed depth-1/depth-2 roll from an untyped post-if
+  // reconciliation roll (`push d + roll(depth=d+1) + drop`), so folding
+  // PUSH(1)/PUSH(2) + ROLL there risks a miscompile, not just a missed
+  // optimization (see `compilers/zig/src/passes/peephole.zig` Rule 18/19
+  // comment). That is a pre-existing, independently-documented divergence,
+  // not something this item changes.
   // -----------------------------------------------------------------------
 
-  describe('opcode-string Roll/Pick forms', () => {
-    it('does NOT optimize PUSH(0) + opcode OP_ROLL (string form, typed form is optimized)', () => {
-      // Typed roll{0} is optimized away. Opcode-string OP_ROLL is not.
-      // See the F-353 note above: this exact (push 0, string OP_ROLL) shape
-      // does not occur in any live codegen path, and is a missed
-      // optimization, not a miscompile, even when constructed synthetically.
+  describe('opcode-string Roll/Pick forms (F-392: now optimized, same as typed form)', () => {
+    it('optimizes PUSH(0) + opcode OP_ROLL the same as typed roll{0}', () => {
       const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'roll', depth: 0 }];
       expect(optimizeStackIR(typedOps)).toEqual([]);
 
       const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_ROLL' }];
-      // Currently passes through unchanged (not optimized)
-      expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+      expect(optimizeStackIR(stringOps)).toEqual([]);
     });
 
-    it('does NOT optimize PUSH(0) + opcode OP_PICK (string form, typed form is optimized)', () => {
-      // Typed pick{0} → dup. Opcode-string OP_PICK is not reduced.
+    it('optimizes PUSH(1) + opcode OP_ROLL the same as typed roll{1} (-> swap)', () => {
+      const typedOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'roll', depth: 1 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'swap' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'opcode', code: 'OP_ROLL' }];
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'swap' }]);
+    });
+
+    it('optimizes PUSH(2) + opcode OP_ROLL the same as typed roll{2} (-> rot)', () => {
+      const typedOps: StackOp[] = [{ op: 'push', value: 2n }, { op: 'roll', depth: 2 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'rot' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 2n }, { op: 'opcode', code: 'OP_ROLL' }];
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'rot' }]);
+    });
+
+    it('optimizes PUSH(0) + opcode OP_PICK the same as typed pick{0} (-> dup)', () => {
       const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'pick', depth: 0 }];
       expect(optimizeStackIR(typedOps)).toEqual([{ op: 'dup' }]);
 
       const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_PICK' }];
-      // Currently passes through unchanged (not optimized)
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'dup' }]);
+    });
+
+    it('optimizes PUSH(1) + opcode OP_PICK the same as typed pick{1} (-> over)', () => {
+      const typedOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'pick', depth: 1 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'over' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'opcode', code: 'OP_PICK' }];
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'over' }]);
+    });
+
+    // Depths the typed rules do NOT cover (2 for PICK, 3 for ROLL -- the
+    // depths wots-codegen.ts and the pow() loop actually use) still pass
+    // through unreduced in both forms: this item only teaches the rules
+    // that already exist a second input representation, it does not add
+    // new depths.
+    it('does NOT optimize PUSH(2) + opcode OP_PICK (no typed rule at this depth either)', () => {
+      const stringOps: StackOp[] = [{ op: 'push', value: 2n }, { op: 'opcode', code: 'OP_PICK' }];
+      expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+    });
+
+    it('does NOT optimize PUSH(3) + opcode OP_ROLL (no typed rule at this depth either)', () => {
+      const stringOps: StackOp[] = [{ op: 'push', value: 3n }, { op: 'opcode', code: 'OP_ROLL' }];
       expect(optimizeStackIR(stringOps)).toEqual(stringOps);
     });
   });
@@ -1339,11 +1364,15 @@ describe('Optimizer: Peephole (Stack IR)', () => {
   // OP_DUP, and OP_2 OP_ROLL behaves like OP_ROT. There is no hidden runtime
   // divergence.
   //
-  // What this does NOT prove: that `optimizeStackIR` reduces the
-  // opcode-string forms (it still does not -- see the describe block above),
-  // or that every string-form Roll/Pick depth is behaviourally safe (only
-  // the three depths tested are covered; the general claim follows from
-  // Bitcoin Script's OP_ROLL/OP_PICK semantics, not from exhaustive testing).
+  // What this does NOT prove: that every string-form Roll/Pick depth is
+  // behaviourally safe (only the three depths tested are covered; the
+  // general claim follows from Bitcoin Script's OP_ROLL/OP_PICK semantics,
+  // not from exhaustive testing). The tests below feed the un-reduced ops
+  // straight to `emitMethod`, bypassing `optimizeStackIR`, so they are
+  // unaffected by F-392's peephole change (see the describe block above,
+  // which now DOES reduce these forms) -- they remain a direct check that
+  // the raw opcode-string bytes execute correctly regardless of whether the
+  // optimizer ever sees them.
   // -----------------------------------------------------------------------
 
   describe('string-form Roll/Pick execution equivalence (F-353)', () => {

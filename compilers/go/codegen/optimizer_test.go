@@ -360,6 +360,82 @@ func TestOptimizer_Push1Pick_BecomesOver(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// F-392: PUSH(depth) + opcode-string OP_ROLL/OP_PICK fold the same as the
+// typed roll/pick form, at the three depths the typed rules cover. Matches
+// compilers/python/runar_compiler/codegen/optimizer.py and
+// compilers/ruby/.../optimizer.rb, which already accept both forms.
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_Push0OpcodeStringRoll_Removed(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(0),
+		opcodeOp("OP_ROLL"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 0 {
+		t.Errorf("PUSH(0) opcode-string OP_ROLL should be removed, got %d ops", len(result))
+	}
+}
+
+func TestOptimizer_Push1OpcodeStringRoll_BecomesSwap(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(1),
+		opcodeOp("OP_ROLL"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "swap" {
+		t.Fatalf("expected [swap], got %v", result)
+	}
+}
+
+func TestOptimizer_Push2OpcodeStringRoll_BecomesRot(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(2),
+		opcodeOp("OP_ROLL"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "rot" {
+		t.Fatalf("expected [rot], got %v", result)
+	}
+}
+
+func TestOptimizer_Push0OpcodeStringPick_BecomesDup(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(0),
+		opcodeOp("OP_PICK"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "dup" {
+		t.Fatalf("expected [dup], got %v", result)
+	}
+}
+
+func TestOptimizer_Push1OpcodeStringPick_BecomesOver(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(1),
+		opcodeOp("OP_PICK"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "over" {
+		t.Fatalf("expected [over], got %v", result)
+	}
+}
+
+// Depths the typed rules do NOT cover still pass through unreduced in
+// opcode-string form too -- this item only teaches existing rules a second
+// input representation, it does not add new depths.
+func TestOptimizer_Push2OpcodeStringPick_Untouched(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(2),
+		opcodeOp("OP_PICK"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 2 {
+		t.Fatalf("expected passthrough (2 ops), got %v", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 2-op window: OP_SHA256 OP_SHA256 -> OP_HASH256
 // ---------------------------------------------------------------------------
 

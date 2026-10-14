@@ -303,13 +303,21 @@ const rules: PeepholeRule[] = [
   // New 2-op rules: Roll/Pick depth simplification
   // The stack lowerer emits PUSH(depth) + Roll/Pick pairs. These rules
   // consume both the push and the roll/pick, replacing with a single opcode.
+  //
+  // F-392: each rule also matches the opcode-string form (`{op:'opcode',
+  // code:'OP_ROLL'|'OP_PICK'}`) that some codegen paths (e.g. WOTS+-adjacent
+  // constructions) emit instead of the typed node -- the depth in that case
+  // comes from the preceding PUSH, same as the typed form. Matches
+  // Python's/Ruby's `optimizer.py`/`optimizer.rb`, which already accept
+  // both representations here.
   // =========================================================================
 
   // PUSH 0, Roll{0} → remove both (no-op)
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 0n) && ops[1]!.op === 'roll' && ops[1]!.depth === 0) return [];
+      if (isPushBigInt(ops[0]!, 0n) &&
+          ((ops[1]!.op === 'roll' && ops[1]!.depth === 0) || isOpcode(ops[1]!, 'OP_ROLL'))) return [];
       return null;
     },
   },
@@ -318,7 +326,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 1n) && ops[1]!.op === 'roll' && ops[1]!.depth === 1) return [{ op: 'swap' }];
+      if (isPushBigInt(ops[0]!, 1n) &&
+          ((ops[1]!.op === 'roll' && ops[1]!.depth === 1) || isOpcode(ops[1]!, 'OP_ROLL'))) return [{ op: 'swap' }];
       return null;
     },
   },
@@ -327,7 +336,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 2n) && ops[1]!.op === 'roll' && ops[1]!.depth === 2) return [{ op: 'rot' }];
+      if (isPushBigInt(ops[0]!, 2n) &&
+          ((ops[1]!.op === 'roll' && ops[1]!.depth === 2) || isOpcode(ops[1]!, 'OP_ROLL'))) return [{ op: 'rot' }];
       return null;
     },
   },
@@ -336,7 +346,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 0n) && ops[1]!.op === 'pick' && ops[1]!.depth === 0) return [{ op: 'dup' }];
+      if (isPushBigInt(ops[0]!, 0n) &&
+          ((ops[1]!.op === 'pick' && ops[1]!.depth === 0) || isOpcode(ops[1]!, 'OP_PICK'))) return [{ op: 'dup' }];
       return null;
     },
   },
@@ -345,7 +356,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 1n) && ops[1]!.op === 'pick' && ops[1]!.depth === 1) return [{ op: 'over' }];
+      if (isPushBigInt(ops[0]!, 1n) &&
+          ((ops[1]!.op === 'pick' && ops[1]!.depth === 1) || isOpcode(ops[1]!, 'OP_PICK'))) return [{ op: 'over' }];
       return null;
     },
   },
