@@ -436,7 +436,8 @@ fn test_p256_add_op_count_golden() {
     // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
     // and four OP_ADD selects and the picks/rolls feeding them. Measured on
     // this tier's own baseline, not copied from TypeScript.
-    assert_eq!(count_op_tree(&ops), 6737, "p256_add op count drift");
+    // N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+    assert_eq!(count_op_tree(&ops), 6749, "p256_add op count drift");
 }
 
 #[test]
@@ -533,7 +534,8 @@ fn test_p384_add_op_count_golden() {
     // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
     // and four OP_ADD selects and the picks/rolls feeding them. Measured on
     // this tier's own baseline, not copied from TypeScript.
-    assert_eq!(count_op_tree(&ops), 11543, "p384_add op count drift");
+    // N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+    assert_eq!(count_op_tree(&ops), 11555, "p384_add op count drift");
 }
 
 #[test]

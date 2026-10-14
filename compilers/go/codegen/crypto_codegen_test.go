@@ -111,7 +111,8 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"EcMulGen", EmitEcMulGen, 131075},
 		{"EcNegate", EmitEcNegate, 956},
 		{"EcOnCurve", EmitEcOnCurve, 548},
-		{"P256Add", EmitP256Add, 6737},
+		// N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+		{"P256Add", EmitP256Add, 6749},
 		{"P256Mul", EmitP256Mul, 140620},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
@@ -121,7 +122,7 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// has no golden entry in this table.
 		// +12 more from CL-BUG-095 (Point-length validation, see above).
 		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
-		{"P384Add", EmitP384Add, 11543},
+		{"P384Add", EmitP384Add, 11555},
 		{"P384Mul", EmitP384Mul, 211986},
 		// R-135: +3 ops for the exact-signature-length gate
 		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
