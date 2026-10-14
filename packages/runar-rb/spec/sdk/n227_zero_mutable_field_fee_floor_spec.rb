@@ -45,7 +45,17 @@ RSpec.describe 'N-227 zero-mutable-field StatefulSmartContract call fee floor' d
   let(:caller_address) { '00' * 20 }
   let(:caller_pub_key) { '02' + ('00' * 32) }
 
-  SRC = <<~TS
+  # Named N227_SRC (not the bare SRC this file used before) because
+  # `SRC = ...` directly inside an `RSpec.describe do ... end` block binds a
+  # TOP-LEVEL Object constant, not a scoped one — a bare `SRC` here collides
+  # with any other spec file that also binds a bare `SRC` (that's exactly
+  # what CK18-FU8 found and fixed on the other side of this same collision:
+  # issue100_spec.rb's `SRC` was renamed to `I100_SRC`). This is read from
+  # inside `def load_artifact`, which opens a new scope, so it must stay a
+  # constant rather than become a local (N-269;
+  # packages/runar-rb/spec/lint/bare_describe_constants_spec.rb guards
+  # against reintroducing a bare one).
+  N227_SRC = <<~TS
     import { StatefulSmartContract, PubKey, Sig, assert, checkSig } from 'runar-lang';
 
     class AllReadonlyCleanstack extends StatefulSmartContract {
@@ -68,7 +78,7 @@ RSpec.describe 'N-227 zero-mutable-field StatefulSmartContract call fee floor' d
     $LOAD_PATH.unshift(compiler_lib) unless $LOAD_PATH.include?(compiler_lib)
     require 'runar_compiler'
     path = File.join(dir, 'AllReadonlyCleanstack.runar.ts')
-    File.write(path, SRC)
+    File.write(path, N227_SRC)
     Runar::SDK::RunarArtifact.from_json(RunarCompiler.artifact_to_json(RunarCompiler.compile_from_source(path)))
   end
 
