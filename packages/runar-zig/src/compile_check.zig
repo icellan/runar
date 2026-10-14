@@ -287,7 +287,7 @@ test "R-093: compileCheckSource rejects an @sighash directive, as --source does"
     try std.testing.expectEqual(CompileCheckStage.parse, result.stage.?);
     try std.testing.expectEqual(@as(usize, 1), result.messages.len);
     try std.testing.expectEqualStrings(
-        frontend.SIGHASH_DIRECTIVE_ERROR,
+        frontend.sighashDirectiveError("Zig"),
         result.messages[0],
     );
 }

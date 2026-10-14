@@ -577,10 +577,10 @@ fn leading_comment_text(comments: &SingleThreadedComments, pos: BytePos) -> Opti
     )
 }
 
-/// True when `marker` (e.g. `@sighash`, `@embedAlways`) appears in `text`
-/// followed by a word boundary — mirroring the TS reference's `/@sighash\b/`
-/// and `/@embedAlways\b/` scans so an identifier like `sighashType` inside a
-/// comment does not trip detection.
+/// True when `marker` (e.g. `@embedAlways`) appears in `text` followed by a
+/// word boundary — mirroring the TS reference's `/@embedAlways\b/` scan. NOT
+/// used for the non-TS `@sighash` guard, which matches any occurrence of
+/// `@sighash`, glued or not (N-244; see `unsupported_directive_error`).
 fn directive_present(text: &str, marker: &str) -> bool {
     let bytes = text.as_bytes();
     let mut start = 0;
@@ -601,11 +601,14 @@ fn directive_present(text: &str, marker: &str) -> bool {
 /// readonly-field DCE opt-out) are honoured only by the TypeScript (.runar.ts)
 /// parser, which reads leading trivia. The eight non-TS surface parsers ignore
 /// comments, so a directive there would be silently dropped and change signing
-/// / DCE semantics — reject rather than miscompile. Word-boundary matched (via
-/// `directive_present`) so an identifier like `sighashType` does not trip it.
+/// / DCE semantics — reject rather than miscompile. `@embedAlways` is
+/// word-boundary matched (via `directive_present`) so an identifier like
+/// `sighashType` does not trip it; `@sighash` is a plain substring match
+/// (N-244): N-039 made every occurrence of the marker a directive, so a glued
+/// `@sighashSINGLE|FORKID` is refused too, with the message every tier shares.
 /// Returns a diagnostic message, or `None` when the source is clean.
 fn unsupported_directive_error(source: &str, surface_name: &str) -> Option<String> {
-    if directive_present(source, "@sighash") {
+    if source.contains("@sighash") {
         return Some(format!(
             "@sighash directive (issue #123) is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured"
         ));
@@ -2208,7 +2211,7 @@ mod tests {
 
     #[test]
     fn test_parse_source_allows_non_directive_identifier() {
-        // A field named `sighashType` must NOT trip the word-boundary guard.
+        // A field named `sighashType` (no `@`) must NOT trip the `@sighash` guard.
         let src = r#"
             class Counter extends SmartContract {
                 readonly sighashType: bigint;

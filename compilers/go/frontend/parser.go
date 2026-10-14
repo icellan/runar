@@ -131,11 +131,13 @@ func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 	}
 }
 
-// Directive markers for the fail-closed guard. Word-boundary anchored to
-// mirror the TypeScript compiler's `/@sighash\b/` / `/@embedAlways\b/` scans,
-// so an identifier like `sighashType` does not trip the guard.
+// Directive markers for the fail-closed guard. `@embedAlways` is word-boundary
+// anchored so an identifier like `sighashType` does not trip the guard;
+// `@sighash` is not (N-244): N-039 made every occurrence of the marker a
+// directive, so a glued `@sighashSINGLE|FORKID` is refused here too, with the
+// message every tier shares.
 var (
-	sighashDirectiveRE     = regexp.MustCompile(`@sighash\b`)
+	sighashDirectiveRE     = regexp.MustCompile(`@sighash`)
 	embedAlwaysDirectiveRE = regexp.MustCompile(`@embedAlways\b`)
 )
 

@@ -29,8 +29,9 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * What it does NOT prove:
  *   - anything about a `@sighash` outside a method's leading comments (a class,
  *     property or file comment): that is N-199's "lost directive" rule;
- *   - the non-TS surfaces, which refuse a word-bounded `@sighash` with their
- *     own per-tier message and are not touched here;
+ *   - the non-TS surfaces, which refuse ANY `@sighash` (glued or not) with
+ *     the shared "not supported by the <Surface> surface parser" message:
+ *     that is N-244's gate (n244-sighash-glued-nonts-parity.test.ts);
  *   - the signing mode on-chain: the well-formed control is compared across
  *     tiers, not executed (the sdk-call vector does that under Spend.validate).
  */

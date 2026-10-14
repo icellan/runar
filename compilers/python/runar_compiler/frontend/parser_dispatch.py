@@ -16,11 +16,13 @@ from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 # opt-out). The eight non-TS surface parsers ignore comments, so a directive in
 # one of those sources would be silently dropped and change signing / DCE
 # semantics. Fail closed on those formats rather than miscompile — this mirrors
-# the Go/Rust/Zig/Ruby/Java tiers. Word-boundary anchored to mirror the TS
-# ``/@sighash\b/`` / ``/@embedAlways\b/`` scans so an identifier like
-# ``sighashType`` does not trip the guard. No conformance fixture uses either
-# directive, so this has zero golden impact.
-_SIGHASH_DIRECTIVE_RE = re.compile(r"@sighash\b")
+# the Go/Rust/Zig/Ruby/Java tiers. ``@embedAlways`` is word-boundary anchored
+# so an identifier like ``sighashType`` does not trip the guard; ``@sighash``
+# is not (N-244): N-039 made every occurrence of the marker a directive, so a
+# glued ``@sighashSINGLE|FORKID`` is refused here too, with the message every
+# tier shares. No conformance fixture uses either directive, so this has zero
+# golden impact.
+_SIGHASH_DIRECTIVE_RE = re.compile(r"@sighash")
 _EMBED_ALWAYS_DIRECTIVE_RE = re.compile(r"@embedAlways\b")
 
 # Non-TS extension -> human-readable surface name for the diagnostic.

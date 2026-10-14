@@ -89,10 +89,12 @@ export interface ParseResult {
 // and change signing / DCE semantics. Fail closed on those formats rather than
 // miscompile — this matches the Go/Rust/Python/Zig/Ruby/Java tiers. No
 // conformance fixture uses either directive, so this has zero golden impact.
-// Word-boundary anchored (matching the `/@sighash\b/` / `/@embedAlways\b/`
-// scans used to detect the directives) so an identifier like `sighashType`
-// does not trip the guard.
-const SIGHASH_DIRECTIVE_RE = /@sighash\b/;
+// `@embedAlways` is word-boundary anchored so an identifier like `sighashType`
+// does not trip the guard. `@sighash` is NOT (N-244): N-039 made every
+// occurrence of the marker a directive on `.runar.ts`, so a glued
+// `@sighashSINGLE|FORKID` is refused here too instead of being read as prose.
+// The message is identical in all seven tiers.
+const SIGHASH_DIRECTIVE_RE = /@sighash/;
 const EMBED_ALWAYS_DIRECTIVE_RE = /@embedAlways\b/;
 
 // Extension → human-readable surface name for the diagnostic. `.runar.ts` is

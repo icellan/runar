@@ -107,6 +107,22 @@ pub fn validateForFile(
         validate_pass.validate(work, contract);
 }
 
+/// The shared `@sighash` refusal (N-244) for a non-TS surface, as a static
+/// one-element error list.
+fn sighashGuardErrors(format: FileFormat) []const []const u8 {
+    return switch (format) {
+        .runar_sol => &.{comptime input_limits.sighashDirectiveError("Solidity")},
+        .runar_move => &.{comptime input_limits.sighashDirectiveError("Move")},
+        .runar_py => &.{comptime input_limits.sighashDirectiveError("Python")},
+        .runar_go => &.{comptime input_limits.sighashDirectiveError("Go DSL")},
+        .runar_rs => &.{comptime input_limits.sighashDirectiveError("Rust")},
+        .runar_rb => &.{comptime input_limits.sighashDirectiveError("Ruby")},
+        .runar_zig => &.{comptime input_limits.sighashDirectiveError("Zig")},
+        .runar_java => &.{comptime input_limits.sighashDirectiveError("Java")},
+        .runar_ts, .unknown => unreachable,
+    };
+}
+
 /// Parse `source` by the format its `file_name` extension names, behind the
 /// two guards that apply to EVERY frontend entry: the size guard immediately
 /// below (N-136 — previously only `runPipeline`'s pass 0 enforced this, so a
@@ -150,8 +166,9 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
     // reject a directive rather than silently drop it and change signing / DCE
     // semantics. `.runar.ts` is exempt — its parser honours the directives.
     if (format != .runar_ts) {
-        if (input_limits.containsDirectiveToken(source, "@sighash")) {
-            return .{ .contract = null, .errors = &.{input_limits.SIGHASH_DIRECTIVE_ERROR} };
+        // N-244: any occurrence of `@sighash`, glued or not (N-039's rule).
+        if (std.mem.indexOf(u8, source, "@sighash") != null) {
+            return .{ .contract = null, .errors = sighashGuardErrors(format) };
         }
         if (input_limits.containsDirectiveToken(source, "@embedAlways")) {
             return .{ .contract = null, .errors = &.{input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR} };

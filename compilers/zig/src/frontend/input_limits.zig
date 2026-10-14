@@ -64,7 +64,15 @@ pub fn assertSourceBytesUnderLimit(source: []const u8) SourceSizeError!void {
 // directives) — the guard callers narrow accordingly.
 // ---------------------------------------------------------------------------
 
-pub const SIGHASH_DIRECTIVE_ERROR = "@sighash directive (issue #123) is only honoured on the TypeScript (.runar.ts) surface; write the contract in .runar.ts where @sighash is implemented";
+/// The `@sighash` refusal for the non-TS surface named `surface` ("Solidity",
+/// "Move", "Python", "Go DSL", "Rust", "Ruby", "Zig", "Java"). Identical text
+/// in all seven tiers (N-244). Detection is a plain substring match on
+/// `@sighash` (see `compiler_api.parseSource`), NOT `containsDirectiveToken`:
+/// N-039 made every occurrence of the marker a directive, so a glued
+/// `@sighashSINGLE|FORKID` is refused rather than read as prose.
+pub fn sighashDirectiveError(comptime surface: []const u8) []const u8 {
+    return "@sighash directive (issue #123) is not supported by the " ++ surface ++ " surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured";
+}
 pub const EMBED_ALWAYS_DIRECTIVE_ERROR = "@embedAlways directive (issue #109) is only honoured on the TypeScript (.runar.ts) surface; write the contract in .runar.ts where @embedAlways is implemented";
 
 fn isWordByte(c: u8) bool {
@@ -73,8 +81,9 @@ fn isWordByte(c: u8) bool {
 
 /// True when `marker` (which begins with a non-word `@`) appears in `source`
 /// followed by a word boundary — i.e. the next byte is not `[A-Za-z0-9_]`.
-/// Mirrors the TypeScript compiler's `/@sighash\b/` / `/@embedAlways\b/` scans
-/// so an identifier like `sighashType` does not trip the guard.
+/// Mirrors the TypeScript compiler's `/@embedAlways\b/` scan. NOT used for the
+/// non-TS `@sighash` guard, which matches any occurrence of `@sighash`, glued
+/// or not (N-244; see `compiler_api.parseSource`).
 pub fn containsDirectiveToken(source: []const u8, marker: []const u8) bool {
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, source, i, marker)) |pos| {
@@ -85,13 +94,6 @@ pub fn containsDirectiveToken(source: []const u8, marker: []const u8) bool {
     return false;
 }
 
-/// Returns the fail-closed diagnostic message for the first unsupported
-/// directive in `source`, or null when the source is clean.
-pub fn unsupportedDirectiveError(source: []const u8) ?[]const u8 {
-    if (containsDirectiveToken(source, "@sighash")) return SIGHASH_DIRECTIVE_ERROR;
-    if (containsDirectiveToken(source, "@embedAlways")) return EMBED_ALWAYS_DIRECTIVE_ERROR;
-    return null;
-}
 
 // ---------------------------------------------------------------------------
 // N-136: the size guard above (`assertSourceBytesUnderLimit`) was reachable

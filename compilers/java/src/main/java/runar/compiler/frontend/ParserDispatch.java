@@ -19,11 +19,32 @@ public final class ParserDispatch {
 
     // Author-facing comment directives implemented only by the TypeScript
     // compiler today: {@code @sighash <FLAGS>} (#123, per-method sighash type)
-    // and {@code @embedAlways} (#109, readonly-field DCE opt-out). Word-boundary
-    // anchored (\b) to mirror the TS {@code /@sighash\b/} / {@code
-    // /@embedAlways\b/} scans so an identifier like {@code sighashType} does not
-    // trip the guard.
-    private static final Pattern SIGHASH_DIRECTIVE = Pattern.compile("@sighash\\b");
+    // and {@code @embedAlways} (#109, readonly-field DCE opt-out).
+    // {@code @embedAlways} is word-boundary anchored (\b) so an identifier like
+    // {@code sighashType} does not trip the guard; {@code @sighash} is not
+    // (N-244): N-039 made every occurrence of the marker a directive, so a glued
+    // {@code @sighashSINGLE|FORKID} is refused too, with the message every tier
+    // shares.
+    private static final Pattern SIGHASH_DIRECTIVE = Pattern.compile("@sighash");
+
+    /** Non-TS suffix -> surface name in the shared {@code @sighash} diagnostic (N-244). */
+    private static final String[][] NON_TS_SURFACES = {
+        {".runar.sol", "Solidity"},
+        {".runar.move", "Move"},
+        {".runar.py", "Python"},
+        {".runar.go", "Go DSL"},
+        {".runar.rs", "Rust"},
+        {".runar.rb", "Ruby"},
+        {".runar.zig", "Zig"},
+        {".runar.java", "Java"},
+    };
+
+    private static String nonTsSurface(String lower) {
+        for (String[] s : NON_TS_SURFACES) {
+            if (lower.endsWith(s[0])) return s[1];
+        }
+        return null;
+    }
     private static final Pattern EMBED_ALWAYS_DIRECTIVE = Pattern.compile("@embedAlways\\b");
 
     /**
@@ -54,10 +75,12 @@ public final class ParserDispatch {
         // change signing / DCE semantics — keep rejecting them there until (if
         // ever) those tiers port the feature.
         if (source != null && !lower.endsWith(".runar.ts")) {
-            if (SIGHASH_DIRECTIVE.matcher(source).find()) {
+            String surface = nonTsSurface(lower);
+            if (surface != null && SIGHASH_DIRECTIVE.matcher(source).find()) {
                 throw new ParseException(
-                    "@sighash directive is only supported on the .runar.ts surface "
-                    + "(issue #123); write the contract in TypeScript syntax");
+                    "@sighash directive (issue #123) is not supported by the " + surface
+                    + " surface parser; write the contract in TypeScript (.runar.ts) where "
+                    + "@sighash is honoured");
             }
             if (EMBED_ALWAYS_DIRECTIVE.matcher(source).find()) {
                 throw new ParseException(

@@ -213,22 +213,42 @@ module RunarCompiler
   end
   private_class_method :_parse_source_dispatch
 
+  # Non-TS extension -> human-readable surface name for the shared @sighash
+  # diagnostic (N-244). Same names as every other tier's guard.
+  NON_TS_SURFACE_NAMES = {
+    ".runar.sol" => "Solidity",
+    ".runar.move" => "Move",
+    ".runar.py" => "Python",
+    ".runar.go" => "Go DSL",
+    ".runar.rs" => "Rust",
+    ".runar.rb" => "Ruby",
+    ".runar.zig" => "Zig",
+    ".runar.java" => "Java",
+  }.freeze
+  private_constant :NON_TS_SURFACE_NAMES
+
   # Detect the first unsupported author-facing comment directive in +source+,
-  # or nil when the source is clean. Word-boundary matched (\b) to mirror the
-  # TypeScript compiler's +/@sighash\b/+ / +/@embedAlways\b/+ scans so an
-  # identifier like +sighashType+ does not trip the guard.
+  # or nil when the source is clean. +@embedAlways+ is word-boundary matched
+  # (\b) so an identifier like +sighashType+ does not trip the guard;
+  # +@sighash+ is a plain substring match (N-244): N-039 made every occurrence
+  # of the marker a directive, so a glued +@sighashSINGLE|FORKID+ is refused
+  # too, with the message every tier shares.
   #
   # The directives are honored ONLY on the +.runar.ts+ surface (matching the
   # TypeScript reference). For +.runar.ts+ the implemented directives are
   # allowed through to the parser; the other 8 formats always fail closed.
   def self._unsupported_directive_error(source, file_name)
-    is_ts = file_name.downcase.end_with?(".runar.ts")
+    lower = file_name.downcase
+    is_ts = lower.end_with?(".runar.ts")
 
     # @sighash (#123) is implemented for the .runar.ts surface; only the other
-    # 8 formats fail closed.
-    if source =~ /@sighash\b/ && !is_ts
-      return "@sighash directive is not supported by the Ruby compiler for " \
-             "this format (issue #123); it is honored only on the .runar.ts surface"
+    # 8 formats fail closed. An unrecognised extension has no surface name and
+    # is refused by the dispatcher's unsupported-format error instead.
+    surface = NON_TS_SURFACE_NAMES.find { |ext, _| lower.end_with?(ext) }&.last
+    if source.include?("@sighash") && !is_ts && !surface.nil?
+      return "@sighash directive (issue #123) is not supported by the #{surface} " \
+             "surface parser; write the contract in TypeScript (.runar.ts) where " \
+             "@sighash is honoured"
     end
 
     # @embedAlways (#109) is implemented for the .runar.ts surface; only the
