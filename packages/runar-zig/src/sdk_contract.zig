@@ -223,6 +223,15 @@ pub const ContractError = error{
     /// Fail closed rather than silently spending less than the caller asked
     /// for while reporting success.
     TerminalAdditionalContractInputsUnsupported,
+    /// N-276 (port of N-227 Part 2 / N-258, mirrored from TS/Go/Rust/Python/
+    /// Ruby): a non-terminal `call()`/`prepareCall()` supplies
+    /// `options.additional_contract_inputs` on a path with no per-input
+    /// unlock builder — only a StatefulSmartContract (with an SDK-derived
+    /// preimage) builds a REAL unlock for each extra contract input; any
+    /// other path would ship a placeholder/primary-only unlock and the
+    /// resulting tx would be invalid (or, before this fix, silently drop
+    /// the extra UTXOs while reporting success). Fail closed instead.
+    AdditionalContractInputsUnsupported,
 };
 
 /// N-045 (defence in depth): every fixed-width method arg must have its
@@ -773,6 +782,20 @@ pub const RunarContract = struct {
                     if (aci.len > 0) return ContractError.TerminalAdditionalContractInputsUnsupported;
                 }
             }
+        }
+        // N-276 (port of N-227 Part 2 / N-258): a NON-terminal call with
+        // additional_contract_inputs on a plain SmartContract (!parent_stateful)
+        // has no per-input unlock builder below -- the stateless path (guarded
+        // on `!parent_stateful` further down) threads only the primary
+        // contract input into buildCallTransaction and never reads
+        // additional_contract_inputs at all. Fail closed instead of silently
+        // dropping the extra UTXOs while reporting success. parent_stateful
+        // contracts (including the zero-mutable-field case) are unaffected --
+        // they route through the OP_PUSH_TX stateful path, which threads a
+        // REAL per-input unlock for every extra contract input via
+        // `extra_call_inputs`.
+        if (!parent_stateful and n_extra_contract_inputs > 0) {
+            return ContractError.AdditionalContractInputsUnsupported;
         }
         const terminal_outputs: []const types.ContractOutput =
             if (is_terminal_call) options.?.terminal_outputs.? else &.{};
@@ -1924,6 +1947,22 @@ pub const RunarContract = struct {
                 if (o.additional_contract_inputs) |aci| {
                     if (aci.len > 0) return ContractError.TerminalAdditionalContractInputsUnsupported;
                 }
+            }
+        }
+        // N-276 (port of N-227 Part 2 / N-258): this branch is prepareCall's
+        // entire non-stateful path (entered whenever is_stateful is false --
+        // the dispatch to prepareCallStateful above only catches real
+        // StatefulSmartContracts). It has NO per-input unlock builder for
+        // ANY non-stateful shape (plain SmartContract or zero-mutable-field
+        // StatefulSmartContract): it never reads
+        // options.additional_contract_inputs outside the terminal check
+        // above. Unlike call() (which threads extras for the zero-mutable
+        // case via its own `!parent_stateful` gate), there is no
+        // "legitimate" merge path here to preserve, so this refusal is
+        // unconditional within this branch.
+        if (options) |o| {
+            if (o.additional_contract_inputs) |aci| {
+                if (aci.len > 0) return ContractError.AdditionalContractInputsUnsupported;
             }
         }
         const terminal_outputs: []const types.ContractOutput =
@@ -4951,6 +4990,116 @@ test "call with terminal_outputs and additional_contract_inputs fails closed" {
 
     const result = contract.call("go", &.{}, prov.provider(), signer.signer(), opts);
     try std.testing.expectError(ContractError.TerminalAdditionalContractInputsUnsupported, result);
+}
+
+// N-276 (port of N-227 Part 2 / N-258 to Zig; TS/Go/Rust/Python/Ruby already
+// refuse this exact shape): a NON-terminal call on a plain SmartContract
+// (parentClass neither set nor "StatefulSmartContract", so `!parent_stateful`)
+// with `options.additional_contract_inputs` must refuse instead of silently
+// dropping the extra UTXO. Before the fix, call()'s stateless path (guarded
+// on `!parent_stateful`, see sdk_contract.zig) never read
+// `options.additional_contract_inputs` at all: it built and broadcast a tx
+// spending ONLY the primary contract input, returning a txid as if the call
+// fully succeeded, while the caller's extra UTXO was neither spent nor
+// refused.
+//
+// Does NOT prove additional_contract_inputs could ever be made to work on a
+// plain SmartContract -- only that silently dropping it is unacceptable.
+// Does NOT exercise the zero-mutable-field StatefulSmartContract merge path
+// (parent_stateful but !is_stateful) -- call() already threads extra inputs
+// correctly there via `extra_call_inputs` (see
+// sdk_n227_zero_mutable_field_fee_floor_test.zig), and this fix must not
+// change that: the guard below is conditioned on `!parent_stateful`, which
+// is false for that case.
+test "call on a plain SmartContract with additional_contract_inputs fails closed (non-terminal)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"OpOne","version":"1","compilerVersion":"1.0","script":"51","asm":"OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"go","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try prov.addKnownOutpoint("fe" ** 32, 0, "51", 5_000);
+    try contract.setCurrentUtxo(.{
+        .txid = "fe" ** 32,
+        .output_index = 0,
+        .satoshis = 5_000,
+        .script = "51",
+    });
+
+    // A funding UTXO so the (pre-fix) build has everything it needs to
+    // succeed and broadcast -- the RED failure must be "silently dropped
+    // the extra input", not an unrelated InsufficientFunds/CallFailed.
+    const addr = try signer.signer().getAddress(allocator);
+    defer allocator.free(addr);
+    try prov.addUtxo(addr, .{
+        .txid = "fd" ** 32,
+        .output_index = 0,
+        .satoshis = 100_000,
+        .script = "76a914" ++ ("00" ** 20) ++ "88ac",
+    });
+
+    const extra_utxos = [_]types.UTXO{.{ .txid = "ee" ** 32, .output_index = 0, .satoshis = 1000, .script = "51" }};
+    const opts = types.CallOptions{ .additional_contract_inputs = &extra_utxos };
+
+    const result = contract.call("go", &.{}, prov.provider(), signer.signer(), opts);
+    try std.testing.expectError(ContractError.AdditionalContractInputsUnsupported, result);
+}
+
+// N-276 companion for `prepareCall()`. Unlike `call()`, prepareCall's
+// non-stateful path (entered whenever `is_stateful` is false -- see
+// `prepareCall`'s dispatch to `prepareCallStateful`) has NO per-input unlock
+// builder at all, for either shape of non-stateful contract: it never reads
+// `options.additional_contract_inputs` outside the N-271 terminal guard. So
+// the refusal added here is unconditional within that branch (not gated on
+// `parent_stateful` the way call()'s is) -- there is no "legitimate"
+// zero-mutable-field merge path in prepareCall to preserve; prepareCall does
+// not thread additional_contract_inputs for ANY non-stateful shape today.
+//
+// Does NOT prove additional_contract_inputs could be made to work via
+// prepareCall for a plain SmartContract or a zero-mutable-field
+// StatefulSmartContract. Does NOT exercise `prepareCallStateful` (a REAL
+// StatefulSmartContract with mutable fields) -- that function also never
+// threads additional_contract_inputs, a separate, pre-existing gap outside
+// this item's scope (see dispatcher notes).
+test "prepareCall on a plain SmartContract with additional_contract_inputs fails closed (non-terminal)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"OpOne","version":"1","compilerVersion":"1.0","script":"51","asm":"OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"go","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "fe" ** 32,
+        .output_index = 0,
+        .satoshis = 10_000,
+        .script = "51",
+    });
+
+    const extra_utxos = [_]types.UTXO{.{ .txid = "ee" ** 32, .output_index = 0, .satoshis = 1000, .script = "51" }};
+    const opts = types.CallOptions{ .additional_contract_inputs = &extra_utxos };
+
+    const result = contract.prepareCall("go", &.{}, prov.provider(), signer.signer(), opts);
+    try std.testing.expectError(ContractError.AdditionalContractInputsUnsupported, result);
 }
 
 // Issue #133: the non-terminal call funding path coin-selects the smallest
