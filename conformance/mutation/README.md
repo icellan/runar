@@ -128,7 +128,7 @@ the historical bug, not a synthetic one:
 | `anflower-merge-locals-single-only` | `04-anf-lower.ts` | the canonical branch-merge list, truncated to its first entry (**re-derived 2026-08-06** — see below) | `branch-merged-locals-vm`, `real-crypto-branch-merged-locals` |
 | `stacklower-merge-locals-property-only` | `05-stack-lower.ts` | the `_properties`-only restriction on adopting the declared results by name (**re-derived 2026-08-06**) | `branch-merged-locals-vm`, `branch-result-depth-invariant`, `real-crypto-branch-merged-locals` |
 | `sdkstate-encode-minimaldata-opn` | `packages/runar-sdk/src/state.ts` | restoring the #110 MINIMALDATA short-circuit in `encodePushDataState` | `state-push-framing-vm`, `c28-state-strict` |
-| `sdkstate-decode-opn-as-length` | `packages/runar-sdk/src/state.ts` | restoring the OP_N decode branch in `decodePushData` | `c28-state-strict` **only** — see finding below |
+| `sdkstate-decode-opn-as-length` | `packages/runar-sdk/src/state.ts` | restoring the OP_N decode branch in `decodePushData` | `state-push-framing-vm`, `c28-state-strict` — see finding below |
 | `sdksplice-constructor-slot-wrong-length` | `packages/runar-sdk/src/contract.ts` | new Phase C3 family: 1 stray byte per constructor-slot substitution | `sdk-vertical-constructor-slots` |
 | `sdksplice-codeseparator-off-by-one` | `packages/runar-sdk/src/contract.ts` | new Phase C4 family: off-by-one on the baked `codeSepIndexSlots` value | `sdk-vertical-codeseparator` |
 
@@ -183,24 +183,33 @@ this repo is worked in several checkouts at once, and a blind restore silently
 throws away anything saved during the seconds a mutated compiler source is in
 place.
 
-### Measured finding: `sdkstate-decode-opn-as-length` (execution-verified, not tuned away)
+### Measured finding: `sdkstate-decode-opn-as-length` (execution-verified, not tuned away) — FIXED by N-299
 
 This mutant restores ONLY the decode-side OP_N branch (the encoder stays
-correct). Run against `state-push-framing-vm` alone it **survives**: every
-test in that file constructs its state blob through the (correct) encoder, so
-an OP_N-framed byte sequence never reaches the decoder — the added leniency is
-dead code for every case that file exercises. `caughtBy` for this mutant is
-`["c28-state-strict"]` while `expectCaughtBy` lists both gates; the scorer's
-own `missedExpectedGates` reporting prints
+correct). Run against `state-push-framing-vm` alone it used to **survive**:
+every test in that file constructed its state blob through the (correct)
+encoder, so an OP_N-framed byte sequence never reached the decoder — the added
+leniency was dead code for every case that file exercised. `caughtBy` for this
+mutant was `["c28-state-strict"]` while `expectCaughtBy` listed both gates;
+the scorer's own `missedExpectedGates` reporting printed
 `⚠ expected gate(s) did NOT fire: state-push-framing-vm` for exactly this
-reason — the mutant is caught overall (`c28-state-strict.test.ts` has a direct
+reason — the mutant was caught overall (`c28-state-strict.test.ts` has a direct
 `expect(() => deserializeState(fields, '55')).toThrow(/is not a push opcode/)`
-pin), but the gate this corpus's own Phase E1 table proposed for it does
+pin), but the gate this corpus's own Phase E1 table proposed for it did
 **not**, on its own, provide that coverage. This was verified by running the
-mutant, not asserted — it was NOT tuned to pass; the honest result is recorded
-as-is. Fix candidate (out of scope for this PR): give
-`state-push-framing-vm.test.ts` a direct malformed-input decode case, per P3
-("round-trip alone is never sufficient for a listed wire primitive").
+mutant, not asserted — it was NOT tuned to pass; the honest result was
+recorded as-is, with a fix candidate: give `state-push-framing-vm.test.ts` a
+direct malformed-input decode case, per P3 ("round-trip alone is never
+sufficient for a listed wire primitive").
+
+**N-299 implemented that fix candidate.** `state-push-framing-vm.test.ts`
+gained a direct unit test — `deserializeState(fields, opHex)` called with
+hand-written OP_1..OP_16 (0x51-0x60) and OP_1NEGATE (0x4f) bytes, never routed
+through `serializeState` — asserting each one throws `/is not a push
+opcode/`. Re-measured by execution (apply the mutant, run the gate, observe):
+`state-push-framing-vm` now fires too. `caughtBy` for this mutant is now
+`["state-push-framing-vm", "c28-state-strict"]`, both nominated gates fire,
+and the scorer no longer reports this mutant as partially caught.
 
 ### `stateful-bytestring-op-n-state` sdk-output golden: NOT wired (documented, not invented)
 
