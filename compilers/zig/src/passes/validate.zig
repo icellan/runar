@@ -2093,6 +2093,17 @@ fn warnLocktimeWithoutSequenceGuard(
     var reads_locktime = false;
     var has_sequence_guard = false;
 
+    // N-266: private helpers by name, built once, so the BFS below resolves
+    // a callee in O(1) instead of re-scanning contract.methods linearly for
+    // every callee of every queued method. That rescan made this function
+    // O(methods^2) on a long private-helper chain. Mirrors the Go/Rust tiers'
+    // privateMethods map in their warnLocktimeWithoutSequenceGuard.
+    var private_methods = std.StringHashMapUnmanaged(MethodNode){};
+    defer private_methods.deinit(allocator);
+    for (contract.methods) |m| {
+        if (!m.is_public) try private_methods.put(allocator, m.name, m);
+    }
+
     var visited = StringSet{};
     defer visited.deinit(allocator);
     try visited.put(allocator, method.name, {});
@@ -2118,12 +2129,9 @@ fn warnLocktimeWithoutSequenceGuard(
         while (it.next()) |entry| {
             const callee = entry.key_ptr.*;
             if (visited.get(callee) != null) continue;
-            for (contract.methods) |m| {
-                if (!m.is_public and std.mem.eql(u8, m.name, callee)) {
-                    try visited.put(allocator, callee, {});
-                    try queue.append(allocator, m);
-                    break;
-                }
+            if (private_methods.get(callee)) |m| {
+                try visited.put(allocator, callee, {});
+                try queue.append(allocator, m);
             }
         }
     }
