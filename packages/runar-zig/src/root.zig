@@ -289,6 +289,7 @@ test {
     _ = @import("sdk_n038_sighash_single_call_test.zig");
     _ = @import("sdk_n293_stateful_merge_call_test.zig");
     _ = @import("sdk_n295_merge_funding_exclusion_test.zig");
+    _ = @import("sdk_n286_stateful_merge_prepared_test.zig");
     _ = @import("sdk_mock_broadcast_validation_test.zig");
     _ = @import("sdk_always_ack_allowlist_test.zig");
     _ = @import("sdk_envelope.zig");

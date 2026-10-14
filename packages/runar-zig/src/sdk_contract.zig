@@ -2237,19 +2237,23 @@ pub const RunarContract = struct {
                 }
             }
         }
-        // N-277: the non-terminal branch below (unlike call()'s stateful
-        // branch, which builds a REAL per-input unlock for every extra
-        // contract input via extra_call_inputs/extra_resolved_args) has no
-        // per-input unlock builder, and PreparedCall carries no field to
-        // hand an extra input's unlock to finalizeCall. Without this guard,
-        // options.additional_contract_inputs is never read again below --
-        // the caller's extra UTXO would be silently dropped (spent neither
-        // here nor by finalizeCall) while prepareCall reports success. Fail
-        // closed with the same error call()/prepareCall's other branches use.
-        if (!is_terminal_call) {
+        // N-286: a non-terminal stateful merge. As in TS, every additional
+        // contract input (tx input 1 + ei) is fully built and signed by the
+        // connected signer HERE, with its own OP_PUSH_TX preimage and its own
+        // Sig (buildExtraContractUnlock, shared with call()); only input 0's
+        // Sig is external, and finalizeCall rewrites input 0 only. BIP-143
+        // does not cover other inputs' scriptSigs, so the extra inputs stay
+        // valid when finalizeCall swaps input 0's placeholder for the real Sig.
+        const extra_contract_utxos: []const types.UTXO =
+            if (options) |o| (if (o.additional_contract_inputs) |aci| aci else &.{}) else &.{};
+        // Per-input arg overrides (additional_contract_input_args) are not
+        // ported to the two-phase path: call() sizes its first pass from
+        // per-input placeholder args this path does not build. Fail closed
+        // (N-277) rather than build a tx that may differ from call()'s.
+        if (extra_contract_utxos.len > 0) {
             if (options) |o| {
-                if (o.additional_contract_inputs) |aci| {
-                    if (aci.len > 0) return ContractError.AdditionalContractInputsUnsupported;
+                if (o.additional_contract_input_args) |aia| {
+                    if (aia.len > 0) return ContractError.AdditionalContractInputsUnsupported;
                 }
             }
         }
@@ -2277,8 +2281,18 @@ pub const RunarContract = struct {
             // into the same terminal funding-input path as funding_utxos.
             if (options) |o| if (o.fee_utxo) |fee| try additional_utxos.append(self.allocator, fee);
         } else {
+            // N-295 parity: never fund with an outpoint this tx already spends
+            // as a contract input (the primary or any additional one).
             for (all_utxos) |u| {
-                if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                const is_primary = std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index;
+                var is_extra = false;
+                for (extra_contract_utxos) |eci| {
+                    if (std.mem.eql(u8, u.txid, eci.txid) and u.output_index == eci.output_index) {
+                        is_extra = true;
+                        break;
+                    }
+                }
+                if (!is_primary and !is_extra) {
                     try additional_utxos.append(self.allocator, u);
                 }
             }
@@ -2306,15 +2320,6 @@ pub const RunarContract = struct {
         const stateful_new_satoshis: i64 = if (is_terminal_call) 0 else new_satoshis;
         const stateful_change_address: ?[]const u8 =
             if (is_terminal_call) null else change_address;
-        const stateful_build_opts: call_mod.CallBuildOptions = .{
-            .contract_outputs = terminal_outputs,
-            // Thread CallOptions.locktime through both the prepare build and
-            // rebuild paths so the preimage matches the final on-chain tx.
-            .locktime = if (options) |o| o.locktime else null,
-                .sequence = if (options) |o| o.sequence else null,
-        };
-        const stateful_build_opts_ptr: ?*const call_mod.CallBuildOptions =
-            if (is_terminal_call or (if (options) |o| o.locktime != null else false) or (if (options) |o| o.sequence != null else false)) &stateful_build_opts else null;
 
         // (Issue #133 funding coin-selection runs AFTER the placeholder unlock is
         // built, below, so finding C2 can size the fee against that input's real
@@ -2364,22 +2369,66 @@ pub const RunarContract = struct {
         );
         defer self.allocator.free(placeholder_unlock);
 
+        // N-286: placeholder unlock per additional contract input (same shape
+        // as the primary's: the primary's resolved args, zero preimage), as in
+        // call()'s first pass. Replaced by real unlocks before the rebuild.
+        var extra_placeholder_unlocks: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (extra_placeholder_unlocks.items) |u| self.allocator.free(u);
+            extra_placeholder_unlocks.deinit(self.allocator);
+        }
+        for (extra_contract_utxos) |_| {
+            const u = try self.buildStatefulUnlockScript(
+                "00" ** 72, resolved_args,
+                method_uses_code_part, change_pkh_opt, 0,
+                needs_new_amount, new_satoshis,
+                "00" ** 181, method_selector_opt,
+                witness_hex,
+            );
+            try extra_placeholder_unlocks.append(self.allocator, u);
+        }
+        var extra_call_inputs: std.ArrayListUnmanaged(call_mod.AdditionalContractInput) = .empty;
+        defer extra_call_inputs.deinit(self.allocator);
+        for (extra_contract_utxos, 0..) |u, ei| {
+            try extra_call_inputs.append(self.allocator, .{
+                .utxo = u,
+                .unlocking_script = extra_placeholder_unlocks.items[ei],
+            });
+        }
+
+        const stateful_build_opts: call_mod.CallBuildOptions = .{
+            .contract_outputs = terminal_outputs,
+            .additional_contract_inputs = extra_call_inputs.items,
+            // Thread CallOptions.locktime through both the prepare build and
+            // rebuild paths so the preimage matches the final on-chain tx.
+            .locktime = if (options) |o| o.locktime else null,
+                .sequence = if (options) |o| o.sequence else null,
+        };
+        const stateful_build_opts_ptr: ?*const call_mod.CallBuildOptions =
+            if (is_terminal_call or extra_call_inputs.items.len > 0 or (if (options) |o| o.locktime != null else false) or (if (options) |o| o.sequence != null else false)) &stateful_build_opts else null;
+
         // Issue #133: coin-select funding instead of sweeping the wallet. The
         // continuation output value (stateful_new_satoshis) is the only output
         // this prepare path emits before change; no data/multi outputs, so C15
         // extra_output_bytes nets 0. C2: size the fee against the contract input's
         // real unlock bytes (codePart + args + preimage) the deploy estimator is
-        // blind to, plus the 2*fundingLockLen + 512 per-input overhead.
+        // blind to, plus the 2*fundingLockLen + 512 per-input overhead. N-286:
+        // every additional contract input counts too, as in call().
         {
             const funding_lock_len: usize = if (new_locking_script.len > 0) new_locking_script.len / 2 else 0;
-            const contract_input_bytes: i64 =
-                contractInputSerializedBytes(placeholder_unlock.len) +
-                2 * @as(i64, @intCast(funding_lock_len)) + 512;
+            const per_contract_input_overhead: i64 = 2 * @as(i64, @intCast(funding_lock_len)) + 512;
+            var contract_input_bytes: i64 =
+                contractInputSerializedBytes(placeholder_unlock.len) + per_contract_input_overhead;
+            var contract_input_sats: i64 = contract_utxo.satoshis;
+            for (extra_contract_utxos, 0..) |u, ei| {
+                contract_input_bytes += contractInputSerializedBytes(extra_placeholder_unlocks.items[ei].len) + per_contract_input_overhead;
+                contract_input_sats += u.satoshis;
+            }
             try self.selectCallFunding(
                 &additional_utxos,
                 is_terminal_call,
                 stateful_new_satoshis,
-                contract_utxo.satoshis,
+                contract_input_sats,
                 funding_lock_len,
                 fee_rate,
                 contract_input_bytes,
@@ -2400,7 +2449,7 @@ pub const RunarContract = struct {
         var signed_tx = try self.allocator.dupe(u8, call_result.tx_hex);
         errdefer self.allocator.free(signed_tx);
 
-        try signFundingInputs(self, &signed_tx, funding_sign, additional_utxos.items, call_result.input_count);
+        try signFundingInputs(self, &signed_tx, funding_sign, additional_utxos.items, 1 + extra_contract_utxos.len, call_result.input_count);
 
         // Issue #123: build the preimage under the method's declared @sighash
         // mode (default 0x41 for methods with no directive).
@@ -2411,6 +2460,35 @@ pub const RunarContract = struct {
             contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
             sig_hash_type,
         ) catch return ContractError.CallFailed;
+
+        // N-286: each additional contract input gets its REAL first-pass
+        // unlock (own preimage + own Sig) before the rebuild, so the rebuild's
+        // fee/change is sized from real bytes on every contract input (N-293,
+        // same order as call() and TS).
+        const extra_unlock_ctx: ExtraUnlockCtx = .{
+            .options = options,
+            .resolved_args = resolved_args,
+            .user_params = user_params,
+            .sig_indices = sig_idx_list.items,
+            .sign = sign,
+            .code_sep_idx = if (code_sep_idx >= 0) code_sep_idx else null,
+            .sig_hash_type = sig_hash_type,
+            .method_uses_code_part = method_uses_code_part,
+            .change_pkh_hex = change_pkh_opt,
+            .needs_new_amount = needs_new_amount,
+            .new_satoshis = new_satoshis,
+            .method_selector_hex = method_selector_opt,
+            .witness_hex = witness_hex,
+        };
+        for (extra_contract_utxos, 0..) |xu, ei| {
+            const x_unlock = self.buildExtraContractUnlock(&extra_unlock_ctx, signed_tx, ei, xu, change_amount) catch |err| {
+                ptx_result.deinit(self.allocator);
+                return err;
+            };
+            self.allocator.free(extra_placeholder_unlocks.items[ei]);
+            extra_placeholder_unlocks.items[ei] = x_unlock;
+            extra_call_inputs.items[ei].unlocking_script = x_unlock;
+        }
 
         // ---- Pass 2: rebuild with real preimage + real change_amount -----
         {
@@ -2440,7 +2518,7 @@ pub const RunarContract = struct {
             self.allocator.free(first_unlock);
         }
 
-        try signFundingInputs(self, &signed_tx, funding_sign, additional_utxos.items, 1 + additional_utxos.items.len);
+        try signFundingInputs(self, &signed_tx, funding_sign, additional_utxos.items, 1 + extra_contract_utxos.len, 1 + extra_contract_utxos.len + additional_utxos.items.len);
 
         // Recompute preimage on the final tx (depends on tx size).
         ptx_result.deinit(self.allocator);
@@ -2465,6 +2543,17 @@ pub const RunarContract = struct {
         const tx_with_final = try insertUnlockingScript(self.allocator, signed_tx, 0, final_placeholder);
         self.allocator.free(signed_tx);
         signed_tx = tx_with_final;
+
+        // N-286: final, fully signed unlock for each additional contract
+        // input (tx input 1 + ei) against the converged tx. finalizeCall
+        // rewrites input 0 only, so these are what gets broadcast.
+        for (extra_contract_utxos, 0..) |xu, ei| {
+            const x_unlock = try self.buildExtraContractUnlock(&extra_unlock_ctx, signed_tx, ei, xu, change_amount);
+            defer self.allocator.free(x_unlock);
+            const new_tx = try insertUnlockingScript(self.allocator, signed_tx, 1 + ei, x_unlock);
+            self.allocator.free(signed_tx);
+            signed_tx = new_tx;
+        }
 
         // ---- BIP-143 sighash for the contract input ---------------------
         // Subscript honours the OP_CODESEPARATOR boundary: only the bytes
@@ -2594,18 +2683,21 @@ pub const RunarContract = struct {
         try additional_utxos.appendSlice(self.allocator, kept.items);
     }
 
-    /// Sign every P2PKH funding input on `tx_hex` (input 0 is the contract).
-    /// Mutates `tx_hex` in place by reallocating with each splice.
+    /// Sign every P2PKH funding input on `tx_hex`. Funding inputs start at
+    /// `funding_offset` (1 + the number of additional contract inputs; input 0
+    /// is the primary contract input). Mutates `tx_hex` in place by
+    /// reallocating with each splice.
     fn signFundingInputs(
         self: *RunarContract,
         tx_hex_inout: *[]u8,
         funding_sign: signer_mod.Signer,
         additional_utxos: []const types.UTXO,
+        funding_offset: usize,
         input_count: usize,
     ) !void {
-        var inp_idx: usize = 1;
+        var inp_idx: usize = funding_offset;
         while (inp_idx < input_count) : (inp_idx += 1) {
-            const utxo_idx = inp_idx - 1;
+            const utxo_idx = inp_idx - funding_offset;
             if (utxo_idx >= additional_utxos.len) break;
             const utxo = additional_utxos[utxo_idx];
             const sig_val = try funding_sign.sign(self.allocator, tx_hex_inout.*, inp_idx, utxo.script, utxo.satoshis, null);
@@ -5185,10 +5277,10 @@ test "call on a plain SmartContract with additional_contract_inputs fails closed
 // Does NOT prove additional_contract_inputs could be made to work via
 // prepareCall for a plain SmartContract or a zero-mutable-field
 // StatefulSmartContract. Does NOT exercise `prepareCallStateful` (a REAL
-// StatefulSmartContract with mutable fields) -- that function now REFUSES
-// non-terminal additional_contract_inputs with the same error instead of
-// silently threading (or dropping) them (N-277; see "prepareCallStateful
-// with additional_contract_inputs fails closed (non-terminal)" below).
+// StatefulSmartContract with mutable fields) -- that function now spends
+// non-terminal additional_contract_inputs (N-286) instead of silently
+// dropping them (N-277; see "prepareCallStateful with
+// additional_contract_inputs spends them, never drops them" below).
 test "prepareCall on a plain SmartContract with additional_contract_inputs fails closed (non-terminal)" {
     const allocator = std.testing.allocator;
     const json =
@@ -5222,34 +5314,25 @@ test "prepareCall on a plain SmartContract with additional_contract_inputs fails
 
 // N-277: `prepareCallStateful` -- the REAL stateful two-phase path, entered
 // when `state_fields` is non-empty (see `prepareCall`'s `is_stateful` gate,
-// which the two tests above do NOT exercise) -- never reads
-// `options.additional_contract_inputs` outside its N-271 terminal guard
-// (`is_terminal_call` branch). Unlike `call()`'s stateful branch (which
-// builds a REAL per-input unlock for every extra contract input via
-// `extra_call_inputs` / `extra_resolved_args`), `prepareCallStateful` has no
-// such builder, and `PreparedCall` carries no field to hand an extra input's
-// unlock to `finalizeCall` even if it did. Before the fix this silently
-// drops the caller's extra UTXO: `prepareCall` succeeds, returns a
-// `PreparedCall` whose tx spends only the ONE primary contract input, and
-// the caller's second UTXO is neither spent nor refused while the call
-// reports success -- the N-271/N-276 failure mode, in the one branch those
-// items didn't cover (N-276's own comment on this file names
-// `prepareCallStateful` as a "pre-existing gap outside this item's scope").
+// which the two tests above do NOT exercise) -- used to never read
+// `options.additional_contract_inputs` outside its N-271 terminal guard, so
+// it silently dropped the caller's extra UTXO: `prepareCall` succeeded with a
+// tx spending only the ONE primary contract input. N-277 made it refuse;
+// N-286 ported call()'s merge into it, so it now spends every extra input.
 //
-// Does NOT prove `additional_contract_inputs` could be made to work via
-// `prepareCallStateful` -- only that silently dropping it is unacceptable.
-// A real per-input unlock in this two-phase path (mirroring `call()`'s
-// ~300-line merge machinery, plus new `PreparedCall` fields and a
-// `finalizeCall` extension to splice sigs into each extra input) is a
-// separate, larger item; see dispatcher notes for N-277.
-test "prepareCallStateful with additional_contract_inputs fails closed (non-terminal)" {
+// Proves: the property N-277 guards still holds after N-286 -- the extra
+// contract UTXO is never silently dropped: the prepared tx spends the primary
+// at input 0 and the extra outpoint at input 1. Does NOT prove the extra
+// input's unlock is correct (the shared-vector test
+// sdk_n286_stateful_merge_prepared_test.zig does that, byte for byte vs TS).
+test "prepareCallStateful with additional_contract_inputs spends them, never drops them (N-277, N-286)" {
     const allocator = std.testing.allocator;
     const json =
         \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
         \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
         \\"stateFields":[{"name":"count","type":"int","index":0}],
         \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
-        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+        \\"codeSeparatorIndex":1,"buildTimestamp":"2024-01-01"}
     ;
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
@@ -5261,10 +5344,9 @@ test "prepareCallStateful with additional_contract_inputs fails closed (non-term
     defer prov.deinit();
     var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
 
-    // Fail-closed MockProvider must know the outpoint the call spends (Phase
-    // A5 non-vacuity) -- mirrors the "prepareCall -> finalizeCall round-trip"
-    // fixture above, which this test reuses (non-vacuity: that fixture
-    // already succeeds today with no additional_contract_inputs).
+    // Same artifact and UTXO as the "prepareCall → finalizeCall round-trip on
+    // stateful Sig-bearing contract" fixture (codeSeparatorIndex 1; index 2
+    // would leave an empty OP_PUSH_TX subscript).
     try prov.addKnownOutpoint("ee" ** 32, 0, "005100", 2_000);
     try contract.setCurrentUtxo(.{
         .txid = "ee" ** 32,
@@ -5278,14 +5360,60 @@ test "prepareCallStateful with additional_contract_inputs fails closed (non-term
     const opts = types.CallOptions{ .new_state = &new_state, .additional_contract_inputs = &extra_utxos };
 
     const args = [_]types.StateValue{.{ .int = 0 }};
+    var prepared = try contract.prepareCall("increment", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    // Outpoints in input order: primary ee..:0, then the extra ff..:0.
+    const prevouts = try extractAllPrevoutsHex(allocator, prepared.tx_hex);
+    defer allocator.free(prevouts);
+    try std.testing.expectEqualStrings(("ee" ** 32) ++ "00000000" ++ ("ff" ** 32) ++ "00000000", prevouts);
+}
+
+// N-286: the one merge shape the two-phase path still cannot build --
+// per-input arg overrides (`additional_contract_input_args`) -- is refused
+// instead of being ignored. Does NOT prove anything about call(), which
+// supports overrides.
+test "prepareCallStateful refuses additional_contract_input_args (N-286)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":1,"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "ee" ** 32,
+        .output_index = 0,
+        .satoshis = 2_000,
+        .script = "005100",
+    });
+
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const extra_utxos = [_]types.UTXO{.{ .txid = "ff" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100" }};
+    const override = [_]types.StateValue{.{ .int = 0 }};
+    const per_input = [_][]const types.StateValue{&override};
+    const opts = types.CallOptions{
+        .new_state = &new_state,
+        .additional_contract_inputs = &extra_utxos,
+        .additional_contract_input_args = &per_input,
+    };
+
+    const args = [_]types.StateValue{.{ .int = 0 }};
     var result = contract.prepareCall("increment", &args, prov.provider(), signer.signer(), opts);
-    // Clean up an Ok result (pre-fix) so a leak panic never masks the
-    // expectError failure below -- the RED run must fail for exactly the
-    // "no error was returned" reason, not an unrelated allocator panic.
     if (result) |*prepared| {
         prepared.deinit(allocator);
     } else |_| {}
-
     try std.testing.expectError(ContractError.AdditionalContractInputsUnsupported, result);
 }
 
