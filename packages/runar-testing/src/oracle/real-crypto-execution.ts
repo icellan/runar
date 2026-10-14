@@ -32,6 +32,26 @@
  *     auto-injected `checkPreimage` + `OP_CODESEPARATOR` + (optional) user
  *     `checkSig`, i.e. the exact BUG-100 on-chain state binding.
  *
+ * What the stateful witness checks WITHOUT trusting the SDK (N-211), and what
+ * it still takes from it. Both transactions are built by `RunarContract`, so
+ * the oracle shares the SDK's transaction modelling; it is independent of it
+ * only where stated here:
+ *   - the verdict: `Spend` recomputes the real BIP-143 sighash from the raw
+ *     transaction, so an SDK-built preimage, continuation state or output set
+ *     that disagrees with the compiled script is rejected, whatever the SDK
+ *     believed. `tamperOutput` shows that binding is not vacuous;
+ *   - the state VALUE, when the spec pins `expectedState` (decoded from the
+ *     call tx's bytes, compared with a hand-written value by the caller);
+ *   - the fields the spec controls — spent outpoint, nLockTime, input-0
+ *     nSequence, deploy and continuation amounts — audited from the raw
+ *     transaction against the options (`auditCallShape` / `auditDeployShape`).
+ * Still SDK-modelled and seen only through the verdict: the unlocking-script
+ * layout and its implicit parameters (`_changePKH`, `_changeAmount`,
+ * `_newAmount`, preimage, `_codePart`, selector), the change output and fee,
+ * funding-input choice, and the deploy's constructor-argument splicing and
+ * initial-state serialisation. A mistake there that still yields a
+ * consensus-valid transaction is NOT detected by this oracle.
+ *
  * A near-miss (wrong key, or a tampered continuation output) MUST make `Spend`
  * reject. Because the ANF interpreter models crypto with mocks it cannot model
  * a crypto rejection, so a crypto near-miss is asserted as a script-only
@@ -561,6 +581,52 @@ export function validateContractInput(
   return validateSpend(tx, inputIdx, sourceTx, sourceOutputIdx, false);
 }
 
+/**
+ * N-211: SDK-independent audit of the transaction fields a stateful witness
+ * spec controls. `runStatefulSpend` builds both transactions through
+ * `RunarContract`, and the Spend verdict alone cannot tell "the SDK built the
+ * tx the spec asked for" from "the SDK built some other tx that is also
+ * valid" (e.g. a `call()` that ignores `satoshis` keeps the old amount, which
+ * the `>=` value rule accepts). These checks read the raw `@bsv/sdk`
+ * transaction and compare it with `opts` only — no `runar-sdk` helper is
+ * consulted — and throw on mismatch.
+ */
+function shapeFault(msg: string): never {
+  throw new Error(`N-211 SDK tx-shape audit: ${msg}`);
+}
+
+function auditDeployShape(deployTx: Transaction, opts: StatefulSpendOptions): void {
+  const out = deployTx.outputs[0];
+  if (!out) shapeFault('deploy tx has no output 0 (the contract output)');
+  if (opts.deploySatoshis !== undefined && out.satoshis !== opts.deploySatoshis) {
+    shapeFault(`deploy output 0 carries ${out.satoshis} sats, spec asked for ${opts.deploySatoshis}`);
+  }
+}
+
+function auditCallShape(callTx: Transaction, deployTx: Transaction, opts: StatefulSpendOptions): void {
+  const in0 = callTx.inputs[0];
+  if (!in0) shapeFault('call tx has no input 0 (the contract input)');
+  const deployTxid = deployTx.id('hex');
+  if (in0.sourceTXID !== deployTxid || in0.sourceOutputIndex !== 0) {
+    shapeFault(`call input 0 spends ${in0.sourceTXID}:${in0.sourceOutputIndex}, not the deployed ${deployTxid}:0`);
+  }
+  const wantLockTime = opts.lockTime ?? 0;
+  if (callTx.lockTime !== wantLockTime) {
+    shapeFault(`call tx nLockTime is ${callTx.lockTime}, spec asked for ${wantLockTime}`);
+  }
+  // A non-zero nLockTime is only enforced by consensus when some input is
+  // non-final, hence the 0xfffffffe default; an explicit `sequence` wins.
+  const wantSequence = opts.sequence ?? (wantLockTime !== 0 ? 0xfffffffe : 0xffffffff);
+  if ((in0.sequence ?? 0xffffffff) !== wantSequence) {
+    shapeFault(`call input 0 nSequence is ${in0.sequence}, spec asked for ${wantSequence}`);
+  }
+  if (opts.satoshis !== undefined && callTx.outputs[0]?.satoshis !== opts.satoshis) {
+    shapeFault(
+      `continuation output 0 carries ${callTx.outputs[0]?.satoshis} sats, spec asked for ${opts.satoshis}`,
+    );
+  }
+}
+
 export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<RealExecResult> {
   const compiled = compile(opts.source, { fileName: opts.fileName });
   if (!compiled.artifact) {
@@ -602,6 +668,7 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
   const contract = new RunarContract(artifact, opts.constructorArgs);
   await contract.deploy(provider, signer, opts.deploySatoshis !== undefined ? { satoshis: opts.deploySatoshis } : {});
   const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
+  auditDeployShape(deployTx, opts);
 
   if (opts.truncatedCodePart) {
     const trueCode = contract.getCodePartHex();
@@ -679,6 +746,11 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
       reachedEngine = true;
     }
   }
+
+  // N-211: outside the verdict try/catch on purpose — a mismatch is a harness
+  // fault (the SDK built a different tx from the one the spec describes) and
+  // must not be laundered into `vmAccepted = false`.
+  if (callTx) auditCallShape(callTx, deployTx, opts);
 
   // Independent readback of the state VALUE: decode the continuation output's
   // state straight from the on-chain call tx bytes (byte layout only, NOT the
