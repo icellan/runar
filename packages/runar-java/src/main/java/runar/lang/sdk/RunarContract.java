@@ -1150,10 +1150,11 @@ public final class RunarContract {
         List<List<Integer>> extraSigIndices = new ArrayList<>();
         List<RunarArtifact.ABIParam> userParamsForExtra = userParams(m, isStateful);
         for (int i = 0; i < extraContractUtxos.size(); i++) {
-            List<Object> baseArgs = (perInputArgs != null && i < perInputArgs.size()
-                && perInputArgs.get(i) != null)
-                ? perInputArgs.get(i)
-                : userArgsOf(resolved, userParamsForExtra.size());
+            boolean inheritsPrimaryArgs = !(perInputArgs != null && i < perInputArgs.size()
+                && perInputArgs.get(i) != null);
+            List<Object> baseArgs = inheritsPrimaryArgs
+                ? userArgsOf(resolved, userParamsForExtra.size())
+                : perInputArgs.get(i);
             if (baseArgs.size() != userParamsForExtra.size()) {
                 throw new IllegalArgumentException(
                     "RunarContract.call(" + methodName + "): additionalContractInputArgs[" + i
@@ -1161,6 +1162,14 @@ public final class RunarContract {
                         + userParamsForExtra.size());
             }
             List<Object> r = new ArrayList<>(baseArgs);
+            // N-292: `resolved` already carries 72-byte zero placeholders in
+            // the primary's auto-sign slots (planCall), so the null test below
+            // never fired for an inherited arg list and this input was
+            // broadcast with an all-zero Sig. Those slots are exactly
+            // `sigIndices`; re-null them so they are signed for THIS input.
+            if (inheritsPrimaryArgs) {
+                for (int idx : sigIndices) r.set(idx, null);
+            }
             List<Integer> sigs = new ArrayList<>();
             for (int j = 0; j < userParamsForExtra.size(); j++) {
                 RunarArtifact.ABIParam p = userParamsForExtra.get(j);
