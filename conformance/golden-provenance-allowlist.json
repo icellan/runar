@@ -3019,6 +3019,15 @@
       "reviewer": "siggi",
       "date": "2026-10-11",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-call/stateful-merge-prepared.json",
+      "sha256": "b77165be4dd20719394be1735791a368bf398adb93acb581fcc368138012c129",
+      "verified-against": "second-implementation",
+      "reason": "N-291 / N-286 (R112, user decision 2026-10-14). NEW golden: a two-phase stateful merge vector (MergeCounter, two 10000-sat contract UTXOs with equal state, one 100000-sat funding UTXO, key 0x01, MockProvider defaults) stamped by the TS SDK's prepareCall/finalizeCall via conformance/sdk-call/generate-stateful-merge.ts (--check reproduces it). Oracles actually run: @bsv/sdk Spend accepts all 3 inputs of the final tx and rejects the placeholder primary and a tampered continuation (conformance/sdk-call/stateful-merge.test.ts); the Go, Rust, Python and Ruby SDKs reproduce the sighash, sig indices [0] and final tx byte for byte. Java (fails: unsigned extra input, N-292) and Zig (refuses; call() fee differs by 72 sat, N-293/N-286) are not yet conformant to it.",
+      "reviewer": "siggi",
+      "date": "2026-10-14",
+      "review-status": "reviewed"
     }
   ]
 }
