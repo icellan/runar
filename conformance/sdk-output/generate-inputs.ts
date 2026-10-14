@@ -565,6 +565,30 @@ const TEST_SPECS: TestSpec[] = [
     name: 'fixed-array-write',
     constructorArgs: [],
   },
+  {
+    // CK21-FU2 (checkpoint-21 red): N-093's `@embedAlways` / `@sighash`
+    // directives fixture. readonly pubKeyHash: Addr, readonly deployTag:
+    // ByteString (the latter kept alive only by `@embedAlways` — without
+    // the directive it would be dead-code-eliminated and never reach the
+    // locking script, since neither spendAll nor spendSingle reads it).
+    name: 'compiler-directives',
+    constructorArgs: [
+      { type: 'Addr', value: ADDR },
+      { type: 'ByteString', value: HASH32 },
+    ],
+  },
+  {
+    // CK21-FU2: N-093's companion fixture — `@embedAlways` applied to EVERY
+    // scalar slot a FixedArray<bigint, 3> expands into (tags__0..tags__2),
+    // keeping tags__0 and tags__2 alive even though unlock() reads only
+    // tags[1]. `tags` carries a literal initializer ([7n, 9n, 11n]), so per
+    // the property-initializer rule it is excluded from the auto-generated
+    // constructor — the only constructor arg is pubKeyHash: Addr.
+    name: 'embed-always-fixed-array',
+    constructorArgs: [
+      { type: 'Addr', value: ADDR },
+    ],
+  },
 ];
 
 const TMP_DIR = join(__dirname, '.tmp');

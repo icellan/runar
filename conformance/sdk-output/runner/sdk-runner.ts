@@ -436,8 +436,13 @@ function parseArgs(argv: string[]): {
  *     (stale-entry gate).
  *
  * Exit 0 on clean coverage; 1 on any drift.
+ *
+ * Exported (CK21-FU2) so the audit can be exercised in-process by
+ * sdk-output-coverage-audit.test.ts, next to runCoverageAudit's siblings
+ * `buildSdkTools` / `runSdkTool` / `evaluateRefusal` above, rather than only
+ * ever via a subprocess invocation of this file's `--audit` CLI mode.
  */
-function runCoverageAudit(): number {
+export function runCoverageAudit(): number {
   const compilerDir = join(ROOT, 'conformance', 'tests');
   const sdkDir = join(ROOT, 'conformance', 'sdk-output', 'tests');
   const allowlistPath = join(ROOT, 'conformance', 'sdk-output', 'coverage-allowlist.json');
