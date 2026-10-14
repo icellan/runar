@@ -2088,7 +2088,7 @@ class RunarContract:
         if self.artifact.constructor_slots:
             for slot in self.artifact.constructor_slots:
                 if slot.byte_offset < base_offset:
-                    encoded = _encode_arg(self._constructor_args[slot.param_index])
+                    encoded = _encode_arg(self._resolve_constructor_arg(slot.param_index))
                     shift += len(encoded) // 2 - 1  # encoded bytes minus 1-byte placeholder
         # Account for codeSepIndex slot expansions
         for template_offset, adjusted_value in self._resolved_code_sep_slot_values():
@@ -2113,7 +2113,7 @@ class RunarContract:
             if self.artifact.constructor_slots:
                 for cs in self.artifact.constructor_slots:
                     if cs.byte_offset < slot.code_sep_index:
-                        encoded = _encode_arg(self._constructor_args[cs.param_index])
+                        encoded = _encode_arg(self._resolve_constructor_arg(cs.param_index))
                         shift += len(encoded) // 2 - 1
             for prev_offset, prev_value in result:
                 if prev_offset < slot.code_sep_index:
@@ -2183,6 +2183,29 @@ class RunarContract:
 
     # -- Private helpers --
 
+    def _resolve_constructor_arg(self, param_index: int):
+        """N-223: shared out-of-range guard for every ``_constructor_args[param_index]``
+        read in this file. The constructor only checks
+        ``len(constructor_args) == len(abi.constructor.params)`` -- it never
+        cross-checks that every ``ConstructorSlot.param_index`` actually falls
+        within that range. Before this fix, ``_build_code_script``,
+        ``_adjust_code_sep_offset``, and ``_resolved_code_sep_slot_values``
+        each indexed ``self._constructor_args`` directly: a malformed or
+        hostile artifact's out-of-range ``param_index`` crashed with a raw
+        Python ``IndexError`` instead of a named error (this item's brief:
+        "Go/Rust/Zig/Python crash with a raw index error"). A negative index
+        is rejected too -- Python's ``list[-1]`` means "from the end", which
+        would otherwise silently read the WRONG real arg rather than failing
+        at all.
+        """
+        if param_index < 0 or param_index >= len(self._constructor_args):
+            raise ValueError(
+                f'RunarContract: constructorSlots entry for {self.artifact.contract_name} has '
+                f'out-of-range paramIndex {param_index} (constructorArgs has '
+                f'{len(self._constructor_args)} entries)'
+            )
+        return self._constructor_args[param_index]
+
     def _build_code_script(self) -> str:
         script = self.artifact.script
 
@@ -2200,7 +2223,7 @@ class RunarContract:
                 for slot in self.artifact.constructor_slots:
                     subs.append((
                         slot.byte_offset,
-                        _encode_arg(self._constructor_args[slot.param_index]),
+                        _encode_arg(self._resolve_constructor_arg(slot.param_index)),
                     ))
 
             # CodeSepIndex slots: replace OP_0 placeholder with encoded adjusted

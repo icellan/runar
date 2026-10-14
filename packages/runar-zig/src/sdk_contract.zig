@@ -3312,6 +3312,23 @@ pub const RunarContract = struct {
     // Private helpers
     // ---------------------------------------------------------------------------
 
+    /// N-223: shared out-of-range guard for every `self.constructor_args[param_index]`
+    /// read in this file. The constructor only checks
+    /// `constructor_args.len == abi.constructor.params.len` (see `init`) -- it
+    /// never cross-checks that every constructor slot's `param_index` actually
+    /// falls within that range. Before this fix, `buildCodeScript`,
+    /// `adjustCodeSepOffset`, and `resolvedCodeSepSlotValues` each silently
+    /// SKIPPED a slot whose `param_index` was out of range (the placeholder
+    /// byte stayed unfilled, or the offset shift was simply wrong) instead of
+    /// refusing. Parity target: TS `RunarContract#resolveConstructorArg`
+    /// (N-081 / N-223).
+    fn resolveConstructorArg(self: *const RunarContract, param_index: i32) !types.StateValue {
+        if (param_index < 0) return error.ConstructorArgParamIndexOutOfRange;
+        const idx: usize = @intCast(param_index);
+        if (idx >= self.constructor_args.len) return error.ConstructorArgParamIndexOutOfRange;
+        return self.constructor_args[idx];
+    }
+
     fn buildCodeScript(self: *const RunarContract) ![]u8 {
         var script = try self.allocator.dupe(u8, self.artifact.script);
         errdefer self.allocator.free(script);
@@ -3336,9 +3353,7 @@ pub const RunarContract = struct {
             // Constructor arg slots: replace OP_0 placeholder with encoded arg
             if (has_constructor_slots) {
                 for (self.artifact.constructor_slots) |slot| {
-                    const param_idx: usize = @intCast(slot.param_index);
-                    if (param_idx >= self.constructor_args.len) continue;
-                    const encoded = try state_mod.encodeArg(self.allocator, self.constructor_args[param_idx]);
+                    const encoded = try state_mod.encodeArg(self.allocator, try self.resolveConstructorArg(slot.param_index));
                     try subs.append(self.allocator, .{
                         .byte_offset = slot.byte_offset,
                         .encoded = encoded,
@@ -3432,12 +3447,9 @@ pub const RunarContract = struct {
         var shift: i32 = 0;
         for (self.artifact.constructor_slots) |slot| {
             if (slot.byte_offset < base_offset) {
-                const param_idx: usize = @intCast(slot.param_index);
-                if (param_idx < self.constructor_args.len) {
-                    const encoded = try state_mod.encodeArg(self.allocator, self.constructor_args[param_idx]);
-                    defer self.allocator.free(encoded);
-                    shift += @as(i32, @intCast(encoded.len / 2)) - 1;
-                }
+                const encoded = try state_mod.encodeArg(self.allocator, try self.resolveConstructorArg(slot.param_index));
+                defer self.allocator.free(encoded);
+                shift += @as(i32, @intCast(encoded.len / 2)) - 1;
             }
         }
         // Account for codeSepIndex slot expansions
@@ -3488,12 +3500,9 @@ pub const RunarContract = struct {
             var shift: i32 = 0;
             for (self.artifact.constructor_slots) |cs| {
                 if (cs.byte_offset < slot.code_sep_index) {
-                    const param_idx_u: usize = @intCast(cs.param_index);
-                    if (param_idx_u < self.constructor_args.len) {
-                        const encoded = try state_mod.encodeArg(self.allocator, self.constructor_args[param_idx_u]);
-                        defer self.allocator.free(encoded);
-                        shift += @as(i32, @intCast(encoded.len / 2)) - 1;
-                    }
+                    const encoded = try state_mod.encodeArg(self.allocator, try self.resolveConstructorArg(cs.param_index));
+                    defer self.allocator.free(encoded);
+                    shift += @as(i32, @intCast(encoded.len / 2)) - 1;
                 }
             }
             for (result.items) |prev| {
@@ -5415,4 +5424,64 @@ test "R-6 — setPrevOutScript rejects invalid hex" {
 
     try std.testing.expectError(error.InvalidWitnessHex, contract.setPrevOutScript(0, "not-hex!"));
     try std.testing.expectError(error.InvalidWitnessHex, contract.setSerialisedOutputs("abc"));
+}
+
+// ---------------------------------------------------------------------------
+// N-223 — out-of-range constructorSlots paramIndex
+// ---------------------------------------------------------------------------
+//
+// The constructor only checks constructor_args.len == abi.constructor.params.len
+// (see `init`) -- it never cross-checks that every constructor slot's
+// param_index actually falls within that range. Before this fix,
+// buildCodeScript, adjustCodeSepOffset, and resolvedCodeSepSlotValues each
+// silently SKIPPED a slot whose param_index was out of range (the OP_0
+// placeholder byte stayed unfilled, or the offset shift was simply wrong)
+// instead of refusing. This item's brief says "Zig ... crash[es] with a raw
+// index error", which does not match this tier: these three functions have
+// carried defensive `if (idx >= len) continue`/skip bound checks since this
+// file's very first commit, but those checks fail OPEN (silently skip
+// instead of refusing) -- the same bug shape as the Java SDK (brief: "Java
+// silently skips the slot"). Parity target: TS N-081 / N-223
+// (packages/runar-sdk/src/__tests__/constructor-slots.test.ts).
+
+test "N-223 buildCodeScript refuses an out-of-range constructorSlots paramIndex" {
+    const allocator = std.testing.allocator;
+    // Exactly 1 constructor arg below (matching the 1 ABI param), but the
+    // slot references paramIndex 1 -- out of range.
+    var artifact = try types.RunarArtifact.fromJson(allocator,
+        "{\"contractName\":\"Test\",\"version\":\"runar-v1.0.0-rc.1\",\"compilerVersion\":\"1.0.0-rc.1\"," ++
+        "\"script\":\"009c69\",\"asm\":\"\"," ++
+        "\"abi\":{\"constructor\":{\"params\":[{\"name\":\"threshold\",\"type\":\"bigint\"}]}," ++
+        "\"methods\":[{\"name\":\"check\",\"params\":[],\"isPublic\":true}]}," ++
+        "\"stateFields\":[]," ++
+        "\"constructorSlots\":[{\"paramIndex\":1,\"byteOffset\":0}]," ++
+        "\"buildTimestamp\":\"2024-01-01\"}");
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 1000 }});
+    defer contract.deinit();
+
+    try std.testing.expectError(error.ConstructorArgParamIndexOutOfRange, contract.getLockingScript());
+}
+
+test "N-223 adjustCodeSepOffset refuses an out-of-range paramIndex, reached WITHOUT buildCodeScript" {
+    // getCodeSepIndex falls straight to adjustCodeSepOffset when code_script
+    // is null -- this never calls buildCodeScript at all, proving the gap
+    // the primary-site fix alone does not cover.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator,
+        "{\"contractName\":\"CodeSep\",\"version\":\"runar-v1.0.0-rc.1\",\"compilerVersion\":\"1.0.0-rc.1\"," ++
+        "\"script\":\"00ab9c69\",\"asm\":\"\"," ++
+        "\"abi\":{\"constructor\":{\"params\":[{\"name\":\"threshold\",\"type\":\"bigint\"}]}," ++
+        "\"methods\":[{\"name\":\"check\",\"params\":[],\"isPublic\":true}]}," ++
+        "\"stateFields\":[]," ++
+        "\"constructorSlots\":[{\"paramIndex\":1,\"byteOffset\":0}]," ++
+        "\"codeSeparatorIndex\":2,\"codeSeparatorIndices\":[2]," ++
+        "\"buildTimestamp\":\"2024-01-01\"}");
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 1000 }});
+    defer contract.deinit();
+
+    try std.testing.expectError(error.ConstructorArgParamIndexOutOfRange, contract.getCodeSepIndex(0));
 }

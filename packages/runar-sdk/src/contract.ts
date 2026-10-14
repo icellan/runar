@@ -2360,17 +2360,13 @@ export class RunarContract {
       // `this.constructorArgs[slot.paramIndex]` reads `undefined`, which
       // `encodeArg`'s fallback silently turns into the literal bytes of the
       // string "undefined" spliced into the deployed script. Fail closed
-      // with a named error instead.
+      // with a named error instead (see `resolveConstructorArg`, shared with
+      // `adjustCodeSepOffset` and `_resolvedCodeSepSlotValues` — N-223).
       if (hasConstructorSlots) {
         for (const slot of this.artifact.constructorSlots!) {
-          if (slot.paramIndex < 0 || slot.paramIndex >= this.constructorArgs.length) {
-            throw new Error(
-              `RunarContract: constructorSlots entry for ${this.artifact.contractName} has out-of-range paramIndex ${slot.paramIndex} (constructorArgs has ${this.constructorArgs.length} entries)`,
-            );
-          }
           subs.push({
             byteOffset: slot.byteOffset,
-            encoded: encodeArg(this.constructorArgs[slot.paramIndex]),
+            encoded: encodeArg(this.resolveConstructorArg(slot.paramIndex)),
           });
         }
       }
@@ -2469,6 +2465,24 @@ export class RunarContract {
   }
 
   /**
+   * N-223: shared out-of-range guard for every `constructorArgs[paramIndex]`
+   * read in this file. N-081 added this check only to `buildCodeScript`'s
+   * constructor-slot loop; `adjustCodeSepOffset` (reached via
+   * `getSubscriptForSigning` / `computeOpPushTxWithCodeSep` without going
+   * through `buildCodeScript` first) and `_resolvedCodeSepSlotValues` read
+   * the same array unguarded, so a malformed artifact could still splice
+   * `encodeArg(undefined)`'s "undefined" bytes through either of those paths.
+   */
+  private resolveConstructorArg(paramIndex: number): unknown {
+    if (paramIndex < 0 || paramIndex >= this.constructorArgs.length) {
+      throw new Error(
+        `RunarContract: constructorSlots entry for ${this.artifact.contractName} has out-of-range paramIndex ${paramIndex} (constructorArgs has ${this.constructorArgs.length} entries)`,
+      );
+    }
+    return this.constructorArgs[paramIndex];
+  }
+
+  /**
    * Adjust a code separator byte offset from the base (template) script to
    * the fully-substituted script. Both constructor arg slots and codeSepIndex
    * slots replace OP_0 (1 byte) with encoded push data, shifting subsequent
@@ -2479,7 +2493,7 @@ export class RunarContract {
     if (this.artifact.constructorSlots) {
       for (const slot of this.artifact.constructorSlots) {
         if (slot.byteOffset < baseOffset) {
-          const encoded = encodeArg(this.constructorArgs[slot.paramIndex]);
+          const encoded = encodeArg(this.resolveConstructorArg(slot.paramIndex));
           shift += encoded.length / 2 - 1; // encoded bytes minus the 1-byte OP_0 placeholder
         }
       }
@@ -2517,7 +2531,7 @@ export class RunarContract {
       if (this.artifact.constructorSlots) {
         for (const cs of this.artifact.constructorSlots) {
           if (cs.byteOffset < slot.codeSepIndex) {
-            const encoded = encodeArg(this.constructorArgs[cs.paramIndex]);
+            const encoded = encodeArg(this.resolveConstructorArg(cs.paramIndex));
             shift += encoded.length / 2 - 1;
           }
         }

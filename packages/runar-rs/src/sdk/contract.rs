@@ -2409,6 +2409,27 @@ impl RunarContract {
             .unwrap_or_else(|e| panic!("RunarContract: {}", e))
     }
 
+    /// N-223: shared out-of-range guard for every `constructor_args[param_index]`
+    /// read in this file. The constructor only checks
+    /// `constructor_args.len() == abi.constructor.params.len()` — it never
+    /// cross-checks that every `ConstructorSlot`'s `param_index` actually falls
+    /// within that range. Before this fix, `try_build_code_script`,
+    /// `adjust_code_sep_offset`, and `resolved_code_sep_slot_values` each
+    /// indexed `self.constructor_args` directly: a malformed or hostile
+    /// artifact's out-of-range `param_index` crashed with a raw Rust
+    /// "index out of bounds" panic instead of a named error (this item's
+    /// brief: "Go/Rust/Zig/Python crash with a raw index error").
+    fn resolve_constructor_arg(&self, param_index: usize) -> Result<&SdkValue, String> {
+        self.constructor_args.get(param_index).ok_or_else(|| {
+            format!(
+                "constructorSlots entry for {} has out-of-range paramIndex {} (constructorArgs has {} entries)",
+                self.artifact.contract_name,
+                param_index,
+                self.constructor_args.len()
+            )
+        })
+    }
+
     /// Fallible core of [`Self::build_code_script`].
     fn try_build_code_script(&self) -> Result<String, String> {
         let mut script = self.artifact.script.clone();
@@ -2435,7 +2456,7 @@ impl RunarContract {
                 for slot in slots {
                     subs.push((
                         slot.byte_offset,
-                        encode_arg(&self.constructor_args[slot.param_index]),
+                        encode_arg(self.resolve_constructor_arg(slot.param_index)?),
                     ));
                 }
             }
@@ -2661,7 +2682,10 @@ impl RunarContract {
         if let Some(ref slots) = self.artifact.constructor_slots {
             for slot in slots {
                 if slot.byte_offset < base_offset {
-                    let encoded = encode_arg(&self.constructor_args[slot.param_index]);
+                    let encoded = encode_arg(
+                        self.resolve_constructor_arg(slot.param_index)
+                            .unwrap_or_else(|e| panic!("RunarContract: {}", e)),
+                    );
                     shift += (encoded.len() / 2) as isize - 1;
                 }
             }
@@ -2698,7 +2722,10 @@ impl RunarContract {
             if let Some(ref cs_slots) = self.artifact.constructor_slots {
                 for cs in cs_slots {
                     if cs.byte_offset < slot.code_sep_index {
-                        let encoded = encode_arg(&self.constructor_args[cs.param_index]);
+                        let encoded = encode_arg(
+                            self.resolve_constructor_arg(cs.param_index)
+                                .unwrap_or_else(|e| panic!("RunarContract: {}", e)),
+                        );
                         shift += (encoded.len() / 2) as isize - 1;
                     }
                 }
@@ -5066,5 +5093,75 @@ mod tests {
             .expect("an unpinned contract must accept an inscription");
 
         assert!(contract.inscription().is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // N-223 — out-of-range constructorSlots paramIndex
+    // -----------------------------------------------------------------------
+    //
+    // The constructor only checks `constructor_args.len() ==
+    // abi.constructor.params.len()` — it never cross-checks that every
+    // ConstructorSlot's param_index actually falls within that range. Before
+    // this fix, every `self.constructor_args[slot.param_index]` read in this
+    // file (try_build_code_script, adjust_code_sep_offset,
+    // resolved_code_sep_slot_values) indexed the Vec directly: a malformed or
+    // hostile artifact's out-of-range param_index crashed with a raw Rust
+    // "index out of bounds" panic instead of a named error (this item's
+    // brief: "Go/Rust/Zig/Python crash with a raw index error").
+    //
+    // Parity target: TS N-081 / N-223
+    // (packages/runar-sdk/src/__tests__/constructor-slots.test.ts).
+
+    #[test]
+    #[should_panic(expected = "paramIndex")]
+    fn n223_build_code_script_refuses_out_of_range_param_index() {
+        // Exactly 1 constructor arg below (matching the 1 ABI param), but the
+        // slot references param_index 1 -- out of range.
+        let artifact = RunarArtifact {
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 1, byte_offset: 0 }]),
+            ..make_artifact(
+                "009c69", // OP_0(slot) OP_NUMEQUAL OP_VERIFY
+                Abi {
+                    constructor: AbiConstructor {
+                        params: vec![AbiParam {
+                            name: "threshold".to_string(),
+                            param_type: "bigint".to_string(),
+                            fixed_array: None,
+                        }],
+                    },
+                    methods: vec![],
+                },
+            )
+        };
+        let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
+        let _ = contract.get_locking_script();
+    }
+
+    #[test]
+    #[should_panic(expected = "paramIndex")]
+    fn n223_adjust_code_sep_offset_refuses_out_of_range_param_index_without_build_code_script() {
+        // get_code_sep_index falls straight to adjust_code_sep_offset when
+        // code_script is None -- this never calls try_build_code_script at
+        // all, proving the gap the primary-site fix alone does not cover.
+        let artifact = RunarArtifact {
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 1, byte_offset: 0 }]),
+            code_separator_index: Some(2),
+            code_separator_indices: Some(vec![2]),
+            ..make_artifact(
+                "00ab9c69", // OP_0(slot) OP_CODESEPARATOR OP_NUMEQUAL OP_VERIFY
+                Abi {
+                    constructor: AbiConstructor {
+                        params: vec![AbiParam {
+                            name: "threshold".to_string(),
+                            param_type: "bigint".to_string(),
+                            fixed_array: None,
+                        }],
+                    },
+                    methods: vec![],
+                },
+            )
+        };
+        let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
+        let _ = contract.get_code_sep_index(0);
     }
 }

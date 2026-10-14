@@ -1120,7 +1120,7 @@ module Runar
 
         if @artifact.constructor_slots.any?
           @artifact.constructor_slots.each do |slot|
-            encoded = encode_arg(@constructor_args[slot.param_index])
+            encoded = encode_arg(resolve_constructor_arg(slot.param_index))
             substitutions << { byte_offset: slot.byte_offset, encoded: encoded }
           end
         end
@@ -2235,7 +2235,7 @@ module Runar
         @artifact.constructor_slots.each do |slot|
           next unless slot.byte_offset < base_offset
 
-          encoded = encode_arg(@constructor_args[slot.param_index])
+          encoded = encode_arg(resolve_constructor_arg(slot.param_index))
           shift  += encoded.length / 2 - 1
         end
 
@@ -2263,11 +2263,30 @@ module Runar
           @artifact.constructor_slots.each do |cs|
             next unless cs.byte_offset < base
 
-            encoded = encode_arg(@constructor_args[cs.param_index])
+            encoded = encode_arg(resolve_constructor_arg(cs.param_index))
             shift  += encoded.length / 2 - 1
           end
           base + shift
         end
+      end
+
+      # N-223: shared out-of-range guard for every +@constructor_args[param_index]+
+      # read in this file. Before this fix, +build_code_script+, +adjust_code_sep_offset+,
+      # and +resolved_code_sep_slot_values+ each indexed +@constructor_args+ directly;
+      # a slot whose +param_index+ pointed past the end of +@constructor_args+ returned
+      # +nil+, and +encode_arg+'s fallback (+value.to_s+ -> +''+ -> an empty push, i.e.
+      # OP_0) silently spliced a wrong-but-valid script instead of refusing. A negative
+      # +param_index+ is rejected too -- Ruby's +Array#[]+ treats a negative index as
+      # "from the end", which would otherwise silently read the WRONG real arg rather
+      # than failing at all.
+      def resolve_constructor_arg(param_index)
+        if param_index.negative? || param_index >= @constructor_args.length
+          raise ArgumentError,
+                "RunarContract: constructorSlots entry for #{@artifact.contract_name} has " \
+                "out-of-range paramIndex #{param_index} (constructorArgs has " \
+                "#{@constructor_args.length} entries)"
+        end
+        @constructor_args[param_index]
       end
 
       # Get the byte offset of an OP_CODESEPARATOR for a method, or -1 if none.

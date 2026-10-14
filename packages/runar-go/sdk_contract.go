@@ -2274,6 +2274,24 @@ type codeScriptSubstitution struct {
 	encoded    string
 }
 
+// resolveConstructorArg (N-223) is the shared out-of-range guard for every
+// `constructorArgs[paramIndex]` read in this file. The constructor only
+// checks `len(constructorArgs) == len(abi.constructor.params)` — it never
+// cross-checks that every ConstructorSlot's ParamIndex actually falls within
+// that range. Before this fix, buildCodeScript, adjustCodeSepOffset, and
+// resolvedCodeSepSlotValues each indexed c.constructorArgs directly: a
+// malformed or hostile artifact's out-of-range ParamIndex crashed with a raw
+// Go "index out of range" panic instead of a named error (this item's brief:
+// "Go ... crash[es] with a raw index error").
+func (c *RunarContract) resolveConstructorArg(paramIndex int) interface{} {
+	if paramIndex < 0 || paramIndex >= len(c.constructorArgs) {
+		panic(fmt.Errorf(
+			"RunarContract: constructorSlots entry for %s has out-of-range paramIndex %d (constructorArgs has %d entries)",
+			c.Artifact.ContractName, paramIndex, len(c.constructorArgs)))
+	}
+	return c.constructorArgs[paramIndex]
+}
+
 // patchCodePartLenSlots (N-051) writes the deployed code-part length into
 // every `codePartLenSlots` field of a spliced code script.
 //
@@ -2344,7 +2362,7 @@ func (c *RunarContract) buildCodeScript() string {
 			for _, slot := range c.Artifact.ConstructorSlots {
 				subs = append(subs, codeScriptSubstitution{
 					byteOffset: slot.ByteOffset,
-					encoded:    encodeArg(c.constructorArgs[slot.ParamIndex]),
+					encoded:    encodeArg(c.resolveConstructorArg(slot.ParamIndex)),
 				})
 			}
 		}
@@ -2420,7 +2438,7 @@ func (c *RunarContract) adjustCodeSepOffset(baseOffset int) int {
 	shift := 0
 	for _, slot := range c.Artifact.ConstructorSlots {
 		if slot.ByteOffset < baseOffset {
-			encoded := encodeArg(c.constructorArgs[slot.ParamIndex])
+			encoded := encodeArg(c.resolveConstructorArg(slot.ParamIndex))
 			shift += len(encoded)/2 - 1 // encoded bytes minus the 1-byte OP_0 placeholder
 		}
 	}
@@ -2464,7 +2482,7 @@ func (c *RunarContract) resolvedCodeSepSlotValues() []struct {
 		shift := 0
 		for _, cs := range c.Artifact.ConstructorSlots {
 			if cs.ByteOffset < slot.CodeSepIndex {
-				encoded := encodeArg(c.constructorArgs[cs.ParamIndex])
+				encoded := encodeArg(c.resolveConstructorArg(cs.ParamIndex))
 				shift += len(encoded)/2 - 1
 			}
 		}

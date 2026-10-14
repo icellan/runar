@@ -94,8 +94,7 @@ public final class ContractScript {
         // the Go SDK's `buildCodeScript`.
         List<Sub> subs = new ArrayList<>();
         for (ConstructorSlot slot : artifact.constructorSlots()) {
-            if (slot.paramIndex() >= constructorArgs.size()) continue;
-            Object arg = constructorArgs.get(slot.paramIndex());
+            Object arg = resolveConstructorArg(artifact, constructorArgs, slot.paramIndex());
             subs.add(new Sub(
                 slot.byteOffset(),
                 encodeConstructorArg(arg, paramType(artifact, slot.paramIndex()))
@@ -264,6 +263,26 @@ public final class ContractScript {
         var params = artifact.abi().constructor().params();
         if (paramIndex < 0 || paramIndex >= params.size()) return "bigint";
         return params.get(paramIndex).type();
+    }
+
+    /**
+     * N-223: shared out-of-range guard for every {@code constructorArgs.get(paramIndex)}
+     * read reachable from a {@link ConstructorSlot}. The constructor only checks
+     * {@code constructorArgs.size() == abi.constructor.params.size()} — it never
+     * cross-checks that every slot's {@code paramIndex} actually falls within that
+     * range. Before this fix, {@link #buildCodeScript}, {@link #resolvedCodeSepSlots},
+     * and {@code RunarContract#adjustCodeSepOffset} each silently SKIPPED a slot
+     * whose {@code paramIndex} was out of range (the placeholder byte stayed
+     * unfilled, or the offset shift was simply wrong) instead of refusing. Parity
+     * target: TS {@code RunarContract#resolveConstructorArg} (N-081 / N-223).
+     */
+    static Object resolveConstructorArg(RunarArtifact artifact, List<Object> constructorArgs, int paramIndex) {
+        if (paramIndex < 0 || paramIndex >= constructorArgs.size()) {
+            throw new IllegalArgumentException(
+                "RunarContract: constructorSlots entry for " + artifact.contractName() + " has out-of-range "
+                    + "paramIndex " + paramIndex + " (constructorArgs has " + constructorArgs.size() + " entries)");
+        }
+        return constructorArgs.get(paramIndex);
     }
 
     // ------------------------------------------------------------------
@@ -444,9 +463,9 @@ public final class ContractScript {
             // Shift from constructor-arg expansions that land before this slot's
             // code-separator position in the template.
             for (ConstructorSlot cs : artifact.constructorSlots()) {
-                if (cs.byteOffset() < slot.codeSepIndex() && cs.paramIndex() < constructorArgs.size()) {
+                if (cs.byteOffset() < slot.codeSepIndex()) {
                     String encoded = encodeConstructorArg(
-                        constructorArgs.get(cs.paramIndex()),
+                        resolveConstructorArg(artifact, constructorArgs, cs.paramIndex()),
                         paramType(artifact, cs.paramIndex())
                     );
                     shift += encoded.length() / 2 - 1;

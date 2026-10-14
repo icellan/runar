@@ -1924,12 +1924,12 @@ public final class RunarContract {
     private int adjustCodeSepOffset(int baseOffset) {
         int shift = 0;
         for (RunarArtifact.ConstructorSlot slot : artifact.constructorSlots()) {
-            if (slot.byteOffset() < baseOffset && slot.paramIndex() < constructorArgs.size()) {
+            if (slot.byteOffset() < baseOffset) {
                 String paramType = slot.paramIndex() < artifact.abi().constructor().params().size()
                     ? artifact.abi().constructor().params().get(slot.paramIndex()).type()
                     : "bigint";
                 String enc = ContractScript.encodeConstructorArg(
-                    constructorArgs.get(slot.paramIndex()), paramType
+                    ContractScript.resolveConstructorArg(artifact, constructorArgs, slot.paramIndex()), paramType
                 );
                 shift += enc.length() / 2 - 1;
             }

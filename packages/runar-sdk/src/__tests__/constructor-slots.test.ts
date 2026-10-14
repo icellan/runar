@@ -199,4 +199,33 @@ describe('getLockingScript — constructor slot splicing', () => {
     const contract = new RunarContract(artifact, [1000n]);
     expect(() => contract.getLockingScript()).toThrow(/paramIndex/i);
   });
+
+  it('N-223: throws a named error from adjustCodeSepOffset, reached WITHOUT going through buildCodeScript', () => {
+    // N-081's test above only proves the guard inside buildCodeScript's
+    // constructor-slot loop. This test proves the gap that commit's own
+    // message named as unproven: `adjustCodeSepOffset` is reached from
+    // `getSubscriptForSigning` (used to trim the subscript for BIP-143
+    // signing) via a route that never calls buildCodeScript first — a fresh,
+    // not-yet-deployed contract has `_codeScript === null`, so
+    // getSubscriptForSigning falls straight to the
+    // `this.adjustCodeSepOffset(codeSepIdx)` branch.
+    //
+    // The artifact declares codeSeparatorIndex = 2, so the constructor slot
+    // at byteOffset 0 (< 2) is read inside adjustCodeSepOffset's shift loop.
+    // Before the fix this read `constructorArgs[1]` -> `undefined` and
+    // `encodeArg` silently turned that into the literal bytes of
+    // "undefined" spliced into the computed shift, instead of refusing.
+    const artifact = makeArtifact({
+      script: '00ab9c69', // OP_0(slot) OP_CODESEPARATOR OP_NUMEQUAL OP_VERIFY
+      abi: {
+        constructor: { params: [{ name: 'threshold', type: 'bigint' }] },
+        methods: [{ name: 'check', params: [], isPublic: true }],
+      },
+      constructorSlots: [{ paramIndex: 1, byteOffset: 0 }],
+      codeSeparatorIndex: 2,
+    });
+
+    const contract = new RunarContract(artifact, [1000n]);
+    expect(() => contract.getSubscriptForSigning(artifact.script, 0)).toThrow(/paramIndex/i);
+  });
 });
