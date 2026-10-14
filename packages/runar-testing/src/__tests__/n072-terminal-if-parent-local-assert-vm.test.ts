@@ -30,7 +30,8 @@
  * terminal `if` (N-071's shape) stays refused at the source.
  * What it does NOT prove: terminal `if`s whose arms REBIND a pre-`if` local
  * (`let k = 0n; if (c) { k = 1n; assert(a); } else { …; assert(b); }`) — those
- * are refused today by the branch-result layout check, a separate defect — or
+ * now compile in all 7 tiers (N-261) and are covered by
+ * n261-terminal-if-rebind-dead-local-vm.test.ts, not here — or
  * hostile `--ir` input beyond what the N-071 terminal-assert rule refuses.
  */
 

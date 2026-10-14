@@ -60,6 +60,7 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
   // position dispatch (different properties updated in different branches).
   for (const method of methods) {
     method.body = liftBranchUpdateProps(method.body);
+    if (method.isPublic) dropTerminalIfResults(method.body);
   }
 
   return {
@@ -3244,6 +3245,52 @@ export function remapValueRefs(value: ANFValue, map: Record<string, string>): AN
       throw new UnknownANFKindError(unknown.kind, 'anf-lower.remapValueRefs');
     }
   }
+}
+
+/**
+ * N-261: a TERMINAL `if` carries no results. Terminal means the same thing it
+ * means to 05-stack-lower's `terminalAssert`: the last binding of a public
+ * method body, or recursively the last binding of an arm of a terminal `if`.
+ * Each arm's final assert is the script's verdict, so nothing can read a
+ * merged local afterwards — yet `lowerIfStatement` declared one for every
+ * rebound local (`let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n;
+ * assert(b); }`) and `appendBranchResults` put the `__merge$` block AFTER the
+ * assert. The arm then no longer ended in its assert and every tier refused
+ * the legal program (branch result layout mismatch / IR validation).
+ *
+ * Strip exactly the block `appendBranchResults` emits — N `__merge$i` copies
+ * then N rebinds of the LOCAL results — and the `results` list with it. Any
+ * other trailing shape (a property result's `update_prop`) is left alone and
+ * stays refused downstream. Mutates in place.
+ */
+function dropTerminalIfResults(bindings: ANFBinding[]): void {
+  const last = bindings[bindings.length - 1];
+  if (!last || last.value.kind !== 'if') return;
+  const node = last.value;
+  const results = node.results ?? [];
+  if (results.length > 0) {
+    const isBlock = (arm: ANFBinding[]): boolean => {
+      const n = results.length;
+      if (arm.length < 2 * n) return false;
+      const block = arm.slice(arm.length - 2 * n);
+      return results.every((name, i) => {
+        const temp = `${MERGED_LOCAL_TEMP_PREFIX}${i}`;
+        const copy = block[i]!;
+        const rebind = block[n + i]!;
+        return copy.name === temp
+          && copy.value.kind === 'load_const' && copy.value.value === `@ref:${name}`
+          && rebind.name === name
+          && rebind.value.kind === 'load_const' && rebind.value.value === `@ref:${temp}`;
+      });
+    };
+    if (isBlock(node.then) && isBlock(node.else)) {
+      node.then.splice(node.then.length - 2 * results.length);
+      node.else.splice(node.else.length - 2 * results.length);
+      delete node.results;
+    }
+  }
+  dropTerminalIfResults(node.then);
+  dropTerminalIfResults(node.else);
 }
 
 /**

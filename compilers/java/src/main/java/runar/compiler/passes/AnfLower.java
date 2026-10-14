@@ -167,6 +167,7 @@ public final class AnfLower {
         List<AnfMethod> lifted = new ArrayList<>(methods.size());
         for (AnfMethod m : methods) {
             List<AnfBinding> newBody = liftBranchUpdateProps(m.body());
+            if (m.isPublic()) newBody = dropTerminalIfResults(newBody);
             lifted.add(m.withBody(newBody));
         }
 
@@ -3313,6 +3314,57 @@ public final class AnfLower {
     private static String mapOr(String s, Map<String, String> nameMap) {
         if (s == null) return null;
         return nameMap.getOrDefault(s, s);
+    }
+
+    /**
+     * N-261: mirrors the TS reference's {@code dropTerminalIfResults}. A
+     * TERMINAL {@code if} (the last binding of a public method body, or
+     * recursively of an arm of a terminal {@code if} -- the rule stack lowering
+     * uses for terminalAssert) carries no results. Its arms' final asserts are
+     * the script's verdict, so nothing reads a merged local afterwards, but the
+     * {@code appendBranchResults} block sat AFTER the assert and every tier
+     * refused the legal
+     * {@code let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }}.
+     * Strips exactly that block (N {@code __merge$i} copies then N rebinds of
+     * LOCAL results) and the results list; any other shape is left alone.
+     * Returns the rewritten list (records are immutable).
+     */
+    static List<AnfBinding> dropTerminalIfResults(List<AnfBinding> bindings) {
+        if (bindings == null || bindings.isEmpty()) return bindings;
+        AnfBinding last = bindings.get(bindings.size() - 1);
+        if (!(last.value() instanceof If node)) return bindings;
+        List<AnfBinding> thenArm = node.thenBranch();
+        List<AnfBinding> elseArm = node.elseBranch();
+        List<String> results = node.results();
+        if (results != null && !results.isEmpty()
+                && isTerminalResultBlock(thenArm, results) && isTerminalResultBlock(elseArm, results)) {
+            int n = results.size();
+            thenArm = new ArrayList<>(thenArm.subList(0, thenArm.size() - 2 * n));
+            elseArm = new ArrayList<>(elseArm.subList(0, elseArm.size() - 2 * n));
+            results = null;
+        }
+        If rewritten = new If(node.cond(), dropTerminalIfResults(thenArm), dropTerminalIfResults(elseArm), results);
+        List<AnfBinding> out = new ArrayList<>(bindings.subList(0, bindings.size() - 1));
+        out.add(new AnfBinding(last.name(), rewritten, last.sourceLoc()));
+        return out;
+    }
+
+    /** True iff {@code arm} ends with exactly the block {@code appendBranchResults} emits for LOCAL results. */
+    private static boolean isTerminalResultBlock(List<AnfBinding> arm, List<String> results) {
+        int n = results.size();
+        if (arm == null || arm.size() < 2 * n) return false;
+        List<AnfBinding> block = arm.subList(arm.size() - 2 * n, arm.size());
+        for (int i = 0; i < n; i++) {
+            String name = results.get(i);
+            String temp = AnfValue.MERGED_LOCAL_TEMP_PREFIX + i;
+            if (!block.get(i).name().equals(temp) || !isConstStringRef(block.get(i).value(), "@ref:" + name)) return false;
+            if (!block.get(n + i).name().equals(name) || !isConstStringRef(block.get(n + i).value(), "@ref:" + temp)) return false;
+        }
+        return true;
+    }
+
+    private static boolean isConstStringRef(AnfValue value, String want) {
+        return value instanceof LoadConst lc && lc.value() instanceof BytesConst bc && want.equals(bc.hex());
     }
 
     static List<AnfBinding> liftBranchUpdateProps(List<AnfBinding> bindings) {

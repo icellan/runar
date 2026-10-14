@@ -42,6 +42,7 @@ module RunarCompiler
       # Mirrors the TS reference compiler's liftBranchUpdateProps (04-anf-lower.ts line 50).
       methods.each do |m|
         m.body = _lift_branch_update_props(m.body)
+        _drop_terminal_if_results(m.body) if m.is_public
       end
 
       IR::ANFProgram.new(
@@ -3457,6 +3458,45 @@ module RunarCompiler
       new_v
     end
     private_class_method :_clone_anf_value
+
+    # N-261: mirrors the TS reference's +dropTerminalIfResults+. A TERMINAL
+    # +if+ (the last binding of a public method body, or recursively of an arm
+    # of a terminal +if+ -- the rule stack lowering uses for terminal_assert)
+    # carries no results. Its arms' final asserts are the script's verdict, so
+    # nothing reads a merged local afterwards, but the _append_branch_results
+    # block sat AFTER the assert and every tier refused the legal
+    # +let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }+.
+    # Strips exactly that block (N +__merge$i+ copies then N rebinds of LOCAL
+    # results) and the results list; any other shape is left alone. In place.
+    def self._drop_terminal_if_results(bindings)
+      return if bindings.nil? || bindings.empty?
+      node = bindings[-1].value
+      return unless node.kind == "if"
+      then_arm = node.then || []
+      else_arm = node.else_ || []
+      results = node.results || []
+      n = results.length
+      if n > 0
+        const_ref = ->(v, want) { v.kind == "load_const" && v.const_string == want }
+        is_block = lambda do |arm|
+          return false if arm.length < 2 * n
+          block = arm[(arm.length - 2 * n)..]
+          results.each_with_index.all? do |name, i|
+            temp = "#{IR::MERGED_LOCAL_TEMP_PREFIX}#{i}"
+            block[i].name == temp && const_ref.call(block[i].value, "@ref:#{name}") &&
+              block[n + i].name == name && const_ref.call(block[n + i].value, "@ref:#{temp}")
+          end
+        end
+        if is_block.call(then_arm) && is_block.call(else_arm)
+          then_arm.pop(2 * n)
+          else_arm.pop(2 * n)
+          node.results = nil
+        end
+      end
+      _drop_terminal_if_results(then_arm)
+      _drop_terminal_if_results(else_arm)
+    end
+    private_class_method :_drop_terminal_if_results
 
     # Transform if-bindings whose branches all end with update_prop into
     # flat conditional assignments.

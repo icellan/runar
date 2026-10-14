@@ -27,6 +27,9 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	// Mirrors the TS reference compiler's liftBranchUpdateProps (04-anf-lower.ts line 50).
 	for i := range methods {
 		methods[i].Body = liftBranchUpdateProps(methods[i].Body)
+		if methods[i].IsPublic {
+			dropTerminalIfResults(methods[i].Body)
+		}
 	}
 
 	return &ir.ANFProgram{
@@ -3434,6 +3437,59 @@ func remapValueRefs(v ir.ANFValue, nameMap map[string]string) ir.ANFValue {
 		// temp by its pre-remap name, producing dangling SSA refs.
 		panic(&ir.UnknownANFKindError{Kind: v.Kind, Location: "anf-lower.remapValueRefs"})
 	}
+}
+
+// dropTerminalIfResults (N-261) mirrors the TS reference's
+// dropTerminalIfResults: a TERMINAL `if` (the last binding of a public method
+// body, or recursively of an arm of a terminal `if` -- the rule stack lowering
+// uses for terminalAssert) carries no results. Its arms' final asserts are the
+// script's verdict, so nothing reads a merged local afterwards, but the
+// appendBranchResults block sat AFTER the assert and every tier refused the
+// legal `let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }`.
+// Strips exactly that block (N `__merge$i` copies then N rebinds of LOCAL
+// results) and the Results list; any other shape is left alone. In place.
+func dropTerminalIfResults(bindings []ir.ANFBinding) {
+	if len(bindings) == 0 {
+		return
+	}
+	node := &bindings[len(bindings)-1].Value
+	if node.Kind != "if" {
+		return
+	}
+	n := len(node.Results)
+	if n > 0 {
+		constRef := func(v ir.ANFValue, want string) bool {
+			if v.Kind != "load_const" {
+				return false
+			}
+			var s string
+			if json.Unmarshal(v.RawValue, &s) != nil {
+				return false
+			}
+			return s == want
+		}
+		isBlock := func(arm []ir.ANFBinding) bool {
+			if len(arm) < 2*n {
+				return false
+			}
+			block := arm[len(arm)-2*n:]
+			for i, name := range node.Results {
+				temp := fmt.Sprintf("%s%d", ir.MergedLocalTempPrefix, i)
+				if block[i].Name != temp || !constRef(block[i].Value, "@ref:"+name) ||
+					block[n+i].Name != name || !constRef(block[n+i].Value, "@ref:"+temp) {
+					return false
+				}
+			}
+			return true
+		}
+		if isBlock(node.Then) && isBlock(node.Else) {
+			node.Then = node.Then[:len(node.Then)-2*n]
+			node.Else = node.Else[:len(node.Else)-2*n]
+			node.Results = nil
+		}
+	}
+	dropTerminalIfResults(node.Then)
+	dropTerminalIfResults(node.Else)
 }
 
 // liftBranchUpdateProps transforms if-bindings whose branches all end

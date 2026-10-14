@@ -50,6 +50,9 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     // liftBranchUpdateProps transformation (04-anf-lower.ts line 50).
     for method in &mut methods {
         method.body = lift_branch_update_props(method.body.clone());
+        if method.is_public {
+            drop_terminal_if_results(&mut method.body);
+        }
     }
 
     ANFProgram {
@@ -3917,6 +3920,46 @@ fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue
             step: *step,
         },
     }
+}
+
+/// N-261: mirrors the TS reference's `dropTerminalIfResults`. A TERMINAL `if`
+/// (the last binding of a public method body, or recursively of an arm of a
+/// terminal `if` -- the rule stack lowering uses for `terminal_assert`) carries
+/// no results. Its arms' final asserts are the script's verdict, so nothing
+/// reads a merged local afterwards, but the `append_branch_results` block sat
+/// AFTER the assert and every tier refused the legal
+/// `let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }`.
+/// Strips exactly that block (N `__merge$i` copies then N rebinds of LOCAL
+/// results) and the results list; any other shape is left alone. In place.
+fn drop_terminal_if_results(bindings: &mut [ANFBinding]) {
+    let Some(last) = bindings.last_mut() else { return };
+    let ANFValue::If { then, else_branch, results, .. } = &mut last.value else { return };
+    let n = results.len();
+    if n > 0 {
+        let const_ref = |v: &ANFValue, want: &str| -> bool {
+            matches!(v, ANFValue::LoadConst { value: serde_json::Value::String(s) } if s == want)
+        };
+        let is_block = |arm: &[ANFBinding]| -> bool {
+            if arm.len() < 2 * n {
+                return false;
+            }
+            let block = &arm[arm.len() - 2 * n..];
+            results.iter().enumerate().all(|(i, name)| {
+                let temp = format!("{}{}", MERGED_LOCAL_TEMP_PREFIX, i);
+                block[i].name == temp
+                    && const_ref(&block[i].value, &format!("@ref:{}", name))
+                    && block[n + i].name == *name
+                    && const_ref(&block[n + i].value, &format!("@ref:{}", temp))
+            })
+        };
+        if is_block(then) && is_block(else_branch) {
+            then.truncate(then.len() - 2 * n);
+            else_branch.truncate(else_branch.len() - 2 * n);
+            results.clear();
+        }
+    }
+    drop_terminal_if_results(then);
+    drop_terminal_if_results(else_branch);
 }
 
 /// Transform if-bindings whose branches all end with update_prop into

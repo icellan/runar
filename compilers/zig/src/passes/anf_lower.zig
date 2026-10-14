@@ -174,6 +174,7 @@ pub fn lowerToANFWithDiagnostic(
         if (old_bindings.len > 0) allocator.free(old_bindings);
         m.bindings = lifted;
         m.body = lifted;
+        if (m.is_public) try dropTerminalIfResults(allocator, m.body);
     }
 
     return ANFProgram{
@@ -3216,6 +3217,66 @@ fn appendBranchResults(
             ));
         }
     }
+}
+
+/// N-261: mirrors the TS reference's `dropTerminalIfResults`. A TERMINAL `if`
+/// (the last binding of a public method body, or recursively of an arm of a
+/// terminal `if` -- the rule stack lowering uses for terminal_assert) carries
+/// no results. Its arms' final asserts are the script's verdict, so nothing
+/// reads a merged local afterwards, but the `appendBranchResults` block sat
+/// AFTER the assert and every tier refused the legal
+/// `let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }`.
+/// Strips exactly that block (N `__merge$i` copies then N rebinds of LOCAL
+/// results) and the results list; any other shape is left alone. In place:
+/// the arm slices are shortened, never freed (ANFProgram.deinit does not free
+/// arm slices either).
+fn dropTerminalIfResults(allocator: Allocator, bindings: []ANFBinding) LowerError!void {
+    if (bindings.len == 0) return;
+    const node = switch (bindings[bindings.len - 1].value) {
+        .@"if" => |v| v,
+        else => return,
+    };
+    const n = node.results.len;
+    if (n > 0 and
+        try isTerminalResultBlock(allocator, node.then, node.results) and
+        try isTerminalResultBlock(allocator, node.@"else", node.results))
+    {
+        node.then = node.then[0 .. node.then.len - 2 * n];
+        node.@"else" = node.@"else"[0 .. node.@"else".len - 2 * n];
+        node.results = &.{};
+    }
+    try dropTerminalIfResults(allocator, node.then);
+    try dropTerminalIfResults(allocator, node.@"else");
+}
+
+/// True iff `arm` ends with exactly the block `appendBranchResults` emits for
+/// LOCAL `results`: N `__merge$i = @ref:<results[i]>` then N
+/// `<results[i]> = @ref:__merge$i`.
+fn isTerminalResultBlock(allocator: Allocator, arm: []ANFBinding, results: []const []const u8) LowerError!bool {
+    const n = results.len;
+    if (arm.len < 2 * n) return false;
+    const block = arm[arm.len - 2 * n ..];
+    for (results, 0..) |name, i| {
+        const temp = try std.fmt.allocPrint(allocator, "{s}{d}", .{ types.merged_local_temp_prefix, i });
+        defer allocator.free(temp);
+        const ref_name = try std.fmt.allocPrint(allocator, "@ref:{s}", .{name});
+        defer allocator.free(ref_name);
+        const ref_temp = try std.fmt.allocPrint(allocator, "@ref:{s}", .{temp});
+        defer allocator.free(ref_temp);
+        if (!std.mem.eql(u8, block[i].name, temp) or !isConstStringRef(block[i].value, ref_name)) return false;
+        if (!std.mem.eql(u8, block[n + i].name, name) or !isConstStringRef(block[n + i].value, ref_temp)) return false;
+    }
+    return true;
+}
+
+fn isConstStringRef(value: ANFValue, want: []const u8) bool {
+    return switch (value) {
+        .load_const => |lc| switch (lc.value) {
+            .string => |s| std.mem.eql(u8, s, want),
+            else => false,
+        },
+        else => false,
+    };
 }
 
 fn containsName(haystack: []const []const u8, needle: []const u8) bool {

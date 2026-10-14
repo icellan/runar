@@ -88,6 +88,8 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
     # where different properties get updated in different branches.
     for method in methods:
         method.body = _lift_branch_update_props(method.body)
+        if method.is_public:
+            _drop_terminal_if_results(method.body)
 
     return ANFProgram(
         contract_name=contract.name,
@@ -3190,6 +3192,52 @@ def _remap_value_refs(value: ANFValue, name_map: dict[str, str]) -> ANFValue:
         new_v.raw_value = new_v.value_ref
 
     return new_v
+
+
+def _drop_terminal_if_results(bindings: list[ANFBinding]) -> None:
+    """N-261: mirrors the TS reference's ``dropTerminalIfResults``.
+
+    A TERMINAL ``if`` (the last binding of a public method body, or
+    recursively of an arm of a terminal ``if`` -- the rule stack lowering uses
+    for ``terminal_assert``) carries no results. Its arms' final asserts are
+    the script's verdict, so nothing reads a merged local afterwards, but the
+    ``_append_branch_results`` block sat AFTER the assert and every tier
+    refused the legal
+    ``let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }``.
+    Strips exactly that block (N ``__merge$i`` copies then N rebinds of LOCAL
+    results) and the results list; any other shape is left alone. In place.
+    """
+    if not bindings:
+        return
+    node = bindings[-1].value
+    if node.kind != "if":
+        return
+    then_arm = node.then if node.then is not None else []
+    else_arm = node.else_ if node.else_ is not None else []
+    results = node.results or []
+    n = len(results)
+    if n > 0:
+        def const_ref(v: ANFValue, want: str) -> bool:
+            return v.kind == "load_const" and isinstance(v.raw_value, str) and v.raw_value == want
+
+        def is_block(arm: list[ANFBinding]) -> bool:
+            if len(arm) < 2 * n:
+                return False
+            block = arm[len(arm) - 2 * n:]
+            for i, name in enumerate(results):
+                temp = f"{MERGED_LOCAL_TEMP_PREFIX}{i}"
+                if (block[i].name != temp or not const_ref(block[i].value, f"@ref:{name}")
+                        or block[n + i].name != name
+                        or not const_ref(block[n + i].value, f"@ref:{temp}")):
+                    return False
+            return True
+
+        if is_block(then_arm) and is_block(else_arm):
+            del then_arm[len(then_arm) - 2 * n:]
+            del else_arm[len(else_arm) - 2 * n:]
+            node.results = None
+    _drop_terminal_if_results(then_arm)
+    _drop_terminal_if_results(else_arm)
 
 
 def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
