@@ -1130,18 +1130,18 @@ use runar::prelude::*;
 
 #[test]
 fn test_unlock() {
-    let pk = mock_pub_key();
+    let pk = ALICE.pub_key.to_vec();
     let c = P2PKH { pub_key_hash: hash160(&pk) };
-    c.unlock(&mock_sig(), &pk);
+    c.unlock(&ALICE.sign_test_message(), &pk);
 }
 
 #[test]
 #[should_panic]
 fn test_unlock_wrong_key() {
-    let pk = mock_pub_key();
-    let wrong_pk = vec![0x03; 33];
+    let pk = ALICE.pub_key.to_vec();
+    let wrong_pk = BOB.pub_key.to_vec();
     let c = P2PKH { pub_key_hash: hash160(&pk) };
-    c.unlock(&mock_sig(), &wrong_pk);
+    c.unlock(&BOB.sign_test_message(), &wrong_pk);
 }
 
 #[test]
@@ -1228,7 +1228,8 @@ The `runar::prelude` provides:
 | Category | Functions |
 |----------|-----------|
 | **Types** | `Int`, `Bigint` (`i64`), `PubKey`, `Sig`, `ByteString`, `Sha256`, `Addr` (all `Vec<u8>`) |
-| **Mock crypto** | `check_sig`, `check_multi_sig`, `check_preimage`, `verify_rabin_sig`, `verify_wots` — always return `true` |
+| **Signature verify (real)** | `check_sig`, `check_multi_sig` — real ECDSA verification over the fixed test message; `verify_rabin_sig`, `verify_wots` — real Rabin / WOTS+ verification |
+| **Mocked** | `check_preimage` — always returns `true` (no transaction context off-chain) |
 | **Real hashes** | `hash160`, `hash256`, `sha256`, `ripemd160` — compute real values |
 | **Math** | `safediv`, `safemod`, `clamp`, `sign`, `pow`, `mul_div`, `percent_of`, `sqrt`, `gcd`, `log2`, `bool_cast` |
 | **Byte ops** | `num2bin`, `len`, `cat`, `substr` |
