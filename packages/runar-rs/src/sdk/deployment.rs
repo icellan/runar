@@ -221,7 +221,20 @@ fn varint_byte_size(n: usize) -> i64 {
 /// Delegates to [`super::script_utils::build_p2pkh_script`] so the change-address
 /// path accepts exactly the same inputs (40-char hash, 66/130-char pubkey,
 /// checksum- and version-checked Base58Check address).
-pub(crate) fn build_p2pkh_script_from_address(address: &str) -> String {
+///
+/// F-297: must be `pub`, not `pub(crate)` — the generated typed-wrapper
+/// template (`codegen.rs::RUST_TEMPLATE`) emits
+/// `use runar::sdk::deployment::build_p2pkh_script_from_address;` for every
+/// contract with a terminal method, which is resolved from OUTSIDE this
+/// crate (the generated wrapper lives in the consuming application). A
+/// `pub(crate)` visibility compiled fine inside `runar-lang`'s own test
+/// suite (which never built the generated wrapper as an external crate) but
+/// made every such wrapper fail with E0603 "private function" the moment
+/// anything actually tried to compile it — exactly the class of bug
+/// `conformance/sdk-codegen/` exists to catch. The function it delegates to,
+/// `script_utils::build_p2pkh_script`, is already `pub`, so this only
+/// widens visibility of a thin wrapper around an already-public primitive.
+pub fn build_p2pkh_script_from_address(address: &str) -> String {
     super::script_utils::build_p2pkh_script(address)
 }
 
