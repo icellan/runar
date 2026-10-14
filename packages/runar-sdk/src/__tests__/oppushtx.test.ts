@@ -216,3 +216,20 @@ describe('R-178: an out-of-range codeSeparatorIndex is refused', () => {
     expect(trimmed.preimageHex).not.toBe(untrimmed.preimageHex);
   });
 });
+
+describe('N-155: a codeSeparatorIndex on the subscript\'s last byte is refused', () => {
+  // codeSeparatorIndex === subscript.length/2 - 1 passes the R-178 "past the
+  // end" check (trimPos === subscript.length, not >) but slices scriptCode
+  // down to ''. An empty scriptCode can never match the script the node
+  // executes, same as the pre-existing empty-subscript check — this is that
+  // same condition reached via the separator offset instead of a bare empty
+  // subscript. Proves: computeOpPushTx refuses this case. Does not prove
+  // anything about ExternalSigner (it already rejects any empty string it is
+  // handed, verified separately) or about any caller upstream that builds the
+  // codeSeparatorIndex it passes in.
+  it('throws instead of signing an empty scriptCode', () => {
+    const tx = makeTx();
+    const oneByte = '51'; // OP_1 — codeSeparatorIndex 0 is its last (and only) byte
+    expect(() => computeOpPushTx(tx, 0, oneByte, 10000, 0)).toThrow(/empty subscript/);
+  });
+});

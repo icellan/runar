@@ -39,6 +39,26 @@ def test_out_of_range_code_separator_index_is_refused():
         assert "code_separator_index" in str(excinfo.value)
 
 
+def test_code_separator_on_last_byte_is_refused():
+    """N-155: a code_separator_index pointing at the LAST byte of the
+    subscript passes the above "past the end" check (trim_pos == len, not >)
+    but trims the scriptCode down to the empty string -- the same unsignable
+    condition as an empty subscript, reached via the separator offset
+    instead. Proves: compute_op_push_tx refuses this case. Does not prove
+    anything about ExternalSigner.sign (it already rejects any empty string
+    it is handed) or about callers upstream that compute the
+    code_separator_index they pass in.
+    """
+    s = _scenario()
+    one_byte = "51"  # OP_1 -- code_separator_index 0 is its last (and only) byte
+    with pytest.raises(ValueError) as excinfo:
+        compute_op_push_tx(
+            s["unsignedTxHex"], s["inputIndex"], one_byte,
+            s["prevValueSats"], code_separator_index=0,
+        )
+    assert "empty subscript" in str(excinfo.value)
+
+
 def test_in_range_index_still_trims_and_changes_the_preimage():
     s = _scenario()
     subscript = s["prevScriptHex"]

@@ -4596,12 +4596,16 @@ test "prepareCall handles stateful contract with Sig param (full OP_PUSH_TX conv
     // Stateful counter with a Sig param on increment. Constructor has
     // a single bigint state field (count). The OP_PUSH_TX convergence
     // path runs end-to-end and returns one BIP-143 sighash.
+    //
+    // N-155: codeSeparatorIndex 1 (not 2 -- the last byte of the 3-byte
+    // "005100" script) so the OP_PUSH_TX scriptCode trim leaves a non-empty
+    // tail ("00"); index 2 now computes OpPushTxError.EmptySubscript.
     const json =
         \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
         \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
         \\"stateFields":[{"name":"count","type":"int","index":0}],
         \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
-        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+        \\"codeSeparatorIndex":1,"buildTimestamp":"2024-01-01"}
     ;
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
@@ -4639,7 +4643,7 @@ test "prepareCall handles stateful contract with Sig param (full OP_PUSH_TX conv
     // OP_PUSH_TX preimage evidence captured (non-empty hex). N-213: there is
     // no op_push_tx_sig to assert on -- PreparedCall carries no such field.
     try std.testing.expect(prepared.preimage.len > 0);
-    try std.testing.expectEqual(@as(i32, 2), prepared.code_sep_idx);
+    try std.testing.expectEqual(@as(i32, 1), prepared.code_sep_idx);
 }
 
 test "prepareCall → finalizeCall round-trip on stateful Sig-bearing contract" {
@@ -4649,7 +4653,7 @@ test "prepareCall → finalizeCall round-trip on stateful Sig-bearing contract" 
         \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
         \\"stateFields":[{"name":"count","type":"int","index":0}],
         \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
-        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+        \\"codeSeparatorIndex":1,"buildTimestamp":"2024-01-01"}
     ;
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
@@ -4727,7 +4731,7 @@ test "PreparedCall has no op_push_tx_sig field (N-213)" {
         \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
         \\"stateFields":[{"name":"count","type":"int","index":0}],
         \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
-        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+        \\"codeSeparatorIndex":1,"buildTimestamp":"2024-01-01"}
     ;
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
@@ -5553,7 +5557,7 @@ fn makeIntentWitnessArtifact(
         \\],"isPublic":true}]},
         \\"stateFields":[{"name":"count","type":"int","index":0}],
         \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
-        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+        \\"codeSeparatorIndex":1,"buildTimestamp":"2024-01-01"}
     ;
     const json = try std.mem.concat(allocator, u8, &[_][]const u8{ head, params_json, tail });
     defer allocator.free(json);

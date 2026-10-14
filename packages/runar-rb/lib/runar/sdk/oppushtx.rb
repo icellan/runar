@@ -98,6 +98,20 @@ module Runar
               'with an empty subscript (scriptCode)'
       end
       effective_subscript = get_subscript(subscript_hex, code_separator_index)
+
+      # N-155: a code_separator_index pointing at the LAST byte of the
+      # subscript passes get_subscript's "past the end" check (trim_pos ==
+      # length, not >) but trims effective_subscript down to the empty
+      # string -- the same unsignable condition the empty-subscript check
+      # above exists to catch, just reached a different way. Refuse it too,
+      # with the same message. (get_subscript itself keeps returning '' here
+      # -- it is a public, independently-tested low-level slicing helper --
+      # this guard lives one level up, where the preimage is actually built.)
+      if effective_subscript.empty?
+        raise ArgumentError,
+              "compute_op_push_tx: refusing to build a preimage for input #{input_index} " \
+              'with an empty subscript (scriptCode)'
+      end
       preimage_hex = compute_preimage(tx_hex, input_index, effective_subscript, satoshis, sighash_type)
       sig_hex = sign_preimage_k1(preimage_hex, sighash_type)
       [sig_hex, preimage_hex]

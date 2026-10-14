@@ -88,6 +88,19 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
             ));
         }
         effective_subscript = subscript[trim_pos..].to_string();
+
+        // N-155: a code_separator_index pointing at the LAST byte of the
+        // subscript passes the "past the end" check above (trim_pos == len,
+        // not >) but trims effective_subscript down to the empty string --
+        // the same unsignable condition the empty-subscript check above
+        // exists to catch, just reached a different way. Refuse it too, with
+        // the same message.
+        if effective_subscript.is_empty() {
+            return Err(format!(
+                "compute_op_push_tx: refusing to build a preimage for input {} with an empty subscript (scriptCode)",
+                input_index
+            ));
+        }
     }
 
     let tx_bytes = hex_to_bytes(tx_hex)?;
@@ -595,13 +608,32 @@ mod tests {
     }
 
     /// N-041: an empty subscript can never match the script the node
-    /// executes, so building a preimage over it is refused. Does not cover a
-    /// non-empty subscript whose separator is its last byte (still accepted).
+    /// executes, so building a preimage over it is refused. N-155 covers the
+    /// companion case below: a non-empty subscript whose separator is its
+    /// last byte, which trims down to the same empty condition.
     #[test]
     fn n041_empty_subscript_is_refused() {
         let tx_hex = minimal_tx_hex();
         let err = compute_op_push_tx(&tx_hex, 0, "", 1000).unwrap_err();
         assert!(err.contains("empty subscript"), "{}", err);
         assert!(compute_op_push_tx_with_code_sep(&tx_hex, 0, "51ab51", 1000, 1).is_ok());
+    }
+
+    /// N-155: code_separator_index pointing at the LAST byte of the subscript
+    /// passes the R-178 "past the end" check (trim_pos == len, not >) but
+    /// trims effective_subscript down to the empty string -- the same
+    /// unsignable condition as an empty subscript, reached via the separator
+    /// offset instead. Proves: compute_op_push_tx_with_code_sep refuses this
+    /// case. Does not prove anything about ExternalSigner::sign (it already
+    /// rejects any empty string it is handed -- see signer.rs's
+    /// n041_external_signer_refuses_empty_subscript) or about callers
+    /// upstream that compute the code_separator_index they pass in.
+    #[test]
+    fn n155_code_separator_on_last_byte_is_refused() {
+        let tx_hex = minimal_tx_hex();
+        // "51" is one byte (OP_1); code_separator_index 0 is its last (and
+        // only) byte, so the trimmed scriptCode is empty.
+        let err = compute_op_push_tx_with_code_sep(&tx_hex, 0, "51", 1000, 0).unwrap_err();
+        assert!(err.contains("empty subscript"), "{}", err);
     }
 }

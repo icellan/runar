@@ -51,6 +51,35 @@ func TestR178_OutOfRangeCodeSeparatorIndexIsRefused(t *testing.T) {
 	}
 }
 
+// N-155: codeSeparatorIndex pointing at the LAST byte of the subscript passes
+// the R-178 "past the end" check (trimPos == len, not >) but trims scriptCode
+// down to the empty string -- the same unsignable condition as an empty
+// subscript, reached via the separator offset instead. Proves: ComputeOpPushTx
+// refuses this case. Does not prove anything about ExternalSigner.Sign (it
+// already rejects any empty string it is handed) or about callers upstream
+// that compute the codeSeparatorIndex they pass in.
+func TestN155_CodeSeparatorOnLastByteIsRefused(t *testing.T) {
+	txHex := "01000000" +
+		"01" +
+		strings.Repeat("11", 32) +
+		"00000000" +
+		"00" +
+		"ffffffff" +
+		"01" +
+		"e803000000000000" +
+		"0151" +
+		"00000000"
+
+	oneByte := "51" // OP_1 -- codeSeparatorIndex 0 is its last (and only) byte
+	_, _, err := ComputeOpPushTxWithCodeSep(txHex, 0, oneByte, 1000, 0)
+	if err == nil {
+		t.Fatal("codeSeparatorIndex on the subscript's last byte was accepted")
+	}
+	if !strings.Contains(err.Error(), "empty subscript") {
+		t.Errorf("the refusal must name the empty-subscript condition; got: %v", err)
+	}
+}
+
 func TestR178_InRangeCodeSeparatorIndexStillTrims(t *testing.T) {
 	s := r178Scenario(t)
 	txHex := s["unsignedTxHex"].(string)

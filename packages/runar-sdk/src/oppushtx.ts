@@ -89,6 +89,17 @@ export function computeOpPushTx(
       );
     }
     scriptCode = subscript.slice(trimPos);
+
+    // N-155: codeSeparatorIndex pointing at the LAST byte of the subscript is
+    // "in range" by the check above (trimPos === subscript.length) but trims
+    // scriptCode down to the empty string — the same unsignable condition the
+    // empty-subscript check above exists to catch, just reached a different
+    // way. Refuse it too, with the same message.
+    if (!scriptCode) {
+      throw new Error(
+        `computeOpPushTx: refusing to build a preimage for input ${inputIndex} with an empty subscript (scriptCode)`,
+      );
+    }
   }
 
   // Compute BIP-143 preimage

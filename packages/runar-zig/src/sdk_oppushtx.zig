@@ -134,6 +134,13 @@ pub fn computeOpPushTxWithSigHash(
         const hex_offset: usize = @intCast((@as(usize, @intCast(code_separator_index)) + 1) * 2);
         if (hex_offset > subscript_hex.len) return OpPushTxError.InvalidCodeSeparatorIndex;
         script_code_hex = subscript_hex[hex_offset..];
+
+        // N-155: a code_separator_index pointing at the LAST byte of the
+        // subscript passes the "past the end" check above (hex_offset ==
+        // len, not >) but trims script_code_hex down to the empty string --
+        // the same unsignable condition the empty-subscript check above
+        // exists to catch, just reached a different way. Refuse it too.
+        if (script_code_hex.len == 0) return OpPushTxError.EmptySubscript;
     }
 
     // Decode the script code bytes
@@ -309,8 +316,9 @@ test "R-178: an in-range code separator index still trims" {
 }
 
 // N-041: an empty subscript can never match the script the node executes, so
-// building a preimage over it is refused with EmptySubscript. Does not cover a
-// non-empty subscript whose separator is its last byte (still accepted).
+// building a preimage over it is refused with EmptySubscript. N-155 (below)
+// covers the companion case: a non-empty subscript whose separator is its
+// last byte, which trims down to the same empty condition.
 test "N-041: an empty subscript is refused" {
     const allocator = std.testing.allocator;
 
@@ -334,4 +342,36 @@ test "N-041: an empty subscript is refused" {
     var ok = try computeOpPushTx(allocator, tx_hex, 0, "51ab51", 1000, 1);
     defer ok.deinit(allocator);
     try std.testing.expect(ok.preimage_hex.len > 0);
+}
+
+// N-155: a code_separator_index pointing at the LAST byte of the subscript
+// passes R-178's "past the end" check (hex_offset == len, not >) but trims
+// script_code_hex down to the empty string -- the same unsignable condition
+// as an empty subscript, reached via the separator offset instead. Proves:
+// computeOpPushTx refuses this case (EmptySubscript). Does not prove anything
+// about ExternalSigner's signImpl (it already rejects any empty
+// subscript it is handed -- see "N-041 ExternalSigner refuses an empty
+// subscript" in sdk_signer.zig) or about callers upstream that compute the
+// code_separator_index they pass in.
+test "N-155: a code separator on the subscript's last byte is refused" {
+    const allocator = std.testing.allocator;
+
+    const tx_hex = "01000000" ++
+        "01" ++
+        "1111111111111111111111111111111111111111111111111111111111111111" ++
+        "00000000" ++
+        "00" ++
+        "ffffffff" ++
+        "01" ++
+        "e803000000000000" ++
+        "01" ++ "51" ++
+        "00000000";
+
+    // "51" is one byte (OP_1); code_separator_index 0 is its last (and only)
+    // byte, so the trimmed scriptCode is empty.
+    if (computeOpPushTx(allocator, tx_hex, 0, "51", 1000, 0)) |r| {
+        var res = r;
+        res.deinit(allocator);
+        return error.TestExpectedError;
+    } else |err| try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
 }

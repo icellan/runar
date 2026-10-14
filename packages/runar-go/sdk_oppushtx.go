@@ -94,6 +94,16 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 				codeSeparatorIndex, len(subscript)/2)
 		}
 		scriptCode = subscript[trimPos:]
+
+		// N-155: a codeSeparatorIndex pointing at the LAST byte of the
+		// subscript passes the "past the end" check above (trimPos == len,
+		// not >) but trims scriptCode down to the empty string -- the same
+		// unsignable condition the empty-subscript check above exists to
+		// catch, just reached a different way. Refuse it too, with the same
+		// message.
+		if scriptCode == "" {
+			return nil, nil, fmt.Errorf("compute_op_push_tx: refusing to build a preimage for input %d with an empty subscript (scriptCode)", inputIndex)
+		}
 	}
 
 	lockScript, err := script.NewFromHex(scriptCode)

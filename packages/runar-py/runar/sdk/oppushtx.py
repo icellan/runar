@@ -67,6 +67,18 @@ def compute_op_push_tx(
                 f"past the end of the subscript ({len(subscript) // 2} bytes)"
             )
         effective_subscript = subscript[trim_pos:]
+
+        # N-155: a code_separator_index pointing at the LAST byte of the
+        # subscript passes the "past the end" check above (trim_pos == len,
+        # not >) but trims effective_subscript down to the empty string --
+        # the same unsignable condition the empty-subscript check above
+        # exists to catch, just reached a different way. Refuse it too, with
+        # the same message.
+        if not effective_subscript:
+            raise ValueError(
+                f"compute_op_push_tx: refusing to build a preimage for input {input_index} "
+                "with an empty subscript (scriptCode)"
+            )
     tx_bytes = bytes.fromhex(tx_hex)
     tx = _parse_raw_tx(tx_bytes)
     subscript_bytes = bytes.fromhex(effective_subscript)
