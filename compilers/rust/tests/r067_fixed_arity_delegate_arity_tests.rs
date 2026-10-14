@@ -40,10 +40,19 @@
 //! Reachability: the type checker's `check_call_args` (`frontend/typecheck.rs`)
 //! DOES reject an over-supplied call on the source path, so a `.runar.*`
 //! contract cannot reach either mechanism. The `--ir` entry point
-//! (`compile_from_ir*` / `lower_to_stack`) runs no frontend validation in this
-//! tier — the same gap R-016 was reachable through — so these guards are the
-//! only thing standing between an over-supplied ANF IR input and a silently
-//! mis-paired crypto primitive.
+//! (`compile_from_ir*` / `lower_to_stack`) runs no FRONTEND validation — but
+//! `load_ir_from_str` (`ir/loader.rs`) is not a bare parse either: it runs its
+//! own loader-level gates before `lower_to_stack` ever sees the program,
+//! including the R-128/R-165 builtin-call-arity check (`builtin_allowed_arity`,
+//! "requires exactly N arguments") and N-205's `verifyRabinSig` key-provenance
+//! rule (`ir/rabin_key_provenance.rs` — the 4th argument must be a trusted
+//! `load_prop` or literal, which is why the fixtures below source it from a
+//! contract property rather than a `load_param`). Both of those run BEFORE
+//! the stack-lowering-level guards this file pins, so this file's guards are
+//! the LAST, not the only, thing standing between an over-supplied ANF IR
+//! input and a silently mis-paired crypto primitive — but they are still load
+//! bearing: `lower_to_stack` is a public entry point in its own right, callable
+//! without going through `load_ir_from_str`'s gates at all.
 //!
 //! The fix tightens every guard to an equality with the same "requires exactly
 //! N arguments, got M" wording the tier already uses for `verifyECDSA_*` and
@@ -57,6 +66,26 @@ use runar_compiler_rust::ir::loader::load_ir_from_str;
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// `verifyRabinSig`'s 4th call argument is its Rabin public key. N-205 (see
+/// `ir/rabin_key_provenance.rs`) refuses that argument unless it is trusted
+/// (a `load_prop` or an integer literal) — a plain `load_param` is a
+/// spender-supplied key and is refused regardless of arity. Every fixture
+/// below that exercises `verifyRabinSig` at (or above) its real 4-argument
+/// arity therefore sources call-position 3 (`t3`) from a contract property
+/// instead of a parameter, so the fixture is exercising the arity guard
+/// under test rather than tripping the unrelated key-provenance guard.
+///
+/// What this proves: with the key sourced from a trusted `load_prop`, the
+/// R-067 arity guards (equality checks tightened from `>=`) are exercised
+/// exactly as originally intended — an over- or under-supplied call is
+/// refused by the arity diagnostic, and a correct-arity call still lowers to
+/// the pinned byte-identical emission. What it does NOT prove: that N-205
+/// itself is correct, complete, or unweakened — this file does not touch
+/// `rabin_key_provenance.rs`, and N-205's own dedicated tests
+/// (`compilers/rust/src/ir/rabin_key_provenance.rs` `#[cfg(test)] mod tests`)
+/// are the ones that pin its refusal behaviour.
+const VERIFY_RABIN_SIG_KEY_BINDING_INDEX: usize = 3;
+
 /// A one-method contract whose body loads `n_params` parameters and then calls
 /// `func` with the bindings named by `args` (indices into the loaded params).
 fn call_anf(func: &str, n_params: usize, args: &[usize]) -> String {
@@ -65,7 +94,11 @@ fn call_anf(func: &str, n_params: usize, args: &[usize]) -> String {
         .collect();
     let mut body: Vec<String> = (0..n_params)
         .map(|i| {
-            format!(r#"{{ "name": "t{i}", "value": {{ "kind": "load_param", "name": "a{i}" }} }}"#)
+            if func == "verifyRabinSig" && i == VERIFY_RABIN_SIG_KEY_BINDING_INDEX {
+                format!(r#"{{ "name": "t{i}", "value": {{ "kind": "load_prop", "name": "key" }} }}"#)
+            } else {
+                format!(r#"{{ "name": "t{i}", "value": {{ "kind": "load_param", "name": "a{i}" }} }}"#)
+            }
         })
         .collect();
     let arg_list: Vec<String> = args.iter().map(|i| format!("\"t{i}\"")).collect();
@@ -74,8 +107,13 @@ fn call_anf(func: &str, n_params: usize, args: &[usize]) -> String {
         arg_list.join(", ")
     ));
     body.push(r#"{ "name": "tv", "value": { "kind": "assert", "value": "tc" } }"#.to_string());
+    let properties = if func == "verifyRabinSig" {
+        r#"{ "name": "key", "type": "RabinPubKey", "readonly": true }"#
+    } else {
+        ""
+    };
     format!(
-        r#"{{ "contractName": "R067", "properties": [], "methods": [ {{ "name": "unlock", "params": [{}], "body": [{}], "isPublic": true }} ] }}"#,
+        r#"{{ "contractName": "R067", "properties": [{properties}], "methods": [ {{ "name": "unlock", "params": [{}], "body": [{}], "isPublic": true }} ] }}"#,
         params.join(", "),
         body.join(", ")
     )
@@ -301,7 +339,11 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // two in-place swaps become OP_OVER / OP_ROT).
     // F-144: 36 -> 45 (<push 0x00> OP_CAT OP_BIN2NUM reads pubKey, padding and
     // sig as unsigned LE integers).
-    ("verifyRabinSig", 4, 45, 0x7611e37581dfb01d),
+    // N-205: the key operand (call position 3) now comes from a `load_prop`
+    // instead of a `load_param` (see VERIFY_RABIN_SIG_KEY_BINDING_INDEX
+    // above), so it is read from a different stack depth than before; same
+    // op count (45), different fingerprint.
+    ("verifyRabinSig", 4, 45, 0xfd0ec4a2972a3164),
     // R-135: +3 top-level ops for the exact-signature-length gate (OP_SIZE,
     // push 2144, OP_EQUALVERIFY). 5444 -> 5447, and the fingerprint moves with it.
     ("verifyWOTS", 3, 5447, 0xeb5c21ad8b9fcfb4),
