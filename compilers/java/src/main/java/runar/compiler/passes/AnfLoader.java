@@ -35,6 +35,12 @@ import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
 import runar.compiler.ir.UnknownAnfKindError;
+import runar.compiler.frontend.InputLimits;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Hand-rolled loader for canonical ANF JSON → {@link AnfProgram}.
@@ -210,6 +216,17 @@ public final class AnfLoader {
                 throw new RuntimeException(err);
             }
         }
+        // N-265: --ir never runs frontend's checkNoRecursion, which enforces
+        // both the call-graph cycle rule and N-180's MAX_CALL_DEPTH bound.
+        // Stack lowering (StackLower's method_call inlining) inlines every
+        // method_call to a private method by lowering its body in place,
+        // with no cycle or depth guard, so a self/mutually-recursive method
+        // recurses the host call stack until a StackOverflowError, and an
+        // acyclic chain past the bound recurses it just as deep. Checked
+        // first, same order as Go's F-004 checkIRFrontendRules (recursion
+        // before parentClass).
+        checkIRNoRecursion(methods);
+
         // N-087: the source validator's parentClass rules, then Go F-004's
         // readonly / undeclared-property write rule.
         String effectiveClass = checkParentClassRules(parentClass, props, methods);
@@ -230,6 +247,163 @@ public final class AnfLoader {
 
     private static final java.util.Set<String> STATEFUL_ONLY_KINDS = java.util.Set.of(
         "add_output", "add_raw_output", "add_data_output", "get_state_script", "deserialize_state");
+
+    /**
+     * N-265: {@code --ir} skips the frontend's {@code checkNoRecursion},
+     * which enforces both the call-graph cycle rule and N-180's
+     * {@code MAX_CALL_DEPTH} (128) bound. Stack lowering ({@code
+     * StackLower}'s method_call inlining) inlines every method_call to a
+     * private method by lowering its body in place, with no cycle or depth
+     * guard, so a self/mutually-recursive method recurses the host call
+     * stack until a {@link StackOverflowError}, and an acyclic chain past
+     * the bound recurses it just as deep. Ported from Go's F-071 {@code
+     * checkIRNoRecursion} (compilers/go/compiler/ir_frontend_rules.go), made
+     * iterative there too under this item, and extended with N-180's depth
+     * bound — Go's existing IR-path check was cycle-only.
+     *
+     * <p>Two passes, cycles checked before depth (a cyclic graph has no
+     * finite depth to measure), both iterative (explicit stack, no host
+     * recursion):
+     * <ol>
+     *   <li>{@link #irCycleMethod} — the exact "hit" a recursive
+     *       depth-first search would report the moment it finds a back
+     *       edge: a method strictly ON the cycle, not every caller that
+     *       merely reaches it.</li>
+     *   <li>{@link #irCallDepthError} — once known acyclic, a plain
+     *       longest-path walk, refusing the first method (declaration
+     *       order) whose inlining depth exceeds MAX_CALL_DEPTH.</li>
+     * </ol>
+     */
+    private static void checkIRNoRecursion(List<AnfMethod> methods) {
+        Map<String, List<String>> callees = new LinkedHashMap<>();
+        for (AnfMethod m : methods) {
+            if ("constructor".equals(m.name())) continue;
+            List<AnfValue> vs = new ArrayList<>();
+            collectValues(m.body(), vs);
+            List<String> calls = new ArrayList<>();
+            for (AnfValue v : vs) {
+                if (v instanceof MethodCall mc) calls.add(mc.method());
+            }
+            callees.put(m.name(), calls);
+        }
+
+        String cycle = irCycleMethod(methods, callees);
+        if (cycle != null) {
+            throw new RuntimeException(
+                "IR validation: recursion detected: method '" + cycle + "' calls itself directly or "
+                    + "indirectly. Private methods are inlined at every call site, so a cyclic call "
+                    + "graph has no finite lowering");
+        }
+        String depthErr = irCallDepthError(methods, callees);
+        if (depthErr != null) {
+            throw new RuntimeException("IR validation: " + depthErr);
+        }
+    }
+
+    private static final class Frame {
+        final String name;
+        int next;
+        int depth;
+
+        Frame(String name) {
+            this.name = name;
+        }
+    }
+
+    /**
+     * Iterative (explicit-stack), three-state DFS over the IR method_call
+     * graph. Declaration order only decides which root the search starts
+     * from; the name returned is whichever back edge is found first —
+     * matches Go F-071's former host-recursive {@code visit} closure byte
+     * for byte.
+     */
+    private static String irCycleMethod(List<AnfMethod> methods, Map<String, List<String>> callees) {
+        final int UNVISITED = 0;
+        final int ON_STACK = 1;
+        final int DONE = 2;
+        Map<String, Integer> state = new HashMap<>();
+
+        for (AnfMethod rootM : methods) {
+            String root = rootM.name();
+            if ("constructor".equals(root)) continue;
+            if (state.getOrDefault(root, UNVISITED) != UNVISITED) continue;
+
+            Deque<Frame> stack = new ArrayDeque<>();
+            state.put(root, ON_STACK);
+            stack.push(new Frame(root));
+            while (!stack.isEmpty()) {
+                Frame top = stack.peek();
+                List<String> calls = callees.getOrDefault(top.name, List.of());
+                if (top.next >= calls.size()) {
+                    state.put(top.name, DONE);
+                    stack.pop();
+                    continue;
+                }
+                String callee = calls.get(top.next);
+                top.next++;
+                if (!callees.containsKey(callee)) continue;
+                int calleeState = state.getOrDefault(callee, UNVISITED);
+                if (calleeState == ON_STACK) return callee;
+                if (calleeState == UNVISITED) {
+                    state.put(callee, ON_STACK);
+                    stack.push(new Frame(callee));
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Iterative longest-path walk over the (by this point known-acyclic) IR
+     * call graph, no host recursion. Returns the diagnostic for the first
+     * method (declaration order) past MAX_CALL_DEPTH, or {@code null}.
+     */
+    private static String irCallDepthError(List<AnfMethod> methods, Map<String, List<String>> callees) {
+        Map<String, Integer> depth = new HashMap<>();
+        Set<String> done = new HashSet<>();
+
+        for (AnfMethod rootM : methods) {
+            String root = rootM.name();
+            if ("constructor".equals(root)) continue;
+            if (done.contains(root)) continue;
+
+            Deque<Frame> stack = new ArrayDeque<>();
+            stack.push(new Frame(root));
+            while (!stack.isEmpty()) {
+                Frame top = stack.peek();
+                List<String> calls = callees.getOrDefault(top.name, List.of());
+                if (top.next < calls.size()) {
+                    String callee = calls.get(top.next);
+                    top.next++;
+                    if (!callees.containsKey(callee)) continue;
+                    if (done.contains(callee)) {
+                        int d = 1 + depth.getOrDefault(callee, 0);
+                        if (d > top.depth) top.depth = d;
+                    } else {
+                        stack.push(new Frame(callee));
+                    }
+                    continue;
+                }
+                stack.pop();
+                done.add(top.name);
+                depth.put(top.name, top.depth);
+                Frame parent = stack.peek();
+                if (parent != null) {
+                    int d = 1 + top.depth;
+                    if (d > parent.depth) parent.depth = d;
+                }
+            }
+        }
+
+        for (AnfMethod m : methods) {
+            if ("constructor".equals(m.name())) continue;
+            int d = depth.getOrDefault(m.name(), 0);
+            if (d > InputLimits.MAX_CALL_DEPTH) {
+                return InputLimits.callDepthMessage(m.name());
+            }
+        }
+        return null;
+    }
 
     /** Every ANF value in {@code bindings}, nested if arms and loop bodies included. */
     private static void collectValues(List<AnfBinding> bindings, List<AnfValue> out) {

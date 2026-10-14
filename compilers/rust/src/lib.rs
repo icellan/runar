@@ -716,6 +716,189 @@ fn check_no_readonly_writes(
     Ok(())
 }
 
+/// N-265: `--ir` skips `frontend::validator`'s `check_no_recursion`, which
+/// enforces both the call-graph cycle rule and N-180's `MAX_CALL_DEPTH` (128)
+/// bound. Stack lowering (codegen/stack.rs's `inline_method_call`) inlines
+/// every `method_call` to a private method by lowering its body in place,
+/// with no cycle or depth guard, so a self/mutually-recursive method
+/// recurses the host call stack until it aborts, and an acyclic chain past
+/// the bound recurses it just as deep. Ported from Go's F-071
+/// `checkIRNoRecursion` (compilers/go/compiler/ir_frontend_rules.go), made
+/// iterative there too under this item, and extended with N-180's depth
+/// bound — Go's existing IR-path check was cycle-only.
+///
+/// Two passes, cycles checked before depth (a cyclic graph has no finite
+/// depth to measure), both iterative (explicit stack, no host recursion):
+///   1. `assert_ir_no_cycle` — the exact "hit" a recursive depth-first
+///      search would report the moment it finds a back edge: a method
+///      strictly ON the cycle, not every caller that merely reaches it.
+///   2. `assert_ir_call_depth_bound` — once known acyclic, a plain
+///      longest-path walk, refusing the first method (declaration order)
+///      whose inlining depth exceeds MAX_CALL_DEPTH.
+fn check_ir_no_recursion(program: &ir::ANFProgram) -> Result<(), String> {
+    fn collect_calls(bindings: &[ir::ANFBinding], out: &mut Vec<String>) {
+        for b in bindings {
+            if let ir::ANFValue::MethodCall { method, .. } = &b.value {
+                out.push(method.clone());
+            }
+            match &b.value {
+                ir::ANFValue::If { then, else_branch, .. } => {
+                    collect_calls(then, out);
+                    collect_calls(else_branch, out);
+                }
+                ir::ANFValue::Loop { body, .. } => collect_calls(body, out),
+                _ => {}
+            }
+        }
+    }
+
+    let mut callees: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for m in &program.methods {
+        if m.name == "constructor" {
+            continue;
+        }
+        let mut calls = Vec::new();
+        collect_calls(&m.body, &mut calls);
+        callees.insert(m.name.as_str(), calls);
+    }
+
+    assert_ir_no_cycle(&program.methods, &callees)?;
+    assert_ir_call_depth_bound(&program.methods, &callees)
+}
+
+/// Iterative (explicit-stack), three-state DFS over the IR `method_call`
+/// graph. Declaration order only decides which root the search starts from;
+/// the reported name is whichever back edge is found first — matches Go
+/// F-071's former host-recursive `visit` closure byte for byte.
+fn assert_ir_no_cycle(
+    methods: &[ir::ANFMethod],
+    callees: &std::collections::HashMap<&str, Vec<String>>,
+) -> Result<(), String> {
+    const UNVISITED: u8 = 0;
+    const ON_STACK: u8 = 1;
+    const DONE: u8 = 2;
+    let mut state: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+
+    struct Frame<'a> {
+        name: &'a str,
+        next: usize,
+    }
+
+    for m in methods {
+        let root = m.name.as_str();
+        if root == "constructor" || *state.get(root).unwrap_or(&UNVISITED) != UNVISITED {
+            continue;
+        }
+        let mut stack: Vec<Frame> = vec![Frame { name: root, next: 0 }];
+        state.insert(root, ON_STACK);
+        while !stack.is_empty() {
+            let idx = stack.len() - 1;
+            let name = stack[idx].name;
+            let next = stack[idx].next;
+            let calls = callees.get(name);
+            let calls_len = calls.map(|c| c.len()).unwrap_or(0);
+            if next >= calls_len {
+                state.insert(name, DONE);
+                stack.pop();
+                continue;
+            }
+            let callee: &str = &calls.unwrap()[next];
+            stack[idx].next += 1;
+            if !callees.contains_key(callee) {
+                continue;
+            }
+            match *state.get(callee).unwrap_or(&UNVISITED) {
+                ON_STACK => {
+                    return Err(format!(
+                        "IR validation: recursion detected: method '{}' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering",
+                        callee
+                    ));
+                }
+                UNVISITED => {
+                    state.insert(callee, ON_STACK);
+                    stack.push(Frame { name: callee, next: 0 });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Iterative longest-path walk over the (by this point known-acyclic) IR
+/// call graph, no host recursion: a method's call depth is 0 if it calls no
+/// contract method, else 1 + the largest call depth among the methods it
+/// calls. Private methods are inlined at every call site, so this is the
+/// inlining depth. Refuses the first method (declaration order) past
+/// `MAX_CALL_DEPTH`, with the diagnostic every tier shares.
+fn assert_ir_call_depth_bound(
+    methods: &[ir::ANFMethod],
+    callees: &std::collections::HashMap<&str, Vec<String>>,
+) -> Result<(), String> {
+    struct Frame<'a> {
+        name: &'a str,
+        next: usize,
+        depth: usize,
+    }
+    let mut depth: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut done: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for m in methods {
+        let root = m.name.as_str();
+        if root == "constructor" || done.contains(root) {
+            continue;
+        }
+        let mut stack: Vec<Frame> = vec![Frame { name: root, next: 0, depth: 0 }];
+        while !stack.is_empty() {
+            let idx = stack.len() - 1;
+            let name = stack[idx].name;
+            let next = stack[idx].next;
+            let calls = callees.get(name);
+            let calls_len = calls.map(|c| c.len()).unwrap_or(0);
+            if next < calls_len {
+                let callee: &str = &calls.unwrap()[next];
+                stack[idx].next += 1;
+                if !callees.contains_key(callee) {
+                    continue;
+                }
+                if done.contains(callee) {
+                    let d = 1 + depth.get(callee).copied().unwrap_or(0);
+                    if d > stack[idx].depth {
+                        stack[idx].depth = d;
+                    }
+                } else {
+                    stack.push(Frame { name: callee, next: 0, depth: 0 });
+                }
+                continue;
+            }
+            let finished_depth = stack[idx].depth;
+            done.insert(name);
+            depth.insert(name, finished_depth);
+            stack.pop();
+            if let Some(parent) = stack.last_mut() {
+                let d = 1 + finished_depth;
+                if d > parent.depth {
+                    parent.depth = d;
+                }
+            }
+        }
+    }
+
+    for m in methods {
+        if m.name == "constructor" {
+            continue;
+        }
+        let d = depth.get(m.name.as_str()).copied().unwrap_or(0);
+        if d > frontend::input_limits::MAX_CALL_DEPTH {
+            return Err(format!(
+                "IR validation: {}",
+                frontend::input_limits::call_depth_message(&m.name)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// N-087: the source validator's parentClass rules, which `--ir` never ran. A
 /// SmartContract property declared readonly:false got no constructor slot, so
 /// `update_prop owner = x; assert(owner == x)` compiled to 76767b8777, which any
@@ -806,6 +989,16 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
     reject_unsupported_stop_after_pass_options(opts)?;
+
+    // N-265: the source validator's `check_no_recursion` (cycle rule + N-180's
+    // MAX_CALL_DEPTH bound) never runs on the `--ir` path either. Stack
+    // lowering (codegen/stack.rs's `inline_method_call`) inlines every
+    // `method_call` to a private method by lowering its body in place, with
+    // no cycle or depth guard, so a self/mutually-recursive method recurses
+    // the host call stack until it aborts, and an acyclic chain past the
+    // bound recurses it just as deep. Checked before the parentClass rules
+    // below, same order as Go's F-004 `checkIRFrontendRules`.
+    check_ir_no_recursion(program)?;
 
     // F-107: the source validator's readonly-write rule, re-asserted on every
     // program that reaches this entry point (the `--ir` path never runs the

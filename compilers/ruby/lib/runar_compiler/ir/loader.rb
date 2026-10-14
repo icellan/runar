@@ -16,6 +16,7 @@ require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
 require_relative "required_fields"
 require_relative "../frontend/reserved_names"
+require_relative "../frontend/input_limits"
 require_relative "stateful_scaffold"
 require_relative "synthetic_array_chain"
 require_relative "rabin_key_provenance"
@@ -181,6 +182,17 @@ module RunarCompiler
         end
       end
 
+      # N-265: --ir never runs frontend/validator.rb's recursion + N-180
+      # MAX_CALL_DEPTH check. Stack lowering (codegen/stack.rb's method_call
+      # inlining) inlines every method_call to a private method by lowering
+      # its body in place, with no cycle or depth guard, so a
+      # self/mutually-recursive method recurses the host call stack until a
+      # SystemStackError, and an acyclic chain past the bound recurses it
+      # just as deep. Checked first, same order as Go's F-004
+      # checkIRFrontendRules (recursion before parentClass).
+      recursion_err = _recursion_error(program)
+      errors << recursion_err if recursion_err
+
       # N-087: the source validator's parentClass rules, then Go F-004's
       # readonly / undeclared-property write rule. See _parent_class_error and
       # _write_error.
@@ -255,6 +267,133 @@ module RunarCompiler
         _each_value(v.else_, &blk)
         _each_value(v.body, &blk)
       end
+    end
+
+    # -------------------------------------------------------------------
+    # N-265: IR method_call graph -- recursion + N-180 call-depth bound
+    # -------------------------------------------------------------------
+    #
+    # Ported from Go's F-071 checkIRNoRecursion (compilers/go/compiler/
+    # ir_frontend_rules.go), made iterative there too under this item, and
+    # extended with N-180's depth bound -- Go's existing IR-path check was
+    # cycle-only, and this tier had no IR-path recursion check at all. Two
+    # passes, cycles checked before depth (a cyclic graph has no finite
+    # depth to measure), both iterative (explicit stack, no host recursion
+    # -- the Ruby fiber/thread stack's own limit is exactly what an
+    # unbounded chain or cycle hit before this).
+
+    # The first ANF method_call cycle or call-depth violation, or nil.
+    #
+    # Reports a cycle (a method strictly ON it, the exact "hit" a recursive
+    # depth-first search would report the moment it finds a back edge)
+    # before a depth violation, since a cyclic graph has no finite depth to
+    # measure.
+    def self._recursion_error(program)
+      callees = {}
+      program.methods.each do |m|
+        next if m.name == "constructor"
+
+        calls = []
+        _each_value(m.body) { |v| calls << v.method if v.kind == "method_call" && v.method }
+        callees[m.name] = calls
+      end
+
+      cycle = _ir_cycle_method(program.methods, callees)
+      if cycle
+        return "recursion detected: method '#{cycle}' calls itself directly or indirectly. " \
+               "Private methods are inlined at every call site, so a cyclic call graph has " \
+               "no finite lowering"
+      end
+      _ir_call_depth_error(program.methods, callees)
+    end
+
+    # Iterative (explicit-stack), three-state DFS over the IR method_call
+    # graph. Declaration order only decides which root the search starts
+    # from; the name returned is whichever back edge is found first.
+    def self._ir_cycle_method(methods, callees)
+      unvisited, on_stack, done_state = 0, 1, 2
+      state = {}
+
+      methods.each do |root_m|
+        root = root_m.name
+        next if root == "constructor"
+        next if (state[root] || unvisited) != unvisited
+
+        stack = [{ name: root, next: 0 }]
+        state[root] = on_stack
+        until stack.empty?
+          top = stack[-1]
+          calls = callees[top[:name]] || []
+          if top[:next] >= calls.length
+            state[top[:name]] = done_state
+            stack.pop
+            next
+          end
+          callee = calls[top[:next]]
+          top[:next] += 1
+          next unless callees.key?(callee)
+
+          callee_state = state[callee] || unvisited
+          return callee if callee_state == on_stack
+
+          if callee_state == unvisited
+            state[callee] = on_stack
+            stack.push({ name: callee, next: 0 })
+          end
+        end
+      end
+      nil
+    end
+
+    # Iterative longest-path walk over the (by this point known-acyclic) IR
+    # call graph, no host recursion. Returns the diagnostic for the first
+    # method (declaration order) past MAX_CALL_DEPTH, or nil.
+    def self._ir_call_depth_error(methods, callees)
+      depth = {}
+      done = {}
+
+      methods.each do |root_m|
+        root = root_m.name
+        next if root == "constructor"
+        next if done[root]
+
+        stack = [{ name: root, next: 0, depth: 0 }]
+        until stack.empty?
+          top = stack[-1]
+          calls = callees[top[:name]] || []
+          if top[:next] < calls.length
+            callee = calls[top[:next]]
+            top[:next] += 1
+            next unless callees.key?(callee)
+
+            if done[callee]
+              d = 1 + (depth[callee] || 0)
+              top[:depth] = d if d > top[:depth]
+            else
+              stack.push({ name: callee, next: 0, depth: 0 })
+            end
+            next
+          end
+          finished = stack.pop
+          done[finished[:name]] = true
+          depth[finished[:name]] = finished[:depth]
+          unless stack.empty?
+            parent = stack[-1]
+            d = 1 + finished[:depth]
+            parent[:depth] = d if d > parent[:depth]
+          end
+        end
+      end
+
+      methods.each do |m|
+        next if m.name == "constructor"
+
+        d = depth[m.name] || 0
+        if d > RunarCompiler::Frontend::InputLimits::MAX_CALL_DEPTH
+          return RunarCompiler::Frontend::InputLimits.call_depth_message(m.name)
+        end
+      end
+      nil
     end
 
     # The declared parentClass, or the N-087 fail-closed inference for IR

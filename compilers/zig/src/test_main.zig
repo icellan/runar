@@ -9,6 +9,7 @@ test {
     _ = @import("ir/f038_parent_class_sighash_test.zig");
     _ = @import("ir/n071_terminal_assert_test.zig");
     _ = @import("ir/n087_parent_class_test.zig");
+    _ = @import("ir/n265_ir_call_depth_test.zig");
     _ = @import("ir/n101_stateful_scaffold_test.zig");
     _ = @import("ir/n096_synthetic_array_chain_test.zig");
     _ = @import("ir/n115_ir_loop_cap_test.zig");

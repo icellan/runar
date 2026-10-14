@@ -12,6 +12,7 @@ const sighash_directive = @import("../frontend/sighash_directive.zig");
 const stateful_scaffold = @import("stateful_scaffold.zig");
 const synthetic_array_chain = @import("synthetic_array_chain.zig");
 const rabin_key_provenance = @import("rabin_key_provenance.zig");
+const call_depth = @import("call_depth.zig");
 pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
@@ -88,6 +89,14 @@ const ParseError = error{
     // leaves that are not one expansion). Message in lastDiagnostic().
     SyntheticArrayChainMalformed,
     RabinKeyProvenance,
+    // N-265: a cycle in the method_call graph. `compile-ir` skips the
+    // frontend entirely, so frontend/validate.zig's recursion check never
+    // ran; stack lowering inlines every method_call with no cycle guard,
+    // recursing until a stack overflow. Message in lastDiagnostic().
+    IRRecursionDetected,
+    // N-265: an ACYCLIC method_call chain past N-180's MAX_CALL_DEPTH (128).
+    // Message in lastDiagnostic().
+    IRCallDepthExceeded,
 };
 
 const max_parse_depth: u32 = 256;
@@ -477,6 +486,15 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         try checkAddOutputArity(m.body, mutable_count);
         if (!std.mem.eql(u8, m.name, "constructor")) try checkNoSuperCall(m.body);
     }
+
+    // N-265: a cycle or an acyclic chain past MAX_CALL_DEPTH in the
+    // method_call graph. Checked first, same order as Go's F-004
+    // checkIRFrontendRules (recursion before parentClass).
+    call_depth.check(allocator, method_list.items) catch |err| switch (err) {
+        error.IRRecursionDetected => return ParseError.IRRecursionDetected,
+        error.IRCallDepthExceeded => return ParseError.IRCallDepthExceeded,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 
     // F-038: optional on input (required_fields.zig validated the value).
     const parent_class: ?types.ParentClass = if (obj.get("parentClass")) |v| switch (v) {

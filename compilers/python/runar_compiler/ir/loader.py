@@ -16,10 +16,12 @@ from .synthetic_array_chain import assert_synthetic_array_chains
 from .rabin_key_provenance import assert_rabin_key_provenance
 from .types import (
     ANFBinding,
+    ANFMethod,
     ANFProgram,
     anf_program_from_dict,
     decode_constants,
 )
+from runar_compiler.frontend.input_limits import MAX_CALL_DEPTH, call_depth_message
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +239,19 @@ def validate_ir(program: ANFProgram) -> list[str]:
     readonly_props = frozenset(p.name for p in program.properties if p.readonly)
     declared_props = frozenset(p.name for p in program.properties)
 
+    # N-265: --ir never runs frontend/validator.py's _check_no_recursion,
+    # which enforces both the call-graph cycle rule and N-180's
+    # MAX_CALL_DEPTH (128) bound. Stack lowering (codegen/stack.py's
+    # method_call inlining) inlines every method_call to a private method by
+    # lowering its body in place, with no cycle or depth guard, so a
+    # self/mutually-recursive method recurses the host call stack until
+    # RecursionError, and an acyclic chain past the bound recurses it just as
+    # deep. Checked first, same order as Go's F-004 checkIRFrontendRules
+    # (recursion before parentClass).
+    recursion_error = _recursion_error(program)
+    if recursion_error:
+        errors.append(recursion_error)
+
     # N-087: the source validator's parentClass rules (see
     # _parent_class_error). Ahead of the per-binding checks so that, as in
     # the other six tiers, it outranks the F-014 readonly-write diagnostic.
@@ -391,6 +406,119 @@ def _walk_values(bindings: list[ANFBinding] | None):
         yield from _walk_values(binding.value.then)
         yield from _walk_values(binding.value.else_)
         yield from _walk_values(binding.value.body)
+
+
+# ---------------------------------------------------------------------------
+# N-265: IR method_call graph -- recursion + N-180 call-depth bound
+# ---------------------------------------------------------------------------
+#
+# Ported from Go's F-071 checkIRNoRecursion (compilers/go/compiler/
+# ir_frontend_rules.go), made iterative there too under this item, and
+# extended with N-180's depth bound -- Go's existing IR-path check was
+# cycle-only, and this tier had no IR-path recursion check at all. Two
+# passes, cycles checked before depth (a cyclic graph has no finite depth to
+# measure), both iterative (explicit stack, no host recursion -- the Python
+# interpreter's own recursion limit is exactly what an unbounded chain or
+# cycle hit before this).
+
+def _recursion_error(program: ANFProgram) -> str | None:
+    """The first ANF method_call cycle or call-depth violation, or ``None``.
+
+    Reports a cycle (a method strictly ON it, the exact "hit" a recursive
+    depth-first search would report the moment it finds a back edge) before
+    a depth violation, since a cyclic graph has no finite depth to measure.
+    """
+    callees: dict[str, list[str]] = {
+        m.name: [v.method for v in _walk_values(m.body) if v.kind == "method_call" and v.method is not None]
+        for m in program.methods
+        if m.name != "constructor"
+    }
+    cycle = _ir_cycle_method(program.methods, callees)
+    if cycle is not None:
+        return (
+            f"recursion detected: method '{cycle}' calls itself directly or indirectly. "
+            "Private methods are inlined at every call site, so a cyclic call graph has "
+            "no finite lowering"
+        )
+    return _ir_call_depth_error(program.methods, callees)
+
+
+def _ir_cycle_method(methods: list[ANFMethod], callees: dict[str, list[str]]) -> str | None:
+    """Iterative (explicit-stack), three-state DFS over the IR method_call
+    graph. Declaration order only decides which root the search starts from;
+    the name returned is whichever back edge is found first."""
+    unvisited, on_stack, done_state = 0, 1, 2
+    state: dict[str, int] = {}
+
+    for m in methods:
+        root = m.name
+        if root == "constructor" or state.get(root, unvisited) != unvisited:
+            continue
+        stack: list[dict] = [{"name": root, "next": 0}]
+        state[root] = on_stack
+        while stack:
+            top = stack[-1]
+            calls = callees.get(top["name"], [])
+            if top["next"] >= len(calls):
+                state[top["name"]] = done_state
+                stack.pop()
+                continue
+            callee = calls[top["next"]]
+            top["next"] += 1
+            if callee not in callees:
+                continue
+            callee_state = state.get(callee, unvisited)
+            if callee_state == on_stack:
+                return callee
+            if callee_state == unvisited:
+                state[callee] = on_stack
+                stack.append({"name": callee, "next": 0})
+    return None
+
+
+def _ir_call_depth_error(methods: list[ANFMethod], callees: dict[str, list[str]]) -> str | None:
+    """Iterative longest-path walk over the (by this point known-acyclic) IR
+    call graph, no host recursion. Returns the diagnostic for the first
+    method (declaration order) past MAX_CALL_DEPTH, or ``None``."""
+    depth: dict[str, int] = {}
+    done: set[str] = set()
+
+    for m in methods:
+        root = m.name
+        if root == "constructor" or root in done:
+            continue
+        stack: list[dict] = [{"name": root, "next": 0, "depth": 0}]
+        while stack:
+            top = stack[-1]
+            calls = callees.get(top["name"], [])
+            if top["next"] < len(calls):
+                callee = calls[top["next"]]
+                top["next"] += 1
+                if callee not in callees:
+                    continue
+                if callee in done:
+                    d = 1 + depth.get(callee, 0)
+                    if d > top["depth"]:
+                        top["depth"] = d
+                else:
+                    stack.append({"name": callee, "next": 0, "depth": 0})
+                continue
+            finished = stack.pop()
+            done.add(finished["name"])
+            depth[finished["name"]] = finished["depth"]
+            if stack:
+                parent = stack[-1]
+                d = 1 + finished["depth"]
+                if d > parent["depth"]:
+                    parent["depth"] = d
+
+    for m in methods:
+        if m.name == "constructor":
+            continue
+        d = depth.get(m.name, 0)
+        if d > MAX_CALL_DEPTH:
+            return call_depth_message(m.name)
+    return None
 
 
 def _effective_parent_class(program: ANFProgram) -> str:

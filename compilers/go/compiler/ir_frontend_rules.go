@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 
+	"github.com/icellan/runar/compilers/go/frontend"
 	"github.com/icellan/runar/compilers/go/ir"
 )
 
@@ -203,8 +204,19 @@ func checkNoReadonlyWrites(bindings []ir.ANFBinding, methodName string, readonly
 // in place (codegen/stack.go inlineMethodCall) with no cycle or depth guard,
 // so a self- or mutually-recursive method in externally supplied IR recursed
 // until the goroutine stack limit — `fatal error: stack overflow`, which no
-// recover() catches. Refuse any cycle in the method_call graph here, with the
-// frontend's wording. The method named is one that lies ON the cycle.
+// recover() catches, and an ACYCLIC chain past N-180's MAX_CALL_DEPTH
+// recursed it just as deep with no bound at all (N-265: the gap N-180 closed
+// on the source path never reached --ir). Two checks, in order, both
+// iterative (explicit stack, no host recursion — N-265 also converts this
+// function itself, which used to recurse via a closure):
+//
+//  1. assertIRNoCycle: refuse any cycle in the method_call graph, with the
+//     frontend's wording. The method named is one that lies ON the cycle —
+//     the exact "hit" the former host-recursive `visit` reported the moment
+//     it found a back edge.
+//  2. assertIRCallDepthBound: once known acyclic, the first method
+//     (declaration order) whose inlining depth exceeds MaxCallDepth, with
+//     the same CallDepthMessage the source-path validator uses (N-180).
 func checkIRNoRecursion(program *ir.ANFProgram) error {
 	callees := make(map[string][]string, len(program.Methods))
 	for i := range program.Methods {
@@ -215,41 +227,123 @@ func checkIRNoRecursion(program *ir.ANFProgram) error {
 		callees[m.Name] = collectIRMethodCalls(m.Body, nil)
 	}
 
+	if err := assertIRNoCycle(program.Methods, callees); err != nil {
+		return err
+	}
+	return assertIRCallDepthBound(program.Methods, callees)
+}
+
+// assertIRNoCycle is an iterative (explicit-stack), three-state DFS over the
+// method_call graph — a drop-in replacement for the former host-recursive
+// `visit` closure, with byte-identical reporting: declaration order only
+// decides which root the search starts from, and the method named is
+// whichever back edge is found first.
+func assertIRNoCycle(methods []ir.ANFMethod, callees map[string][]string) error {
 	const (
 		unvisited = iota
 		onStack
 		done
 	)
 	state := make(map[string]int, len(callees))
-	var visit func(name string) string
-	visit = func(name string) string {
-		state[name] = onStack
-		for _, callee := range callees[name] {
+
+	type frame struct {
+		name string
+		next int
+	}
+	for i := range methods {
+		root := methods[i].Name
+		if root == "constructor" || state[root] != unvisited {
+			continue
+		}
+		var stack []frame
+		state[root] = onStack
+		stack = append(stack, frame{name: root})
+		for len(stack) > 0 {
+			top := &stack[len(stack)-1]
+			calls := callees[top.name]
+			if top.next >= len(calls) {
+				state[top.name] = done
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			callee := calls[top.next]
+			top.next++
 			if _, declared := callees[callee]; !declared {
 				continue
 			}
 			switch state[callee] {
 			case onStack:
-				return callee
+				return fmt.Errorf(
+					"IR validation: recursion detected: method '%s' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering",
+					callee)
 			case unvisited:
-				if hit := visit(callee); hit != "" {
-					return hit
+				state[callee] = onStack
+				stack = append(stack, frame{name: callee})
+			}
+		}
+	}
+	return nil
+}
+
+// assertIRCallDepthBound is an iterative longest-path walk over the (by this
+// point known-acyclic) method_call graph, no host recursion: a method's call
+// depth is 0 if it calls no contract method, else 1 + the largest call depth
+// among the methods it calls. Private methods are inlined at every call
+// site, so this is the inlining depth. Refuses the first method (declaration
+// order) past frontend.MaxCallDepth.
+func assertIRCallDepthBound(methods []ir.ANFMethod, callees map[string][]string) error {
+	depth := make(map[string]int, len(callees))
+	done := make(map[string]bool, len(callees))
+
+	type frame struct {
+		name  string
+		next  int
+		depth int
+	}
+	for i := range methods {
+		root := methods[i].Name
+		if root == "constructor" || done[root] {
+			continue
+		}
+		var stack []frame
+		stack = append(stack, frame{name: root})
+		for len(stack) > 0 {
+			top := &stack[len(stack)-1]
+			calls := callees[top.name]
+			if top.next < len(calls) {
+				callee := calls[top.next]
+				top.next++
+				if _, declared := callees[callee]; !declared {
+					continue
+				}
+				if done[callee] {
+					if d := 1 + depth[callee]; d > top.depth {
+						top.depth = d
+					}
+				} else {
+					stack = append(stack, frame{name: callee})
+				}
+				continue
+			}
+			stack = stack[:len(stack)-1]
+			done[top.name] = true
+			depth[top.name] = top.depth
+			if len(stack) > 0 {
+				parent := &stack[len(stack)-1]
+				if d := 1 + top.depth; d > parent.depth {
+					parent.depth = d
 				}
 			}
 		}
-		state[name] = done
-		return ""
 	}
 
-	for i := range program.Methods {
-		name := program.Methods[i].Name
-		if name == "constructor" || state[name] != unvisited {
+	for i := range methods {
+		name := methods[i].Name
+		if name == "constructor" {
 			continue
 		}
-		if hit := visit(name); hit != "" {
-			return fmt.Errorf(
-				"IR validation: recursion detected: method '%s' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering",
-				hit)
+		if depth[name] > frontend.MaxCallDepth {
+			return fmt.Errorf("IR validation: %s", frontend.CallDepthMessage(name))
 		}
 	}
 	return nil

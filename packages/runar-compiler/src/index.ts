@@ -661,6 +661,15 @@ export function compileFromANF(
       `IR validation: contract ${anf.contractName} has no public methods — no spending entry points; an empty locking script is anyone-can-spend`,
     );
   }
+  // N-265: IR input skips 02-validate's checkNoRecursion, which enforces both
+  // the call-graph cycle rule and N-180's MAX_CALL_DEPTH bound. Stack lowering
+  // inlines every method_call to a private method by lowering its body in
+  // place with no cycle or depth guard, so a self/mutually-recursive method —
+  // or an acyclic chain past MAX_CALL_DEPTH — recurses the host call stack
+  // until it crashes. Checked before the parentClass rules below, same order
+  // as Go's F-004 checkIRFrontendRules.
+  assertIrNoRecursion(anf);
+
   // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
   // the scaffolding the frontend injects into each public method.
   if (assertIrParentClassRules(anf) === 'StatefulSmartContract') {
@@ -744,6 +753,131 @@ function forEachIrBinding(bindings: ANFBinding[], fn: (v: ANFBinding['value']) =
     fn(b.value);
     const v = b.value as { then?: ANFBinding[]; else?: ANFBinding[]; body?: ANFBinding[] };
     for (const nested of [v.then, v.else, v.body]) if (nested) forEachIrBinding(nested, fn);
+  }
+}
+
+/**
+ * N-265: `--ir` skips 02-validate's `checkNoRecursion`, which enforces both
+ * the call-graph cycle rule and N-180's `MAX_CALL_DEPTH` (128) bound. Stack
+ * lowering (`lowerToStack`'s `inlineMethodCall`) inlines every `method_call`
+ * to a private method by lowering its body in place, with no cycle or depth
+ * guard, so a self/mutually-recursive method recurses the host call stack
+ * until `RangeError: Maximum call stack size exceeded`, and an acyclic chain
+ * past the bound recurses it just as deep. Ported from Go's F-071
+ * `checkIRNoRecursion` (compilers/go/compiler/ir_frontend_rules.go), made
+ * iterative here too (no host recursion), and extended with N-180's depth
+ * bound — Go's existing IR-path check was cycle-only, which is this item's
+ * other half.
+ *
+ * Two iterative passes, cycles checked before depth (a cyclic graph has no
+ * finite depth, so there is nothing for the second pass to measure):
+ *   1. `assertIrNoCycle` — the exact "hit" a recursive depth-first search
+ *      would report the moment it finds a back edge (a method strictly ON
+ *      the cycle, not every caller that merely reaches it), with the stack
+ *      made explicit instead of growing the host call stack one level per
+ *      link. Matches Go F-071's existing reporting convention byte for byte.
+ *   2. `assertIrCallDepthBound` — once known acyclic, a plain iterative
+ *      longest-path over the call graph, refusing the first method
+ *      (declaration order) whose inlining depth exceeds MAX_CALL_DEPTH.
+ */
+function assertIrNoRecursion(program: ANFProgram): void {
+  const callGraph = new Map<string, string[]>();
+  for (const m of program.methods) {
+    if (m.name === 'constructor') continue;
+    const calls: string[] = [];
+    forEachIrBinding(m.body, (v) => {
+      if (v.kind === 'method_call') calls.push(v.method);
+    });
+    callGraph.set(m.name, calls);
+  }
+
+  assertIrNoCycle(callGraph);
+  assertIrCallDepthBound(program.methods, callGraph);
+}
+
+/**
+ * Iterative (explicit-stack), three-state DFS over the IR `method_call`
+ * graph. Declaration order only decides which root the search starts from;
+ * the reported name is whichever back edge is found first, exactly as the
+ * host-recursive version Go's F-071 `checkIRNoRecursion` used would report.
+ */
+function assertIrNoCycle(callGraph: Map<string, string[]>): void {
+  const UNVISITED = 0;
+  const ON_STACK = 1;
+  const DONE = 2;
+  const state = new Map<string, number>();
+
+  for (const root of callGraph.keys()) {
+    if ((state.get(root) ?? UNVISITED) !== UNVISITED) continue;
+    const stack: Array<{ name: string; callees: string[]; next: number }> = [];
+    state.set(root, ON_STACK);
+    stack.push({ name: root, callees: callGraph.get(root)!, next: 0 });
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.next >= top.callees.length) {
+        state.set(top.name, DONE);
+        stack.pop();
+        continue;
+      }
+      const callee = top.callees[top.next++]!;
+      if (!callGraph.has(callee)) continue;
+      const calleeState = state.get(callee) ?? UNVISITED;
+      if (calleeState === ON_STACK) {
+        throw new Error(
+          `IR validation: recursion detected: method '${callee}' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering`,
+        );
+      }
+      if (calleeState === UNVISITED) {
+        state.set(callee, ON_STACK);
+        stack.push({ name: callee, callees: callGraph.get(callee)!, next: 0 });
+      }
+    }
+  }
+}
+
+/**
+ * Iterative longest-path over the (by this point known-acyclic) IR call
+ * graph, no host recursion: a method's call depth is 0 if it calls no
+ * contract method, else 1 + the largest call depth among the methods it
+ * calls. Private methods are inlined at every call site, so this is the
+ * inlining depth. Refuses the first method (declaration order) past
+ * MAX_CALL_DEPTH, with the diagnostic every tier shares.
+ */
+function assertIrCallDepthBound(methods: ANFProgram['methods'], callGraph: Map<string, string[]>): void {
+  const depth = new Map<string, number>();
+  const done = new Set<string>();
+
+  for (const root of callGraph.keys()) {
+    if (done.has(root)) continue;
+    const stack: Array<{ name: string; callees: string[]; next: number; depth: number }> = [];
+    stack.push({ name: root, callees: callGraph.get(root)!, next: 0, depth: 0 });
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.next < top.callees.length) {
+        const callee = top.callees[top.next++]!;
+        if (!callGraph.has(callee)) continue;
+        if (done.has(callee)) {
+          top.depth = Math.max(top.depth, 1 + depth.get(callee)!);
+        } else {
+          stack.push({ name: callee, callees: callGraph.get(callee)!, next: 0, depth: 0 });
+        }
+        continue;
+      }
+      stack.pop();
+      done.add(top.name);
+      depth.set(top.name, top.depth);
+      const parent = stack[stack.length - 1];
+      if (parent) parent.depth = Math.max(parent.depth, 1 + top.depth);
+    }
+  }
+
+  for (const m of methods) {
+    if (m.name === 'constructor') continue;
+    if ((depth.get(m.name) ?? 0) > InputLimits.MAX_CALL_DEPTH) {
+      throw new Error(
+        `IR validation: call depth of method '${m.name}' exceeds MAX_CALL_DEPTH (limit=${InputLimits.MAX_CALL_DEPTH})`,
+      );
+    }
   }
 }
 
