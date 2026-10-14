@@ -1,6 +1,6 @@
 # Integration Tests
 
-End-to-end integration tests that deploy and spend Runar contracts on a real Bitcoin node. Tests are organized by language (Go, TypeScript, Rust, Python, Ruby, Zig) — each suite uses its own compiler and SDK for deployment/calling.
+End-to-end integration tests that deploy and spend Runar contracts on a real Bitcoin node. Tests are organized by language (Go, TypeScript, Rust, Python, Ruby, Zig, Java) — each suite uses its own compiler and SDK for deployment/calling.
 
 Two node backends are supported:
 
