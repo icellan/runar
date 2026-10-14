@@ -11,7 +11,8 @@
  * non-empty strings and so are truthy in JS, wrongly counting as CI.
  *
  * N-166 already solved this once, for the ANF driver gate only
- * (`conformance/anf-interpreter/driver-gate.ts`'s `isCiEnv`: CI is "set to
+ * (`isCiEnv`, now defined in `conformance/env.ts` — see N-250 below — and at
+ * the time in `conformance/anf-interpreter/driver-gate.ts`: CI is "set to
  * anything but '', '0' or 'false' (case-insensitive)", or
  * `GITHUB_ACTIONS=true`). This sweeps every other conformance CI check onto
  * that same predicate instead of leaving `~30` private reimplementations to
@@ -31,12 +32,16 @@ import { fileURLToPath } from 'node:url';
 
 const CONFORMANCE_DIR = dirname(fileURLToPath(import.meta.url));
 
-// The predicate's own definition and its direct unit test legitimately spell
-// out `env.CI` / `process.env.CI` — that's the implementation being reused,
-// not a site that should call it. This file also mentions the pattern only
-// inside comments/regexes above, never as a live check, so it is not its own
+// The predicate's own definition (conformance/env.ts, since N-250 — see
+// below) and its direct unit test legitimately spell out `env.CI` /
+// `process.env.CI` — that's the implementation being reused, not a site that
+// should call it. driver-gate.ts/.test.ts are also excluded: driver-gate.ts
+// keeps a backward-compatible re-export of isCiEnv (N-250) and its test
+// exercises that re-export. This file also mentions the pattern only inside
+// comments/regexes above, never as a live check, so it is not its own
 // violation, but is excluded anyway for clarity.
 const EXCLUDED = new Set([
+  join(CONFORMANCE_DIR, 'env.ts'),
   join(CONFORMANCE_DIR, 'anf-interpreter', 'driver-gate.ts'),
   join(CONFORMANCE_DIR, 'anf-interpreter', 'driver-gate.test.ts'),
   join(CONFORMANCE_DIR, 'ci-predicate-sweep.test.ts'),
@@ -82,6 +87,57 @@ describe('N-236: conformance CI checks route through the shared isCiEnv predicat
         if (BAD_EQUALS_TRUE.test(line) || BAD_RAW_PROCESS_ENV_CI.test(line)) {
           violations.push(`${relative(CONFORMANCE_DIR, file)}:${i + 1}: ${line.trim()}`);
         }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
+/**
+ * N-250: isCiEnv used to be DEFINED in conformance/anf-interpreter/driver-gate.ts
+ * — a file that is otherwise about the ANF cross-interpreter driver gate
+ * (enforceDriverGate, GateDriver) — yet after N-236's sweep it was imported
+ * by ~44 unrelated conformance suites plus analyzer/run.ts and
+ * runner/runner.ts, none of which care about ANF drivers at all. That made
+ * driver-gate.ts a load-bearing dependency for most of conformance/ despite
+ * its name and doc comment describing a narrow, unrelated concern.
+ *
+ * Fix: isCiEnv is defined in the neutral conformance/env.ts, and
+ * driver-gate.ts re-exports it only for its own backward compatibility
+ * (its direct unit test, driver-gate.test.ts, still imports the re-export to
+ * prove that compatibility shim works). Every other caller imports isCiEnv
+ * from env.ts directly.
+ *
+ * Proves: conformance/env.ts exists and defines isCiEnv, and no file outside
+ * driver-gate.ts / driver-gate.test.ts imports isCiEnv from driver-gate.js.
+ * Does not prove isCiEnv's runtime behavior (driver-gate.test.ts and the
+ * N-236 sweep above cover that) — only where the symbol is defined and how
+ * it is reached.
+ */
+describe('N-250: isCiEnv is defined in the neutral conformance/env.ts', () => {
+  const allFiles = listTsFiles(CONFORMANCE_DIR);
+  // driver-gate.ts keeps a compatibility re-export; driver-gate.test.ts
+  // legitimately imports through that re-export to prove the shim works.
+  const ALLOWED_DRIVER_GATE_IMPORTERS = new Set([
+    join(CONFORMANCE_DIR, 'anf-interpreter', 'driver-gate.ts'),
+    join(CONFORMANCE_DIR, 'anf-interpreter', 'driver-gate.test.ts'),
+  ]);
+  const IMPORTS_IS_CI_ENV_FROM_DRIVER_GATE =
+    /import\s*\{[^}]*\bisCiEnv\b[^}]*\}\s*from\s*['"][^'"]*driver-gate(?:\.js)?['"]/;
+
+  it('conformance/env.ts exports isCiEnv', () => {
+    const envTs = join(CONFORMANCE_DIR, 'env.ts');
+    const src = readFileSync(envTs, 'utf8');
+    expect(src).toMatch(/export function isCiEnv\(/);
+  });
+
+  it('no file outside driver-gate.ts/driver-gate.test.ts imports isCiEnv from driver-gate.js', () => {
+    const violations: string[] = [];
+    for (const file of allFiles) {
+      if (ALLOWED_DRIVER_GATE_IMPORTERS.has(file)) continue;
+      const src = readFileSync(file, 'utf8');
+      if (IMPORTS_IS_CI_ENV_FROM_DRIVER_GATE.test(src)) {
+        violations.push(relative(CONFORMANCE_DIR, file));
       }
     }
     expect(violations).toEqual([]);

@@ -12,7 +12,7 @@ import {
   buildIrTiers,
   compileHex,
 } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-096 — one `syntheticArrayChain` validity rule on the `--ir` path, in all

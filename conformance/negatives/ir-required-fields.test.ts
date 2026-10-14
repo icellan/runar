@@ -10,7 +10,7 @@ import {
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
 import { BrokenTier, IR_TIER_IDS, Tier, buildIrTiers, verdict } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-069 — required ANF IR fields, checked for presence AND JSON type, with ONE

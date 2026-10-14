@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { REPO, Tier, buildSourceTiers } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-021 (user decision R11) — seven-tier POSITIVE parity for Ruby's

@@ -17,7 +17,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-071 — on the `--ir` path every public method must END with an assert, in

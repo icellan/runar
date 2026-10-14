@@ -11,7 +11,7 @@ import { MockProvider } from '../../packages/runar-sdk/src/providers/mock.js';
 import { LocalSigner } from '../../packages/runar-sdk/src/signers/local.js';
 import { buildP2PKHScript } from '../../packages/runar-sdk/src/script-utils.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildSourceTiers } from '../negatives/tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * F-038 (+ F-065, F-066, F-070, F-088) — `--emit-ir` -> `--ir` is lossless.

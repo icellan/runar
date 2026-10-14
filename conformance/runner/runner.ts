@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { execSync, spawn } from 'child_process';
 import os from 'os';
 import { JavaDaemon } from './java-daemon.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

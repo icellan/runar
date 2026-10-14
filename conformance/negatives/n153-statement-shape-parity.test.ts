@@ -9,7 +9,7 @@ import {
   newConsensusSpend,
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { Tier, buildSourceTiers, compileHex } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-153 — statement-shape parity on the .sol / .move / .go / .rs surfaces.

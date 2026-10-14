@@ -17,7 +17,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-065 / N-060 — compiler-reserved names, all seven tiers, one diagnostic.

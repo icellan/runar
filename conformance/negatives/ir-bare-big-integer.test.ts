@@ -10,7 +10,7 @@ import {
   compileHex,
   resolveTsxLoader,
 } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * ---------------------------------------------------------------------------

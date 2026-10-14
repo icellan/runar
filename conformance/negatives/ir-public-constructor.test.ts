@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ScriptVM } from '../../packages/runar-testing/src/vm/script-vm.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildIrTiers, verdict } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-113 — the `--ir` no-public-methods guard counted the CONSTRUCTOR.

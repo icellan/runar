@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compileFromANF, loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildIrTiers, verdict } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-059 / F-102 — `check_preimage.sighashFlag` on the `--ir` path, all 7 tiers.

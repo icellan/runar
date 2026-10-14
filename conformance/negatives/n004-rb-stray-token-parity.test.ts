@@ -9,7 +9,7 @@ import {
   newConsensusSpend,
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { REPO, Tier, buildSourceTiers, compileHex } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-004 (CL-BUG-257) — stray class-level tokens on the .runar.rb surface,

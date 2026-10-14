@@ -9,7 +9,7 @@ import {
   compileHex,
   missingTierIds,
 } from '../negatives/tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * F-108 — dead-code elimination deleted a private helper's RETURN VALUE.

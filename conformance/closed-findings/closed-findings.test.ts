@@ -44,7 +44,7 @@ import {
   findRustBinary,
   findZigBinary,
 } from '../runner/runner.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * Cross-tier ACCEPTANCE parity. Started as the subtype-lattice gate (N-104) and

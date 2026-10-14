@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compile, compileFromANF, loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildIrTiers, compileHex } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-205 (b) — verifyRabinSig key provenance on the `--ir` path, in all seven

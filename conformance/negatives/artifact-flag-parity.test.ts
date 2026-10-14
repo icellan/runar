@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ALL_TIER_IDS, BrokenTier, REPO, Tier, buildSourceTiers } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-139 — artifact `abi.methods[].isTerminal` and top-level `anf` presence

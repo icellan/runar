@@ -15,17 +15,15 @@
 // Kept out of the suites so the gate can be unit-tested against an injected
 // env without spawning drivers (driver-gate.test.ts).
 
+// isCiEnv moved to ../env.ts (N-250) — it's a general conformance CI
+// predicate, not specific to the ANF driver gate. Re-exported here only for
+// backward compatibility with existing imports.
+import { isCiEnv, type Env } from '../env.js';
+export { isCiEnv };
+
 export interface GateDriver {
   name: string;
   setupHint: string;
-}
-
-type Env = Record<string, string | undefined>;
-
-export function isCiEnv(env: Env): boolean {
-  const ci = env.CI;
-  if (ci !== undefined && !['', '0', 'false'].includes(ci.toLowerCase())) return true;
-  return env.GITHUB_ACTIONS === 'true';
 }
 
 export function driversRequired(env: Env): boolean {

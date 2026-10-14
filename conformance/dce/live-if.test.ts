@@ -9,7 +9,7 @@ import {
   compileHex,
   missingTierIds,
 } from '../negatives/tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-140 — dead-code elimination deleted a LIVE `if`, on all seven tiers.

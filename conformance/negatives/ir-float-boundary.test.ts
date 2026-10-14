@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { IR_TIER_IDS, REPO, Tier, buildIrTiers, compileHex, verdict } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * ---------------------------------------------------------------------------

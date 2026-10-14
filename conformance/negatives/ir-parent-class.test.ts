@@ -18,7 +18,7 @@ import {
   compileHex,
   verdict,
 } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-087 — on the `--ir` path the source validator's parentClass rules, and

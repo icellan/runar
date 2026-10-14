@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { buildSourceTiers, judge, ALL_TIER_IDS } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-215 -- substr() literal negative start, seven-tier SHARED-DIAGNOSTIC

@@ -10,7 +10,7 @@ import {
 } from '../../packages/runar-testing/src/consensus-spend.js';
 import { compile } from '../../packages/runar-compiler/src/index.js';
 import { Tier, buildSourceTiers, compileHex } from './tier-harness.js';
-import { isCiEnv } from '../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-053 — silent statement drops, seven-tier parity and on-chain proof.

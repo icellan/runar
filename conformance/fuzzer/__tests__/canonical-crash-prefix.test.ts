@@ -35,7 +35,7 @@ import {
   CRASH_PREFIX,
   normaliseOutcome,
 } from '../canonical-json-differential.js';
-import { isCiEnv } from '../../anf-interpreter/driver-gate.js';
+import { isCiEnv } from '../../env.js';
 
 const REPO = resolve(__dirname, '../../..');
 const read = (rel: string) => readFileSync(resolve(REPO, rel), 'utf8');
