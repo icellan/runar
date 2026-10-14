@@ -133,6 +133,15 @@ export const GATES: Record<string, GateSpec> = {
     cwd: 'conformance',
     argv: ['npx', 'vitest', 'run', 'witnesses/real-crypto-execution.test.ts', '-t', 'private-helper-outputs'],
   },
+  // N-298: direct unit gate on `collectStmt`'s `if_statement` case — closes
+  // the measured hole where every `real-crypto-private-helper-outputs` /
+  // F1 fixture puts its helper's effect at the top level or in a `then` arm,
+  // never exclusively inside an `else` branch, so the `stmt.else` walk itself
+  // was untested by any gate in this corpus.
+  'side-effect-summary-unit': {
+    cwd: '.',
+    argv: ['npx', 'vitest', 'run', 'packages/runar-compiler/src/__tests__/side-effect-summary.test.ts'],
+  },
   'state-push-framing-vm': {
     cwd: '.',
     argv: ['npx', 'vitest', 'run', 'packages/runar-testing/src/__tests__/state-push-framing-vm.test.ts'],

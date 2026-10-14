@@ -304,6 +304,7 @@
       "caught": true,
       "survived": false,
       "caughtBy": [
+        "state-push-framing-vm",
         "c28-state-strict"
       ],
       "expectCaughtBy": [
@@ -477,11 +478,15 @@
       "id": "peephole-f392-roll0-opcode-form-matches-pick",
       "class": "swapped operands",
       "stage": "peephole",
-      "caught": false,
-      "survived": true,
-      "caughtBy": [],
-      "expectCaughtBy": [],
-      "documentedSurvivor": true,
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false,
       "stale": false
     },
     {
@@ -503,11 +508,15 @@
       "id": "sideeffect-ifstmt-skip-else-branch",
       "class": "dropped side-effect detection",
       "stage": "side-effect-summary",
-      "caught": false,
-      "survived": true,
-      "caughtBy": [],
-      "expectCaughtBy": [],
-      "documentedSurvivor": true,
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "side-effect-summary-unit"
+      ],
+      "expectCaughtBy": [
+        "side-effect-summary-unit"
+      ],
+      "documentedSurvivor": false,
       "stale": false
     }
   ]

@@ -365,6 +365,55 @@ describe('peephole rules preserve stack effect (bounded-exhaustive, TS-GAP-008)'
 });
 
 // ---------------------------------------------------------------------------
+// N-298: F-392's opcode-string form (push(depth), {op:'opcode', code:'OP_ROLL'
+// | 'OP_PICK'}) for the Roll{0,1,2}/Pick{0,1} small-depth rules.
+//
+// `PEEPHOLE_RULES` (peephole-rules.ts) only encodes the TYPED form of each
+// window (`{op:'roll', depth:0}`, `{op:'pick', depth:0}`, ...), so the sweep
+// above never drives `optimizeStackIR` through the opcode-string branch each
+// of these five matchers also accepts (`isOpcode(ops[1], 'OP_ROLL' |
+// 'OP_PICK')`). mutation id `peephole-f392-roll0-opcode-form-matches-pick`
+// flips the Roll{0} rule's opcode check from 'OP_ROLL' to 'OP_PICK', which
+// makes it wrongly intercept `push(0n), {op:'opcode', code:'OP_PICK'}` (which
+// must become `dup`, not be erased) and simultaneously stops matching its own
+// `push(0n), {op:'opcode', code:'OP_ROLL'}` window at all. Both are real
+// matcher divergences caught below by running `optimizeStackIR` for real
+// (`assertRuntimeRule`), not by comparing the declarative mirror to itself.
+//
+// Proves: for each of the five small-depth rules, the opcode-string form of
+// its window is matched by the SAME rule (and none other), and
+// `optimizeStackIR`'s output for it has the typed form's documented stack
+// effect over the numeric edge domain.
+// Does NOT prove: anything about an opcode-string Roll/Pick at a depth this
+// corpus does not target (the rules only special-case depth 0/1/2), or about
+// an opcode-string window embedded in a longer program.
+// ---------------------------------------------------------------------------
+describe('F-392: opcode-string-form Roll/Pick windows match the SAME rule as their typed form', () => {
+  const OPCODE_FORM_CASES: Array<{
+    name: string;
+    depth: bigint;
+    code: 'OP_ROLL' | 'OP_PICK';
+    replacement: StackOp[];
+  }> = [
+    { name: 'opcode-form-roll0', depth: 0n, code: 'OP_ROLL', replacement: [] },
+    { name: 'opcode-form-roll1', depth: 1n, code: 'OP_ROLL', replacement: [{ op: 'swap' }] },
+    { name: 'opcode-form-roll2', depth: 2n, code: 'OP_ROLL', replacement: [{ op: 'rot' }] },
+    { name: 'opcode-form-pick0', depth: 0n, code: 'OP_PICK', replacement: [{ op: 'dup' }] },
+    { name: 'opcode-form-pick1', depth: 1n, code: 'OP_PICK', replacement: [{ op: 'over' }] },
+  ];
+
+  for (const c of OPCODE_FORM_CASES) {
+    it(`push(${c.depth}n), {opcode:${c.code}} ≡ replacement over edge domain`, () => {
+      const pattern: StackOp[] = [push(c.depth), opc(c.code)];
+      for (const inputs of cartesian(EDGE_NUM, Number(c.depth) + 1)) {
+        const witness = [SENTINEL, ...inputs.map(push)];
+        assertRuntimeRule(c.name, `inputs=[${inputs.join(',')}]`, witness, pattern, c.replacement);
+      }
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Documented precondition: OP_NOT, OP_NOT elimination is boolean-idempotence.
 // ---------------------------------------------------------------------------
 

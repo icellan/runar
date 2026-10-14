@@ -32,6 +32,7 @@ harness would need a per-mutant rebuild; they do not today.)
 | `branch-result-depth-invariant` | `npx vitest run packages/runar-compiler/src/__tests__/branch-result-depth-invariant.test.ts` | Layer C of `lowerIf` (`7b888035`): the parent `stackMap` must describe the physical stack after `OP_ENDIF`. Registered so the branch-merge mutants can **measure** whether it fires — for a depth-preserving, name-corrupting defect it does **not** |
 | `real-crypto-branch-merged-locals` | `cd conformance && npx vitest run witnesses/real-crypto-execution.test.ts -t branch-merged-locals` | the `branch-merged-locals` witness replayed through the real `@bsv/sdk` `Spend` (2 accepts + 1 tamper-reject), not the interpreter |
 | `real-crypto-private-helper-outputs` | `cd conformance && npx vitest run witnesses/real-crypto-execution.test.ts -t private-helper-outputs` | the `private-helper-outputs` witness (side-effect-summary.ts's regression fixture: public methods delegate output/mutation effects to private helpers) replayed through the real `@bsv/sdk` `Spend`, not the interpreter (N-287) |
+| `side-effect-summary-unit` | `npx vitest run packages/runar-compiler/src/__tests__/side-effect-summary.test.ts` | direct unit pins on `collectStmt`'s call-graph walk, including a private helper whose only mutation is reachable solely through an else branch (N-298) |
 | `state-push-framing-vm` | `npx vitest run packages/runar-testing/src/__tests__/state-push-framing-vm.test.ts` | state-section `<len><data>` framing through a deployed continuation and the real Script VM, over the full 1-byte value-class matrix (PALMER-2, `23ef2d2b`) |
 | `c28-state-strict` | `npx vitest run packages/runar-sdk/src/__tests__/c28-state-strict.test.ts` | `deserializeState` strictness unit pins, including a direct malformed-input case (`deserializeState(fields, '55')` must throw `/is not a push opcode/`) — the gate that actually detects a *decoder*-only OP_N regression (see Phase E1 below) |
 | `sdk-vertical-constructor-slots` | `cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter bigint-0` | TS SDK's constructor-slot splice (`buildCodeScript()` in `contract.ts`) against the independently-derived code part in `conformance/sdk-vertical` (Phase C3 / TG-016) |
@@ -92,9 +93,9 @@ assumed:
 |---|---|---|
 | `peephole-walk-drops-else-arm` | `optimizeStackIR`'s N-264 bottom-up collection: disables `if (op.else) lists.push(op.else)`, so an if-statement's else arm is never itself optimized | caught by `differential-witness`, `real-crypto-branch-merged-locals`, `stack-frame-mutation-pins` |
 | `peephole-withoptimizedarms-swap-then-else` | `withOptimizedArms` swaps the rebuilt `then`/`else` arms | caught by `differential-witness`, `branch-merged-locals-vm`, `real-crypto-branch-merged-locals`, `stack-frame-mutation-pins` |
-| `peephole-f392-roll0-opcode-form-matches-pick` | F-392's opcode-string-form matching: the `PUSH 0, Roll{0}` rule's `isOpcode(…, 'OP_ROLL')` disjunct is changed to `'OP_PICK'`, so it wrongly intercepts a `PUSH 0, OP_PICK` window that should become `dup` and erases both ops instead | **documented survivor** — see `finding` on the mutant; no current codegen path emits a depth-0/1 opcode-string Roll/Pick pair (WOTS+ codegen, the only known opcode-string emitter, uses depth 2/3), so every one of F-392's five small-depth opcode-string branches is individually unreachable by this corpus's gates |
+| `peephole-f392-roll0-opcode-form-matches-pick` | F-392's opcode-string-form matching: the `PUSH 0, Roll{0}` rule's `isOpcode(…, 'OP_ROLL')` disjunct is changed to `'OP_PICK'`, so it wrongly intercepts a `PUSH 0, OP_PICK` window that should become `dup` and erases both ops instead | **formerly a documented survivor, now closed by `peephole-exhaustive`** — see below |
 | `sideeffect-unioninto-and-instead-of-or` | `unionInto` flips one effect-propagation `||=` to `&&=`, so a private helper's `mutatesState` effect is silently dropped from its public caller's summary | caught **only** by the new `real-crypto-private-helper-outputs` gate (added by this item) — no other existing gate detects it |
-| `sideeffect-ifstmt-skip-else-branch` | `collectStmt`'s `if_statement` case: disables the `stmt.else` walk, so a private helper's side effect hidden only inside an else-branch never surfaces | **documented survivor** — see `finding` on the mutant; `private-helper-outputs` (the fixture this walk exists for) puts every helper's effect at the top level or in a then-branch, never exclusively in an else |
+| `sideeffect-ifstmt-skip-else-branch` | `collectStmt`'s `if_statement` case: disables the `stmt.else` walk, so a private helper's side effect hidden only inside an else-branch never surfaces | **formerly a documented survivor, now closed by `side-effect-summary-unit`** — see below |
 
 `real-crypto-private-helper-outputs` (new gate, added alongside these
 mutants) replays `conformance/witnesses/real-crypto/private-helper-outputs.json`
@@ -113,6 +114,32 @@ hole (its accept/reject verdict depends on a folded `2n + 3n`); the mutant's
 `expectCaughtBy` is `["fold-execution"]` and its `finding` records the
 before/after. Kept as an example of the corpus's own discipline: a real hole
 was measured, named, and closed with new execution — not by relabelling.
+
+`peephole-f392-roll0-opcode-form-matches-pick` (N-287's documented survivor
+for F-392's opcode-string-form matching) **used to survive** every gate
+probed, because `peephole-rules.ts`'s declarative mirror only encoded the
+TYPED form of the Roll/Pick windows, never the opcode-string form the same
+matchers also accept. Five new cases in
+`packages/runar-compiler/src/__tests__/peephole-exhaustive.test.ts` ("F-392:
+opcode-string-form Roll/Pick windows match the SAME rule as their typed
+form") run `optimizeStackIR` for real on the opcode-string form of each of
+Roll{0,1,2}/Pick{0,1} and assert its output matches the typed form's
+documented replacement. The mutant's `expectCaughtBy` is now
+`["peephole-exhaustive"]`.
+
+`sideeffect-ifstmt-skip-else-branch` (N-287's documented survivor for
+`collectStmt`'s `else`-branch walk) **used to survive** every gate probed,
+because every fixture in the corpus — `private-helper-outputs` included —
+put a private helper's effect at the top level or in a `then` arm, never
+exclusively inside an `else` branch. A new ANF/ABI parameter-propagation test
+in `packages/runar-compiler/src/__tests__/side-effect-summary.test.ts`
+("N-298: side-effect-summary walks a private helper's else branch") pins a
+private helper whose only mutation is reachable solely through an else arm,
+wired into this harness as the new `side-effect-summary-unit` gate; a
+sibling interpreter-execution test in the same describe block pins that the
+else-only mutation still runs under `TestContract`'s business-logic model,
+but does not itself detect this mutation. The mutant's `expectCaughtBy` is
+now `["side-effect-summary-unit"]`.
 
 ## Phase E1 additions — Palmer-class corpus (TS-GAP-007, 2026-08)
 
