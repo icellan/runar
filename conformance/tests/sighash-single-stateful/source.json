@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/sighash-single-stateful/SingleCounter.runar.ts",
+    ".runar.sol": "../../../examples/sol/sighash-single-stateful/SingleCounter.runar.sol",
+    ".runar.move": "../../../examples/move/sighash-single-stateful/SingleCounter.runar.move",
+    ".runar.go": "../../../examples/go/sighash-single-stateful/SingleCounter.runar.go",
+    ".runar.rs": "../../../examples/rust/sighash-single-stateful/SingleCounter.runar.rs",
+    ".runar.py": "../../../examples/python/sighash-single-stateful/SingleCounter.runar.py",
+    ".runar.zig": "../../../examples/zig/sighash-single-stateful/SingleCounter.runar.zig",
+    ".runar.rb": "../../../examples/ruby/sighash-single-stateful/SingleCounter.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/sighash-single-stateful/SingleCounter.runar.java"
+  }
+}

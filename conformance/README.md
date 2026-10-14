@@ -818,7 +818,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **90 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **91 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
@@ -879,9 +879,9 @@ Gated in CI by the `Script Execution Oracle` job. It is a curated family list
 (not a completeness gate over every fixture); the TS `witnesses/differential.test.ts`
 ScriptVM also executes fold-ON bytes against a script engine.
 
-### SDK-output conformance (71 fixtures, 7 SDKs)
+### SDK-output conformance (72 fixtures, 7 SDKs)
 
-`sdk-output/tests/` contains 71 fixtures (one `input.json` + one
+`sdk-output/tests/` contains 72 fixtures (one `input.json` + one
 `expected-locking.hex` per directory). The runner in `sdk-output/runner/sdk-runner.ts`
 compiles each fixture through all seven SDK tools in `sdk-output/tools/` (TypeScript,
 Go, Python, Ruby, Rust, Zig, Java) and asserts byte-identical locking-script hex

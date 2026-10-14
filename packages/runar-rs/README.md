@@ -1175,7 +1175,7 @@ mod counter_integration_example {
 [`conformance/sdk-output/`](../../conformance/sdk-output/) cross-validates
 that this SDK emits **byte-identical deployed locking scripts** as every
 other Rúnar SDK (TS, Go, Python, Zig, Ruby, Java) for the same artifact +
-constructor args. The Counter contract is one of the 71 fixtures.
+constructor args. The Counter contract is one of the 72 fixtures.
 
 ---
 

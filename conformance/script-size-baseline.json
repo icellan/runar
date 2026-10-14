@@ -81,6 +81,7 @@
     "sha256-compress": 23153,
     "sha256-finalize": 69513,
     "shift-ops": 33,
+    "sighash-single-stateful": 1357,
     "sphincs-wallet": 188594,
     "state-bigint-edges": 703,
     "state-covenant": 1033,

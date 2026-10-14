@@ -824,7 +824,12 @@ number. It is pinned from both sides:
 -- 2026-10-14 (N-093): N-093 added `compiler-directives` and
 -- `embed-always-fixed-array` (both byte-exact, baselineMatches):
 -- 71 = baselineMatches (68) + (22 - 19).
-def expectedByteExact : Nat := 71
+--
+-- 2026-10-15 (N-179): N-179 added `sighash-single-stateful` (byte-exact,
+-- baselineMatches; the first non-ALL stateful fixture, byte-exact because
+-- N-178 made the model read check_preimage's sighashFlag):
+-- 72 = baselineMatches (69) + (22 - 19).
+def expectedByteExact : Nat := 72
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -843,8 +848,10 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-10-11 (F-148): 87 -> 88 for F-148's `price-bet` fixture (byte-exact, in `baselineMatches`).
 2026-10-14 (N-093): 88 -> 90 for N-093's `compiler-directives` and
 `embed-always-fixed-array` fixtures (both byte-exact, in `baselineMatches`).
+2026-10-15 (N-179): 90 -> 91 for N-179's `sighash-single-stateful` fixture
+(byte-exact, in `baselineMatches`).
 -/
-def expectedFixtureTotal : Nat := 90
+def expectedFixtureTotal : Nat := 91
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -907,6 +914,7 @@ def baselineMatches : List String := [
   "sha256-compress",
   "sha256-finalize",
   "shift-ops",
+  "sighash-single-stateful",
   "state-bigint-edges",
   "state-covenant-mechanics",
   "state-ripemd160",
@@ -1247,7 +1255,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 90 := by rfl
+        + lowerDivergencePending.length = 91 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

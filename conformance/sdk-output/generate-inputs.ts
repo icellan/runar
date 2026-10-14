@@ -296,6 +296,17 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '0' },
     ],
   },
+  // N-179 (N-038): a stateful method declared `@sighash SINGLE|FORKID`, whose
+  // ABI carries no change params. The deploy locking script is pinned here;
+  // the call-time behaviour all seven SDKs must share is pinned by
+  // conformance/sdk-call/.
+  {
+    name: 'sighash-single-stateful',
+    source: 'examples/ts/sighash-single-stateful/SingleCounter.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '0' },
+    ],
+  },
   // R-248: the corpus's only MUTABLE `boolean` state field. The compiler
   // spells the type `boolean` (never `bool`) and annotates it
   // `encoding: "bool1", byteLength: 1`; five of the seven SDKs matched only

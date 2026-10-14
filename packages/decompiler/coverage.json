@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-10-14T19:12:44.755Z",
+  "generatedAt": "2026-10-14T22:42:20.944Z",
   "summary": {
-    "byte-match": 92,
+    "byte-match": 93,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 87,
+    "template": 88,
     "assert-recognizer": 1,
     "symexec": 0,
     "raw_script": 4
@@ -411,6 +411,11 @@
     },
     {
       "id": "shift-ops/ShiftOps",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "sighash-single-stateful/SingleCounter",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

@@ -1415,7 +1415,7 @@ The SDK follows semver. Pre-1.0 minor versions may include breaking changes; che
 
 The `_`-prefixed fields on `PreparedCall` are explicitly internal — `prepareCall` and `finalizeCall` round-trip them; do not depend on their shape.
 
-The cross-SDK `conformance/sdk-output/` suite verifies that the TypeScript SDK produces byte-identical locking scripts to the Go, Rust, Python, Zig, Ruby, and Java SDKs for the same artifact + constructor args. As of this writing, 71 fixtures pass on all seven SDKs.
+The cross-SDK `conformance/sdk-output/` suite verifies that the TypeScript SDK produces byte-identical locking scripts to the Go, Rust, Python, Zig, Ruby, and Java SDKs for the same artifact + constructor args. As of this writing, 72 fixtures pass on all seven SDKs.
 
 ---
 
