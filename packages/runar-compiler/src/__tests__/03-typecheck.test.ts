@@ -1209,6 +1209,96 @@ describe('Pass 3: Type-Check', () => {
         expect(hasError(result, DOUBLE)).toBe(true);
       });
     });
+
+    // N-109: private helpers are inlined (04-anf-lower), so a helper that
+    // consumes its Sig parameter consumes the caller's argument at every call
+    // site. The checker was intra-method: `this.h(sig); this.h(sig);` and
+    // `this.h(sig)` in a 2-iteration loop typechecked although the inlined
+    // script runs checkSig on the same Sig twice.
+    //
+    // Proves: a call to a contract method consumes the arguments at the
+    // parameter positions that method consumes (directly, through an alias, in
+    // an if arm, or transitively through another helper), with the same
+    // diagnostic as a sequential double use, including per loop iteration; a
+    // single call, and a helper that takes a Sig without consuming it, stay legal.
+    // Does not prove: a helper consuming a PROPERTY (`checkSig(this.sig, ..)` in
+    // a helper called twice) — the summary covers parameters only; nor
+    // untracked argument expressions (`this.h(sigs[i])`), nor the emitted script.
+    describe('N-109: affine consumption through private helper calls', () => {
+      const wrap = (helpers: string, params: string, body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          ${helpers}
+          public m(${params}) {
+            ${body}
+          }
+        }
+      `;
+      const H = 'private h(s: Sig): void { assert(checkSig(s, this.pk)); }';
+      const DOUBLE = "affine value 'sig' has already been consumed";
+
+      it('refuses the same Sig passed to a consuming helper twice', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig', 'this.h(sig); this.h(sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a consuming helper called once in a 2-iteration loop', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig',
+          'for (let i = 0n; i < 2n; i++) { this.h(sig); } assert(true);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed directly and again through a helper', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig',
+          'assert(checkSig(sig, this.pk)); this.h(sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes transitively through another helper', () => {
+        const result = typecheckSource(wrap(
+          `${H} private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }`,
+          'sig: Sig', 'this.g(1n, sig); this.g(2n, sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes an alias of its parameter', () => {
+        const result = typecheckSource(wrap(
+          'private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }',
+          'sig: Sig', 'this.h(sig); this.h(sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a SigHashPreimage consumed by a helper twice', () => {
+        const result = typecheckSource(wrap(
+          'private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }',
+          'preimage: SigHashPreimage', 'this.p(preimage); this.p(preimage);'));
+        expect(hasError(result, "affine value 'preimage' has already been consumed")).toBe(true);
+      });
+
+      it('allows a single call to a consuming helper', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig', 'this.h(sig);'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a consuming helper called once per if/else arm', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig, flag: boolean',
+          'if (flag) { this.h(sig); } else { this.h(sig); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows two different Sigs through the same consuming helper', () => {
+        const result = typecheckSource(wrap(H, 'sig1: Sig, sig2: Sig', 'this.h(sig1); this.h(sig2);'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a helper that takes a Sig without consuming it to be called twice', () => {
+        const result = typecheckSource(wrap(
+          'private n(s: Sig): bigint { return len(s); }',
+          'sig: Sig', 'assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));'));
+        expect(result.errors).toEqual([]);
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------

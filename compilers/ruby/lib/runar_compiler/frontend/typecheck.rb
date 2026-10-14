@@ -383,6 +383,11 @@ module RunarCompiler
         @repeating_loop_scopes = []
         @current_method_loc = nil
         @current_stmt_loc = nil
+        # N-109: for every contract method, the indices of the parameters it
+        # consumes (directly or through further helper calls). Private helpers
+        # are inlined, so a call consumes the arguments at those positions.
+        # Computed lazily by TypeChecker.consumed_param_summary.
+        @consumed_params = nil
 
         contract.properties.each do |prop|
           @prop_types[prop.name] = type_node_to_string(prop.type)
@@ -1546,7 +1551,14 @@ module RunarCompiler
       # 2026-04-30 audit finding F6.
       def check_affine_consumption(func_name, args, env)
         consumed_indices = CONSUMING_FUNCTIONS[func_name]
-        return if consumed_indices.nil?
+        if consumed_indices.nil?
+          # N-109: a call to a contract method consumes the arguments at the
+          # parameter positions that method consumes.
+          return if BUILTIN_FUNCTIONS.key?(func_name) || !@method_sigs.key?(func_name)
+
+          @consumed_params ||= TypeChecker.consumed_param_summary(@contract)
+          consumed_indices = @consumed_params[func_name] || []
+        end
 
         consumed_indices.each do |param_index|
           next if param_index >= args.length
@@ -1573,6 +1585,44 @@ module RunarCompiler
             @consumed_values[origin] = true
           end
         end
+      end
+
+      # N-109: run the affine checker over each method body with throwaway
+      # diagnostics and record which parameters end up consumed. Reusing the
+      # checker inherits alias, if-arm and loop handling. Consumption only grows
+      # as summaries grow, so iterating until no entry changes terminates, also
+      # for recursive call graphs (refused separately by the validator).
+      # Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
+      def self.consumed_param_summary(contract)
+        summary = {}
+        contract.methods.each { |m| summary[m.name] = [] }
+        changed = true
+        while changed
+          changed = false
+          contract.methods.each do |method|
+            consumed = TypeChecker.new(contract).send(:consumed_param_indices, method, summary)
+            next if consumed.length == summary[method.name].length
+
+            summary[method.name] = consumed
+            changed = true
+          end
+        end
+        summary
+      end
+
+      # N-109: the indices of +method+'s parameters its body consumes, with
+      # helper calls resolved through +summary+.
+      def consumed_param_indices(method, summary)
+        @consumed_params = summary
+        env = TypeEnv.new
+        @current_method_loc = method.source_location
+        @consumed_values = {}
+        @affine_aliases = {}
+        method.params.each do |param|
+          env.define(param.name, type_node_to_string(param.type))
+        end
+        check_statements(method.body, env)
+        method.params.each_index.select { |i| @consumed_values[method.params[i].name] }
       end
 
       # F-110: true when +origin+ is bound outside the innermost enclosing loop

@@ -818,6 +818,43 @@ class TestTypecheck < Minitest::Test
     end
   end
 
+  # N-109: private helpers are inlined, so a call consumes the arguments at the
+  # parameter positions the helper consumes (directly, through an alias, or
+  # transitively through another helper). `this.h(sig)` twice, or once in a
+  # 2-iteration loop, must get the same diagnostic as a sequential double use;
+  # a single call, one call per if/else arm, and a helper that takes a Sig
+  # without consuming it stay legal. Proves the type checker's verdict only; a
+  # helper consuming a PROPERTY is not covered.
+  N109_H = "private h(s: Sig): void { assert(checkSig(s, this.pk)); }"
+  N109_DOUBLE = "affine value 'sig' has already been consumed"
+  N109_CASES = [
+    [N109_H, "sig: Sig", "this.h(sig); this.h(sig);", N109_DOUBLE],
+    [N109_H, "sig: Sig", "for (let i = 0n; i < 2n; i++) { this.h(sig); }", N109_DOUBLE],
+    [N109_H, "sig: Sig", "assert(checkSig(sig, this.pk)); this.h(sig);", N109_DOUBLE],
+    ["#{N109_H} private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }", "sig: Sig", "this.g(1n, sig); this.g(2n, sig);", N109_DOUBLE],
+    ["private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }", "sig: Sig", "this.h(sig); this.h(sig);", N109_DOUBLE],
+    ["private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }", "preimage: SigHashPreimage", "this.p(preimage); this.p(preimage);", "affine value 'preimage' has already been consumed"],
+    [N109_H, "sig: Sig", "this.h(sig);", nil],
+    [N109_H, "sig: Sig, flag: boolean", "if (flag) { this.h(sig); } else { this.h(sig); }", nil],
+    [N109_H, "sig1: Sig, sig2: Sig", "this.h(sig1); this.h(sig2);", nil],
+    ["private n(s: Sig): bigint { return len(s); }", "sig: Sig", "assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));", nil],
+  ].freeze
+
+  def test_n109_affine_consumption_through_helpers
+    N109_CASES.each do |helpers, params, body, want|
+      source = "class C extends SmartContract {\n  readonly pk: PubKey;\n" \
+               "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n" \
+               "  #{helpers}\n" \
+               "  public m(#{params}) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # F-265: substr() literal negative start is a compile-time error
   #

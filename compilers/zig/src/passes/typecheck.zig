@@ -383,6 +383,16 @@ fn isAffineType(t: RunarType) bool {
 }
 
 /// Functions that consume affine values, mapped to the parameter indices that get consumed.
+/// N-109: method name -> indices of the parameters that method consumes.
+const ConsumedParamSummary = std.StringHashMapUnmanaged([]u8);
+
+fn freeConsumedParamSummary(allocator: Allocator, summary: *ConsumedParamSummary) void {
+    var it = summary.iterator();
+    while (it.next()) |entry| allocator.free(entry.value_ptr.*);
+    summary.deinit(allocator);
+    allocator.destroy(summary);
+}
+
 fn consumedIndices(func_name: []const u8) ?[]const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{
         .{ "checkSig", &[_]u8{0} },
@@ -425,6 +435,13 @@ const TypeChecker = struct {
     /// in the affine consumption check.
     prop_origin_keys: std.StringHashMapUnmanaged([]u8),
     stateful_ctx_params: std.StringHashMapUnmanaged(void),
+    /// N-109: for every contract method, the indices of the parameters it
+    /// consumes (directly or through further helper calls). Private helpers
+    /// are inlined, so a call consumes the arguments at those positions.
+    /// Computed lazily by `consumedParamSummary`; owned by this checker only
+    /// when `owns_consumed_params` (scratch checkers borrow the caller's).
+    consumed_params: ?*ConsumedParamSummary = null,
+    owns_consumed_params: bool = false,
 
     fn init(allocator: Allocator, contract: ContractNode) !TypeChecker {
         var self = TypeChecker{
@@ -486,7 +503,74 @@ const TypeChecker = struct {
         while (keys_it.next()) |entry| self.allocator.free(entry.value_ptr.*);
         self.prop_origin_keys.deinit(self.allocator);
         self.stateful_ctx_params.deinit(self.allocator);
+        if (self.owns_consumed_params) {
+            if (self.consumed_params) |summary| freeConsumedParamSummary(self.allocator, summary);
+        }
         // Note: self.errors ownership transfers to caller via toOwnedSlice
+    }
+
+    /// N-109: run the affine checker over each method body with throwaway
+    /// diagnostics and record which parameters end up consumed. Reusing the
+    /// checker inherits alias, if-arm and loop handling. Consumption only
+    /// grows as summaries grow, so iterating until no entry changes
+    /// terminates, also for recursive call graphs (refused separately by the
+    /// validator). Mirrors `consumedParamSummary` in the TS reference
+    /// 03-typecheck.ts.
+    fn consumedParamSummary(allocator: Allocator, contract: ContractNode) !*ConsumedParamSummary {
+        const summary = try allocator.create(ConsumedParamSummary);
+        summary.* = .empty;
+        errdefer freeConsumedParamSummary(allocator, summary);
+        for (contract.methods) |method| {
+            try summary.put(allocator, method.name, try allocator.alloc(u8, 0));
+        }
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (contract.methods) |method| {
+                var scratch = try TypeChecker.init(allocator, contract);
+                defer {
+                    for (scratch.errors.items) |msg| allocator.free(msg);
+                    scratch.errors.deinit(allocator);
+                    scratch.deinit();
+                }
+                scratch.consumed_params = summary;
+                const consumed = try scratch.consumedParamIndices(method);
+                const slot = summary.getPtr(method.name).?;
+                if (consumed.len != slot.len) {
+                    allocator.free(slot.*);
+                    slot.* = consumed;
+                    changed = true;
+                } else {
+                    allocator.free(consumed);
+                }
+            }
+        }
+        return summary;
+    }
+
+    /// N-109: the indices of `method`'s parameters its body consumes. The
+    /// caller owns the returned slice.
+    fn consumedParamIndices(self: *TypeChecker, method: MethodNode) ![]u8 {
+        var env = try TypeEnv.init(self.allocator);
+        defer env.deinit();
+        self.consumed_values.clearRetainingCapacity();
+        self.affine_aliases.clearRetainingCapacity();
+        self.stateful_ctx_params.clearRetainingCapacity();
+        for (method.params) |param| {
+            env.define(param.name, param.type_info);
+            if (std.mem.eql(u8, param.type_name, "StatefulContext")) {
+                try self.stateful_ctx_params.put(self.allocator, param.name, {});
+            }
+        }
+        self.checkStatements(method.body, &env);
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        for (method.params, 0..) |param, i| {
+            if (self.consumed_values.get(param.name) orelse false) {
+                try out.append(self.allocator, @intCast(i));
+            }
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     /// One emitted state value: what the state continuation actually carries.
@@ -1713,7 +1797,22 @@ const TypeChecker = struct {
     /// cannot launder a double-consumption past the affine check.
     /// 2026-04-30 audit finding F6.
     fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, env: *TypeEnv) void {
-        const indices = consumedIndices(func_name) orelse return;
+        const indices = consumedIndices(func_name) orelse blk: {
+            // N-109: a call to a contract method consumes the arguments at
+            // the parameter positions that method consumes.
+            if (builtin_functions.get(func_name) != null) return;
+            if (self.method_sigs.get(func_name) == null) return;
+            const summary = self.consumed_params orelse s: {
+                const computed = consumedParamSummary(self.allocator, self.contract) catch {
+                    self.addError("out of memory computing affine consumption of helper '{s}'", .{func_name});
+                    return;
+                };
+                self.consumed_params = computed;
+                self.owns_consumed_params = true;
+                break :s computed;
+            };
+            break :blk summary.get(func_name) orelse return;
+        };
 
         for (indices) |param_index| {
             if (param_index >= args.len) continue;

@@ -483,6 +483,11 @@ type typeChecker struct {
 	currentStmtLoc   *SourceLocation
 	// sideEffects is computed lazily by methodEffects (F-075).
 	sideEffects SideEffectSummary
+	// consumedParams maps every contract method to the indices of the
+	// parameters it consumes, directly or through further helper calls
+	// (N-109). Private helpers are inlined, so a call consumes the arguments
+	// at those positions. Computed lazily by consumedParamSummary.
+	consumedParams map[string][]int
 }
 
 // methodEffects returns the named method's effects, following private helpers.
@@ -1604,7 +1609,18 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression, env *typeEnv) {
 	consumedIndices, ok := consumingFunctions[funcName]
 	if !ok {
-		return
+		// N-109: a call to a contract method consumes the arguments at the
+		// parameter positions that method consumes.
+		if _, isBuiltin := builtinFunctions[funcName]; isBuiltin {
+			return
+		}
+		if _, isMethod := tc.methodSigs[funcName]; !isMethod {
+			return
+		}
+		if tc.consumedParams == nil {
+			tc.consumedParams = consumedParamSummary(tc.contract)
+		}
+		consumedIndices = tc.consumedParams[funcName]
 	}
 
 	for _, paramIndex := range consumedIndices {
@@ -1637,6 +1653,52 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 			tc.consumedValues[origin] = true
 		}
 	}
+}
+
+// consumedParamSummary runs the affine checker over each method body with
+// throwaway diagnostics and records which parameters end up consumed (N-109).
+// Reusing the checker inherits alias, if-arm and loop handling. Consumption
+// only grows as summaries grow, so iterating until no entry changes
+// terminates, also for recursive call graphs (refused separately by the
+// validator). Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
+func consumedParamSummary(contract *ContractNode) map[string][]int {
+	summary := make(map[string][]int, len(contract.Methods))
+	for _, method := range contract.Methods {
+		summary[method.Name] = []int{}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, method := range contract.Methods {
+			scratch := newTypeChecker(contract)
+			scratch.consumedParams = summary
+			consumed := scratch.consumedParamIndices(method)
+			if len(consumed) != len(summary[method.Name]) {
+				summary[method.Name] = consumed
+				changed = true
+			}
+		}
+	}
+	return summary
+}
+
+// consumedParamIndices returns the indices of method's parameters its body
+// consumes (N-109).
+func (tc *typeChecker) consumedParamIndices(method MethodNode) []int {
+	env := newTypeEnv()
+	tc.currentMethodLoc = &method.SourceLocation
+	tc.consumedValues = make(map[string]bool)
+	tc.affineAliases = make(map[string]string)
+	for _, param := range method.Params {
+		env.define(param.Name, typeNodeToString(param.Type))
+	}
+	tc.checkStatements(method.Body, env)
+	indices := []int{}
+	for i, param := range method.Params {
+		if tc.consumedValues[param.Name] {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 // consumedPerLoopIteration reports whether origin is bound outside the

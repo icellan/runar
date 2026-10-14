@@ -485,6 +485,15 @@ class TypeChecker {
    */
   private repeatingLoopScopes: number[] = [];
 
+  /**
+   * N-109: for every contract method, the indices of the parameters it
+   * consumes (directly or through further helper calls). Private helpers are
+   * inlined, so a call consumes the arguments at those positions exactly as a
+   * direct `checkSig`/`checkPreimage` would. Computed once, by a fixpoint over
+   * scratch checkers that share this map (see `consumedParamSummary`).
+   */
+  private consumedParams: Map<string, number[]> | null;
+
   /** Lazily computed side-effect summary (follows private helpers). */
   private sideEffects: SideEffectSummary | null = null;
 
@@ -495,9 +504,14 @@ class TypeChecker {
     return effects;
   }
 
-  constructor(contract: ContractNode, errors: CompilerDiagnostic[]) {
+  constructor(
+    contract: ContractNode,
+    errors: CompilerDiagnostic[],
+    consumedParams: Map<string, number[]> | null = null,
+  ) {
     this.contract = contract;
     this.errors = errors;
+    this.consumedParams = consumedParams;
 
     // Build property type map
     this.propTypes = new Map();
@@ -2046,7 +2060,10 @@ class TypeChecker {
     args: Expression[],
     env: TypeEnv,
   ): void {
-    const consumedIndices = CONSUMING_FUNCTIONS[funcName];
+    // N-109: a call to a contract method consumes the arguments at the
+    // parameter positions that method consumes.
+    const consumedIndices = CONSUMING_FUNCTIONS[funcName]
+      ?? (BUILTIN_FUNCTIONS.has(funcName) ? undefined : this.methodConsumedParams(funcName));
     if (!consumedIndices) return;
 
     for (const paramIndex of consumedIndices) {
@@ -2077,6 +2094,58 @@ class TypeChecker {
         this.consumedValues.add(origin);
       }
     }
+  }
+
+  /**
+   * N-109: the parameter indices contract method `name` consumes, or
+   * undefined when `name` is not a contract method.
+   */
+  private methodConsumedParams(name: string): number[] | undefined {
+    if (!this.methodSigs.has(name)) return undefined;
+    if (this.consumedParams === null) this.consumedParams = this.consumedParamSummary();
+    return this.consumedParams.get(name);
+  }
+
+  /**
+   * N-109: run the affine checker over each method body with a throwaway
+   * diagnostics list and record which parameters end up consumed. Reusing the
+   * checker (rather than a second walker) inherits alias, if-arm and loop
+   * handling. Consumption only grows as summaries grow, so iterating until no
+   * entry changes terminates, also for the recursive call graphs 02-validate
+   * refuses separately.
+   */
+  private consumedParamSummary(): Map<string, number[]> {
+    const summary = new Map<string, number[]>();
+    for (const method of this.contract.methods) summary.set(method.name, []);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const method of this.contract.methods) {
+        const scratch = new TypeChecker(this.contract, [], summary);
+        const consumed = scratch.consumedParamIndices(method);
+        if (consumed.length !== summary.get(method.name)!.length) {
+          summary.set(method.name, consumed);
+          changed = true;
+        }
+      }
+    }
+    return summary;
+  }
+
+  /** N-109: the indices of `method`'s parameters its body consumes. */
+  private consumedParamIndices(method: MethodNode): number[] {
+    const env = new TypeEnv();
+    this.consumedValues = new Set();
+    this.affineAliases = new Map();
+    for (const param of method.params) {
+      env.define(param.name, typeNodeToTType(param.type));
+    }
+    this.checkStatements(method.body, env, method.sourceLocation);
+    const indices: number[] = [];
+    method.params.forEach((param, i) => {
+      if (this.consumedValues.has(param.name)) indices.push(i);
+    });
+    return indices;
   }
 
   /**

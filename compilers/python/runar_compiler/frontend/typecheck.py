@@ -473,6 +473,27 @@ _CONSUMING_FUNCTIONS: dict[str, list[int]] = {
 # Type checker
 # ---------------------------------------------------------------------------
 
+def _consumed_param_summary(contract: ContractNode) -> dict[str, list[int]]:
+    """N-109: run the affine checker over each method body with throwaway
+    diagnostics and record which parameters end up consumed. Reusing the
+    checker inherits alias, if-arm and loop handling. Consumption only grows as
+    summaries grow, so iterating until no entry changes terminates, also for
+    recursive call graphs (refused separately by the validator). Mirrors
+    ``consumedParamSummary`` in the TS reference 03-typecheck.ts."""
+    summary: dict[str, list[int]] = {m.name: [] for m in contract.methods}
+    changed = True
+    while changed:
+        changed = False
+        for method in contract.methods:
+            scratch = _TypeChecker(contract)
+            scratch._consumed_params = summary
+            consumed = scratch._consumed_param_indices(method)
+            if len(consumed) != len(summary[method.name]):
+                summary[method.name] = consumed
+                changed = True
+    return summary
+
+
 class _TypeChecker:
     def __init__(self, contract: ContractNode) -> None:
         self.contract = contract
@@ -495,6 +516,11 @@ class _TypeChecker:
         self._current_stmt_loc: SourceLocation | None = None
         # Lazily computed side-effect summary (F-075).
         self._side_effects: dict[str, MethodEffects] | None = None
+        # N-109: for every contract method, the indices of the parameters it
+        # consumes (directly or through further helper calls). Private helpers
+        # are inlined, so a call consumes the arguments at those positions.
+        # Computed lazily by _consumed_param_summary.
+        self._consumed_params: dict[str, list[int]] | None = None
 
         for prop in contract.properties:
             self.prop_types[prop.name] = _type_node_to_string(prop.type)
@@ -1532,7 +1558,13 @@ class _TypeChecker:
         2026-04-30 audit finding F6."""
         consumed_indices = _CONSUMING_FUNCTIONS.get(func_name)
         if consumed_indices is None:
-            return
+            # N-109: a call to a contract method consumes the arguments at the
+            # parameter positions that method consumes.
+            if func_name in BUILTIN_FUNCTIONS or func_name not in self.method_sigs:
+                return
+            if self._consumed_params is None:
+                self._consumed_params = _consumed_param_summary(self.contract)
+            consumed_indices = self._consumed_params.get(func_name, [])
 
         for param_index in consumed_indices:
             if param_index >= len(args):
@@ -1561,6 +1593,17 @@ class _TypeChecker:
                 )
             else:
                 self.consumed_values[origin] = True
+
+    def _consumed_param_indices(self, method: MethodNode) -> list[int]:
+        """N-109: the indices of ``method``'s parameters its body consumes."""
+        env = _TypeEnv()
+        self._current_method_loc = method.source_location
+        self.consumed_values = {}
+        self.affine_aliases = {}
+        for param in method.params:
+            env.define(param.name, _type_node_to_string(param.type))
+        self._check_statements(method.body, env)
+        return [i for i, p in enumerate(method.params) if self.consumed_values.get(p.name, False)]
 
     def _consumed_per_loop_iteration(self, origin: str, env: _TypeEnv) -> bool:
         """F-110: true when ``origin`` is bound outside the innermost enclosing

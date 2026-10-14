@@ -2430,6 +2430,63 @@ class C extends SmartContract {
 	}
 }
 
+// TestTypeCheck_N109_AffineConsumptionThroughHelpers: private helpers are
+// inlined, so a call consumes the arguments at the parameter positions the
+// helper consumes (directly, through an alias, or transitively through another
+// helper). `this.h(sig)` twice, or once in a 2-iteration loop, must get the
+// same diagnostic as a sequential double use; a single call, one call per
+// if/else arm, and a helper that takes a Sig without consuming it stay legal.
+// Proves the type checker's verdict only; a helper consuming a PROPERTY is not
+// covered (the summary is over parameters).
+func TestTypeCheck_N109_AffineConsumptionThroughHelpers(t *testing.T) {
+	const h = "private h(s: Sig): void { assert(checkSig(s, this.pk)); }"
+	const double = "affine value 'sig' has already been consumed"
+	cases := []struct {
+		name, helpers, params, body, want string
+	}{
+		{"twice", h, "sig: Sig", "this.h(sig); this.h(sig);", double},
+		{"loop2", h, "sig: Sig", "for (let i = 0n; i < 2n; i++) { this.h(sig); }", double},
+		{"directThenHelper", h, "sig: Sig", "assert(checkSig(sig, this.pk)); this.h(sig);", double},
+		{"transitive", h + " private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }", "sig: Sig", "this.g(1n, sig); this.g(2n, sig);", double},
+		{"aliasInHelper", "private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }", "sig: Sig", "this.h(sig); this.h(sig);", double},
+		{"preimageTwice", "private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }", "preimage: SigHashPreimage", "this.p(preimage); this.p(preimage);", "affine value 'preimage' has already been consumed"},
+		{"once", h, "sig: Sig", "this.h(sig);", ""},
+		{"oncePerArm", h, "sig: Sig, flag: boolean", "if (flag) { this.h(sig); } else { this.h(sig); }", ""},
+		{"twoSigs", h, "sig1: Sig, sig2: Sig", "this.h(sig1); this.h(sig2);", ""},
+		{"nonConsumingHelper", "private n(s: Sig): bigint { return len(s); }", "sig: Sig", "assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, assert, Sig, SigHashPreimage, PubKey, checkSig, checkPreimage, len } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  ` + c.helpers + `
+  public m(` + c.params + `) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // F-265: substr() literal negative start is a compile-time error
 //

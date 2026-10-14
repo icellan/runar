@@ -328,6 +328,11 @@ public final class Typecheck {
         // bounded loop is unrolled `count` times, so consuming an affine value
         // bound below the innermost index happens once per iteration.
         final Deque<Integer> repeatingLoopScopes = new ArrayDeque<>();
+        // N-109: for every contract method, the indices of the parameters it
+        // consumes (directly or through further helper calls). Private helpers
+        // are inlined, so a call consumes the arguments at those positions.
+        // Computed lazily by consumedParamSummary.
+        Map<String, int[]> consumedParams;
 
         Checker(ContractNode contract) {
             this.contract = contract;
@@ -1464,7 +1469,13 @@ public final class Typecheck {
          */
         private void checkAffine(String name, List<Expression> args, Env env) {
             int[] indices = CONSUMING_FUNCTIONS.get(name);
-            if (indices == null) return;
+            if (indices == null) {
+                // N-109: a call to a contract method consumes the arguments at
+                // the parameter positions that method consumes.
+                if (BuiltinRegistry.lookup(name).isPresent() || !methodSigs.containsKey(name)) return;
+                if (consumedParams == null) consumedParams = consumedParamSummary(contract);
+                indices = consumedParams.getOrDefault(name, new int[0]);
+            }
             for (int idx : indices) {
                 if (idx >= args.size()) continue;
                 Expression arg = args.get(idx);
@@ -1484,6 +1495,51 @@ public final class Typecheck {
                     consumed.put(origin, true);
                 }
             }
+        }
+
+        /**
+         * N-109: run the affine checker over each method body with throwaway
+         * diagnostics and record which parameters end up consumed. Reusing the
+         * checker inherits alias, if-arm and loop handling. Consumption only
+         * grows as summaries grow, so iterating until no entry changes
+         * terminates, also for recursive call graphs (refused separately by
+         * validation). Mirrors {@code consumedParamSummary} in the TS reference
+         * {@code 03-typecheck.ts}.
+         */
+        private static Map<String, int[]> consumedParamSummary(ContractNode contract) {
+            Map<String, int[]> summary = new HashMap<>();
+            for (MethodNode m : contract.methods()) summary.put(m.name(), new int[0]);
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (MethodNode m : contract.methods()) {
+                    Checker scratch = new Checker(contract);
+                    scratch.consumedParams = summary;
+                    int[] consumed = scratch.consumedParamIndices(m);
+                    if (consumed.length != summary.get(m.name()).length) {
+                        summary.put(m.name(), consumed);
+                        changed = true;
+                    }
+                }
+            }
+            return summary;
+        }
+
+        /** N-109: the indices of {@code m}'s parameters its body consumes. */
+        private int[] consumedParamIndices(MethodNode m) {
+            currentMethodLoc = m.sourceLocation();
+            consumed = new HashMap<>();
+            affineAliases = new HashMap<>();
+            Env env = new Env();
+            for (ParamNode p : m.params()) {
+                env.define(p.name(), typeToString(p.type()));
+            }
+            checkStatements(m.body(), env);
+            List<Integer> out = new ArrayList<>();
+            for (int i = 0; i < m.params().size(); i++) {
+                if (Boolean.TRUE.equals(consumed.get(m.params().get(i).name()))) out.add(i);
+            }
+            return out.stream().mapToInt(Integer::intValue).toArray();
         }
 
         /**
