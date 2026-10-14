@@ -10,7 +10,7 @@ Port of ``compilers/go/codegen/stack.go``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Generator, Optional
 
 from runar_compiler.ir.types import (
     ANFBinding,
@@ -685,6 +685,52 @@ def _hex_to_bytes(h: str) -> bytes:
 # Lowering context
 # ---------------------------------------------------------------------------
 
+# N-264: a suspended step of the lowering. ``lower_bindings``,
+# ``_lower_binding``, ``_lower_if``, ``_lower_loop``, ``_lower_method_call``
+# and ``_inline_method_call`` are generators (``*_task``), and each place one
+# used to CALL another (an if's two arms, a loop body, an inlined private
+# method's body) now YIELDS the child generator instead. ``_run_lower_tasks``
+# keeps the suspended parents on an explicit heap stack, so lowering depth no
+# longer consumes the interpreter stack.
+#
+# Why: private methods are inlined at every call site, so F-213's per-method
+# nesting bound (128) and N-180's call-depth bound (128) compose
+# multiplicatively -- a chain of D helpers that each call the next under K
+# nested ifs is D*K nested ifs here, and the recursive lowering hit
+# "maximum recursion depth exceeded" at D=32 x 120 (user decision R106: lower
+# iteratively). A generator resumes exactly where it yielded, so every
+# statement runs in the same order with the same state as the recursive
+# version did -- the emitted ops are unchanged. Never ``yield from`` a child:
+# that resumes the delegation chain recursively.
+_LowerTask = Generator["_LowerTask", None, None]
+
+
+def _run_lower_tasks(root: _LowerTask) -> None:
+    """Run ``root`` and every task it yields, depth-first, on an explicit stack."""
+    stack: list[_LowerTask] = [root]
+    error: BaseException | None = None
+    while stack:
+        top = stack[-1]
+        try:
+            if error is not None:
+                e, error = error, None
+                child = top.throw(e)
+            else:
+                child = next(top)
+        except StopIteration:
+            stack.pop()
+            continue
+        except BaseException as e:  # noqa: BLE001 -- re-raised at the parent's yield
+            # ``top`` raised (or did not catch what a child raised): it is
+            # finished, and its parent sees the exception at its ``yield``.
+            stack.pop()
+            if not stack:
+                raise
+            error = e
+            continue
+        stack.append(child)
+
+
 class _LoweringContext:
     """Mutable state for the stack-lowering pass."""
 
@@ -1342,6 +1388,14 @@ class _LoweringContext:
         terminal_assert: bool,
         inherited_arrays: dict[str, list[str]] | None = None,
     ) -> None:
+        _run_lower_tasks(self._lower_bindings_task(bindings, terminal_assert, inherited_arrays))
+
+    def _lower_bindings_task(
+        self,
+        bindings: list[ANFBinding],
+        terminal_assert: bool,
+        inherited_arrays: dict[str, list[str]] | None = None,
+    ) -> _LowerTask:
         self.local_bindings = {b.name: True for b in bindings}
         last_uses = compute_last_uses(bindings, inherited_arrays)
 
@@ -1373,14 +1427,14 @@ class _LoweringContext:
                 self._lower_assert(binding.value.value_ref, i, last_uses, True)
             elif binding.value.kind == "if" and i == terminal_if_idx:
                 # Terminal if: propagate terminalAssert into both branches
-                self._lower_if(
+                yield self._lower_if_task(
                     binding.name, binding.value.cond,
                     binding.value.then, binding.value.else_,
                     binding.value.results or [],
                     i, last_uses, True,
                 )
             else:
-                self._lower_binding(binding, i, last_uses)
+                yield self._lower_binding_task(binding, i, last_uses)
             self.current_source_loc = None
 
     def _lower_bindings_protected(self, bindings: list[ANFBinding], protected_names: set[str]) -> None:
@@ -1401,6 +1455,9 @@ class _LoweringContext:
     # -----------------------------------------------------------------
 
     def _lower_binding(self, binding: ANFBinding, binding_index: int, last_uses: dict[str, int]) -> None:
+        _run_lower_tasks(self._lower_binding_task(binding, binding_index, last_uses))
+
+    def _lower_binding_task(self, binding: ANFBinding, binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         name = binding.name
         value = binding.value
         kind = value.kind
@@ -1418,13 +1475,13 @@ class _LoweringContext:
         elif kind == "call":
             self._lower_call(name, value.func, value.args, binding_index, last_uses)
         elif kind == "method_call":
-            self._lower_method_call(name, value.object, value.method, value.args, binding_index, last_uses)
+            yield self._lower_method_call_task(name, value.object, value.method, value.args, binding_index, last_uses)
         elif kind == "if":
-            self._lower_if(name, value.cond, value.then, value.else_,
-                           value.results or [], binding_index, last_uses)
+            yield self._lower_if_task(name, value.cond, value.then, value.else_,
+                                      value.results or [], binding_index, last_uses)
         elif kind == "loop":
-            self._lower_loop(name, value.count, value.body, value.iter_var,
-                             value.start, value.step, binding_index, last_uses)
+            yield self._lower_loop_task(name, value.count, value.body, value.iter_var,
+                                        value.start, value.step, binding_index, last_uses)
         elif kind == "assert":
             self._lower_assert(value.value_ref, binding_index, last_uses, False)
         elif kind == "update_prop":
@@ -1924,8 +1981,8 @@ class _LoweringContext:
     # method_call
     # -----------------------------------------------------------------
 
-    def _lower_method_call(self, binding_name: str, _obj: str, method: str,
-                           args: list[str], binding_index: int, last_uses: dict[str, int]) -> None:
+    def _lower_method_call_task(self, binding_name: str, _obj: str, method: str,
+                                args: list[str], binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         if method == "getStateScript":
             # Consume the @this object reference — compile-time concept, not a runtime value.
             if self.sm.has(_obj):
@@ -1943,14 +2000,14 @@ class _LoweringContext:
                 self.bring_to_top(_obj, True)
                 self.emit_op(StackOp(op="drop"))
                 self.sm.pop()
-            self._inline_method_call(binding_name, private_method, args, binding_index, last_uses)
+            yield self._inline_method_call_task(binding_name, private_method, args, binding_index, last_uses)
             return
 
         # For other method calls, treat like a function call
         self._lower_call(binding_name, method, args, binding_index, last_uses)
 
-    def _inline_method_call(self, binding_name: str, method: ANFMethod,
-                            args: list[str], binding_index: int, last_uses: dict[str, int]) -> None:
+    def _inline_method_call_task(self, binding_name: str, method: ANFMethod,
+                                 args: list[str], binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         """Inline a private method by lowering its body in the current context."""
         # Track shadowed names so we can restore them after the body runs.
         # When a param name already exists on the stack, temporarily rename
@@ -2010,7 +2067,7 @@ class _LoweringContext:
                 self.sm.push(param_name)
 
         # Lower the method body
-        self.lower_bindings(method.body, False)
+        yield self._lower_bindings_task(method.body, False)
 
         # Restore shadowed names so the caller's scope sees its original entries.
         for entry in shadowed:
@@ -2034,11 +2091,11 @@ class _LoweringContext:
     # if
     # -----------------------------------------------------------------
 
-    def _lower_if(self, binding_name: str, cond: str,
-                  then_bindings: list[ANFBinding], else_bindings: list[ANFBinding],
-                  results: list[str],
-                  binding_index: int, last_uses: dict[str, int],
-                  terminal_assert: bool = False) -> None:
+    def _lower_if_task(self, binding_name: str, cond: str,
+                       then_bindings: list[ANFBinding], else_bindings: list[ANFBinding],
+                       results: list[str],
+                       binding_index: int, last_uses: dict[str, int],
+                       terminal_assert: bool = False) -> _LowerTask:
         """``results`` is the ``if`` node's declared result slots, deepest
         first (see ``ANFValue.results``).  Empty for an ``if`` that carries at
         most one result, and then every path below behaves exactly as it did
@@ -2198,7 +2255,7 @@ class _LoweringContext:
         then_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
         then_ctx.array_lengths = dict(self.array_lengths)
         then_ctx.inside_branch = True
-        then_ctx.lower_bindings(then_bindings, terminal_assert, self.array_elements)
+        yield then_ctx._lower_bindings_task(then_bindings, terminal_assert, self.array_elements)
 
         then_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2228,7 +2285,7 @@ class _LoweringContext:
         else_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
         else_ctx.array_lengths = dict(self.array_lengths)
         else_ctx.inside_branch = True
-        else_ctx.lower_bindings(else_bindings, terminal_assert, self.array_elements)
+        yield else_ctx._lower_bindings_task(else_bindings, terminal_assert, self.array_elements)
 
         else_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2710,11 +2767,11 @@ class _LoweringContext:
     # loop
     # -----------------------------------------------------------------
 
-    def _lower_loop(self, binding_name: str, count: int,
-                    body: list[ANFBinding], iter_var: str,
-                    start: Optional[int] = None, step: Optional[int] = None,
-                    loop_binding_index: Optional[int] = None,
-                    enclosing_last_uses: Optional[dict[str, int]] = None) -> None:
+    def _lower_loop_task(self, binding_name: str, count: int,
+                         body: list[ANFBinding], iter_var: str,
+                         start: Optional[int] = None, step: Optional[int] = None,
+                         loop_binding_index: Optional[int] = None,
+                         enclosing_last_uses: Optional[dict[str, int]] = None) -> _LowerTask:
         # Iterator start value and step direction (issue #121). Older ANF
         # payloads without start/step describe zero-start counting-up loops.
         start_val = start if start is not None else 0
@@ -2805,7 +2862,7 @@ class _LoweringContext:
             for j, binding in enumerate(body):
                 if binding.source_loc is not None:
                     self.current_source_loc = binding.source_loc
-                self._lower_binding(binding, j, last_uses)
+                yield self._lower_binding_task(binding, j, last_uses)
                 self.current_source_loc = loop_loc
 
             # Clean up the iteration variable if it was not consumed
@@ -5533,25 +5590,42 @@ def _method_uses_check_preimage(
     missed manual checkPreimage calls inside if/loop bodies and
     private helpers, causing stack lowering to fail with
     `Value '_opPushTxSig' not found on stack`."""
-    if seen is None:
-        seen = set()
-    for b in bindings:
-        if b.value.kind == "check_preimage":
-            return True
-        if b.value.kind == "if":
-            if _method_uses_check_preimage(b.value.then, private_methods, seen):
+    return _some_reachable_binding(
+        bindings, private_methods, seen, lambda b: b.value.kind == "check_preimage",
+    )
+
+
+def _some_reachable_binding(
+    bindings: list[ANFBinding],
+    private_methods: dict | None,
+    seen: set[str] | None,
+    pred,
+) -> bool:
+    """True when ``pred`` holds for some binding reachable from ``bindings``
+    through if arms, loop bodies and (when ``private_methods`` is given) the
+    bodies of called private methods not in ``seen``.
+
+    N-264: an explicit work list, not recursion -- a chain of D helpers each
+    calling the next under K nested ifs is D*K levels deep through those
+    edges. The answer is plain reachability, exactly what the recursive walk
+    (which pruned a method only when it was already on the current call
+    path) computed."""
+    visited = set(seen) if seen is not None else set()
+    work: list[list[ANFBinding]] = [bindings]
+    while work:
+        for b in work.pop():
+            if pred(b):
                 return True
-            if _method_uses_check_preimage(b.value.else_ or [], private_methods, seen):
-                return True
-        if b.value.kind == "loop":
-            if _method_uses_check_preimage(b.value.body, private_methods, seen):
-                return True
-        if b.value.kind == "method_call" and private_methods is not None:
-            target = private_methods.get(b.value.method)
-            if target is not None and target.name not in seen:
-                next_seen = seen | {target.name}
-                if _method_uses_check_preimage(target.body, private_methods, next_seen):
-                    return True
+            if b.value.kind == "if":
+                work.append(getattr(b.value, "else_", None) or [])
+                work.append(getattr(b.value, "then", None) or [])
+            elif b.value.kind == "loop":
+                work.append(getattr(b.value, "body", None) or [])
+            elif b.value.kind == "method_call" and private_methods is not None:
+                target = private_methods.get(b.value.method)
+                if target is not None and target.name not in visited:
+                    visited.add(target.name)
+                    work.append(target.body)
     return False
 
 
@@ -5601,28 +5675,10 @@ def _method_reads_var_len_state(
     guarded via `seen`) exactly like the sibling _method_uses_check_preimage --
     otherwise _codePart is never pushed and the load_prop falls through to the
     deploy-time constructor placeholder instead of the live on-chain state."""
-    if seen is None:
-        seen = set()
-    for b in bindings:
-        if b.value.kind == "load_prop" and getattr(b.value, "name", None) in var_len_props:
-            return True
-        if b.value.kind == "if":
-            then_bindings = getattr(b.value, "then", None) or []
-            else_bindings = getattr(b.value, "else_", None) or []
-            if (_method_reads_var_len_state(then_bindings, var_len_props, private_methods, seen)
-                    or _method_reads_var_len_state(else_bindings, var_len_props, private_methods, seen)):
-                return True
-        if b.value.kind == "loop":
-            body_bindings = getattr(b.value, "body", None) or []
-            if _method_reads_var_len_state(body_bindings, var_len_props, private_methods, seen):
-                return True
-        if b.value.kind == "method_call" and private_methods is not None:
-            target = private_methods.get(b.value.method)
-            if target is not None and target.name not in seen:
-                next_seen = seen | {target.name}
-                if _method_reads_var_len_state(target.body, var_len_props, private_methods, next_seen):
-                    return True
-    return False
+    return _some_reachable_binding(
+        bindings, private_methods, seen,
+        lambda b: b.value.kind == "load_prop" and getattr(b.value, "name", None) in var_len_props,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5775,11 +5831,18 @@ def _pin_code_part_length(
     pins: list[StackOp] = []
     placeholders: list[int] = []
 
-    def walk(ops: list[StackOp]) -> None:
-        for op in ops:
+    # N-264: pre-order over nested if arms on an explicit stack -- inlined
+    # private methods nest D*K if-ops here, too deep to recurse on.
+    def walk(root: list[StackOp]) -> None:
+        stack = [iter(root)]
+        while stack:
+            op = next(stack[-1], None)
+            if op is None:
+                stack.pop()
+                continue
             if op.op == "if":
-                walk(op.then)
-                walk(op.else_ops)
+                stack.append(iter(op.else_ops))
+                stack.append(iter(op.then))
             elif op.op == "placeholder":
                 placeholders.append(op.param_index)
             elif op.op == "verify_code_part_len":

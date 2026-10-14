@@ -698,6 +698,55 @@ function checkFixedArity(table: Record<string, number>, func: string, args: stri
   }
 }
 
+/**
+ * N-264: a suspended step of the lowering — `lowerBindings`, `lowerBinding`,
+ * `lowerIf`, `lowerLoop`, `lowerMethodCall` and `inlineMethodCall` are
+ * generators, and each place one used to CALL another (an `if`'s two arms, a
+ * loop body, an inlined private method's body) now YIELDS the child task
+ * instead. `runLowerTasks` keeps the suspended parents on an explicit heap
+ * stack, so lowering depth no longer consumes host stack.
+ *
+ * Why: private methods are inlined at every call site, so F-213's per-method
+ * nesting bound (128) and N-180's call-depth bound (128) compose
+ * multiplicatively — a chain of D helpers that each call the next under K
+ * nested ifs is D*K nested ifs here, and the recursive lowering overflowed
+ * the JS stack at D=16 x 120 (user decision R106: lower iteratively).
+ *
+ * A generator resumes exactly where it yielded, so every statement runs in
+ * the same order with the same state as the recursive version did — the
+ * emitted ops are byte-identical. Never `yield*` a child: V8 resumes a
+ * delegation chain recursively, which would put the depth back on the stack.
+ */
+type LowerTask = Generator<LowerTask, void, undefined>;
+
+/** Run `root` and every task it yields, depth-first, on an explicit stack. */
+function runLowerTasks(root: LowerTask): void {
+  const stack: LowerTask[] = [root];
+  let error: { value: unknown } | null = null;
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1]!;
+    let step: IteratorResult<LowerTask, void>;
+    try {
+      if (error) {
+        const e = error.value;
+        error = null;
+        step = top.throw(e);
+      } else {
+        step = top.next();
+      }
+    } catch (e) {
+      // `top` threw (or did not catch what a child threw): it is finished,
+      // and its parent sees the exception at the `yield` it is suspended on.
+      stack.pop();
+      if (stack.length === 0) throw e;
+      error = { value: e };
+      continue;
+    }
+    if (step.done) stack.pop();
+    else stack.push(step.value);
+  }
+}
+
 class LoweringContext {
   private stackMap: StackMap;
   private ops: StackOp[] = [];
@@ -1478,6 +1527,14 @@ class LoweringContext {
     terminalAssert = false,
     inheritedArrays?: ReadonlyMap<string, string[]>,
   ): void {
+    runLowerTasks(this.lowerBindingsTask(bindings, terminalAssert, inheritedArrays));
+  }
+
+  private *lowerBindingsTask(
+    bindings: ANFBinding[],
+    terminalAssert = false,
+    inheritedArrays?: ReadonlyMap<string, string[]>,
+  ): LowerTask {
     this.localBindings = new Set(bindings.map(b => b.name));
     const lastUses = computeLastUses(bindings, inheritedArrays);
 
@@ -1516,20 +1573,20 @@ class LoweringContext {
         this.lowerAssert(binding.value.value, i, lastUses, true);
       } else if (binding.value.kind === 'if' && i === terminalIfIdx) {
         // Terminal if: propagate terminalAssert into both branches
-        this.lowerIf(binding.name, binding.value.cond, binding.value.then, binding.value.else, binding.value.results ?? [], i, lastUses, true);
+        yield this.lowerIfTask(binding.name, binding.value.cond, binding.value.then, binding.value.else, binding.value.results ?? [], i, lastUses, true);
       } else {
-        this.lowerBinding(binding, i, lastUses);
+        yield this.lowerBindingTask(binding, i, lastUses);
       }
       this.currentSourceLoc = undefined;
     }
 
   }
 
-  private lowerBinding(
+  private *lowerBindingTask(
     binding: ANFBinding,
     bindingIndex: number,
     lastUses: Map<string, number>,
-  ): void {
+  ): LowerTask {
     const { name, value } = binding;
 
     switch (value.kind) {
@@ -1552,13 +1609,13 @@ class LoweringContext {
         this.lowerCall(name, value.func, value.args, bindingIndex, lastUses);
         break;
       case 'method_call':
-        this.lowerMethodCall(name, value.object, value.method, value.args, bindingIndex, lastUses);
+        yield this.lowerMethodCallTask(name, value.object, value.method, value.args, bindingIndex, lastUses);
         break;
       case 'if':
-        this.lowerIf(name, value.cond, value.then, value.else, value.results ?? [], bindingIndex, lastUses);
+        yield this.lowerIfTask(name, value.cond, value.then, value.else, value.results ?? [], bindingIndex, lastUses);
         break;
       case 'loop':
-        this.lowerLoop(name, value.count, value.body, value.iterVar, value.start, value.step, bindingIndex, lastUses);
+        yield this.lowerLoopTask(name, value.count, value.body, value.iterVar, value.start, value.step, bindingIndex, lastUses);
         break;
       case 'assert':
         this.lowerAssert(value.value, bindingIndex, lastUses);
@@ -2372,14 +2429,14 @@ class LoweringContext {
     this.trackDepth();
   }
 
-  private lowerMethodCall(
+  private *lowerMethodCallTask(
     bindingName: string,
     object: string,
     method: string,
     args: string[],
     bindingIndex: number,
     lastUses: Map<string, number>,
-  ): void {
+  ): LowerTask {
     // Method calls on `this` are treated as builtin calls
     // e.g. this.getStateScript(), this.buildP2PKH(addr)
     if (method === 'getStateScript') {
@@ -2402,7 +2459,7 @@ class LoweringContext {
         this.emitOp({ op: 'drop' });
         this.stackMap.pop();
       }
-      this.inlineMethodCall(bindingName, privateMethod, args, bindingIndex, lastUses);
+      yield this.inlineMethodCallTask(bindingName, privateMethod, args, bindingIndex, lastUses);
       return;
     }
 
@@ -2410,13 +2467,13 @@ class LoweringContext {
     this.lowerCall(bindingName, method, args, bindingIndex, lastUses);
   }
 
-  private inlineMethodCall(
+  private *inlineMethodCallTask(
     bindingName: string,
     method: ANFMethod,
     args: string[],
     bindingIndex: number,
     lastUses: Map<string, number>,
-  ): void {
+  ): LowerTask {
     // Track shadowed names so we can restore them after the body runs.
     // When a param name already exists on the stack, temporarily rename
     // the existing entry to avoid duplicate names which break Set-based
@@ -2482,7 +2539,7 @@ class LoweringContext {
       }
     }
 
-    this.lowerBindings(method.body);
+    yield this.lowerBindingsTask(method.body);
 
     // Restore shadowed names so the caller's scope sees its original entries.
     for (const { paramName, shadowedName } of shadowed) {
@@ -2524,7 +2581,7 @@ class LoweringContext {
     this.stackMap.pop();
   }
 
-  private lowerIf(
+  private *lowerIfTask(
     bindingName: string,
     cond: string,
     thenBindings: ANFBinding[],
@@ -2539,7 +2596,7 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
     terminalAssert = false,
-  ): void {
+  ): LowerTask {
     // The ANF wire format has no version field, and `--ir` / `--ir-parity` are
     // documented surfaces that feed a checked-in ANF JSON straight into this
     // pass. An ANF produced BEFORE the multi-result node carries the trailing
@@ -2688,7 +2745,7 @@ class LoweringContext {
     // "array_literal metadata missing".
     thenCtx.inheritArrays(this);
     thenCtx._insideBranch = true;
-    thenCtx.lowerBindings(thenBindings, terminalAssert, this.arrayElements);
+    yield thenCtx.lowerBindingsTask(thenBindings, terminalAssert, this.arrayElements);
 
     thenCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -2736,7 +2793,7 @@ class LoweringContext {
     for (const [param, slot] of this.renamedParams) elseCtx.renamedParams.set(param, slot); // N-007, see thenCtx
     elseCtx.inheritArrays(this); // F-081, see thenCtx
     elseCtx._insideBranch = true;
-    elseCtx.lowerBindings(elseBindings, terminalAssert, this.arrayElements);
+    yield elseCtx.lowerBindingsTask(elseBindings, terminalAssert, this.arrayElements);
 
     elseCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3322,7 +3379,7 @@ class LoweringContext {
     }
   }
 
-  private lowerLoop(
+  private *lowerLoopTask(
     _bindingName: string,
     count: number,
     body: ANFBinding[],
@@ -3331,7 +3388,7 @@ class LoweringContext {
     step: 1 | -1,
     loopBindingIndex?: number,
     enclosingLastUses?: Map<string, number>,
-  ): void {
+  ): LowerTask {
     // Names (re)defined anywhere inside the loop body, nested branches
     // included. A name the body itself binds is NOT an outer ref —
     // reassigned locals (e.g. `off = off + ...` inside an if) flow through
@@ -3417,7 +3474,7 @@ class LoweringContext {
       const loopLoc = this.currentSourceLoc;
       for (let j = 0; j < body.length; j++) {
         this.currentSourceLoc = body[j]!.sourceLoc ?? loopLoc;
-        this.lowerBinding(body[j]!, j, lastUses);
+        yield this.lowerBindingTask(body[j]!, j, lastUses);
         this.currentSourceLoc = loopLoc;
       }
 
@@ -6710,11 +6767,27 @@ function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): v
   const pins: StackOp[] = [];
   const placeholders: number[] = [];
 
-  const walk = (ops: StackOp[]): void => {
-    for (const op of ops) {
+  // N-264: pre-order over nested if arms on an explicit stack — inlined
+  // private methods nest D*K if-ops here, too deep to recurse on.
+  const walk = (root: StackOp[]): void => {
+    const stack: StackOp[][] = [root];
+    const at: number[] = [0];
+    while (stack.length > 0) {
+      const top = stack.length - 1;
+      const ops = stack[top]!;
+      if (at[top]! >= ops.length) {
+        stack.pop();
+        at.pop();
+        continue;
+      }
+      const op = ops[at[top]!++]!;
       if (op.op === 'if') {
-        walk(op.then);
-        if (op.else) walk(op.else);
+        if (op.else) {
+          stack.push(op.else);
+          at.push(0);
+        }
+        stack.push(op.then);
+        at.push(0);
       } else if (op.op === 'placeholder') {
         placeholders.push(op.paramIndex);
       } else if (op.op === 'verify_code_part_len') {
@@ -6764,23 +6837,39 @@ function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): v
 function methodUsesCheckPreimage(
   bindings: ANFBinding[],
   privateMethods?: Map<string, ANFMethod>,
-  seen: Set<string> = new Set(),
 ): boolean {
-  for (const b of bindings) {
-    if (b.value.kind === 'check_preimage') return true;
-    if (b.value.kind === 'if') {
-      if (methodUsesCheckPreimage(b.value.then, privateMethods, seen)) return true;
-      if (methodUsesCheckPreimage(b.value.else, privateMethods, seen)) return true;
-    }
-    if (b.value.kind === 'loop') {
-      if (methodUsesCheckPreimage(b.value.body, privateMethods, seen)) return true;
-    }
-    if (b.value.kind === 'method_call' && privateMethods) {
-      const target = privateMethods.get(b.value.method);
-      if (target && !seen.has(target.name)) {
-        const nextSeen = new Set(seen);
-        nextSeen.add(target.name);
-        if (methodUsesCheckPreimage(target.body, privateMethods, nextSeen)) return true;
+  return someReachableBinding(bindings, privateMethods, (b) => b.value.kind === 'check_preimage');
+}
+
+/**
+ * True when `pred` holds for some binding reachable from `bindings` through
+ * if arms, loop bodies and (when `privateMethods` is given) the bodies of
+ * called private methods. N-264: an explicit work list, not recursion — a
+ * chain of D helpers each calling the next under K nested ifs is D*K levels
+ * deep through those edges and overflowed the JS stack. The answer is plain
+ * reachability, exactly what the recursive walk (which pruned a method only
+ * when it was already on the current call path) computed.
+ */
+function someReachableBinding(
+  bindings: ANFBinding[],
+  privateMethods: Map<string, ANFMethod> | undefined,
+  pred: (b: ANFBinding) => boolean,
+): boolean {
+  const work: ANFBinding[][] = [bindings];
+  const seen = new Set<string>();
+  while (work.length > 0) {
+    for (const b of work.pop()!) {
+      if (pred(b)) return true;
+      if (b.value.kind === 'if') {
+        work.push(b.value.else, b.value.then);
+      } else if (b.value.kind === 'loop') {
+        work.push(b.value.body);
+      } else if (b.value.kind === 'method_call' && privateMethods) {
+        const target = privateMethods.get(b.value.method);
+        if (target && !seen.has(target.name)) {
+          seen.add(target.name);
+          work.push(target.body);
+        }
       }
     }
   }
@@ -6848,25 +6937,12 @@ function methodReadsVarLenState(
   bindings: ANFBinding[],
   varLenProps: Set<string>,
   privateMethods?: Map<string, ANFMethod>,
-  seen: Set<string> = new Set(),
 ): boolean {
-  for (const b of bindings) {
-    if (b.value.kind === 'load_prop' && varLenProps.has(b.value.name)) return true;
-    if (b.value.kind === 'if') {
-      if (methodReadsVarLenState(b.value.then, varLenProps, privateMethods, seen) ||
-          methodReadsVarLenState(b.value.else, varLenProps, privateMethods, seen)) return true;
-    }
-    if (b.value.kind === 'loop' && methodReadsVarLenState(b.value.body, varLenProps, privateMethods, seen)) return true;
-    if (b.value.kind === 'method_call' && privateMethods) {
-      const target = privateMethods.get(b.value.method);
-      if (target && !seen.has(target.name)) {
-        const nextSeen = new Set(seen);
-        nextSeen.add(target.name);
-        if (methodReadsVarLenState(target.body, varLenProps, privateMethods, nextSeen)) return true;
-      }
-    }
-  }
-  return false;
+  return someReachableBinding(
+    bindings,
+    privateMethods,
+    (b) => b.value.kind === 'load_prop' && varLenProps.has(b.value.name),
+  );
 }
 
 function methodUsesCodePart(bindings: ANFBinding[]): boolean {

@@ -513,10 +513,54 @@ def encode_push_big_int(n: int) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
-    # Propagate source location from StackOp to the emit context
-    if op.source_loc:
-        ctx.set_source_loc(op.source_loc)
+    _emit_ops([op], ctx)
 
+
+def _emit_ops(root: list[StackOp], ctx: _EmitContext) -> None:
+    """Emit ``root`` in order, descending into if-op arms on an explicit stack.
+
+    N-264: this used to recurse (``_emit_stack_op`` -> ``_emit_if`` ->
+    ``_emit_stack_op``), one level per nested if-op. Private methods are
+    inlined, so a chain of D helpers each calling the next under K nested ifs
+    nests D*K if-ops, past the recursion limit. Each op is emitted in the same
+    order with the same source-location bookkeeping as before: an op's
+    location is set before it, cleared after it, and an if-op's OP_ELSE /
+    OP_ENDIF are emitted under whatever location its last arm op left.
+    """
+    # Frames: [ops, next index, arm, else ops]; arm is "root", "then", "else".
+    stack: list[list] = [[root, 0, "root", None]]
+    while stack:
+        frame = stack[-1]
+        ops, i, arm, else_ops = frame
+        if i < len(ops):
+            frame[1] = i + 1
+            op = ops[i]
+            # Propagate source location from StackOp to the emit context
+            if op.source_loc:
+                ctx.set_source_loc(op.source_loc)
+            if op.op == "if":
+                # An OP_IF / OP_ELSE / OP_ENDIF structure: the arms follow.
+                ctx.emit_opcode("OP_IF")
+                stack.append([op.then, 0, "then", op.else_ops])
+                continue
+            _emit_leaf_op(op, ctx)
+            # Clear after emitting so the location doesn't leak to the next op
+            ctx.set_source_loc(None)
+            continue
+        stack.pop()
+        if arm == "root":
+            continue
+        if arm == "then" and else_ops:
+            ctx.emit_opcode("OP_ELSE")
+            stack.append([else_ops, 0, "else", None])
+            continue
+        ctx.emit_opcode("OP_ENDIF")
+        # The if-op is done: clear its location like any other op's.
+        ctx.set_source_loc(None)
+
+
+def _emit_leaf_op(op: StackOp, ctx: _EmitContext) -> None:
+    """Emit one op that is not an if-op."""
     if op.op == "push":
         ctx.emit_push(op.value)
     elif op.op == "dup":
@@ -539,8 +583,6 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         ctx.emit_opcode("OP_TUCK")
     elif op.op == "opcode":
         ctx.emit_opcode(op.code)
-    elif op.op == "if":
-        _emit_if(op.then, op.else_ops, ctx)
     elif op.op == "placeholder":
         ctx.emit_placeholder(op.param_index)
     elif op.op == "raw_bytes":
@@ -568,24 +610,6 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         })
     else:
         raise ValueError(f"unknown stack op: {op.op}")
-
-    # Clear after emitting so the location doesn't leak to the next op
-    ctx.set_source_loc(None)
-
-
-def _emit_if(then_ops: list[StackOp], else_ops: list[StackOp], ctx: _EmitContext) -> None:
-    """Emit an OP_IF / OP_ELSE / OP_ENDIF structure."""
-    ctx.emit_opcode("OP_IF")
-
-    for op in then_ops:
-        _emit_stack_op(op, ctx)
-
-    if else_ops:
-        ctx.emit_opcode("OP_ELSE")
-        for op in else_ops:
-            _emit_stack_op(op, ctx)
-
-    ctx.emit_opcode("OP_ENDIF")
 
 
 # ---------------------------------------------------------------------------

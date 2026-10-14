@@ -43,10 +43,39 @@ public final class Peephole {
         return new StackProgram(program.contractName(), optimised);
     }
 
+    /**
+     * Optimizes {@code ops} bottom-up: every if-arm before the list holding it.
+     *
+     * <p>N-264: bottom-up by an explicit list, not recursion. Private methods
+     * are inlined, so a chain of D helpers that each call the next under K
+     * nested ifs nests D*K IfOps here, and the recursive walk overflowed the
+     * thread stack. Every op list reachable through if arms is collected
+     * parents first, then optimized in reverse — children before parents, each
+     * list exactly as the recursive version optimized it.
+     */
     public static List<StackOp> optimize(List<StackOp> ops) {
-        List<StackOp> current = new ArrayList<>(ops.size());
-        for (StackOp op : ops) current.add(optimizeNestedIf(op));
+        List<List<StackOp>> lists = new ArrayList<>();
+        lists.add(ops);
+        for (int k = 0; k < lists.size(); k++) {
+            for (StackOp op : lists.get(k)) {
+                if (op instanceof IfOp i) {
+                    lists.add(i.thenBranch());
+                    if (i.elseBranch() != null) lists.add(i.elseBranch());
+                }
+            }
+        }
+        java.util.IdentityHashMap<List<StackOp>, List<StackOp>> optimized = new java.util.IdentityHashMap<>();
+        for (int k = lists.size() - 1; k >= 0; k--) {
+            List<StackOp> list = lists.get(k);
+            List<StackOp> current = new ArrayList<>(list.size());
+            for (StackOp op : list) current.add(withOptimizedArms(op, optimized));
+            optimized.put(list, optimizeOneLevel(current));
+        }
+        return optimized.get(ops);
+    }
 
+    /** The fixed-point rule loop over one op list whose if-arms are already done. */
+    private static List<StackOp> optimizeOneLevel(List<StackOp> current) {
         for (int it = 0; it < MAX_ITERATIONS; it++) {
             Pass pass = applyOnePass(current);
             if (!pass.changed) break;
@@ -55,10 +84,11 @@ public final class Peephole {
         return current;
     }
 
-    private static StackOp optimizeNestedIf(StackOp op) {
+    private static StackOp withOptimizedArms(
+            StackOp op, java.util.IdentityHashMap<List<StackOp>, List<StackOp>> optimized) {
         if (op instanceof IfOp i) {
-            List<StackOp> thenB = optimize(i.thenBranch());
-            List<StackOp> elseB = i.elseBranch() != null ? optimize(i.elseBranch()) : null;
+            List<StackOp> thenB = optimized.get(i.thenBranch());
+            List<StackOp> elseB = i.elseBranch() != null ? optimized.get(i.elseBranch()) : null;
             // N-158: keep the IfOp's own loc; Emit maps OP_IF from it.
             return new IfOp(thenB, elseB, i.sourceLoc());
         }

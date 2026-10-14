@@ -559,6 +559,50 @@ pub fn encode_push_int(n: &num_bigint::BigInt) -> (String, String) {
 // ---------------------------------------------------------------------------
 
 fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
+    emit_ops(std::slice::from_ref(op), ctx)
+}
+
+/// Emit `root` in order, descending into if-op arms on an explicit stack.
+///
+/// N-264: this used to recurse (`emit_stack_op` -> `emit_if` ->
+/// `emit_stack_op`), one level per nested if-op. Private methods are inlined,
+/// so a chain of D helpers each calling the next under K nested ifs nests D*K
+/// if-ops, too deep for a thread stack. Same opcodes in the same order, and
+/// the first error stops the emission, as before.
+fn emit_ops(root: &[StackOp], ctx: &mut EmitContext) -> Result<(), String> {
+    // Each frame: the remaining ops of a list, and — for an if-op's then-arm —
+    // the else-arm still to emit (`None` for the root and for an else-arm).
+    let mut stack: Vec<(std::slice::Iter<'_, StackOp>, Option<Option<&[StackOp]>>)> =
+        vec![(root.iter(), None)];
+    while let Some((ops, arm)) = stack.last_mut() {
+        if let Some(op) = ops.next() {
+            if let StackOp::If { then_ops, else_ops } = op {
+                ctx.emit_opcode("OP_IF")?;
+                stack.push((then_ops.iter(), Some(Some(&else_ops[..]))));
+            } else {
+                emit_leaf_op(op, ctx)?;
+            }
+            continue;
+        }
+        let arm = *arm;
+        stack.pop();
+        match arm {
+            // The root list.
+            None => {}
+            // A then-arm, followed by its else-arm when that is non-empty.
+            Some(Some(else_ops)) if !else_ops.is_empty() => {
+                ctx.emit_opcode("OP_ELSE")?;
+                stack.push((else_ops.iter(), Some(None)));
+            }
+            // The if-op is done.
+            Some(_) => ctx.emit_opcode("OP_ENDIF")?,
+        }
+    }
+    Ok(())
+}
+
+/// Emit one op that is not an if-op.
+fn emit_leaf_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
     match op {
         StackOp::Push(value) => {
             ctx.emit_push(value);
@@ -574,10 +618,7 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
         StackOp::Rot => ctx.emit_opcode("OP_ROT"),
         StackOp::Tuck => ctx.emit_opcode("OP_TUCK"),
         StackOp::Opcode(code) => ctx.emit_opcode(code),
-        StackOp::If {
-            then_ops,
-            else_ops,
-        } => emit_if(then_ops, else_ops, ctx),
+        StackOp::If { .. } => unreachable!("emit_ops emits if-ops"),
         StackOp::Placeholder {
             param_index,
             param_name,
@@ -625,26 +666,6 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
     }
 }
 
-fn emit_if(
-    then_ops: &[StackOp],
-    else_ops: &[StackOp],
-    ctx: &mut EmitContext,
-) -> Result<(), String> {
-    ctx.emit_opcode("OP_IF")?;
-
-    for op in then_ops {
-        emit_stack_op(op, ctx)?;
-    }
-
-    if !else_ops.is_empty() {
-        ctx.emit_opcode("OP_ELSE")?;
-        for op in else_ops {
-            emit_stack_op(op, ctx)?;
-        }
-    }
-
-    ctx.emit_opcode("OP_ENDIF")
-}
 
 // ---------------------------------------------------------------------------
 // Peephole optimization
@@ -664,11 +685,12 @@ fn emit_if(
 pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
     let mut ctx = EmitContext::new();
 
-    // Filter to public methods (exclude constructor)
-    let public_methods: Vec<StackMethod> = methods
+    // Filter to public methods (exclude constructor). N-264: by reference —
+    // cloning a method deep-copied its op tree, recursively, once per nested
+    // if-op (D*K deep for a chain of D inlined helpers under K ifs each).
+    let public_methods: Vec<&StackMethod> = methods
         .iter()
         .filter(|m| m.name != "constructor")
-        .cloned()
         .collect();
 
     if public_methods.is_empty() {
@@ -703,13 +725,13 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
     }
 
     if public_methods.len() == 1 {
-        let m = &public_methods[0];
+        let m = public_methods[0];
         for (idx, op) in m.ops.iter().enumerate() {
             ctx.pending_source_loc = m.source_locs.get(idx).cloned().flatten();
             emit_stack_op(op, &mut ctx)?;
         }
     } else {
-        let refs: Vec<&StackMethod> = public_methods.iter().collect();
+        let refs: Vec<&StackMethod> = public_methods.clone();
         emit_method_dispatch(&refs, &mut ctx)?;
     }
 

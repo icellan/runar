@@ -2791,6 +2791,24 @@ module RunarCompiler
     # State mutation analysis
     # -------------------------------------------------------------------
 
+    # N-264: the private-method bodies a cross-call predicate below still has
+    # to scan, each at most once.
+    class CalleeQueue
+      attr_reader :pending
+
+      def initialize(seen)
+        @visited = seen.dup
+        @pending = []
+      end
+
+      def enqueue(target)
+        return if target.nil? || @visited.include?(target.name)
+
+        @visited.add(target.name)
+        @pending << (target.body || [])
+      end
+    end
+
     # Determine whether a method mutates any mutable (non-readonly) property.
     # Conservative: if ANY code path can mutate state, returns true. Walks
     # the private-method call graph so a public method that delegates the
@@ -2812,26 +2830,38 @@ module RunarCompiler
     # @param seen [Set<String>] private methods currently on the recursion stack
     # @return [Boolean]
     def self._body_mutates_state(stmts, mutable_props, contract, seen)
-      stmts.any? { |stmt| _stmt_mutates_state(stmt, mutable_props, contract, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_mutates_state(stmt, mutable_props, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_mutates_state
 
     # @return [Boolean]
-    def self._stmt_mutates_state(stmt, mutable_props, contract, seen)
+    def self._stmt_mutates_state(stmt, mutable_props, contract, q)
       if stmt.is_a?(AssignmentStmt) && stmt.target.is_a?(PropertyAccessExpr) &&
          mutable_props.include?(stmt.target.property)
         return true
       end
 
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_mutates_state(e, mutable_props, contract, seen)
+        _expr_mutates_state(e, mutable_props, contract, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_mutates_state(s, mutable_props, contract, seen) }
+      _child_statements(stmt).any? { |s| _stmt_mutates_state(s, mutable_props, contract, q) }
     end
     private_class_method :_stmt_mutates_state
 
     # @return [Boolean]
-    def self._expr_mutates_state(expr, mutable_props, contract, seen)
+    def self._expr_mutates_state(expr, mutable_props, contract, q)
       return false if expr.nil?
       if expr.is_a?(IncrementExpr) || expr.is_a?(DecrementExpr)
         # The reference stops here -- it does not descend into the operand.
@@ -2840,12 +2870,9 @@ module RunarCompiler
       end
       if expr.is_a?(CallExpr)
         target = _resolve_private_method(expr.callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_mutates_state(target.body, mutable_props, contract, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_mutates_state(e, mutable_props, contract, seen) }
+      _child_expressions(expr).any? { |e| _expr_mutates_state(e, mutable_props, contract, q) }
     end
     private_class_method :_expr_mutates_state
 
@@ -2879,21 +2906,33 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._body_has_add_output(stmts, contract, seen)
-      stmts.any? { |stmt| _stmt_has_add_output(stmt, contract, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_has_add_output(stmt, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_has_add_output
 
     # @return [Boolean]
-    def self._stmt_has_add_output(stmt, contract, seen)
+    def self._stmt_has_add_output(stmt, contract, q)
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_has_add_output(e, contract, seen)
+        _expr_has_add_output(e, contract, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_has_add_output(s, contract, seen) }
+      _child_statements(stmt).any? { |s| _stmt_has_add_output(s, contract, q) }
     end
     private_class_method :_stmt_has_add_output
 
     # @return [Boolean]
-    def self._expr_has_add_output(expr, contract, seen)
+    def self._expr_has_add_output(expr, contract, q)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -2907,12 +2946,9 @@ module RunarCompiler
           return true
         end
         target = _resolve_private_method(callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_has_add_output(target.body, contract, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_has_add_output(e, contract, seen) }
+      _child_expressions(expr).any? { |e| _expr_has_add_output(e, contract, q) }
     end
     private_class_method :_expr_has_add_output
 
@@ -2929,21 +2965,33 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._body_has_add_data_output(stmts, contract, seen)
-      stmts.any? { |stmt| _stmt_has_add_data_output(stmt, contract, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_has_add_data_output(stmt, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_has_add_data_output
 
     # @return [Boolean]
-    def self._stmt_has_add_data_output(stmt, contract, seen)
+    def self._stmt_has_add_data_output(stmt, contract, q)
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_has_add_data_output(e, contract, seen)
+        _expr_has_add_data_output(e, contract, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_has_add_data_output(s, contract, seen) }
+      _child_statements(stmt).any? { |s| _stmt_has_add_data_output(s, contract, q) }
     end
     private_class_method :_stmt_has_add_data_output
 
     # @return [Boolean]
-    def self._expr_has_add_data_output(expr, contract, seen)
+    def self._expr_has_add_data_output(expr, contract, q)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -2957,12 +3005,9 @@ module RunarCompiler
           return true
         end
         target = _resolve_private_method(callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_has_add_data_output(target.body, contract, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_has_add_data_output(e, contract, seen) }
+      _child_expressions(expr).any? { |e| _expr_has_add_data_output(e, contract, q) }
     end
     private_class_method :_expr_has_add_data_output
 
@@ -2983,21 +3028,33 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._body_calls_require_output_p2pkh(stmts, contract, zero_only, seen)
-      stmts.any? { |stmt| _stmt_calls_require_output_p2pkh(stmt, contract, zero_only, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_calls_require_output_p2pkh(stmt, contract, zero_only, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_calls_require_output_p2pkh
 
     # @return [Boolean]
-    def self._stmt_calls_require_output_p2pkh(stmt, contract, zero_only, seen)
+    def self._stmt_calls_require_output_p2pkh(stmt, contract, zero_only, q)
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_calls_require_output_p2pkh(e, contract, zero_only, seen)
+        _expr_calls_require_output_p2pkh(e, contract, zero_only, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_calls_require_output_p2pkh(s, contract, zero_only, seen) }
+      _child_statements(stmt).any? { |s| _stmt_calls_require_output_p2pkh(s, contract, zero_only, q) }
     end
     private_class_method :_stmt_calls_require_output_p2pkh
 
     # @return [Boolean]
-    def self._expr_calls_require_output_p2pkh(expr, contract, zero_only, seen)
+    def self._expr_calls_require_output_p2pkh(expr, contract, zero_only, q)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -3007,12 +3064,9 @@ module RunarCompiler
           return true if idx.is_a?(BigIntLiteral) && idx.value == 0
         end
         target = _resolve_private_method(callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_calls_require_output_p2pkh(target.body, contract, zero_only, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_calls_require_output_p2pkh(e, contract, zero_only, seen) }
+      _child_expressions(expr).any? { |e| _expr_calls_require_output_p2pkh(e, contract, zero_only, q) }
     end
     private_class_method :_expr_calls_require_output_p2pkh
 

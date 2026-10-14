@@ -42,6 +42,7 @@ test {
     _ = @import("tests/java_parenthesised_expression.zig");
     _ = @import("tests/f213_source_nesting_limit.zig");
     _ = @import("tests/n180_call_depth_limit.zig");
+    _ = @import("tests/n264_composite_nesting.zig");
     _ = @import("tests/n266_locktime_bfs_perf.zig");
     _ = @import("tests/f026_int_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");

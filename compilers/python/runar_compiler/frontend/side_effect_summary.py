@@ -121,6 +121,14 @@ def continuation_shape_for(eff: MethodEffects, sighash_type: int | None = None) 
     )
 
 
+class _NeedCallee(Exception):
+    """Raised by a body walk that needs a callee classified first (N-264)."""
+
+    def __init__(self, target: MethodNode) -> None:
+        super().__init__(target.name)
+        self.target = target
+
+
 def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffects]:
     """Classify every method on the contract.
 
@@ -137,6 +145,24 @@ def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffec
     }
     in_progress: set[str] = set()
 
+    # N-264: the walk is ITERATIVE across calls. It used to classify a callee
+    # by recursing from inside the caller's statement walk, so the host stack
+    # held every caller's nesting at once: a chain of D helpers that each call
+    # the next under K nested ifs (both within their own bounds) needed D*K
+    # frames. Now a body walk that meets an unclassified callee abandons itself
+    # (``_NeedCallee``), the callee is classified first on an explicit work
+    # stack, and the caller's walk restarts. The walk is pure, so a restart
+    # yields exactly what the recursive walk did, in the same visit order with
+    # the same in-progress set.
+    def callee_effects(target: MethodNode) -> MethodEffects:
+        if target.name in summary:
+            return summary[target.name]
+        if target.name in in_progress:
+            # Validation should reject recursion before we get here;
+            # return empty effects defensively to avoid infinite loops.
+            return MethodEffects()
+        raise _NeedCallee(target)
+
     def classify(method_name: str, body: list[Statement]) -> MethodEffects:
         if method_name in summary:
             return summary[method_name]
@@ -144,13 +170,22 @@ def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffec
             # Validation should reject recursion before we get here;
             # return empty effects defensively to avoid infinite loops.
             return MethodEffects()
+        work: list[tuple[str, list[Statement]]] = [(method_name, body)]
         in_progress.add(method_name)
-        effects = MethodEffects()
-        for stmt in body:
-            _collect_stmt(stmt, effects, mutable_props, private_by_name, classify)
-        in_progress.discard(method_name)
-        summary[method_name] = effects
-        return effects
+        while work:
+            name, stmts = work[-1]
+            effects = MethodEffects()
+            try:
+                for stmt in stmts:
+                    _collect_stmt(stmt, effects, mutable_props, private_by_name, callee_effects)
+            except _NeedCallee as need:
+                in_progress.add(need.target.name)
+                work.append((need.target.name, need.target.body))
+                continue
+            work.pop()
+            in_progress.discard(name)
+            summary[name] = effects
+        return summary[method_name]
 
     classify("constructor", contract.constructor.body)
     for m in contract.methods:
@@ -239,7 +274,7 @@ def _collect_expr(
                 into.has_data_output = True
             target = private_by_name.get(callee_name)
             if target is not None:
-                into.union(classify(target.name, target.body))
+                into.union(classify(target))
 
         if isinstance(callee, Identifier):
             if callee.name == "checkPreimage":
@@ -252,7 +287,7 @@ def _collect_expr(
                         into.requires_output_p2pkh_zero = True
             target = private_by_name.get(callee.name)
             if target is not None:
-                into.union(classify(target.name, target.body))
+                into.union(classify(target))
 
         for arg in expr.args:
             _collect_expr(arg, into, mutable_props, private_by_name, classify)

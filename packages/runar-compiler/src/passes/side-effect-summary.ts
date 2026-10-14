@@ -71,6 +71,11 @@ function unionInto(target: MethodEffects, source: MethodEffects): void {
   target.requiresOutputP2PKHZero ||= source.requiresOutputP2PKHZero;
 }
 
+/** Raised by a body walk that needs a callee computed first (N-264). */
+class NeedCallee {
+  constructor(readonly name: string, readonly body: Statement[]) {}
+}
+
 /**
  * Compute side-effect summary for every method on the contract.
  *
@@ -96,6 +101,16 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
   // mis-validated input.
   const inProgress = new Set<string>();
 
+  // N-264: the walk is ITERATIVE across calls. It used to compute a callee's
+  // effects by recursing from inside the caller's statement walk, so the host
+  // stack held every caller's nesting at once: a chain of D helpers that each
+  // call the next under K nested ifs (both within their own bounds) needed
+  // D*K frames and overflowed at D=32 x 120. Now a body walk that meets an
+  // uncomputed callee abandons itself (`NeedCallee`), the callee is computed
+  // first on an explicit work stack, and the caller's walk restarts. The walk
+  // is pure, so a restart yields exactly what the recursive walk did, in the
+  // same visit order with the same in-progress set — results (including the
+  // empty effects a cyclic call gets) are unchanged.
   function effectsFor(methodName: string, body: Statement[]): MethodEffects {
     const cached = summary.get(methodName);
     if (cached) return cached;
@@ -105,11 +120,32 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
       // here. Returning empty avoids infinite recursion.
       return emptyEffects();
     }
+    const work: { name: string; body: Statement[] }[] = [{ name: methodName, body }];
     inProgress.add(methodName);
-    const effects = computeBodyEffects(body);
-    inProgress.delete(methodName);
-    summary.set(methodName, effects);
-    return effects;
+    while (work.length > 0) {
+      const top = work[work.length - 1]!;
+      let effects: MethodEffects;
+      try {
+        effects = computeBodyEffects(top.body);
+      } catch (e) {
+        if (!(e instanceof NeedCallee)) throw e;
+        inProgress.add(e.name);
+        work.push({ name: e.name, body: e.body });
+        continue;
+      }
+      work.pop();
+      inProgress.delete(top.name);
+      summary.set(top.name, effects);
+    }
+    return summary.get(methodName)!;
+  }
+
+  /** A callee's effects for the walk in progress; see `effectsFor`. */
+  function calleeEffects(target: MethodNode): MethodEffects {
+    const cached = summary.get(target.name);
+    if (cached) return cached;
+    if (inProgress.has(target.name)) return emptyEffects();
+    throw new NeedCallee(target.name, target.body);
   }
 
   function computeBodyEffects(stmts: Statement[]): MethodEffects {
@@ -182,7 +218,7 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
           if (DATA_OUTPUT_INTRINSICS.has(name)) into.hasDataOutput = true;
           const target = privateMethodsByName.get(name);
           if (target) {
-            unionInto(into, effectsFor(target.name, target.body));
+            unionInto(into, calleeEffects(target));
           }
         }
 
@@ -200,7 +236,7 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
           }
           const target = privateMethodsByName.get(callee.name);
           if (target) {
-            unionInto(into, effectsFor(target.name, target.body));
+            unionInto(into, calleeEffects(target));
           }
         }
 

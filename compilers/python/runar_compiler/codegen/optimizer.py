@@ -17,10 +17,35 @@ MAX_OPTIMIZATION_ITERATIONS = 100
 
 
 def optimize_stack_ops(ops: list[StackOp]) -> list[StackOp]:
-    """Apply peephole optimization to a list of stack ops."""
-    # First, recursively optimize nested if-blocks
-    current = [_optimize_nested_if(op) for op in ops]
+    """Apply peephole optimization to a list of stack ops.
 
+    Nested if-blocks are optimized bottom-up: every if-arm before the list
+    holding it. N-264: by an explicit list, not recursion -- private methods
+    are inlined, so a chain of D helpers that each call the next under K
+    nested ifs nests D*K if-ops here, past the recursion limit. Every op list
+    reachable through if arms is collected parents first, then optimized in
+    reverse (children before parents), each list exactly as the recursive
+    version optimized it.
+    """
+    lists: list[list[StackOp]] = [ops]
+    k = 0
+    while k < len(lists):
+        for op in lists[k]:
+            if op.op == "if":
+                lists.append(op.then)
+                if op.else_ops:
+                    lists.append(op.else_ops)
+        k += 1
+    # Keyed by list identity; every list stays referenced by ``lists``.
+    optimized: dict[int, list[StackOp]] = {}
+    for lst in reversed(lists):
+        current = [_with_optimized_arms(op, optimized) for op in lst]
+        optimized[id(lst)] = _optimize_one_level(current)
+    return optimized[id(ops)]
+
+
+def _optimize_one_level(current: list[StackOp]) -> list[StackOp]:
+    """The fixed-point rule loop over one op list whose if-arms are done."""
     for _ in range(MAX_OPTIMIZATION_ITERATIONS):
         result, changed = _apply_one_pass(current)
         if not changed:
@@ -30,10 +55,10 @@ def optimize_stack_ops(ops: list[StackOp]) -> list[StackOp]:
     return current
 
 
-def _optimize_nested_if(op: StackOp) -> StackOp:
+def _with_optimized_arms(op: StackOp, optimized: dict[int, list[StackOp]]) -> StackOp:
     if op.op == "if":
-        optimized_then = optimize_stack_ops(op.then)
-        optimized_else = optimize_stack_ops(op.else_ops) if op.else_ops else []
+        optimized_then = optimized[id(op.then)]
+        optimized_else = optimized[id(op.else_ops)] if op.else_ops else []
         return StackOp(
             op="if",
             then=optimized_then,

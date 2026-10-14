@@ -158,11 +158,20 @@ pub fn compute_side_effect_summary(contract: &ContractNode) -> SideEffectSummary
     summary
 }
 
-fn classify(
-    method_name: &str,
-    body: &[Statement],
+/// N-264: the walk is ITERATIVE across calls. It used to classify a callee by
+/// recursing from inside the caller's statement walk, so the host stack held
+/// every caller's nesting at once: a chain of D helpers that each call the
+/// next under K nested ifs (both within their own bounds) needed D*K frames.
+/// Now a body walk that meets an unclassified callee abandons itself (its
+/// `Err` names the callee), the callee is classified first on an explicit
+/// work stack, and the caller's walk restarts. The walk is pure, so a restart
+/// yields exactly what the recursive walk did, in the same visit order with
+/// the same in-progress set.
+fn classify<'a>(
+    method_name: &'a str,
+    body: &'a [Statement],
     mutable_props: &HashSet<String>,
-    private_by_name: &HashMap<String, &MethodNode>,
+    private_by_name: &HashMap<String, &'a MethodNode>,
     summary: &mut SideEffectSummary,
     in_progress: &mut HashSet<String>,
 ) -> MethodEffects {
@@ -176,24 +185,53 @@ fn classify(
     }
     in_progress.insert(method_name.to_string());
 
-    let mut effects = MethodEffects::default();
-    for s in body {
-        collect_stmt(s, &mut effects, mutable_props, private_by_name, summary, in_progress);
+    let mut work: Vec<(&'a str, &'a [Statement])> = vec![(method_name, body)];
+    while let Some(&(name, stmts)) = work.last() {
+        let mut effects = MethodEffects::default();
+        let walk = stmts
+            .iter()
+            .try_for_each(|s| collect_stmt(s, &mut effects, mutable_props, private_by_name, summary, in_progress));
+        match walk {
+            Err(callee) => {
+                in_progress.insert(callee.name.clone());
+                work.push((&callee.name, &callee.body));
+            }
+            Ok(()) => {
+                work.pop();
+                in_progress.remove(name);
+                summary.insert(name.to_string(), effects);
+            }
+        }
     }
-
-    in_progress.remove(method_name);
-    summary.insert(method_name.to_string(), effects);
-    effects
+    summary[method_name]
 }
 
-fn collect_stmt(
+/// A callee's effects for the walk in progress, or `Err(callee)` when it has
+/// to be classified first (N-264; see `classify`).
+fn callee_effects<'a>(
+    target: &'a MethodNode,
+    summary: &SideEffectSummary,
+    in_progress: &HashSet<String>,
+) -> Result<MethodEffects, &'a MethodNode> {
+    if let Some(cached) = summary.get(&target.name) {
+        return Ok(*cached);
+    }
+    if in_progress.contains(&target.name) {
+        // Defensive: validation should reject recursion before we
+        // get here. Returning empty avoids infinite recursion.
+        return Ok(MethodEffects::default());
+    }
+    Err(target)
+}
+
+fn collect_stmt<'a>(
     stmt: &Statement,
     into: &mut MethodEffects,
     mutable_props: &HashSet<String>,
-    private_by_name: &HashMap<String, &MethodNode>,
+    private_by_name: &HashMap<String, &'a MethodNode>,
     summary: &mut SideEffectSummary,
     in_progress: &mut HashSet<String>,
-) {
+) -> Result<(), &'a MethodNode> {
     match stmt {
         Statement::Assignment { target, value, .. } => {
             if let Expression::PropertyAccess { property } = target {
@@ -203,11 +241,11 @@ fn collect_stmt(
             }
             // Both sides may still contain calls (output intrinsics could hide
             // in the target's index/object as well as the value).
-            collect_expr(target, into, mutable_props, private_by_name, summary, in_progress);
-            collect_expr(value, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(target, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_expr(value, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Statement::ExpressionStatement { expression, .. } => {
-            collect_expr(expression, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(expression, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Statement::IfStatement {
             condition,
@@ -215,45 +253,46 @@ fn collect_stmt(
             else_branch,
             ..
         } => {
-            collect_expr(condition, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(condition, into, mutable_props, private_by_name, summary, in_progress)?;
             for inner in then_branch {
-                collect_stmt(inner, into, mutable_props, private_by_name, summary, in_progress);
+                collect_stmt(inner, into, mutable_props, private_by_name, summary, in_progress)?;
             }
             if let Some(else_body) = else_branch {
                 for inner in else_body {
-                    collect_stmt(inner, into, mutable_props, private_by_name, summary, in_progress);
+                    collect_stmt(inner, into, mutable_props, private_by_name, summary, in_progress)?;
                 }
             }
         }
         Statement::ForStatement { init, condition, update, body, .. } => {
             // Walk the full loop header: an output intrinsic can hide in init or
             // condition, not only in update/body.
-            collect_stmt(init, into, mutable_props, private_by_name, summary, in_progress);
-            collect_expr(condition, into, mutable_props, private_by_name, summary, in_progress);
-            collect_stmt(update, into, mutable_props, private_by_name, summary, in_progress);
+            collect_stmt(init, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_expr(condition, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_stmt(update, into, mutable_props, private_by_name, summary, in_progress)?;
             for inner in body {
-                collect_stmt(inner, into, mutable_props, private_by_name, summary, in_progress);
+                collect_stmt(inner, into, mutable_props, private_by_name, summary, in_progress)?;
             }
         }
         Statement::ReturnStatement { value, .. } => {
             if let Some(expr) = value {
-                collect_expr(expr, into, mutable_props, private_by_name, summary, in_progress);
+                collect_expr(expr, into, mutable_props, private_by_name, summary, in_progress)?;
             }
         }
         Statement::VariableDecl { init, .. } => {
-            collect_expr(init, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(init, into, mutable_props, private_by_name, summary, in_progress)?;
         }
     }
+    Ok(())
 }
 
-fn collect_expr(
+fn collect_expr<'a>(
     expr: &Expression,
     into: &mut MethodEffects,
     mutable_props: &HashSet<String>,
-    private_by_name: &HashMap<String, &MethodNode>,
+    private_by_name: &HashMap<String, &'a MethodNode>,
     summary: &mut SideEffectSummary,
     in_progress: &mut HashSet<String>,
-) {
+) -> Result<(), &'a MethodNode> {
     match expr {
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
             if let Expression::PropertyAccess { property } = operand.as_ref() {
@@ -278,14 +317,7 @@ fn collect_expr(
                     into.has_data_output = true;
                 }
                 if let Some(target) = private_by_name.get(name) {
-                    let target_eff = classify(
-                        &target.name,
-                        &target.body,
-                        mutable_props,
-                        private_by_name,
-                        summary,
-                        in_progress,
-                    );
+                    let target_eff = callee_effects(target, summary, in_progress)?;
                     into.union(&target_eff);
                 }
             }
@@ -307,55 +339,49 @@ fn collect_expr(
                     }
                 }
                 if let Some(target) = private_by_name.get(name) {
-                    let target_eff = classify(
-                        &target.name,
-                        &target.body,
-                        mutable_props,
-                        private_by_name,
-                        summary,
-                        in_progress,
-                    );
+                    let target_eff = callee_effects(target, summary, in_progress)?;
                     into.union(&target_eff);
                 }
             }
 
             for arg in args {
-                collect_expr(arg, into, mutable_props, private_by_name, summary, in_progress);
+                collect_expr(arg, into, mutable_props, private_by_name, summary, in_progress)?;
             }
             // Walk the callee subexpression too, except for plain
             // identifiers (already handled above).
             if !matches!(callee.as_ref(), Expression::Identifier { .. }) {
-                collect_expr(callee, into, mutable_props, private_by_name, summary, in_progress);
+                collect_expr(callee, into, mutable_props, private_by_name, summary, in_progress)?;
             }
         }
         Expression::BinaryExpr { left, right, .. } => {
-            collect_expr(left, into, mutable_props, private_by_name, summary, in_progress);
-            collect_expr(right, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(left, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_expr(right, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Expression::UnaryExpr { operand, .. } => {
-            collect_expr(operand, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(operand, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Expression::TernaryExpr {
             condition,
             consequent,
             alternate,
         } => {
-            collect_expr(condition, into, mutable_props, private_by_name, summary, in_progress);
-            collect_expr(consequent, into, mutable_props, private_by_name, summary, in_progress);
-            collect_expr(alternate, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(condition, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_expr(consequent, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_expr(alternate, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Expression::IndexAccess { object, index } => {
-            collect_expr(object, into, mutable_props, private_by_name, summary, in_progress);
-            collect_expr(index, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(object, into, mutable_props, private_by_name, summary, in_progress)?;
+            collect_expr(index, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Expression::MemberExpr { object, .. } => {
-            collect_expr(object, into, mutable_props, private_by_name, summary, in_progress);
+            collect_expr(object, into, mutable_props, private_by_name, summary, in_progress)?;
         }
         Expression::ArrayLiteral { elements } => {
             for el in elements {
-                collect_expr(el, into, mutable_props, private_by_name, summary, in_progress);
+                collect_expr(el, into, mutable_props, private_by_name, summary, in_progress)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }

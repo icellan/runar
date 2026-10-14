@@ -10,16 +10,80 @@ use super::stack::{PushValue, StackOp};
 const MAX_ITERATIONS: usize = 100;
 
 /// Apply peephole optimization to a list of stack ops.
+/// Optimize `ops`, nested if-blocks bottom-up: every if-arm before the list
+/// holding it.
+///
+/// N-264: bottom-up on an explicit stack, not by recursion. Private methods are
+/// inlined, so a chain of D helpers that each call the next under K nested ifs
+/// nests D*K if-ops here, too deep to recurse on. Each list is optimized
+/// exactly as the recursive version optimized it.
 pub fn optimize_stack_ops(ops: &[StackOp]) -> Vec<StackOp> {
-    // First, recursively optimize nested if-blocks
-    let mut current: Vec<StackOp> = ops.iter().map(optimize_nested_if).collect();
+    /// An op list being rebuilt: its next op, the rebuilt ops so far, and —
+    /// while an if-op's else-arm is being optimized — that if-op's finished
+    /// then-arm.
+    struct Frame<'o> {
+        ops: &'o [StackOp],
+        next: usize,
+        out: Vec<StackOp>,
+        then_done: Option<Vec<StackOp>>,
+    }
+    fn new_frame(ops: &[StackOp]) -> Frame<'_> {
+        Frame { ops, next: 0, out: Vec::with_capacity(ops.len()), then_done: None }
+    }
+    let mut stack: Vec<Frame> = vec![new_frame(ops)];
+    // A just-optimized arm, on its way to the if-op that holds it.
+    let mut arm: Option<Vec<StackOp>> = None;
+    loop {
+        let top = stack.len() - 1;
+        if let Some(done) = arm.take() {
+            let frame = &mut stack[top];
+            let else_ops = match &frame.ops[frame.next - 1] {
+                StackOp::If { else_ops, .. } => else_ops,
+                _ => unreachable!("an arm returns to its if-op"),
+            };
+            match frame.then_done.take() {
+                Some(then_ops) => frame.out.push(StackOp::If { then_ops, else_ops: done }),
+                None if else_ops.is_empty() => {
+                    frame.out.push(StackOp::If { then_ops: done, else_ops: Vec::new() })
+                }
+                None => {
+                    frame.then_done = Some(done);
+                    let child = new_frame(else_ops);
+                    stack.push(child);
+                }
+            }
+            continue;
+        }
+        let frame = &mut stack[top];
+        if frame.next < frame.ops.len() {
+            let op = &frame.ops[frame.next];
+            frame.next += 1;
+            match op {
+                StackOp::If { then_ops, .. } => {
+                    let child = new_frame(then_ops);
+                    stack.push(child);
+                }
+                other => frame.out.push(other.clone()),
+            }
+            continue;
+        }
+        let done = stack.pop().unwrap();
+        let optimized = optimize_one_level(done.out);
+        if stack.is_empty() {
+            return optimized;
+        }
+        arm = Some(optimized);
+    }
+}
 
+/// The fixed-point rule loop over one op list whose if-arms are done.
+fn optimize_one_level(mut current: Vec<StackOp>) -> Vec<StackOp> {
     for _ in 0..MAX_ITERATIONS {
-        let (result, changed) = apply_one_pass(&current);
+        let (result, changed) = apply_one_pass(current);
+        current = result;
         if !changed {
             break;
         }
-        current = result;
     }
 
     current
@@ -46,19 +110,21 @@ pub fn optimize_stack_ops_with_locs(
         if source_locs.len() == ops.len() { source_locs.to_vec() } else { vec![None; ops.len()] };
 
     for _ in 0..MAX_ITERATIONS {
-        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(&current_ops, &current_locs);
+        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(current_ops, &current_locs);
+        current_ops = result_ops;
         if !changed {
             break;
         }
-        current_ops = result_ops;
         current_locs = result_locs;
     }
 
     (current_ops, current_locs)
 }
 
+/// N-264: takes `ops` by value and MOVES each unmatched op into the result.
+/// Cloning one deep-cloned an if-op's whole subtree, recursively.
 fn apply_one_pass_with_locs(
-    ops: &[StackOp],
+    mut ops: Vec<StackOp>,
     source_locs: &[Option<crate::ir::SourceLocation>],
 ) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>, bool) {
     let mut result_ops = Vec::new();
@@ -112,7 +178,8 @@ fn apply_one_pass_with_locs(
             }
         }
 
-        result_ops.push(ops[i].clone());
+        // Every later window starts past `i`, so the placeholder is never read.
+        result_ops.push(std::mem::replace(&mut ops[i], StackOp::Drop));
         result_locs.push(source_locs.get(i).cloned().flatten());
         i += 1;
     }
@@ -141,7 +208,8 @@ fn optimize_nested_if(op: &StackOp) -> StackOp {
     }
 }
 
-fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
+/// N-264: takes `ops` by value; see `apply_one_pass_with_locs`.
+fn apply_one_pass(mut ops: Vec<StackOp>) -> (Vec<StackOp>, bool) {
     let mut result = Vec::new();
     let mut changed = false;
     let mut i = 0;
@@ -177,7 +245,8 @@ fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
             }
         }
 
-        result.push(ops[i].clone());
+        // Every later window starts past `i`, so the placeholder is never read.
+        result.push(std::mem::replace(&mut ops[i], StackOp::Drop));
         i += 1;
     }
 

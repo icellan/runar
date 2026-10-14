@@ -388,10 +388,63 @@ public final class Emit {
     }
 
     private static void emitStackOp(StackOp op, Ctx ctx) {
-        // GAP-002: read the StackSourceLoc the StackLower pass stamped onto
-        // this op (when any) so Ctx#recordSourceMapping can attach it to
-        // the next opcode index.
-        ctx.setPendingSourceLoc(extractSourceLoc(op));
+        emitOps(List.of(op), ctx);
+    }
+
+    /** An op list being emitted by {@link #emitOps}: the root, or an IfOp arm. */
+    private static final class EmitFrame {
+        final java.util.Iterator<StackOp> ops;
+        /** 0 = root, 1 = then-arm (else-arm follows), 2 = else-arm. */
+        final int arm;
+        final List<StackOp> elseOps;
+
+        EmitFrame(List<StackOp> ops, int arm, List<StackOp> elseOps) {
+            this.ops = ops.iterator();
+            this.arm = arm;
+            this.elseOps = elseOps;
+        }
+    }
+
+    /**
+     * Emits {@code root} in order, descending into IfOp arms on an explicit
+     * stack. N-264: this used to recurse (emitStackOp -> emitIf ->
+     * emitStackOp), one level per nested IfOp; private methods are inlined, so
+     * a chain of D helpers each calling the next under K nested ifs nests D*K
+     * IfOps, too deep for the thread stack. Same opcodes, same order, same
+     * source-loc bookkeeping as the recursive version.
+     */
+    private static void emitOps(List<StackOp> root, Ctx ctx) {
+        java.util.ArrayDeque<EmitFrame> stack = new java.util.ArrayDeque<>();
+        stack.push(new EmitFrame(root, 0, null));
+        while (!stack.isEmpty()) {
+            EmitFrame frame = stack.peek();
+            if (frame.ops.hasNext()) {
+                StackOp op = frame.ops.next();
+                // GAP-002: read the StackSourceLoc the StackLower pass stamped onto
+                // this op (when any) so Ctx#recordSourceMapping can attach it to
+                // the next opcode index.
+                ctx.setPendingSourceLoc(extractSourceLoc(op));
+                if (op instanceof IfOp ifo) {
+                    ctx.emitOpcode("OP_IF");
+                    stack.push(new EmitFrame(ifo.thenBranch(), 1, ifo.elseBranch()));
+                } else {
+                    emitLeafOp(op, ctx);
+                }
+                continue;
+            }
+            stack.pop();
+            if (frame.arm == 0) continue;
+            if (frame.arm == 1 && frame.elseOps != null && !frame.elseOps.isEmpty()) {
+                ctx.emitOpcode("OP_ELSE");
+                stack.push(new EmitFrame(frame.elseOps, 2, null));
+                continue;
+            }
+            ctx.emitOpcode("OP_ENDIF");
+        }
+    }
+
+    /** Emits one op that is not an IfOp. */
+    private static void emitLeafOp(StackOp op, Ctx ctx) {
         if (op instanceof PushOp p) {
             ctx.emitPush(p.value());
         } else if (op instanceof DupOp) {
@@ -414,8 +467,6 @@ public final class Emit {
             ctx.emitOpcode("OP_TUCK");
         } else if (op instanceof OpcodeOp o) {
             ctx.emitOpcode(o.code());
-        } else if (op instanceof IfOp ifo) {
-            emitIf(ifo.thenBranch(), ifo.elseBranch(), ctx);
         } else if (op instanceof PlaceholderOp ph) {
             ctx.emitPlaceholder(ph.paramIndex().intValueExact());
         } else if (op instanceof PushCodeSepIndexOp) {
@@ -458,16 +509,6 @@ public final class Emit {
         // F-316: a raw_script span (asm({...})) now carries a sourceLoc too.
         if (op instanceof RawBytesOp o) return o.sourceLoc();
         return null;
-    }
-
-    private static void emitIf(List<StackOp> thenOps, List<StackOp> elseOps, Ctx ctx) {
-        ctx.emitOpcode("OP_IF");
-        for (StackOp op : thenOps) emitStackOp(op, ctx);
-        if (elseOps != null && !elseOps.isEmpty()) {
-            ctx.emitOpcode("OP_ELSE");
-            for (StackOp op : elseOps) emitStackOp(op, ctx);
-        }
-        ctx.emitOpcode("OP_ENDIF");
     }
 
     // ------------------------------------------------------------------

@@ -516,12 +516,67 @@ class EmitContext {
 // ---------------------------------------------------------------------------
 
 function emitStackOp(op: StackOp, ctx: EmitContext): void {
-  // Propagate source location from StackOp to the emit context
-  const loc = (op as { sourceLoc?: { file: string; line: number; column: number } }).sourceLoc;
-  if (loc) {
-    ctx.setSourceLoc(loc);
-  }
+  emitOps([op], ctx);
+}
 
+/** Where an arm of an if-op being emitted by `emitOps` came from. */
+interface EmitFrame {
+  ops: StackOp[];
+  next: number;
+  /** 'then' / 'else': an if-op's arm, closed by OP_ELSE / OP_ENDIF. */
+  arm: 'root' | 'then' | 'else';
+  /** For a 'then' arm: the if-op's else arm, emitted after it. */
+  elseOps?: StackOp[];
+}
+
+/**
+ * Emit `root` in order, descending into if-op arms on an explicit stack.
+ *
+ * N-264: this used to recurse (`emitStackOp` -> `emitIf` -> `emitStackOp`),
+ * one level per nested if-op. Private methods are inlined, so a chain of D
+ * helpers each calling the next under K nested ifs nests D*K if-ops, and the
+ * recursion overflowed the JS stack at D=127 x 120. Each op is emitted in the
+ * same order with the same source-location bookkeeping as before: an op's
+ * location is set before it, cleared after it, and an if-op's OP_ELSE /
+ * OP_ENDIF are emitted under whatever location its last arm op left.
+ */
+function emitOps(root: StackOp[], ctx: EmitContext): void {
+  const stack: EmitFrame[] = [{ ops: root, next: 0, arm: 'root' }];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]!;
+    if (frame.next < frame.ops.length) {
+      const op = frame.ops[frame.next++]!;
+      // Propagate source location from StackOp to the emit context
+      const loc = (op as { sourceLoc?: { file: string; line: number; column: number } }).sourceLoc;
+      if (loc) {
+        ctx.setSourceLoc(loc);
+      }
+      if (op.op === 'if') {
+        // Emit an if/else/endif structure: the arms follow on the stack.
+        ctx.emitOpcode('OP_IF');
+        stack.push({ ops: op.then, next: 0, arm: 'then', elseOps: op.else });
+        continue;
+      }
+      emitLeafOp(op, ctx);
+      // Clear after emitting so the location doesn't leak to the next op
+      ctx.setSourceLoc(undefined);
+      continue;
+    }
+    stack.pop();
+    if (frame.arm === 'root') continue;
+    if (frame.arm === 'then' && frame.elseOps && frame.elseOps.length > 0) {
+      ctx.emitOpcode('OP_ELSE');
+      stack.push({ ops: frame.elseOps, next: 0, arm: 'else' });
+      continue;
+    }
+    ctx.emitOpcode('OP_ENDIF');
+    // The if-op is done: clear its location like any other op's.
+    ctx.setSourceLoc(undefined);
+  }
+}
+
+/** Emit one op that is not an if-op. */
+function emitLeafOp(op: Exclude<StackOp, { op: 'if' }>, ctx: EmitContext): void {
   switch (op.op) {
     case 'push':
       ctx.emitPush(op.value);
@@ -567,10 +622,6 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
       ctx.emitOpcode(op.code);
       break;
 
-    case 'if':
-      emitIf(op.then, op.else, ctx);
-      break;
-
     case 'placeholder':
       ctx.emitPlaceholder(op.paramIndex, op.paramName);
       break;
@@ -597,33 +648,6 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
       ctx.emitRawBytes(op.bytes, op.in_arity, op.out_arity);
       break;
   }
-
-  // Clear after emitting so the location doesn't leak to the next op
-  ctx.setSourceLoc(undefined);
-}
-
-/**
- * Emit an if/else/endif structure.
- */
-function emitIf(
-  thenOps: StackOp[],
-  elseOps: StackOp[] | undefined,
-  ctx: EmitContext,
-): void {
-  ctx.emitOpcode('OP_IF');
-
-  for (const op of thenOps) {
-    emitStackOp(op, ctx);
-  }
-
-  if (elseOps && elseOps.length > 0) {
-    ctx.emitOpcode('OP_ELSE');
-    for (const op of elseOps) {
-      emitStackOp(op, ctx);
-    }
-  }
-
-  ctx.emitOpcode('OP_ENDIF');
 }
 
 // ---------------------------------------------------------------------------

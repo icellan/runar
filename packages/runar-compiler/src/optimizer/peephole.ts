@@ -476,12 +476,37 @@ const rules: PeepholeRule[] = [
  * Rules are applied in a single left-to-right pass, then the entire pass
  * is repeated until no more changes occur (fixed-point iteration).
  *
- * If-ops are recursively optimized: the then/else branches are each
- * optimized independently.
+ * If-ops are optimized bottom-up: the then/else branches are each
+ * optimized independently, before the list that holds them.
+ *
+ * N-264: bottom-up by an explicit list, not recursion. Private methods are
+ * inlined, so a chain of D helpers that each call the next under K nested
+ * ifs nests D*K if-ops here, and the recursive walk overflowed the JS stack
+ * at D=32 x 120. Every op list reachable through if arms is collected parents
+ * first, then optimized in reverse — children before parents, each list
+ * exactly as the recursive version optimized it.
  */
 export function optimizeStackIR(ops: StackOp[]): StackOp[] {
-  // First, recursively optimize nested if-blocks
-  let current = ops.map(op => optimizeNestedIf(op));
+  const lists: StackOp[][] = [ops];
+  for (let k = 0; k < lists.length; k++) {
+    for (const op of lists[k]!) {
+      if (op.op === 'if') {
+        lists.push(op.then);
+        if (op.else) lists.push(op.else);
+      }
+    }
+  }
+  const optimized = new Map<StackOp[], StackOp[]>();
+  for (let k = lists.length - 1; k >= 0; k--) {
+    const list = lists[k]!;
+    optimized.set(list, optimizeOneLevel(list.map(op => withOptimizedArms(op, optimized))));
+  }
+  return optimized.get(ops)!;
+}
+
+/** The fixed-point rule loop over one op list whose if-arms are already done. */
+function optimizeOneLevel(ops: StackOp[]): StackOp[] {
+  let current = ops;
 
   const MAX_ITERATIONS = 100;
   let iteration = 0;
@@ -497,12 +522,13 @@ export function optimizeStackIR(ops: StackOp[]): StackOp[] {
 }
 
 /**
- * Recursively optimize if-op branches.
+ * An if-op rebuilt with its already-optimized branches (the shape the
+ * recursive `optimizeNestedIf` returned); any other op unchanged.
  */
-function optimizeNestedIf(op: StackOp): StackOp {
+function withOptimizedArms(op: StackOp, optimized: Map<StackOp[], StackOp[]>): StackOp {
   if (op.op === 'if') {
-    const optimizedThen = optimizeStackIR(op.then);
-    const optimizedElse = op.else ? optimizeStackIR(op.else) : undefined;
+    const optimizedThen = optimized.get(op.then)!;
+    const optimizedElse = op.else ? optimized.get(op.else)! : undefined;
     return {
       op: 'if',
       then: optimizedThen,

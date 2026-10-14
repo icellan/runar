@@ -277,6 +277,399 @@ const LowerError = error{
     DegenerateMultiSigThreshold,
 };
 
+// ============================================================================
+// N-264: iterative lowering
+// ============================================================================
+
+/// A suspended step of the lowering. `lowerBindings`, `lowerIfExpr`,
+/// `lowerForLoop` and `inlineMethodCall` are tasks: each place one used to
+/// CALL another (an if's two arms, a loop body, an inlined private method's
+/// body) now RETURNS the child task instead, and `runLowerTasks` keeps the
+/// suspended parents on an explicit heap stack.
+///
+/// Why: private methods are inlined at every call site, so F-213's per-method
+/// nesting bound (128) and N-180's call-depth bound (128) compose
+/// multiplicatively — a chain of D helpers that each call the next under K
+/// nested ifs is D*K nested ifs here, and the recursive lowering segfaulted at
+/// D=16 x 120 (user decision R106: lower iteratively). Every statement runs in
+/// the same order, against the same state, as in the recursive version, so
+/// the emitted instructions are unchanged. Each task's `destroy` does what
+/// the recursive version's `defer`s did, and runs both when the task finishes
+/// and, innermost first, when an error unwinds the stack.
+const LowerTask = union(enum) {
+    bindings: *BindingsTask,
+    if_expr: *IfTask,
+    inline_call: *InlineTask,
+    loop: *LoopTask,
+
+    /// Run until finished (null) or until a nested body must be lowered first
+    /// (the child task; the task is stepped again once the child is done).
+    fn step(task: LowerTask) LowerError!?LowerTask {
+        return switch (task) {
+            inline else => |t| t.step(),
+        };
+    }
+
+    fn destroy(task: LowerTask) void {
+        switch (task) {
+            inline else => |t| t.destroy(),
+        }
+    }
+};
+
+/// Run `root` and every child it returns, depth-first, on an explicit stack.
+fn runLowerTasks(allocator: Allocator, root: LowerTask) LowerError!void {
+    var stack: std.ArrayListUnmanaged(LowerTask) = .empty;
+    defer stack.deinit(allocator);
+    errdefer while (stack.pop()) |task| task.destroy();
+    stack.append(allocator, root) catch |err| {
+        root.destroy();
+        return err;
+    };
+    while (stack.items.len > 0) {
+        const top = stack.items[stack.items.len - 1];
+        if (try top.step()) |child| {
+            stack.append(allocator, child) catch |err| {
+                child.destroy();
+                return err;
+            };
+        } else {
+            _ = stack.pop();
+            top.destroy();
+        }
+    }
+}
+
+/// `lowerBindings` as a resumable task (N-264). The setup in `start` is the
+/// old `lowerBindingsWithArrays` prologue; `destroy` is its
+/// `defer self.scope_bindings = saved_scope_bindings`.
+const BindingsTask = struct {
+    ctx: *LowerCtx,
+    bindings: []const types.ANFBinding,
+    saved_scope_bindings: []const types.ANFBinding,
+    terminal_assert_idx: ?usize = null,
+    terminal_if_idx: ?usize = null,
+    idx: usize = 0,
+    awaiting_child: bool = false,
+
+    /// Set up lowering `bindings` in `self`, now — immediately before the
+    /// task's first step. `inherited_arrays` is the enclosing scope's
+    /// array_literal metadata, which a branch arm's liveness must see (F-081).
+    fn start(
+        self: *LowerCtx,
+        bindings: []const types.ANFBinding,
+        terminal_assert: bool,
+        inherited_arrays: ?*const std.StringHashMapUnmanaged([]const []const u8),
+    ) LowerError!*BindingsTask {
+        const t = try self.allocator.create(BindingsTask);
+        t.* = .{ .ctx = self, .bindings = bindings, .saved_scope_bindings = self.scope_bindings };
+        self.scope_bindings = bindings;
+        errdefer t.destroy();
+
+        self.local_bindings.clearRetainingCapacity();
+        for (bindings) |binding| {
+            try self.local_bindings.put(self.allocator, binding.name, {});
+        }
+        try self.computeLastUsesWithArrays(bindings, inherited_arrays);
+
+        // Protect parent-scope refs from consume inside this scope: extend
+        // their last-use index past the end of the bindings, mirroring TS
+        // `outerProtectedRefs` handling in `lowerBindings`.
+        if (self.outer_protected_refs) |protected| {
+            var it = protected.iterator();
+            while (it.next()) |entry| {
+                try self.last_uses.put(self.allocator, entry.key_ptr.*, bindings.len);
+            }
+        }
+
+        // Terminal-assert propagation mirrors TS reference compiler
+        // (`05-stack-lower.ts` lowerBindings): if the last binding is an
+        // `if`, mark it as the terminal-if point so its branches can
+        // propagate `terminalAssert=true` to their last assert. Otherwise
+        // only an assert that IS the last binding may leave its value as the
+        // result (N-005): any later binding (e.g. a terminal asm() raw_script
+        // with out_arity 1) pushes its own result, the cleanup NIPs the
+        // assert's value away, and the check is never enforced. Such an
+        // assert gets OP_VERIFY.
+        var terminal_assert_idx: ?usize = null;
+        var terminal_if_idx: ?usize = null;
+        if (terminal_assert and bindings.len > 0) {
+            const last_idx = bindings.len - 1;
+            switch (bindings[last_idx].value) {
+                .@"if" => terminal_if_idx = last_idx,
+                .assert => terminal_assert_idx = last_idx,
+                else => {},
+            }
+        }
+        t.terminal_assert_idx = terminal_assert_idx;
+        t.terminal_if_idx = terminal_if_idx;
+        return t;
+    }
+
+    fn step(t: *BindingsTask) LowerError!?LowerTask {
+        const self = t.ctx;
+        const terminal_assert_idx = t.terminal_assert_idx;
+        const terminal_if_idx = t.terminal_if_idx;
+        if (t.awaiting_child) {
+            t.awaiting_child = false;
+            self.current_source_loc = null;
+            t.idx += 1;
+        }
+        while (t.idx < t.bindings.len) : (t.idx += 1) {
+            const idx = t.idx;
+            const binding = t.bindings[idx];
+            self.current_idx = idx;
+            self.current_source_loc = binding.source_loc;
+            const child: ?LowerTask = if (terminal_assert_idx != null and idx == terminal_assert_idx.?)
+                switch (binding.value) {
+                    .assert => |a| blk: {
+                        try self.lowerAssertOp(binding.name, .{ .condition = a.value }, true);
+                        break :blk null;
+                    },
+                    else => try self.lowerBindingTask(binding),
+                }
+            else if (terminal_if_idx != null and idx == terminal_if_idx.?)
+                switch (binding.value) {
+                    .@"if" => |ie| try self.startIfTask(binding.name, .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null, .results = ie.results }, true),
+                    else => try self.lowerBindingTask(binding),
+                }
+            else
+                try self.lowerBindingTask(binding);
+            if (child) |c| {
+                t.awaiting_child = true;
+                return c;
+            }
+            self.current_source_loc = null;
+        }
+        return null;
+    }
+
+    fn destroy(t: *BindingsTask) void {
+        t.ctx.scope_bindings = t.saved_scope_bindings;
+        t.ctx.allocator.destroy(t);
+    }
+};
+
+const ShadowedName = struct {
+    param_name: []const u8,
+    shadowed_name: []const u8,
+};
+
+/// `inlineMethodCall` as a resumable task (N-264). `destroy` runs what the
+/// recursive version's two `defer`s did, in the same order: restore the
+/// caller's last_uses / force_copy_bindings / copy_ref_aliases (once they were
+/// saved), then free the shadowed names.
+const InlineTask = struct {
+    ctx: *LowerCtx,
+    bind_name: []const u8,
+    method: types.ANFMethod,
+    shadowed: std.ArrayListUnmanaged(ShadowedName) = .empty,
+    saved: ?struct {
+        last_uses: std.StringHashMapUnmanaged(usize),
+        force_copy_bindings: std.StringHashMapUnmanaged(void),
+        copy_ref_aliases: bool,
+    } = null,
+    body_lowered: bool = false,
+
+    fn step(t: *InlineTask) LowerError!?LowerTask {
+        if (!t.body_lowered) {
+            t.body_lowered = true;
+            return .{ .bindings = try BindingsTask.start(t.ctx, t.method.body, false, null) };
+        }
+        try t.ctx.inlineMethodCallTail(t);
+        return null;
+    }
+
+    fn destroy(t: *InlineTask) void {
+        const self = t.ctx;
+        if (t.saved) |saved| {
+            self.force_copy_bindings.deinit(self.allocator);
+            self.force_copy_bindings = saved.force_copy_bindings;
+            self.last_uses.deinit(self.allocator);
+            self.last_uses = saved.last_uses;
+            self.copy_ref_aliases = saved.copy_ref_aliases;
+        }
+        for (t.shadowed.items) |entry| {
+            self.allocator.free(entry.shadowed_name);
+        }
+        t.shadowed.deinit(self.allocator);
+        self.allocator.destroy(t);
+    }
+};
+
+/// `lowerIfExpr` as a resumable task (N-264). `destroy` runs what the
+/// recursive version's `defer`s did: deinit both arm contexts and the
+/// protected-ref / pre-if-name / base-stack snapshots.
+const IfTask = struct {
+    parent: *LowerCtx,
+    bind_name: []const u8,
+    ie: types.ANFIfExpr,
+    terminal_assert: bool,
+    base_stack: StackMap = .{},
+    pre_if_names: std.StringHashMapUnmanaged(void) = .empty,
+    protected_refs: std.StringHashMapUnmanaged(void) = .empty,
+    then_ctx: LowerCtx,
+    else_ctx: LowerCtx,
+    phase: u8 = 0,
+
+    fn step(t: *IfTask) LowerError!?LowerTask {
+        switch (t.phase) {
+            0 => {
+                t.phase = 1;
+                return .{ .bindings = try BindingsTask.start(&t.then_ctx, t.ie.then_bindings, t.terminal_assert, &t.parent.array_elements) };
+            },
+            1 => {
+                t.phase = 2;
+                try t.parent.lowerIfMid(t);
+                const else_bindings = t.ie.else_bindings orelse &.{};
+                return .{ .bindings = try BindingsTask.start(&t.else_ctx, else_bindings, t.terminal_assert, &t.parent.array_elements) };
+            },
+            else => {
+                try t.parent.lowerIfTail(t);
+                return null;
+            },
+        }
+    }
+
+    fn destroy(t: *IfTask) void {
+        const allocator = t.parent.allocator;
+        t.else_ctx.deinit();
+        t.then_ctx.deinit();
+        t.protected_refs.deinit(allocator);
+        t.pre_if_names.deinit(allocator);
+        t.base_stack.deinit(allocator);
+        allocator.destroy(t);
+    }
+};
+
+/// `lowerForLoop` as a resumable task (N-264). `destroy` runs what the
+/// recursive version's `defer`s did: restore the enclosing local_bindings /
+/// force_copy_bindings (once they were saved) and free the outer-ref sets.
+const LoopTask = struct {
+    ctx: *LowerCtx,
+    bind_name: []const u8,
+    fl: types.ANFForLoop,
+    outer_refs: std.StringHashMapUnmanaged(void) = .empty,
+    outer_arrays: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+    saved: ?struct {
+        local_bindings: std.StringHashMapUnmanaged(void),
+        force_copy_bindings: std.StringHashMapUnmanaged(void),
+    } = null,
+    loop_binding_index: usize = 0,
+    /// Current iteration, and body index within it (null: not begun).
+    n: u32 = 0,
+    j: ?usize = null,
+    enclosing_last_uses: std.StringHashMapUnmanaged(usize) = .empty,
+    loop_loc: ?types.SourceLocation = null,
+    awaiting_child: bool = false,
+
+    fn step(t: *LoopTask) LowerError!?LowerTask {
+        const self = t.ctx;
+        const fl = &t.fl;
+        if (t.awaiting_child) {
+            t.awaiting_child = false;
+            self.current_source_loc = t.loop_loc;
+            t.j = t.j.? + 1;
+        }
+        while (true) {
+            if (t.j == null) {
+                if (t.n >= fl.count) break;
+                const n = t.n;
+                    // Iteration `n` binds `start + n*step` (issue #121). Zero-start
+                    // counting-up loops (start=0, step=1) reduce to `n`, preserving the
+                    // historical byte-for-byte lowering.
+                    const iter_val: i64 = fl.start + @as(i64, @intCast(n)) * fl.step;
+                    try self.emitPushInt(iter_val);
+                    try self.stack.push(self.allocator, fl.var_name);
+                    self.trackDepth();
+
+                    t.enclosing_last_uses = self.last_uses;
+                    const enclosing_last_uses = &t.enclosing_last_uses;
+                    self.last_uses = .empty;
+                    try self.computeLastUsesWithArrays(fl.body_bindings, &t.outer_arrays);
+
+                    // Prevent outer-scope refs from being consumed by pinning their
+                    // last-use past every body binding index:
+                    //  - in non-final iterations: always (the next iteration re-reads);
+                    //  - in the FINAL iteration: only when the enclosing scope still
+                    //    references the ref AFTER the loop. Previously the final
+                    //    iteration consumed every outer ref at its last body use, so a
+                    //    method param (or const) referenced after the loop was gone
+                    //    from the stack and was silently lowered to an OP_0 — the
+                    //    script compiled and the env interpreter passed, but the
+                    //    emitted Script failed on chain (silent interpreter/Script
+                    //    divergence).
+                    const is_final_iteration = (n == fl.count - 1);
+                    var outer_it = t.outer_refs.iterator();
+                    while (outer_it.next()) |entry| {
+                        const ref = entry.key_ptr.*;
+                        const used_after_loop = if (enclosing_last_uses.get(ref)) |lu|
+                            lu > t.loop_binding_index
+                        else
+                            false;
+                        if (!is_final_iteration or used_after_loop) {
+                            try self.last_uses.put(self.allocator, ref, fl.body_bindings.len);
+                        }
+                    }
+
+                    // F-259: each body binding's ops carry that binding's own location
+                    // (a binding without one keeps the loop's). The iteration-variable
+                    // push above and the cleanup below stay on the loop's location.
+                t.loop_loc = self.current_source_loc;
+                t.j = 0;
+            }
+            while (t.j.? < fl.body_bindings.len) {
+                const idx = t.j.?;
+                const binding = fl.body_bindings[idx];
+                self.current_idx = idx;
+                if (binding.source_loc) |loc| self.current_source_loc = loc;
+                const child = self.lowerBindingTask(binding) catch |err| {
+                    self.current_source_loc = t.loop_loc;
+                    return err;
+                };
+                if (child) |c| {
+                    t.awaiting_child = true;
+                    return c;
+                }
+                self.current_source_loc = t.loop_loc;
+                t.j = idx + 1;
+            }
+            self.last_uses.deinit(self.allocator);
+            self.last_uses = t.enclosing_last_uses;
+
+                // Remove iteration variable if still on stack.
+                //
+                // R-186 / R-292: it is not always on TOP when the body leaves it
+                // behind. A body whose last binding LEAVES a value — the
+                // accumulator `sum = sum + x`, which rebinds `sum` in place and ends
+                // holding it — buries the iteration variable one slot down. Dropping
+                // only at depth 0 left one slot behind per iteration, until the leak
+                // alone crossed the peers' MAX_STACK_DEPTH and they refused a
+                // contract with a working set of three. `removeBranchValueAtDepth`
+                // is the same removal `drainBranchPrivateResidue` uses.
+                if (self.stack.findDepth(fl.var_name)) |d| {
+                    try LowerCtx.removeBranchValueAtDepth(self, d);
+                }
+            t.n += 1;
+            t.j = null;
+        }
+        return null;
+    }
+
+    fn destroy(t: *LoopTask) void {
+        const self = t.ctx;
+        if (t.saved) |saved| {
+            self.local_bindings.deinit(self.allocator);
+            self.local_bindings = saved.local_bindings;
+            self.force_copy_bindings.deinit(self.allocator);
+            self.force_copy_bindings = saved.force_copy_bindings;
+        }
+        t.outer_arrays.deinit(self.allocator);
+        t.outer_refs.deinit(self.allocator);
+        self.allocator.destroy(t);
+    }
+};
+
 const LowerCtx = struct {
     allocator: Allocator,
     instructions: std.ArrayListUnmanaged(types.StackInstruction),
@@ -1010,81 +1403,10 @@ const LowerCtx = struct {
     // Lower a binding sequence
     // ========================================================================
 
+    /// Lower `bindings` in this context. N-264: iteratively — see `LowerTask`.
     fn lowerBindings(self: *LowerCtx, bindings: []const types.ANFBinding, terminal_assert: bool) LowerError!void {
-        return self.lowerBindingsWithArrays(bindings, terminal_assert, null);
-    }
-
-    /// `lowerBindings` for a branch arm, whose liveness must see the
-    /// enclosing scope's array_literal metadata (F-081).
-    fn lowerBindingsWithArrays(
-        self: *LowerCtx,
-        bindings: []const types.ANFBinding,
-        terminal_assert: bool,
-        inherited_arrays: ?*const std.StringHashMapUnmanaged([]const []const u8),
-    ) LowerError!void {
-        const saved_scope_bindings = self.scope_bindings;
-        self.scope_bindings = bindings;
-        defer self.scope_bindings = saved_scope_bindings;
-
-        self.local_bindings.clearRetainingCapacity();
-        for (bindings) |binding| {
-            try self.local_bindings.put(self.allocator, binding.name, {});
-        }
-        try self.computeLastUsesWithArrays(bindings, inherited_arrays);
-
-        // Protect parent-scope refs from consume inside this scope: extend
-        // their last-use index past the end of the bindings, mirroring TS
-        // `outerProtectedRefs` handling in `lowerBindings`.
-        if (self.outer_protected_refs) |protected| {
-            var it = protected.iterator();
-            while (it.next()) |entry| {
-                try self.last_uses.put(self.allocator, entry.key_ptr.*, bindings.len);
-            }
-        }
-
-        // Terminal-assert propagation mirrors TS reference compiler
-        // (`05-stack-lower.ts` lowerBindings): if the last binding is an
-        // `if`, mark it as the terminal-if point so its branches can
-        // propagate `terminalAssert=true` to their last assert. Otherwise
-        // only an assert that IS the last binding may leave its value as the
-        // result (N-005): any later binding (e.g. a terminal asm() raw_script
-        // with out_arity 1) pushes its own result, the cleanup NIPs the
-        // assert's value away, and the check is never enforced. Such an
-        // assert gets OP_VERIFY.
-        var terminal_assert_idx: ?usize = null;
-        var terminal_if_idx: ?usize = null;
-        if (terminal_assert and bindings.len > 0) {
-            const last_idx = bindings.len - 1;
-            switch (bindings[last_idx].value) {
-                .@"if" => terminal_if_idx = last_idx,
-                .assert => terminal_assert_idx = last_idx,
-                else => {},
-            }
-        }
-
-        for (bindings, 0..) |binding, idx| {
-            self.current_idx = idx;
-            self.current_source_loc = binding.source_loc;
-            if (terminal_assert_idx != null and idx == terminal_assert_idx.?) {
-                switch (binding.value) {
-                    .assert => |a| try self.lowerAssertOp(binding.name, .{ .condition = a.value }, true),
-                    else => try self.lowerBinding(binding),
-                }
-            } else if (terminal_if_idx != null and idx == terminal_if_idx.?) {
-                switch (binding.value) {
-                    .@"if" => |ie| {
-                        const legacy = try self.allocator.create(types.ANFIfExpr);
-                        defer self.allocator.destroy(legacy);
-                        legacy.* = .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null, .results = ie.results };
-                        try self.lowerIfExprTerminal(binding.name, legacy, true);
-                    },
-                    else => try self.lowerBinding(binding),
-                }
-            } else {
-                try self.lowerBinding(binding);
-            }
-            self.current_source_loc = null;
-        }
+        const root: LowerTask = .{ .bindings = try BindingsTask.start(self, bindings, terminal_assert, null) };
+        try runLowerTasks(self.allocator, root);
     }
 
     fn hasLocalBinding(self: *const LowerCtx, name: []const u8) bool {
@@ -1198,7 +1520,10 @@ const LowerCtx = struct {
         return false;
     }
 
-    fn lowerBinding(self: *LowerCtx, binding: types.ANFBinding) LowerError!void {
+    /// Lowers `binding`; for a binding that lowers a nested body (an inlined
+    /// private call, an if, a loop) returns the task that does so instead, for
+    /// the caller to run (N-264). Otherwise returns null.
+    fn lowerBindingTask(self: *LowerCtx, binding: types.ANFBinding) LowerError!?LowerTask {
         switch (binding.value) {
             .add_output => |ao| try self.lowerAddOutput(binding.name, ao),
             .add_raw_output => |aro| try self.lowerAddRawOutput(binding.name, aro),
@@ -1224,21 +1549,11 @@ const LowerCtx = struct {
                     try self.lowerBuiltinCall(binding.name, .{ .name = c.func, .args = c.args });
                 }
             },
-            .method_call => |mc| try self.lowerMethodCall(binding.name, mc),
-            .@"if" => |ie| {
-                const legacy = try self.allocator.create(types.ANFIfExpr);
-                defer self.allocator.destroy(legacy);
-                legacy.* = .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null, .results = ie.results };
-                try self.lowerIfExpr(binding.name, legacy);
-            },
-            .loop => |lp| {
-                const legacy = try self.allocator.create(types.ANFForLoop);
-                defer self.allocator.destroy(legacy);
-                // Issue #121: carry start/step so the unroll pushes
-                // `start + n*step` on iteration `n`.
-                legacy.* = .{ .var_name = lp.iter_var, .start = lp.start, .step = lp.step, .count = lp.count, .body_bindings = lp.body };
-                try self.lowerForLoop(binding.name, legacy);
-            },
+            .method_call => |mc| return try self.lowerMethodCallTask(binding.name, mc),
+            .@"if" => |ie| return try self.startIfTask(binding.name, .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null, .results = ie.results }, false),
+            // Issue #121: carry start/step so the unroll pushes
+            // `start + n*step` on iteration `n`.
+            .loop => |lp| return try self.startLoopTask(binding.name, .{ .var_name = lp.iter_var, .start = lp.start, .step = lp.step, .count = lp.count, .body_bindings = lp.body }),
             .assert => |a| try self.lowerAssertOp(binding.name, .{ .condition = a.value }, false),
             .update_prop => |up| try self.lowerPropertyWrite(binding.name, .{ .name = up.name, .value_ref = up.value }),
             .check_preimage => |cp| try self.lowerCheckPreimage(binding.name, &.{cp.preimage}, cp.sighash_flag),
@@ -1246,6 +1561,7 @@ const LowerCtx = struct {
             .array_literal => |al| try self.lowerArrayLiteral(binding.name, al.elements),
             .raw_script => |rs| try self.lowerRawScript(binding.name, rs.bytes, rs.in_arity, rs.out_arity),
         }
+        return null;
     }
 
     /// Lower a raw_script ANF node to a single opaque raw_bytes
@@ -1362,7 +1678,8 @@ const LowerCtx = struct {
         return LowerError.SilentOpZeroRefused;
     }
 
-    fn lowerMethodCall(self: *LowerCtx, bind_name: []const u8, mc: types.ANFMethodCall) !void {
+    /// Returns the inlining task for a private-method call (N-264), else null.
+    fn lowerMethodCallTask(self: *LowerCtx, bind_name: []const u8, mc: types.ANFMethodCall) LowerError!?LowerTask {
         if (std.mem.eql(u8, mc.method, "getStateScript")) {
             if (self.stack.findDepth(mc.object) != null) {
                 try self.bringToTop(mc.object, true);
@@ -1370,7 +1687,7 @@ const LowerCtx = struct {
                 _ = self.stack.pop();
             }
             try self.lowerGetStateScript(bind_name);
-            return;
+            return null;
         }
 
         if (findPrivateMethod(self.program.methods, mc.method)) |method| {
@@ -1379,26 +1696,21 @@ const LowerCtx = struct {
                 try self.emitOp(.op_drop);
                 _ = self.stack.pop();
             }
-            try self.inlineMethodCall(bind_name, method, mc.args);
-            return;
+            return try self.startInlineTask(bind_name, method, mc.args);
         }
 
         try self.lowerBuiltinCall(bind_name, .{ .name = mc.method, .args = mc.args });
+        return null;
     }
 
-    fn inlineMethodCall(self: *LowerCtx, bind_name: []const u8, method: types.ANFMethod, args: []const []const u8) !void {
-        const ShadowedName = struct {
-            param_name: []const u8,
-            shadowed_name: []const u8,
-        };
-
-        var shadowed = std.ArrayListUnmanaged(ShadowedName).empty;
-        defer {
-            for (shadowed.items) |entry| {
-                self.allocator.free(entry.shadowed_name);
-            }
-            shadowed.deinit(self.allocator);
-        }
+    /// `inlineMethodCall` up to its body (N-264): binds the arguments and
+    /// returns the task that lowers the body in THIS context, then restores
+    /// shadowed names and renames the result (`inlineMethodCallTail`).
+    fn startInlineTask(self: *LowerCtx, bind_name: []const u8, method: types.ANFMethod, args: []const []const u8) LowerError!LowerTask {
+        const t = try self.allocator.create(InlineTask);
+        t.* = .{ .ctx = self, .bind_name = bind_name, .method = method };
+        errdefer t.destroy();
+        const shadowed = &t.shadowed;
 
         // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
         // checks its own -- checking in the lowerer rather than the typechecker also
@@ -1454,21 +1766,24 @@ const LowerCtx = struct {
         //
         // last_uses IS restored because in TS `lastUses` is a local variable
         // inside each `lowerBindings` call, so the caller's analysis survives.
-        const saved_last_uses = self.last_uses;
-        var saved_force_copy_bindings = self.force_copy_bindings;
-        const saved_copy_ref_aliases = self.copy_ref_aliases;
-        defer {
-            self.force_copy_bindings.deinit(self.allocator);
-            self.force_copy_bindings = saved_force_copy_bindings;
-            self.last_uses.deinit(self.allocator);
-            self.last_uses = saved_last_uses;
-            self.copy_ref_aliases = saved_copy_ref_aliases;
-        }
+        t.saved = .{
+            .last_uses = self.last_uses,
+            .force_copy_bindings = self.force_copy_bindings,
+            .copy_ref_aliases = self.copy_ref_aliases,
+        };
 
         self.last_uses = .empty;
         self.force_copy_bindings = .empty;
         self.copy_ref_aliases = false;
-        try self.lowerBindings(method.body, false);
+        return .{ .inline_call = t };
+    }
+
+    /// The part of `inlineMethodCall` after the body is lowered (N-264).
+    fn inlineMethodCallTail(self: *LowerCtx, t: *InlineTask) LowerError!void {
+        const shadowed = &t.shadowed;
+        const method = t.method;
+        const bind_name = t.bind_name;
+        const saved_force_copy_bindings = &t.saved.?.force_copy_bindings;
 
         for (shadowed.items) |entry| {
             if (self.stack.findDepth(entry.shadowed_name)) |depth| {
@@ -5120,15 +5435,21 @@ const LowerCtx = struct {
     // ========================================================================
 
 
-    fn lowerIfExprTerminal(self: *LowerCtx, bind_name: []const u8, ie: *const types.ANFIfExpr, terminal_assert: bool) !void {
-        return self.lowerIfExprImpl(bind_name, ie, terminal_assert);
-    }
-
-    fn lowerIfExpr(self: *LowerCtx, bind_name: []const u8, ie: *const types.ANFIfExpr) !void {
-        return self.lowerIfExprImpl(bind_name, ie, false);
-    }
-
-    fn lowerIfExprImpl(self: *LowerCtx, bind_name: []const u8, ie: *const types.ANFIfExpr, terminal_assert: bool) !void {
+    /// `lowerIfExpr` up to its then-arm (N-264): returns the task that lowers
+    /// each arm in its own context (`lowerIfMid` between them) and then
+    /// reconciles them (`lowerIfTail`).
+    fn startIfTask(self: *LowerCtx, bind_name: []const u8, ie_value: types.ANFIfExpr, terminal_assert: bool) LowerError!LowerTask {
+        const t = try self.allocator.create(IfTask);
+        t.* = .{
+            .parent = self,
+            .bind_name = bind_name,
+            .ie = ie_value,
+            .terminal_assert = terminal_assert,
+            .then_ctx = LowerCtx.init(self.allocator, self.program),
+            .else_ctx = LowerCtx.init(self.allocator, self.program),
+        };
+        errdefer t.destroy();
+        const ie = &t.ie;
         // The ANF wire format has no version field, and `--ir` / `--ir-parity`
         // are documented surfaces that feed a checked-in ANF JSON straight into
         // this pass. An ANF produced BEFORE the multi-result node carries the
@@ -5194,13 +5515,10 @@ const LowerCtx = struct {
 
         try self.bringToTop(ie.condition, !cond_read_in_arms and self.isLastUse(ie.condition));
         _ = self.stack.pop();
-        var base_stack = try self.stack.clone(self.allocator);
-        defer base_stack.deinit(self.allocator);
-        var pre_if_names = try self.stack.namedSlots(self.allocator);
-        defer pre_if_names.deinit(self.allocator);
+        t.base_stack = try self.stack.clone(self.allocator);
+        t.pre_if_names = try self.stack.namedSlots(self.allocator);
 
-        var protected_refs: std.StringHashMapUnmanaged(void) = .empty;
-        defer protected_refs.deinit(self.allocator);
+        const protected_refs = &t.protected_refs;
         var last_use_it = self.last_uses.iterator();
         while (last_use_it.next()) |entry| {
             if (entry.value_ptr.* > self.current_idx and self.stack.findDepth(entry.key_ptr.*) != null) {
@@ -5256,9 +5574,8 @@ const LowerCtx = struct {
             }
         }
 
-        var then_ctx = LowerCtx.init(self.allocator, self.program);
-        defer then_ctx.deinit();
-        then_ctx.stack = try base_stack.clone(self.allocator);
+        const then_ctx = &t.then_ctx;
+        then_ctx.stack = try t.base_stack.clone(self.allocator);
         then_ctx.updated_props = try cloneVoidMap(self.allocator, self.updated_props);
         then_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         then_ctx.in_branch = true;
@@ -5274,14 +5591,25 @@ const LowerCtx = struct {
         // clone is enough.
         then_ctx.renamed_params = try self.renamed_params.clone(self.allocator);
         then_ctx.max_depth = self.max_depth;
-        then_ctx.outer_protected_refs = &protected_refs;
+        then_ctx.outer_protected_refs = protected_refs;
         // F-081: the same holds for array_literal metadata. An array declared
         // before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
         // there needs its element refs; a fresh context has none and failed
         // with InvalidBuiltin. Copied, so an arm-local array does not leak out.
         try then_ctx.inheritArrays(self);
-        try then_ctx.lowerBindingsWithArrays(ie.then_bindings, terminal_assert, &self.array_elements);
-        try then_ctx.drainBranchPrivateResidue(&pre_if_names);
+        return .{ .if_expr = t };
+    }
+
+    /// `lowerIfExpr` between its arms (N-264): finishes the then-arm and sets
+    /// up the else-arm's context.
+    fn lowerIfMid(self: *LowerCtx, t: *IfTask) LowerError!void {
+        const terminal_assert = t.terminal_assert;
+        const pre_if_names = &t.pre_if_names;
+        const protected_refs = &t.protected_refs;
+        const base_stack = &t.base_stack;
+        const then_ctx = &t.then_ctx;
+        const else_ctx = &t.else_ctx;
+        try then_ctx.drainBranchPrivateResidue(pre_if_names);
         if (terminal_assert and then_ctx.stack.depth() > 1) {
             const excess = then_ctx.stack.depth() - 1;
             var i: usize = 0;
@@ -5301,8 +5629,6 @@ const LowerCtx = struct {
             try then_ctx.stack.push(self.allocator, null);
         }
 
-        var else_ctx = LowerCtx.init(self.allocator, self.program);
-        defer else_ctx.deinit();
         else_ctx.stack = try base_stack.clone(self.allocator);
         else_ctx.updated_props = try cloneVoidMap(self.allocator, self.updated_props);
         else_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
@@ -5311,11 +5637,20 @@ const LowerCtx = struct {
         else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.renamed_params = try self.renamed_params.clone(self.allocator); // N-007, see then_ctx
         else_ctx.max_depth = self.max_depth;
-        else_ctx.outer_protected_refs = &protected_refs;
-        const else_bindings = ie.else_bindings orelse &.{};
+        else_ctx.outer_protected_refs = protected_refs;
         try else_ctx.inheritArrays(self); // F-081, see then_ctx
-        try else_ctx.lowerBindingsWithArrays(else_bindings, terminal_assert, &self.array_elements);
-        try else_ctx.drainBranchPrivateResidue(&pre_if_names);
+    }
+
+    /// `lowerIfExpr` after its arms (N-264): the reconciliation.
+    fn lowerIfTail(self: *LowerCtx, t: *IfTask) LowerError!void {
+        const bind_name = t.bind_name;
+        const ie = &t.ie;
+        const terminal_assert = t.terminal_assert;
+        const pre_if_names = &t.pre_if_names;
+        const then_ctx = &t.then_ctx;
+        const else_ctx = &t.else_ctx;
+        const else_bindings = ie.else_bindings orelse &.{};
+        try else_ctx.drainBranchPrivateResidue(pre_if_names);
         if (terminal_assert and else_ctx.stack.depth() > 1) {
             const excess = else_ctx.stack.depth() - 1;
             var i: usize = 0;
@@ -5416,10 +5751,10 @@ const LowerCtx = struct {
         defer else_consumed_depths.deinit(self.allocator);
 
         for (consumed_depths.items) |depth| {
-            try removeBranchValueAtDepth(&else_ctx, depth);
+            try removeBranchValueAtDepth(else_ctx, depth);
         }
         for (else_consumed_depths.items) |depth| {
-            try removeBranchValueAtDepth(&then_ctx, depth);
+            try removeBranchValueAtDepth(then_ctx, depth);
         }
 
         // Branch-merged locals: trim each arm down to exactly its K result slots.
@@ -5454,7 +5789,7 @@ const LowerCtx = struct {
                 if (held > kept) consumed_from_parent += held - kept;
             }
             const target_depth = self.stack.depth() - consumed_from_parent + n_declared;
-            for ([_]*LowerCtx{ &then_ctx, &else_ctx }) |arm_ctx| {
+            for ([_]*LowerCtx{ then_ctx, else_ctx }) |arm_ctx| {
                 while (arm_ctx.stack.depth() > target_depth) {
                     try removeBranchValueAtDepth(arm_ctx, n_declared);
                 }
@@ -5467,8 +5802,8 @@ const LowerCtx = struct {
             // disagree on layout, which is precisely the failure that produced
             // the 2026-08 miscompile family. Emits no opcodes.
             const arms = [_]struct { label: []const u8, ctx: *LowerCtx }{
-                .{ .label = "then", .ctx = &then_ctx },
-                .{ .label = "else", .ctx = &else_ctx },
+                .{ .label = "then", .ctx = then_ctx },
+                .{ .label = "else", .ctx = else_ctx },
             };
             for (arms) |arm| {
                 if (arm.ctx.stack.depth() != target_depth) {
@@ -5508,7 +5843,7 @@ const LowerCtx = struct {
             const then_name = then_ctx.stack.peekAtDepth(result_depth);
             if (else_bindings.len == 0 and then_name != null and else_ctx.stack.findDepth(then_name.?) != null) {
                 const var_depth = else_ctx.stack.findDepth(then_name.?).?;
-                try duplicateBranchValueAtDepth(&else_ctx, var_depth, then_name);
+                try duplicateBranchValueAtDepth(else_ctx, var_depth, then_name);
             } else {
                 try else_ctx.emitPushData("");
                 try else_ctx.stack.push(self.allocator, null);
@@ -5561,12 +5896,12 @@ const LowerCtx = struct {
         // elements into `self.instructions`; the compile path runs on an arena,
         // but `lowerIfExpr` is also exercised directly under the leak-checking
         // test allocator.
-        const then_arm = try optimizeArm(self.allocator, &then_ctx, "then", bind_name);
+        const then_arm = try optimizeArm(self.allocator, then_ctx, "then", bind_name);
         defer {
             self.allocator.free(then_arm.insts);
             self.allocator.free(then_arm.locs);
         }
-        const else_arm = try optimizeArm(self.allocator, &else_ctx, "else", bind_name);
+        const else_arm = try optimizeArm(self.allocator, else_ctx, "else", bind_name);
         defer {
             self.allocator.free(else_arm.insts);
             self.allocator.free(else_arm.locs);
@@ -6097,7 +6432,14 @@ const LowerCtx = struct {
         }
     }
 
-    fn lowerForLoop(self: *LowerCtx, bind_name: []const u8, fl: *const types.ANFForLoop) !void {
+    /// `lowerForLoop` up to its first iteration (N-264): returns the task
+    /// that unrolls the loop, running a body binding that lowers a nested body
+    /// (if / inlined call / inner loop) as a child task.
+    fn startLoopTask(self: *LowerCtx, bind_name: []const u8, fl_value: types.ANFForLoop) LowerError!LowerTask {
+        const t = try self.allocator.create(LoopTask);
+        t.* = .{ .ctx = self, .bind_name = bind_name, .fl = fl_value };
+        errdefer t.destroy();
+        const fl = &t.fl;
         var body_binding_names: std.StringHashMapUnmanaged(void) = .empty;
         defer body_binding_names.deinit(self.allocator);
         for (fl.body_bindings) |binding| {
@@ -6126,8 +6468,7 @@ const LowerCtx = struct {
             try collectValueRefs(self.allocator, binding.value, &all_refs);
         }
 
-        var outer_refs: std.StringHashMapUnmanaged(void) = .empty;
-        defer outer_refs.deinit(self.allocator);
+        const outer_refs = &t.outer_refs;
         var all_refs_it = all_refs.iterator();
         while (all_refs_it.next()) |entry| {
             const ref = entry.key_ptr.*;
@@ -6159,8 +6500,8 @@ const LowerCtx = struct {
         // slices are borrowed from `self.array_elements`, which only grows
         // while the body lowers (an overwrite would free a body-local copy,
         // never one of these outer entries).
-        var outer_arrays = try self.array_elements.clone(self.allocator);
-        defer outer_arrays.deinit(self.allocator);
+        t.outer_arrays = try self.array_elements.clone(self.allocator);
+        const outer_arrays = &t.outer_arrays;
         {
             var array_refs: std.ArrayListUnmanaged([]const u8) = .empty;
             defer array_refs.deinit(self.allocator);
@@ -6177,12 +6518,7 @@ const LowerCtx = struct {
         const saved_force_copy_bindings = self.force_copy_bindings;
         self.local_bindings = try cloneVoidMap(self.allocator, saved_local_bindings);
         self.force_copy_bindings = try cloneVoidMap(self.allocator, saved_force_copy_bindings);
-        defer {
-            self.local_bindings.deinit(self.allocator);
-            self.local_bindings = saved_local_bindings;
-            self.force_copy_bindings.deinit(self.allocator);
-            self.force_copy_bindings = saved_force_copy_bindings;
-        }
+        t.saved = .{ .local_bindings = saved_local_bindings, .force_copy_bindings = saved_force_copy_bindings };
         var body_name_it = body_binding_names.iterator();
         while (body_name_it.next()) |entry| {
             try self.local_bindings.put(self.allocator, entry.key_ptr.*, {});
@@ -6195,76 +6531,11 @@ const LowerCtx = struct {
         // loop. Zig threads the enclosing index / last-use map implicitly via
         // the shared LowerCtx (unlike the TS reference, which passes them as
         // explicit params to lowerLoop).
-        const loop_binding_index = self.current_idx;
+        t.loop_binding_index = self.current_idx;
 
-        var n: u32 = 0;
-        while (n < fl.count) : (n += 1) {
-            // Iteration `n` binds `start + n*step` (issue #121). Zero-start
-            // counting-up loops (start=0, step=1) reduce to `n`, preserving the
-            // historical byte-for-byte lowering.
-            const iter_val: i64 = fl.start + @as(i64, @intCast(n)) * fl.step;
-            try self.emitPushInt(iter_val);
-            try self.stack.push(self.allocator, fl.var_name);
-            self.trackDepth();
-
-            const enclosing_last_uses = self.last_uses;
-            self.last_uses = .empty;
-            try self.computeLastUsesWithArrays(fl.body_bindings, &outer_arrays);
-
-            // Prevent outer-scope refs from being consumed by pinning their
-            // last-use past every body binding index:
-            //  - in non-final iterations: always (the next iteration re-reads);
-            //  - in the FINAL iteration: only when the enclosing scope still
-            //    references the ref AFTER the loop. Previously the final
-            //    iteration consumed every outer ref at its last body use, so a
-            //    method param (or const) referenced after the loop was gone
-            //    from the stack and was silently lowered to an OP_0 — the
-            //    script compiled and the env interpreter passed, but the
-            //    emitted Script failed on chain (silent interpreter/Script
-            //    divergence).
-            const is_final_iteration = (n == fl.count - 1);
-            var outer_it = outer_refs.iterator();
-            while (outer_it.next()) |entry| {
-                const ref = entry.key_ptr.*;
-                const used_after_loop = if (enclosing_last_uses.get(ref)) |lu|
-                    lu > loop_binding_index
-                else
-                    false;
-                if (!is_final_iteration or used_after_loop) {
-                    try self.last_uses.put(self.allocator, ref, fl.body_bindings.len);
-                }
-            }
-
-            // F-259: each body binding's ops carry that binding's own location
-            // (a binding without one keeps the loop's). The iteration-variable
-            // push above and the cleanup below stay on the loop's location.
-            const loop_loc = self.current_source_loc;
-            for (fl.body_bindings, 0..) |binding, idx| {
-                self.current_idx = idx;
-                if (binding.source_loc) |loc| self.current_source_loc = loc;
-                defer self.current_source_loc = loop_loc;
-                try self.lowerBinding(binding);
-            }
-            self.last_uses.deinit(self.allocator);
-            self.last_uses = enclosing_last_uses;
-
-            // Remove iteration variable if still on stack.
-            //
-            // R-186 / R-292: it is not always on TOP when the body leaves it
-            // behind. A body whose last binding LEAVES a value — the
-            // accumulator `sum = sum + x`, which rebinds `sum` in place and ends
-            // holding it — buries the iteration variable one slot down. Dropping
-            // only at depth 0 left one slot behind per iteration, until the leak
-            // alone crossed the peers' MAX_STACK_DEPTH and they refused a
-            // contract with a working set of three. `removeBranchValueAtDepth`
-            // is the same removal `drainBranchPrivateResidue` uses.
-            if (self.stack.findDepth(fl.var_name)) |d| {
-                try removeBranchValueAtDepth(self, d);
-            }
-        }
-
-        _ = bind_name;
+        return .{ .loop = t };
     }
+
 
     // ========================================================================
     // add_output / add_raw_output

@@ -2712,6 +2712,23 @@ public final class AnfLower {
         return out;
     }
 
+    /**
+     * N-264: the private-method bodies a cross-call predicate below still has
+     * to scan, each at most once.
+     */
+    private static final class CalleeQueue {
+        final Set<String> visited;
+        final java.util.ArrayDeque<List<Statement>> pending = new java.util.ArrayDeque<>();
+
+        CalleeQueue(Set<String> seen) {
+            this.visited = new HashSet<>(seen);
+        }
+
+        void enqueue(MethodNode target) {
+            if (target != null && visited.add(target.name())) pending.add(target.body());
+        }
+    }
+
     static boolean methodMutatesState(MethodNode method, ContractNode contract) {
         Set<String> mutable = new HashSet<>();
         for (PropertyNode p : contract.properties()) {
@@ -2723,30 +2740,37 @@ public final class AnfLower {
 
     private static boolean bodyMutatesState(
             List<Statement> stmts, Set<String> mutable, ContractNode contract, Set<String> seen) {
-        for (Statement s : stmts) {
-            if (stmtMutatesState(s, mutable, contract, seen)) return true;
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtMutatesState(s, mutable, contract, q)) return true;
         }
         return false;
     }
 
     private static boolean stmtMutatesState(
-            Statement stmt, Set<String> mutable, ContractNode contract, Set<String> seen) {
+            Statement stmt, Set<String> mutable, ContractNode contract, CalleeQueue q) {
         if (stmt instanceof AssignmentStatement a
             && a.target() instanceof PropertyAccessExpr pa
             && mutable.contains(pa.property())) {
             return true;
         }
         for (Expression e : statementExpressions(stmt)) {
-            if (exprMutatesState(e, mutable, contract, seen)) return true;
+            if (exprMutatesState(e, mutable, contract, q)) return true;
         }
         for (Statement s : childStatements(stmt)) {
-            if (stmtMutatesState(s, mutable, contract, seen)) return true;
+            if (stmtMutatesState(s, mutable, contract, q)) return true;
         }
         return false;
     }
 
     private static boolean exprMutatesState(
-            Expression expr, Set<String> mutable, ContractNode contract, Set<String> seen) {
+            Expression expr, Set<String> mutable, ContractNode contract, CalleeQueue q) {
         if (expr == null) return false;
         // The reference stops here — it does not descend into the operand.
         if (expr instanceof IncrementExpr ie) {
@@ -2758,14 +2782,10 @@ public final class AnfLower {
         if (expr instanceof CallExpr c) {
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyMutatesState(target.body(), mutable, contract, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(expr)) {
-            if (exprMutatesState(child, mutable, contract, seen)) return true;
+            if (exprMutatesState(child, mutable, contract, q)) return true;
         }
         return false;
     }
@@ -2778,22 +2798,32 @@ public final class AnfLower {
         return bodyHasAddOutput(m.body(), contract, new HashSet<>());
     }
 
-    private static boolean bodyHasAddOutput(List<Statement> stmts, ContractNode contract, Set<String> seen) {
-        for (Statement s : stmts) if (stmtHasAddOutput(s, contract, seen)) return true;
+    private static boolean bodyHasAddOutput(
+            List<Statement> stmts, ContractNode contract, Set<String> seen) {
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtHasAddOutput(s, contract, q)) return true;
+        }
         return false;
     }
 
-    private static boolean stmtHasAddOutput(Statement s, ContractNode contract, Set<String> seen) {
+    private static boolean stmtHasAddOutput(Statement s, ContractNode contract, CalleeQueue q) {
         for (Expression e : statementExpressions(s)) {
-            if (exprHasAddOutput(e, contract, seen)) return true;
+            if (exprHasAddOutput(e, contract, q)) return true;
         }
         for (Statement inner : childStatements(s)) {
-            if (stmtHasAddOutput(inner, contract, seen)) return true;
+            if (stmtHasAddOutput(inner, contract, q)) return true;
         }
         return false;
     }
 
-    private static boolean exprHasAddOutput(Expression e, ContractNode contract, Set<String> seen) {
+    private static boolean exprHasAddOutput(Expression e, ContractNode contract, CalleeQueue q) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa
@@ -2808,14 +2838,10 @@ public final class AnfLower {
             }
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyHasAddOutput(target.body(), contract, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(e)) {
-            if (exprHasAddOutput(child, contract, seen)) return true;
+            if (exprHasAddOutput(child, contract, q)) return true;
         }
         return false;
     }
@@ -2824,22 +2850,32 @@ public final class AnfLower {
         return bodyHasAddDataOutput(m.body(), contract, new HashSet<>());
     }
 
-    private static boolean bodyHasAddDataOutput(List<Statement> stmts, ContractNode contract, Set<String> seen) {
-        for (Statement s : stmts) if (stmtHasAddDataOutput(s, contract, seen)) return true;
+    private static boolean bodyHasAddDataOutput(
+            List<Statement> stmts, ContractNode contract, Set<String> seen) {
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtHasAddDataOutput(s, contract, q)) return true;
+        }
         return false;
     }
 
-    private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, Set<String> seen) {
+    private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, CalleeQueue q) {
         for (Expression e : statementExpressions(s)) {
-            if (exprHasAddDataOutput(e, contract, seen)) return true;
+            if (exprHasAddDataOutput(e, contract, q)) return true;
         }
         for (Statement inner : childStatements(s)) {
-            if (stmtHasAddDataOutput(inner, contract, seen)) return true;
+            if (stmtHasAddDataOutput(inner, contract, q)) return true;
         }
         return false;
     }
 
-    private static boolean exprHasAddDataOutput(Expression e, ContractNode contract, Set<String> seen) {
+    private static boolean exprHasAddDataOutput(Expression e, ContractNode contract, CalleeQueue q) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa
@@ -2854,14 +2890,10 @@ public final class AnfLower {
             }
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyHasAddDataOutput(target.body(), contract, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(e)) {
-            if (exprHasAddDataOutput(child, contract, seen)) return true;
+            if (exprHasAddDataOutput(child, contract, q)) return true;
         }
         return false;
     }
@@ -2883,23 +2915,32 @@ public final class AnfLower {
 
     private static boolean bodyCallsRequireOutputP2PKH(
             List<Statement> stmts, ContractNode contract, boolean zeroOnly, Set<String> seen) {
-        for (Statement s : stmts) if (stmtCallsRequireOutputP2PKH(s, contract, zeroOnly, seen)) return true;
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtCallsRequireOutputP2PKH(s, contract, zeroOnly, q)) return true;
+        }
         return false;
     }
 
     private static boolean stmtCallsRequireOutputP2PKH(
-            Statement s, ContractNode contract, boolean zeroOnly, Set<String> seen) {
+            Statement s, ContractNode contract, boolean zeroOnly, CalleeQueue q) {
         for (Expression e : statementExpressions(s)) {
-            if (exprCallsRequireOutputP2PKH(e, contract, zeroOnly, seen)) return true;
+            if (exprCallsRequireOutputP2PKH(e, contract, zeroOnly, q)) return true;
         }
         for (Statement inner : childStatements(s)) {
-            if (stmtCallsRequireOutputP2PKH(inner, contract, zeroOnly, seen)) return true;
+            if (stmtCallsRequireOutputP2PKH(inner, contract, zeroOnly, q)) return true;
         }
         return false;
     }
 
     private static boolean exprCallsRequireOutputP2PKH(
-            Expression e, ContractNode contract, boolean zeroOnly, Set<String> seen) {
+            Expression e, ContractNode contract, boolean zeroOnly, CalleeQueue q) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof Identifier id && "requireOutputP2PKH".equals(id.name())) {
@@ -2911,14 +2952,10 @@ public final class AnfLower {
             }
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyCallsRequireOutputP2PKH(target.body(), contract, zeroOnly, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(e)) {
-            if (exprCallsRequireOutputP2PKH(child, contract, zeroOnly, seen)) return true;
+            if (exprCallsRequireOutputP2PKH(child, contract, zeroOnly, q)) return true;
         }
         return false;
     }

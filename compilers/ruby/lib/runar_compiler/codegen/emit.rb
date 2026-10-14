@@ -669,9 +669,60 @@ module RunarCompiler
 
     # @api private
     def self.emit_stack_op(op, ctx)
-      # Propagate source location from StackOp to the emit context
-      ctx.set_source_loc(op[:source_loc]) if op[:source_loc]
+      emit_ops([op], ctx)
+    end
 
+    # Emit +root+ in order, descending into if-op arms on an explicit stack.
+    #
+    # N-264: this used to recurse (emit_stack_op -> emit_if -> emit_stack_op),
+    # one level per nested if-op. Private methods are inlined, so a chain of D
+    # helpers each calling the next under K nested ifs nests D*K if-ops, too
+    # deep for the VM stack. Each op is emitted in the same order with the
+    # same source-location bookkeeping as before: an op's location is set
+    # before it, cleared after it, and an if-op's OP_ELSE / OP_ENDIF are
+    # emitted under whatever location its last arm op left.
+    #
+    # @api private
+    def self.emit_ops(root, ctx)
+      # Frames: [ops, next index, arm (:root / :then / :else), else ops].
+      stack = [[root, 0, :root, nil]]
+      until stack.empty?
+        frame = stack.last
+        ops, i, arm, else_ops = frame
+        if i < ops.length
+          frame[1] = i + 1
+          op = ops[i]
+          # Propagate source location from StackOp to the emit context
+          ctx.set_source_loc(op[:source_loc]) if op[:source_loc]
+          if op[:op] == "if"
+            # An OP_IF / OP_ELSE / OP_ENDIF structure: the arms follow.
+            ctx.emit_opcode("OP_IF")
+            stack.push([op[:then] || [], 0, :then, op[:else_ops] || []])
+            next
+          end
+          emit_leaf_op(op, ctx)
+          # Clear after emitting so the location doesn't leak to the next op
+          ctx.set_source_loc(nil)
+          next
+        end
+        stack.pop
+        next if arm == :root
+
+        if arm == :then && !else_ops.empty?
+          ctx.emit_opcode("OP_ELSE")
+          stack.push([else_ops, 0, :else, nil])
+          next
+        end
+        ctx.emit_opcode("OP_ENDIF")
+        # The if-op is done: clear its location like any other op's.
+        ctx.set_source_loc(nil)
+      end
+    end
+
+    # Emit one op that is not an if-op.
+    #
+    # @api private
+    def self.emit_leaf_op(op, ctx)
       case op[:op]
       when "push"
         ctx.emit_push(op[:value])
@@ -695,8 +746,6 @@ module RunarCompiler
         ctx.emit_opcode("OP_TUCK")
       when "opcode"
         ctx.emit_opcode(op[:code])
-      when "if"
-        emit_if(op[:then] || [], op[:else_ops] || [], ctx)
       when "placeholder"
         ctx.emit_placeholder(op[:param_index] || 0)
       when "raw_bytes"
@@ -719,23 +768,6 @@ module RunarCompiler
       else
         raise ArgumentError, "unknown stack op: #{op[:op]}"
       end
-
-      # Clear after emitting so the location doesn't leak to the next op
-      ctx.set_source_loc(nil)
-    end
-
-    # @api private
-    def self.emit_if(then_ops, else_ops, ctx)
-      ctx.emit_opcode("OP_IF")
-
-      then_ops.each { |op| emit_stack_op(op, ctx) }
-
-      unless else_ops.empty?
-        ctx.emit_opcode("OP_ELSE")
-        else_ops.each { |op| emit_stack_op(op, ctx) }
-      end
-
-      ctx.emit_opcode("OP_ENDIF")
     end
 
     # ------------------------------------------------------------------

@@ -12,9 +12,37 @@ module RunarCompiler
   module Codegen
     MAX_OPTIMIZATION_ITERATIONS = 100
 
+    # Nested if-blocks are optimized bottom-up: every if-arm before the list
+    # holding it. N-264: by an explicit list, not recursion -- private methods
+    # are inlined, so a chain of D helpers that each call the next under K
+    # nested ifs nests D*K if-ops here, too deep for the VM stack. Every op
+    # list reachable through if arms is collected parents first, then
+    # optimized in reverse (children before parents), each list exactly as the
+    # recursive version optimized it.
     def self.optimize_stack_ops(ops)
-      current = ops.map { |op| _optimize_nested_if(op) }
+      lists = [ops]
+      arms = {}.compare_by_identity
+      k = 0
+      while k < lists.length
+        lists[k].each do |op|
+          next unless op[:op] == "if"
 
+          pair = [op[:then] || op[:then_ops] || [], op[:else_ops] || []]
+          arms[op] = pair
+          lists.push(pair[0], pair[1])
+        end
+        k += 1
+      end
+      optimized = {}.compare_by_identity
+      lists.reverse_each do |list|
+        current = list.map { |op| _with_optimized_arms(op, arms, optimized) }
+        optimized[list] = _optimize_one_level(current)
+      end
+      optimized[ops]
+    end
+
+    # The fixed-point rule loop over one op list whose if-arms are done.
+    def self._optimize_one_level(current)
       MAX_OPTIMIZATION_ITERATIONS.times do
         result, changed = _apply_one_pass(current)
         break unless changed
@@ -23,16 +51,16 @@ module RunarCompiler
 
       current
     end
+    private_class_method :_optimize_one_level
 
-    def self._optimize_nested_if(op)
+    def self._with_optimized_arms(op, arms, optimized)
       if op[:op] == "if"
-        optimized_then = optimize_stack_ops(op[:then] || op[:then_ops] || [])
-        optimized_else = optimize_stack_ops(op[:else_ops] || [])
-        return { op: "if", then: optimized_then, else_ops: optimized_else, source_loc: op[:source_loc] }
+        then_ops, else_ops = arms[op]
+        return { op: "if", then: optimized[then_ops], else_ops: optimized[else_ops], source_loc: op[:source_loc] }
       end
       op
     end
-    private_class_method :_optimize_nested_if
+    private_class_method :_with_optimized_arms
 
     def self._propagate_source_loc(original, replacements)
       sl = original[:source_loc]

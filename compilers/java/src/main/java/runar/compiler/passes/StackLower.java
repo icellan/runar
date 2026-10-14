@@ -849,10 +849,20 @@ public final class StackLower {
         List<VerifyCodePartLenOp> pins,
         List<Integer> placeholders
     ) {
-        for (StackOp op : ops) {
+        // N-264: pre-order over nested if arms on an explicit stack — inlined
+        // private methods nest D*K if-ops here, too deep to recurse on.
+        java.util.ArrayDeque<java.util.Iterator<StackOp>> stack = new java.util.ArrayDeque<>();
+        stack.push(ops.iterator());
+        while (!stack.isEmpty()) {
+            java.util.Iterator<StackOp> it = stack.peek();
+            if (!it.hasNext()) {
+                stack.pop();
+                continue;
+            }
+            StackOp op = it.next();
             if (op instanceof IfOp ifo) {
-                collectCodePartPins(ifo.thenBranch(), pins, placeholders);
-                if (ifo.elseBranch() != null) collectCodePartPins(ifo.elseBranch(), pins, placeholders);
+                if (ifo.elseBranch() != null) stack.push(ifo.elseBranch().iterator());
+                stack.push(ifo.thenBranch().iterator());
             } else if (op instanceof PlaceholderOp ph) {
                 placeholders.add(ph.paramIndex().intValueExact());
             } else if (op instanceof VerifyCodePartLenOp v) {
@@ -1013,22 +1023,41 @@ public final class StackLower {
             List<AnfBinding> body,
             Map<String, AnfMethod> privateMethods,
             java.util.Set<String> seen) {
-        for (AnfBinding b : body) {
-            AnfValue v = b.value();
-            if (v instanceof CheckPreimage) return true;
-            if (v instanceof If iv) {
-                if (methodUsesCheckPreimage(iv.thenBranch(), privateMethods, seen)) return true;
-                if (methodUsesCheckPreimage(iv.elseBranch(), privateMethods, seen)) return true;
-            }
-            if (v instanceof Loop loop) {
-                if (methodUsesCheckPreimage(loop.body(), privateMethods, seen)) return true;
-            }
-            if (v instanceof MethodCall mc && privateMethods != null) {
-                AnfMethod target = privateMethods.get(mc.method());
-                if (target != null && !seen.contains(target.name())) {
-                    java.util.Set<String> nextSeen = new java.util.HashSet<>(seen);
-                    nextSeen.add(target.name());
-                    if (methodUsesCheckPreimage(target.body(), privateMethods, nextSeen)) return true;
+        return someReachableBinding(body, privateMethods, seen, v -> v instanceof CheckPreimage);
+    }
+
+    /**
+     * True when {@code pred} holds for some binding reachable from
+     * {@code body} through if arms, loop bodies and (when
+     * {@code privateMethods} is non-null) the bodies of called private methods
+     * not in {@code seen}. N-264: an explicit work list, not recursion — a
+     * chain of D helpers each calling the next under K nested ifs is D*K levels
+     * deep through those edges. The answer is plain reachability, exactly what
+     * the recursive walk (which pruned a method only when it was already on
+     * the current call path) computed.
+     */
+    private static boolean someReachableBinding(
+            List<AnfBinding> body,
+            Map<String, AnfMethod> privateMethods,
+            java.util.Set<String> seen,
+            java.util.function.Predicate<AnfValue> pred) {
+        java.util.Set<String> visited = new java.util.HashSet<>(seen);
+        java.util.ArrayDeque<List<AnfBinding>> work = new java.util.ArrayDeque<>();
+        work.push(body);
+        while (!work.isEmpty()) {
+            for (AnfBinding b : work.pop()) {
+                AnfValue v = b.value();
+                if (pred.test(v)) return true;
+                if (v instanceof If iv) {
+                    work.push(iv.elseBranch());
+                    work.push(iv.thenBranch());
+                } else if (v instanceof Loop loop) {
+                    work.push(loop.body());
+                } else if (v instanceof MethodCall mc && privateMethods != null) {
+                    AnfMethod target = privateMethods.get(mc.method());
+                    if (target != null && visited.add(target.name())) {
+                        work.push(target.body());
+                    }
                 }
             }
         }
@@ -1071,25 +1100,49 @@ public final class StackLower {
             java.util.Set<String> varLenProps,
             Map<String, AnfMethod> privateMethods,
             java.util.Set<String> seen) {
-        for (AnfBinding b : body) {
-            AnfValue v = b.value();
-            if (v instanceof LoadProp lp && varLenProps.contains(lp.name())) return true;
-            if (v instanceof If iv) {
-                if (methodReadsVarLenState(iv.thenBranch(), varLenProps, privateMethods, seen)
-                    || methodReadsVarLenState(iv.elseBranch(), varLenProps, privateMethods, seen)) return true;
-            }
-            if (v instanceof Loop l
-                && methodReadsVarLenState(l.body(), varLenProps, privateMethods, seen)) return true;
-            if (v instanceof MethodCall mc && privateMethods != null) {
-                AnfMethod target = privateMethods.get(mc.method());
-                if (target != null && !seen.contains(target.name())) {
-                    java.util.Set<String> nextSeen = new java.util.HashSet<>(seen);
-                    nextSeen.add(target.name());
-                    if (methodReadsVarLenState(target.body(), varLenProps, privateMethods, nextSeen)) return true;
-                }
+        return someReachableBinding(body, privateMethods, seen,
+            v -> v instanceof LoadProp lp && varLenProps.contains(lp.name()));
+    }
+
+    // ------------------------------------------------------------------
+    // N-264: iterative lowering
+    // ------------------------------------------------------------------
+
+    /**
+     * A suspended step of the lowering. {@link #step} runs the task until it
+     * either finishes ({@code null}) or needs a nested body lowered first: it
+     * then returns that child task and is stepped again once the child is
+     * done. {@code lowerBindings}, {@code lowerIf}, {@code lowerLoop} and
+     * {@code inlineMethodCall} are such tasks; each place one used to CALL
+     * another (an if's two arms, a loop body, an inlined private method's
+     * body) now RETURNS the child instead, and {@link #runLowerTasks} keeps
+     * the suspended parents on an explicit heap stack.
+     *
+     * <p>Why: private methods are inlined at every call site, so F-213's
+     * per-method nesting bound (128) and N-180's call-depth bound (128)
+     * compose multiplicatively — a chain of D helpers that each call the next
+     * under K nested ifs is D*K nested ifs here, and the recursive lowering
+     * threw StackOverflowError at D=16 x 120 (user decision R106: lower
+     * iteratively). Every statement runs in the same order, against the same
+     * state, as in the recursive version, so the emitted ops are unchanged.
+     * An exception abandons the whole method's lowering, as before.
+     */
+    interface LowerTask {
+        LowerTask step();
+    }
+
+    /** Run {@code root} and every child it returns, depth-first, on an explicit stack. */
+    static void runLowerTasks(LowerTask root) {
+        java.util.ArrayDeque<LowerTask> stack = new java.util.ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            LowerTask child = stack.peek().step();
+            if (child == null) {
+                stack.pop();
+            } else {
+                stack.push(child);
             }
         }
-        return false;
     }
 
     // ------------------------------------------------------------------
@@ -1510,62 +1563,108 @@ public final class StackLower {
 
         void lowerBindings(List<AnfBinding> bindings, boolean terminalAssert,
                            Map<String, List<String>> inheritedArrays) {
-            localBindings = new HashMap<>();
-            for (AnfBinding b : bindings) localBindings.put(b.name(), true);
+            runLowerTasks(new BindingsTask(bindings, terminalAssert, inheritedArrays));
+        }
 
-            Map<String, Integer> lastUses = computeLastUses(bindings, inheritedArrays);
+        /** {@code lowerBindings} as a resumable {@link LowerTask} (N-264). */
+        final class BindingsTask implements LowerTask {
+            private final List<AnfBinding> bindings;
+            private final boolean terminalAssert;
+            private final Map<String, List<String>> inheritedArrays;
+            private boolean started;
+            private Map<String, Integer> lastUses;
+            private int lastAssertIdx = -1;
+            private int terminalIfIdx = -1;
+            private int i;
+            /** The location to restore once the child task in flight is done. */
+            private runar.compiler.ir.ast.SourceLocation prev;
+            private boolean awaitingChild;
 
-            if (outerProtectedRefs != null) {
-                for (String ref : outerProtectedRefs) {
-                    lastUses.put(ref, bindings.size());
-                }
+            BindingsTask(List<AnfBinding> bindings, boolean terminalAssert,
+                         Map<String, List<String>> inheritedArrays) {
+                this.bindings = bindings;
+                this.terminalAssert = terminalAssert;
+                this.inheritedArrays = inheritedArrays;
             }
 
-            // Only an assert that IS the last binding may leave its value as
-            // the result (N-005): any later binding (e.g. a terminal asm()
-            // raw_script with out_arity 1) pushes its own result, the cleanup
-            // NIPs the assert's value away, and the check is never enforced.
-            // Such an assert gets OP_VERIFY.
-            int lastAssertIdx = -1;
-            int terminalIfIdx = -1;
-            if (terminalAssert && !bindings.isEmpty()) {
-                AnfBinding last = bindings.get(bindings.size() - 1);
-                if (last.value() instanceof If) {
-                    terminalIfIdx = bindings.size() - 1;
-                } else if (last.value() instanceof Assert) {
-                    lastAssertIdx = bindings.size() - 1;
-                }
-            }
+            @Override
+            public LowerTask step() {
+                if (!started) {
+                    started = true;
+                    localBindings = new HashMap<>();
+                    for (AnfBinding b : bindings) localBindings.put(b.name(), true);
 
-            for (int i = 0; i < bindings.size(); i++) {
-                AnfBinding b = bindings.get(i);
-                // GAP-002: stamp the binding's sourceLoc onto every StackOp
-                // emitted while it lowers. We deliberately keep the loc
-                // sticky AFTER the binding closes — nothing reads it until
-                // the next binding overwrites it — so peephole-survivable
-                // ops get a deterministic anchor.
-                runar.compiler.ir.ast.SourceLocation prev = currentSourceLoc;
-                if (b.sourceLoc() != null) {
-                    currentSourceLoc = b.sourceLoc();
-                }
-                try {
-                    if (b.value() instanceof Assert a && i == lastAssertIdx) {
-                        lowerAssert(a.value(), i, lastUses, true);
-                    } else if (b.value() instanceof If iv && i == terminalIfIdx) {
-                        lowerIf(b.name(), iv.cond(), iv.thenBranch(), iv.elseBranch(),
-                            iv.results() == null ? List.of() : iv.results(), i, lastUses, true);
-                    } else {
-                        lowerBinding(b, i, lastUses);
+                    lastUses = computeLastUses(bindings, inheritedArrays);
+
+                    if (outerProtectedRefs != null) {
+                        for (String ref : outerProtectedRefs) {
+                            lastUses.put(ref, bindings.size());
+                        }
                     }
-                } finally {
+
+                    // Only an assert that IS the last binding may leave its value as
+                    // the result (N-005): any later binding (e.g. a terminal asm()
+                    // raw_script with out_arity 1) pushes its own result, the cleanup
+                    // NIPs the assert's value away, and the check is never enforced.
+                    // Such an assert gets OP_VERIFY.
+                    if (terminalAssert && !bindings.isEmpty()) {
+                        AnfBinding last = bindings.get(bindings.size() - 1);
+                        if (last.value() instanceof If) {
+                            terminalIfIdx = bindings.size() - 1;
+                        } else if (last.value() instanceof Assert) {
+                            lastAssertIdx = bindings.size() - 1;
+                        }
+                    }
+                } else if (awaitingChild) {
+                    awaitingChild = false;
+                    currentSourceLoc = prev;
+                    i++;
+                }
+
+                for (; i < bindings.size(); i++) {
+                    AnfBinding b = bindings.get(i);
+                    // GAP-002: stamp the binding's sourceLoc onto every StackOp
+                    // emitted while it lowers. We deliberately keep the loc
+                    // sticky AFTER the binding closes — nothing reads it until
+                    // the next binding overwrites it — so peephole-survivable
+                    // ops get a deterministic anchor.
+                    prev = currentSourceLoc;
+                    if (b.sourceLoc() != null) {
+                        currentSourceLoc = b.sourceLoc();
+                    }
+                    LowerTask child;
+                    try {
+                        if (b.value() instanceof Assert a && i == lastAssertIdx) {
+                            lowerAssert(a.value(), i, lastUses, true);
+                            child = null;
+                        } else if (b.value() instanceof If iv && i == terminalIfIdx) {
+                            child = new IfTask(b.name(), iv.cond(), iv.thenBranch(), iv.elseBranch(),
+                                iv.results() == null ? List.of() : iv.results(), i, lastUses, true);
+                        } else {
+                            child = lowerBinding(b, i, lastUses);
+                        }
+                    } catch (RuntimeException | Error e) {
+                        currentSourceLoc = prev;
+                        throw e;
+                    }
+                    if (child != null) {
+                        awaitingChild = true;
+                        return child;
+                    }
                     currentSourceLoc = prev;
                 }
+                return null;
             }
         }
 
         // ---------------- lower_binding dispatch ----------------
 
-        void lowerBinding(AnfBinding b, int idx, Map<String, Integer> lastUses) {
+        /**
+         * Lowers {@code b}; for a binding that lowers a nested body (an inlined
+         * private call, an if, a loop) returns the task that does so instead,
+         * for the caller to run (N-264). Otherwise returns {@code null}.
+         */
+        LowerTask lowerBinding(AnfBinding b, int idx, Map<String, Integer> lastUses) {
             // R-144: the binding carries its own position — round-tripped
             // through the --ir JSON, so it is there even when this pass never
             // saw a source file. Published for the error path only.
@@ -1586,12 +1685,12 @@ public final class StackLower {
             } else if (v instanceof Call c) {
                 lowerCall(name, c.func(), c.args(), idx, lastUses);
             } else if (v instanceof MethodCall mc) {
-                lowerMethodCall(name, mc.object(), mc.method(), mc.args(), idx, lastUses);
+                return lowerMethodCall(name, mc.object(), mc.method(), mc.args(), idx, lastUses);
             } else if (v instanceof If iv) {
-                lowerIf(name, iv.cond(), iv.thenBranch(), iv.elseBranch(),
+                return new IfTask(name, iv.cond(), iv.thenBranch(), iv.elseBranch(),
                     iv.results() == null ? List.of() : iv.results(), idx, lastUses, false);
             } else if (v instanceof Loop l) {
-                lowerLoop(name, l.count(), l.body(), l.iterVar(), l.start(), l.step(), idx, lastUses);
+                return new LoopTask(name, l.count(), l.body(), l.iterVar(), l.start(), l.step(), idx, lastUses);
             } else if (v instanceof Assert a) {
                 lowerAssert(a.value(), idx, lastUses, false);
             } else if (v instanceof UpdateProp up) {
@@ -1619,6 +1718,7 @@ public final class StackLower {
                 // passing type-check while producing wrong on-chain bytes.
                 throw new UnknownAnfKindError(v.kind(), "stack-lower.lowerBinding");
             }
+            return null;
         }
 
         // ---------------- load_param / load_prop / load_const ----------------
@@ -2800,7 +2900,8 @@ public final class StackLower {
 
         // ---------------- method_call ----------------
 
-        void lowerMethodCall(String bindingName, String obj, String method,
+        /** Returns the inlining task for a private-method call (N-264), else {@code null}. */
+        LowerTask lowerMethodCall(String bindingName, String obj, String method,
                              List<String> args, int idx, Map<String, Integer> lastUses) {
             if ("getStateScript".equals(method)) {
                 if (sm.has(obj)) {
@@ -2809,7 +2910,7 @@ public final class StackLower {
                     sm.pop();
                 }
                 lowerGetStateScript(bindingName);
-                return;
+                return null;
             }
             AnfMethod pm = privateMethods.get(method);
             if (pm != null) {
@@ -2818,16 +2919,51 @@ public final class StackLower {
                     emitOp(new DropOp());
                     sm.pop();
                 }
-                inlineMethodCall(bindingName, pm, args, idx, lastUses);
-                return;
+                return new InlineTask(bindingName, pm, args, idx, lastUses);
             }
             // Treat as a function call
             lowerCall(bindingName, method, args, idx, lastUses);
+            return null;
         }
 
-        void inlineMethodCall(String bindingName, AnfMethod m, List<String> args,
-                              int idx, Map<String, Integer> lastUses) {
-            List<Map<String, String>> shadowed = new ArrayList<>();
+        /**
+         * {@code inlineMethodCall} as a resumable {@link LowerTask} (N-264): binds
+         * the arguments, lowers the private method's body in THIS context as a
+         * child task, then restores shadowed names and renames the result.
+         */
+        final class InlineTask implements LowerTask {
+            private final String bindingName;
+            private final AnfMethod m;
+            private final List<String> args;
+            private final int idx;
+            private final Map<String, Integer> lastUses;
+            private final List<Map<String, String>> shadowed = new ArrayList<>();
+            private boolean bodyLowered;
+
+            InlineTask(String bindingName, AnfMethod m, List<String> args,
+                       int idx, Map<String, Integer> lastUses) {
+                this.bindingName = bindingName;
+                this.m = m;
+                this.args = args;
+                this.idx = idx;
+                this.lastUses = lastUses;
+            }
+
+            @Override
+            public LowerTask step() {
+                if (!bodyLowered) {
+                    bodyLowered = true;
+                    inlineMethodCallHead(bindingName, m, args, idx, lastUses, shadowed);
+                    return new BindingsTask(m.body(), false, null);
+                }
+                inlineMethodCallTail(bindingName, m, shadowed);
+                return null;
+            }
+        }
+
+        void inlineMethodCallHead(String bindingName, AnfMethod m, List<String> args,
+                                  int idx, Map<String, Integer> lastUses,
+                                  List<Map<String, String>> shadowed) {
 
             // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
             // checks its own -- checking in the lowerer rather than the typechecker also
@@ -2880,8 +3016,10 @@ public final class StackLower {
                 sm.push(paramName);
             }
 
-            lowerBindings(m.body(), false);
+        }
 
+        void inlineMethodCallTail(String bindingName, AnfMethod m,
+                                  List<Map<String, String>> shadowed) {
             for (Map<String, String> e : shadowed) {
                 String sn = e.get("shadowName");
                 String pn = e.get("paramName");
@@ -2909,11 +3047,70 @@ public final class StackLower {
          * that carries at most one result, and then every path below behaves
          * exactly as it did before the multi-result contract existed.
          */
-        void lowerIf(String bindingName, String cond,
-                     List<AnfBinding> thenB, List<AnfBinding> elseB,
-                     List<String> results,
-                     int idx, Map<String, Integer> lastUses,
-                     boolean terminalAssert) {
+        /** The state {@code lowerIf}'s three phases share across its two arms (N-264). */
+        static final class IfFrame {
+            String bindingName;
+            String cond;
+            List<AnfBinding> thenB;
+            List<AnfBinding> elseB;
+            List<String> results;
+            int idx;
+            Map<String, Integer> lastUses;
+            boolean terminalAssert;
+            Set<String> protectedRefs;
+            Set<String> preIfNames;
+            LoweringContext thenCtx;
+            LoweringContext elseCtx;
+        }
+
+        /**
+         * {@code lowerIf} as a resumable {@link LowerTask} (N-264): the head
+         * prepares the then-arm context, each arm is lowered as a child task,
+         * and the tail reconciles the arms exactly as the recursive version did.
+         */
+        final class IfTask implements LowerTask {
+            private final IfFrame f = new IfFrame();
+            private int phase;
+
+            IfTask(String bindingName, String cond,
+                   List<AnfBinding> thenB, List<AnfBinding> elseB,
+                   List<String> results,
+                   int idx, Map<String, Integer> lastUses,
+                   boolean terminalAssert) {
+                f.bindingName = bindingName;
+                f.cond = cond;
+                f.thenB = thenB;
+                f.elseB = elseB;
+                f.results = results;
+                f.idx = idx;
+                f.lastUses = lastUses;
+                f.terminalAssert = terminalAssert;
+            }
+
+            @Override
+            public LowerTask step() {
+                switch (phase++) {
+                    case 0:
+                        lowerIfHead(f);
+                        return f.thenCtx.new BindingsTask(f.thenB, f.terminalAssert, arrayElements);
+                    case 1:
+                        lowerIfMid(f);
+                        return f.elseCtx.new BindingsTask(f.elseB, f.terminalAssert, arrayElements);
+                    default:
+                        lowerIfTail(f);
+                        return null;
+                }
+            }
+        }
+
+        void lowerIfHead(IfFrame f) {
+            String bindingName = f.bindingName;
+            String cond = f.cond;
+            List<AnfBinding> thenB = f.thenB;
+            List<AnfBinding> elseB = f.elseB;
+            List<String> results = f.results;
+            int idx = f.idx;
+            Map<String, Integer> lastUses = f.lastUses;
             // The ANF wire format has no version field, and --ir / --ir-parity
             // are documented surfaces that feed a checked-in ANF JSON straight
             // into this pass. An ANF produced BEFORE the multi-result node
@@ -3050,7 +3247,16 @@ public final class StackLower {
             LoweringContext thenCtx = subContext();
             thenCtx.outerProtectedRefs = protectedRefs;
             thenCtx.insideBranch = true;
-            thenCtx.lowerBindings(thenB, terminalAssert, arrayElements);
+            f.protectedRefs = protectedRefs;
+            f.preIfNames = preIfNames;
+            f.thenCtx = thenCtx;
+        }
+
+        void lowerIfMid(IfFrame f) {
+            boolean terminalAssert = f.terminalAssert;
+            Set<String> protectedRefs = f.protectedRefs;
+            Set<String> preIfNames = f.preIfNames;
+            LoweringContext thenCtx = f.thenCtx;
 
             thenCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3076,7 +3282,22 @@ public final class StackLower {
             LoweringContext elseCtx = subContext();
             elseCtx.outerProtectedRefs = protectedRefs;
             elseCtx.insideBranch = true;
-            elseCtx.lowerBindings(elseB, terminalAssert, arrayElements);
+            f.elseCtx = elseCtx;
+        }
+
+        void lowerIfTail(IfFrame f) {
+            String bindingName = f.bindingName;
+            String cond = f.cond;
+            List<AnfBinding> thenB = f.thenB;
+            List<AnfBinding> elseB = f.elseB;
+            List<String> results = f.results;
+            int idx = f.idx;
+            Map<String, Integer> lastUses = f.lastUses;
+            boolean terminalAssert = f.terminalAssert;
+            Set<String> protectedRefs = f.protectedRefs;
+            Set<String> preIfNames = f.preIfNames;
+            LoweringContext thenCtx = f.thenCtx;
+            LoweringContext elseCtx = f.elseCtx;
 
             elseCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3566,144 +3787,204 @@ public final class StackLower {
 
         // ---------------- loop ----------------
 
-        void lowerLoop(String bindingName, int count, List<AnfBinding> body, String iterVar,
-                       BigInteger start, int step,
-                       Integer loopBindingIndex, Map<String, Integer> enclosingLastUses) {
-            // Names (re)defined anywhere inside the loop body, nested branches
-            // included. A name the body itself binds is NOT an outer ref —
-            // reassigned locals (e.g. `off = off + ...` inside an if) flow
-            // through lowerIf's branch-reassignment reconciliation, not through
-            // protection here.
-            Set<String> deepBodyBindingNames = collectDeepBindingNames(body);
+        /**
+         * {@code lowerLoop} as a resumable {@link LowerTask} (N-264): the loop is
+         * unrolled exactly as before, but a body binding that lowers a nested
+         * body (if / inlined call / inner loop) runs as a child task.
+         */
+        final class LoopTask implements LowerTask {
+            private final String bindingName;
+            private final int count;
+            private final List<AnfBinding> body;
+            private final String iterVar;
+            private final BigInteger start;
+            private final int step;
+            private final Integer loopBindingIndex;
+            private final Map<String, Integer> enclosingLastUses;
+            private boolean started;
+            private Set<String> outerRefs;
+            private Map<String, List<String>> outerArrays;
+            private Map<String, Boolean> prevLocal;
+            /** Current iteration, and body index within it ({@code -1}: not begun). */
+            private int i;
+            private int j = -1;
+            private Map<String, Integer> lastUses;
+            private runar.compiler.ir.ast.SourceLocation loopLoc;
+            private boolean awaitingChild;
 
-            Map<String, Boolean> bodyNames = new HashMap<>();
-            for (AnfBinding b : body) bodyNames.put(b.name(), true);
-
-            // Collect ALL outer-scope refs used anywhere in the body — including
-            // refs that only occur inside nested if-branches (collectRefs
-            // recurses). The previous top-level-only scan missed nested
-            // references: a const defined before the loop and referenced only
-            // inside an if-branch was consumed by the first iteration, making
-            // iteration 2 fail with "Value 'X' not found on stack".
-            Set<String> outerRefs = new LinkedHashSet<>();
-            for (AnfBinding b : body) {
-                for (String ref : collectRefs(b.value())) {
-                    if (!ref.equals(iterVar) && !deepBodyBindingNames.contains(ref)) {
-                        outerRefs.add(ref);
-                    }
-                }
+            LoopTask(String bindingName, int count, List<AnfBinding> body, String iterVar,
+                     BigInteger start, int step,
+                     Integer loopBindingIndex, Map<String, Integer> enclosingLastUses) {
+                this.bindingName = bindingName;
+                this.count = count;
+                this.body = body;
+                this.iterVar = iterVar;
+                this.start = start;
+                this.step = step;
+                this.loopBindingIndex = loopBindingIndex;
+                this.enclosingLastUses = enclosingLastUses;
             }
 
-            // A local the body REBINDS and then READS AGAIN in the same
-            // iteration is carried across iterations through the rebound slot,
-            // so it must survive the body exactly like an outer ref.
-            // deepBodyBindingNames above excludes it precisely because the body
-            // binds it — which is what made the updated value consumable. See
-            // collectLoopCarriedRebinds.
-            for (String ref : collectLoopCarriedRebinds(body)) {
-                if (!ref.equals(iterVar)) {
-                    outerRefs.add(ref);
-                }
-            }
+            @Override
+            public LowerTask step() {
+                if (!started) {
+                    started = true;
+                    // Names (re)defined anywhere inside the loop body, nested branches
+                    // included. A name the body itself binds is NOT an outer ref —
+                    // reassigned locals (e.g. `off = off + ...` inside an if) flow
+                    // through lowerIf's branch-reassignment reconciliation, not through
+                    // protection here.
+                    Set<String> deepBodyBindingNames = collectDeepBindingNames(body);
 
-            // F-081: an outer array_literal binding is metadata only — its
-            // ELEMENTS are the stack slots. Protecting the array name protects
-            // nothing, so the first iteration consumed the elements and the
-            // second failed with "value 't0' not found on stack". Protect the
-            // elements themselves.
-            Map<String, List<String>> outerArrays = new HashMap<>(arrayElements);
-            for (String ref : new ArrayList<>(outerRefs)) {
-                List<String> elems = outerArrays.get(ref);
-                if (elems != null) outerRefs.addAll(elems);
-            }
+                    Map<String, Boolean> bodyNames = new HashMap<>();
+                    for (AnfBinding b : body) bodyNames.put(b.name(), true);
 
-            Map<String, Boolean> prevLocal = localBindings;
-            Map<String, Boolean> newLocal = new HashMap<>(prevLocal);
-            newLocal.putAll(bodyNames);
-            localBindings = newLocal;
-
-            for (int i = 0; i < count; i++) {
-                // Push the iteration variable value (in case the loop body uses
-                // it). Iteration `i` binds `start + i*step` (issue #121);
-                // zero-start counting-up loops (start=0, step=1) reduce to
-                // BigInteger.valueOf(i), preserving the historical byte-for-byte
-                // lowering.
-                emitOp(new PushOp(PushValue.of(
-                    start.add(BigInteger.valueOf((long) i * step)))));
-                sm.push(iterVar);
-                Map<String, Integer> lastUses = computeLastUses(body, outerArrays);
-
-                // Prevent outer-scope refs from being consumed by setting their
-                // last-use beyond any body binding index:
-                //  - non-final iterations: always (the next iteration re-reads them);
-                //  - the FINAL iteration: when the enclosing scope still references
-                //    them AFTER the loop. Previously the final iteration consumed
-                //    every outer ref at its last body use, so a method param (or
-                //    const) referenced after the loop was gone from the stack and
-                //    was silently lowered to an OP_0/empty push — compilation
-                //    succeeded, the env-based interpreter passed, but the emitted
-                //    Script failed at runtime (silent interpreter <-> Script
-                //    divergence).
-                boolean isFinalIteration = i == count - 1;
-                for (String ref : outerRefs) {
-                    boolean usedAfterLoop = enclosingLastUses != null
-                        && loopBindingIndex != null
-                        && enclosingLastUses.getOrDefault(ref, -1) > loopBindingIndex;
-                    if (!isFinalIteration || usedAfterLoop) {
-                        lastUses.put(ref, body.size());
+                    // Collect ALL outer-scope refs used anywhere in the body — including
+                    // refs that only occur inside nested if-branches (collectRefs
+                    // recurses). The previous top-level-only scan missed nested
+                    // references: a const defined before the loop and referenced only
+                    // inside an if-branch was consumed by the first iteration, making
+                    // iteration 2 fail with "Value 'X' not found on stack".
+                    outerRefs = new LinkedHashSet<>();
+                    for (AnfBinding b : body) {
+                        for (String ref : collectRefs(b.value())) {
+                            if (!ref.equals(iterVar) && !deepBodyBindingNames.contains(ref)) {
+                                outerRefs.add(ref);
+                            }
+                        }
                     }
+
+                    // A local the body REBINDS and then READS AGAIN in the same
+                    // iteration is carried across iterations through the rebound slot,
+                    // so it must survive the body exactly like an outer ref.
+                    // deepBodyBindingNames above excludes it precisely because the body
+                    // binds it — which is what made the updated value consumable. See
+                    // collectLoopCarriedRebinds.
+                    for (String ref : collectLoopCarriedRebinds(body)) {
+                        if (!ref.equals(iterVar)) {
+                            outerRefs.add(ref);
+                        }
+                    }
+
+                    // F-081: an outer array_literal binding is metadata only — its
+                    // ELEMENTS are the stack slots. Protecting the array name protects
+                    // nothing, so the first iteration consumed the elements and the
+                    // second failed with "value 't0' not found on stack". Protect the
+                    // elements themselves.
+                    outerArrays = new HashMap<>(arrayElements);
+                    for (String ref : new ArrayList<>(outerRefs)) {
+                        List<String> elems = outerArrays.get(ref);
+                        if (elems != null) outerRefs.addAll(elems);
+                    }
+
+                    prevLocal = localBindings;
+                    Map<String, Boolean> newLocal = new HashMap<>(prevLocal);
+                    newLocal.putAll(bodyNames);
+                    localBindings = newLocal;
+                } else if (awaitingChild) {
+                    awaitingChild = false;
+                    currentSourceLoc = loopLoc;
+                    j++;
                 }
 
-                // F-259: each body binding's ops carry that binding's own
-                // location (a binding without one keeps the loop's). The
-                // iteration-variable push above and the cleanup below stay on
-                // the loop's location.
-                runar.compiler.ir.ast.SourceLocation loopLoc = currentSourceLoc;
-                for (int j = 0; j < body.size(); j++) {
-                    AnfBinding b = body.get(j);
-                    if (b.sourceLoc() != null) {
-                        currentSourceLoc = b.sourceLoc();
+                while (true) {
+                    if (j < 0) {
+                        if (i >= count) break;
+                        // Push the iteration variable value (in case the loop body uses
+                        // it). Iteration `i` binds `start + i*step` (issue #121);
+                        // zero-start counting-up loops (start=0, step=1) reduce to
+                        // BigInteger.valueOf(i), preserving the historical byte-for-byte
+                        // lowering.
+                        emitOp(new PushOp(PushValue.of(
+                            start.add(BigInteger.valueOf((long) i * step)))));
+                        sm.push(iterVar);
+                        lastUses = computeLastUses(body, outerArrays);
+
+                        // Prevent outer-scope refs from being consumed by setting their
+                        // last-use beyond any body binding index:
+                        //  - non-final iterations: always (the next iteration re-reads them);
+                        //  - the FINAL iteration: when the enclosing scope still references
+                        //    them AFTER the loop. Previously the final iteration consumed
+                        //    every outer ref at its last body use, so a method param (or
+                        //    const) referenced after the loop was gone from the stack and
+                        //    was silently lowered to an OP_0/empty push — compilation
+                        //    succeeded, the env-based interpreter passed, but the emitted
+                        //    Script failed at runtime (silent interpreter <-> Script
+                        //    divergence).
+                        boolean isFinalIteration = i == count - 1;
+                        for (String ref : outerRefs) {
+                            boolean usedAfterLoop = enclosingLastUses != null
+                                && loopBindingIndex != null
+                                && enclosingLastUses.getOrDefault(ref, -1) > loopBindingIndex;
+                            if (!isFinalIteration || usedAfterLoop) {
+                                lastUses.put(ref, body.size());
+                            }
+                        }
+
+                        // F-259: each body binding's ops carry that binding's own
+                        // location (a binding without one keeps the loop's). The
+                        // iteration-variable push above and the cleanup below stay on
+                        // the loop's location.
+                        loopLoc = currentSourceLoc;
+                        j = 0;
                     }
-                    try {
-                        lowerBinding(b, j, lastUses);
-                    } finally {
+                    while (j < body.size()) {
+                        AnfBinding b = body.get(j);
+                        if (b.sourceLoc() != null) {
+                            currentSourceLoc = b.sourceLoc();
+                        }
+                        LowerTask child;
+                        try {
+                            child = lowerBinding(b, j, lastUses);
+                        } catch (RuntimeException | Error e) {
+                            currentSourceLoc = loopLoc;
+                            throw e;
+                        }
+                        if (child != null) {
+                            awaitingChild = true;
+                            return child;
+                        }
                         currentSourceLoc = loopLoc;
+                        j++;
                     }
-                }
-                // Clean up the iteration variable if it was not consumed by the body.
-                //
-                // R-186 / R-292: it is not always on TOP when that happens. A body
-                // whose last binding LEAVES a value — the accumulator
-                // `sum = sum + x`, which rebinds `sum` in place and ends holding it
-                // — buries the iteration variable one slot down. Dropping only at
-                // depth 0 left one slot behind per iteration, until the leak alone
-                // crossed MAX_STACK_DEPTH and the compiler refused a contract with
-                // a working set of three. Removing it wherever it sits is the same
-                // operation drainBranchPrivateResidue performs, spelled the same
-                // way.
-                if (sm.has(iterVar)) {
-                    int d = sm.findDepth(iterVar);
-                    if (d == 0) {
-                        emitOp(new DropOp());
-                        sm.pop();
-                    } else if (d == 1) {
-                        emitOp(new NipOp());
-                        sm.removeAtDepth(1);
-                    } else {
-                        emitOp(new PushOp(PushValue.of(d)));
-                        sm.push("");
-                        emitOp(new RollOp(d));
-                        sm.pop();
-                        String rolled = sm.removeAtDepth(d);
-                        sm.push(rolled);
-                        emitOp(new DropOp());
-                        sm.pop();
+                    // Clean up the iteration variable if it was not consumed by the body.
+                    //
+                    // R-186 / R-292: it is not always on TOP when that happens. A body
+                    // whose last binding LEAVES a value — the accumulator
+                    // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+                    // — buries the iteration variable one slot down. Dropping only at
+                    // depth 0 left one slot behind per iteration, until the leak alone
+                    // crossed MAX_STACK_DEPTH and the compiler refused a contract with
+                    // a working set of three. Removing it wherever it sits is the same
+                    // operation drainBranchPrivateResidue performs, spelled the same
+                    // way.
+                    if (sm.has(iterVar)) {
+                        int d = sm.findDepth(iterVar);
+                        if (d == 0) {
+                            emitOp(new DropOp());
+                            sm.pop();
+                        } else if (d == 1) {
+                            emitOp(new NipOp());
+                            sm.removeAtDepth(1);
+                        } else {
+                            emitOp(new PushOp(PushValue.of(d)));
+                            sm.push("");
+                            emitOp(new RollOp(d));
+                            sm.pop();
+                            String rolled = sm.removeAtDepth(d);
+                            sm.push(rolled);
+                            emitOp(new DropOp());
+                            sm.pop();
+                        }
                     }
+                    i++;
+                    j = -1;
                 }
-            }
 
-            localBindings = prevLocal;
-            trackDepth();
+                localBindings = prevLocal;
+                trackDepth();
+                return null;
+            }
         }
 
         // ---------------- assert ----------------

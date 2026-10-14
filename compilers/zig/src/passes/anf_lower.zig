@@ -3361,6 +3361,86 @@ fn lookupPrivateMethod(contract: ContractNode, name: []const u8) ?MethodNode {
 // pathological inputs that bypass the validator.
 const MAX_PRIVATE_CALL_DEPTH: u32 = 64;
 
+// N-264: the predicates below reach private helpers through a QUEUE, not by
+// recursing into a callee's body from the middle of the caller's statement
+// walk. A chain of D helpers that each call the next under K nested ifs held
+// D*K frames at once (capped only by the 64-hop cutoff above) and overflowed
+// the thread stack. The queue is breadth-first, so each private method is
+// scanned once, at its SHORTEST call distance from the method being
+// classified, and only while that distance is within MAX_PRIVATE_CALL_DEPTH —
+// exactly the methods the recursive walk (which re-walked every path, and cut
+// a path off past the cap) reached. The answer is the same boolean.
+
+/// A body still to scan, with its call distance from the classified method.
+const PendingBody = struct {
+    stmts: []const Statement,
+    params: []const ParamNode,
+    depth: u32,
+};
+
+const CalleeQueue = struct {
+    allocator: Allocator,
+    /// The call distance of the body being scanned.
+    depth: u32 = 0,
+    pending: std.ArrayListUnmanaged(PendingBody) = .empty,
+    next: usize = 0,
+    visited: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// Queue `target`'s body one hop further out, unless it is past the cap
+    /// or already queued.
+    fn enqueue(q: *CalleeQueue, target: MethodNode) void {
+        if (q.depth + 1 > MAX_PRIVATE_CALL_DEPTH) return;
+        const gop = q.visited.getOrPut(q.allocator, target.name) catch @panic("out of memory");
+        if (gop.found_existing) return;
+        q.pending.append(q.allocator, .{ .stmts = target.body, .params = target.params, .depth = q.depth + 1 }) catch @panic("out of memory");
+    }
+};
+
+/// True when `scanner.scan` finds its effect in `body` or in the body of a
+/// private helper reachable from it within MAX_PRIVATE_CALL_DEPTH hops.
+fn anyReachableBody(contract: ContractNode, body: []const Statement, params: []const ParamNode, scanner: anytype) bool {
+    _ = contract;
+    var fallback = std.heap.stackFallback(4096, std.heap.page_allocator);
+    var q: CalleeQueue = .{ .allocator = fallback.get() };
+    defer {
+        q.pending.deinit(q.allocator);
+        q.visited.deinit(q.allocator);
+    }
+    q.pending.append(q.allocator, .{ .stmts = body, .params = params, .depth = 0 }) catch @panic("out of memory");
+    while (q.next < q.pending.items.len) {
+        const pending = q.pending.items[q.next];
+        q.next += 1;
+        q.depth = pending.depth;
+        if (scanner.scan(pending.stmts, pending.params, &q)) return true;
+    }
+    return false;
+}
+
+const MutatesStateScan = struct {
+    contract: ContractNode,
+    fn scan(self: MutatesStateScan, stmts: []const Statement, params: []const ParamNode, q: *CalleeQueue) bool {
+        _ = params;
+        return bodyMutatesStateRec(stmts, self.contract, q);
+    }
+};
+
+const IntrinsicCallScan = struct {
+    contract: ContractNode,
+    names: []const []const u8,
+    fn scan(self: IntrinsicCallScan, stmts: []const Statement, params: []const ParamNode, q: *CalleeQueue) bool {
+        return bodyHasIntrinsicCallRec(stmts, params, self.contract, self.names, q);
+    }
+};
+
+const RequireOutputP2PKHScan = struct {
+    contract: ContractNode,
+    zero_only: bool,
+    fn scan(self: RequireOutputP2PKHScan, stmts: []const Statement, params: []const ParamNode, q: *CalleeQueue) bool {
+        _ = params;
+        return bodyCallsRequireOutputP2PKHRec(stmts, self.contract, self.zero_only, q);
+    }
+};
+
 pub fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
     var has_mutable = false;
     for (contract.properties) |p| {
@@ -3371,13 +3451,12 @@ pub fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
     }
     if (!has_mutable) return false;
 
-    return bodyMutatesStateRec(method.body, contract, 0);
+    return anyReachableBody(contract, method.body, method.params, MutatesStateScan{ .contract = contract });
 }
 
-fn bodyMutatesStateRec(stmts: []const Statement, contract: ContractNode, depth: u32) bool {
-    if (depth > MAX_PRIVATE_CALL_DEPTH) return false;
+fn bodyMutatesStateRec(stmts: []const Statement, contract: ContractNode, q: *CalleeQueue) bool {
     for (stmts) |stmt| {
-        if (stmtMutatesStateRec(stmt, contract, depth)) return true;
+        if (stmtMutatesStateRec(stmt, contract, q)) return true;
     }
     return false;
 }
@@ -3394,7 +3473,7 @@ fn bodyMutatesStateRec(stmts: []const Statement, contract: ContractNode, depth: 
 // behind one silently marks the method TERMINAL, so the deployed script
 // carries no continuation covenant at all.
 
-fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, depth: u32) bool {
+fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, q: *CalleeQueue) bool {
     switch (stmt) {
         .assign => |assign| {
             // R-028 sibling: `assign.target` is a BARE name — every surface
@@ -3414,39 +3493,39 @@ fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, depth: u32) bool
                     if (!p.readonly and std.mem.eql(u8, p.name, assign.target)) return true;
                 }
             }
-            return exprMutatesStateRec(assign.value, contract, depth);
+            return exprMutatesStateRec(assign.value, contract, q);
         },
-        .const_decl => |cd| return exprMutatesStateRec(cd.value, contract, depth),
+        .const_decl => |cd| return exprMutatesStateRec(cd.value, contract, q),
         .let_decl => |ld| {
-            if (ld.value) |v| return exprMutatesStateRec(v, contract, depth);
+            if (ld.value) |v| return exprMutatesStateRec(v, contract, q);
             return false;
         },
-        .expr_stmt => |expr| return exprMutatesStateRec(expr.expr, contract, depth),
+        .expr_stmt => |expr| return exprMutatesStateRec(expr.expr, contract, q),
         // The canonical AST has no assert node — the reference tiers see an
         // expression-statement calling `assert` and walk its argument. The
         // sol / rust / ruby surface parsers here lower it to `.assert_stmt`.
-        .assert_stmt => |as_s| return exprMutatesStateRec(as_s.condition, contract, depth),
+        .assert_stmt => |as_s| return exprMutatesStateRec(as_s.condition, contract, q),
         .if_stmt => |if_s| {
-            if (exprMutatesStateRec(if_s.condition, contract, depth)) return true;
-            if (bodyMutatesStateRec(if_s.then_body, contract, depth)) return true;
+            if (exprMutatesStateRec(if_s.condition, contract, q)) return true;
+            if (bodyMutatesStateRec(if_s.then_body, contract, q)) return true;
             if (if_s.else_body) |eb| {
-                if (bodyMutatesStateRec(eb, contract, depth)) return true;
+                if (bodyMutatesStateRec(eb, contract, q)) return true;
             }
             return false;
         },
         // `ForStmt` carries an integer init/bound, not expressions, so the
         // loop header holds nothing to walk.
-        .for_stmt => |for_s| return bodyMutatesStateRec(for_s.body, contract, depth),
+        .for_stmt => |for_s| return bodyMutatesStateRec(for_s.body, contract, q),
         .return_stmt => |maybe_expr| {
             if (maybe_expr) |expr| {
-                return exprMutatesStateRec(expr, contract, depth);
+                return exprMutatesStateRec(expr, contract, q);
             }
             return false;
         },
     }
 }
 
-fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) bool {
+fn exprMutatesStateRec(expr: Expression, contract: ContractNode, q: *CalleeQueue) bool {
     switch (expr) {
         // The reference stops at an increment/decrement — it does not descend
         // into the operand.
@@ -3474,40 +3553,40 @@ fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) boo
             // Bareword call: callee is the function name. Recurse into
             // a private helper if the name matches one.
             if (lookupPrivateMethod(contract, call.callee)) |target| {
-                if (bodyMutatesStateRec(target.body, contract, depth + 1)) return true;
+                q.enqueue(target);
             }
             for (call.args) |arg| {
-                if (exprMutatesStateRec(arg, contract, depth)) return true;
+                if (exprMutatesStateRec(arg, contract, q)) return true;
             }
         },
         .method_call => |mc| {
             // this.X / self.X — recurse into the helper.
             if (lookupPrivateMethod(contract, mc.method)) |target| {
-                if (bodyMutatesStateRec(target.body, contract, depth + 1)) return true;
+                q.enqueue(target);
             }
             for (mc.args) |arg| {
-                if (exprMutatesStateRec(arg, contract, depth)) return true;
+                if (exprMutatesStateRec(arg, contract, q)) return true;
             }
         },
         .binary_op => |bin| {
-            if (exprMutatesStateRec(bin.left, contract, depth)) return true;
-            if (exprMutatesStateRec(bin.right, contract, depth)) return true;
+            if (exprMutatesStateRec(bin.left, contract, q)) return true;
+            if (exprMutatesStateRec(bin.right, contract, q)) return true;
         },
         .unary_op => |un| {
-            if (exprMutatesStateRec(un.operand, contract, depth)) return true;
+            if (exprMutatesStateRec(un.operand, contract, q)) return true;
         },
         .ternary => |tern| {
-            if (exprMutatesStateRec(tern.condition, contract, depth)) return true;
-            if (exprMutatesStateRec(tern.then_expr, contract, depth)) return true;
-            if (exprMutatesStateRec(tern.else_expr, contract, depth)) return true;
+            if (exprMutatesStateRec(tern.condition, contract, q)) return true;
+            if (exprMutatesStateRec(tern.then_expr, contract, q)) return true;
+            if (exprMutatesStateRec(tern.else_expr, contract, q)) return true;
         },
         .index_access => |idx| {
-            if (exprMutatesStateRec(idx.object, contract, depth)) return true;
-            if (exprMutatesStateRec(idx.index, contract, depth)) return true;
+            if (exprMutatesStateRec(idx.object, contract, q)) return true;
+            if (exprMutatesStateRec(idx.index, contract, q)) return true;
         },
         .array_literal => |elems| {
             for (elems) |el| {
-                if (exprMutatesStateRec(el, contract, depth)) return true;
+                if (exprMutatesStateRec(el, contract, q)) return true;
             }
         },
         else => {},
@@ -3524,12 +3603,12 @@ fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) boo
 // private helper is correctly classified.
 
 pub fn methodHasAddOutput(method: MethodNode, contract: ContractNode) bool {
-    return bodyHasIntrinsicCallRec(method.body, method.params, contract, &STATE_OUTPUT_METHODS, 0);
+    return anyReachableBody(contract, method.body, method.params, IntrinsicCallScan{ .contract = contract, .names = &STATE_OUTPUT_METHODS });
 }
 
 /// Return true when a method body contains at least one this.addDataOutput call.
 pub fn methodHasAddDataOutput(method: MethodNode, contract: ContractNode) bool {
-    return bodyHasIntrinsicCallRec(method.body, method.params, contract, &DATA_OUTPUT_METHODS, 0);
+    return anyReachableBody(contract, method.body, method.params, IntrinsicCallScan{ .contract = contract, .names = &DATA_OUTPUT_METHODS });
 }
 
 const STATE_OUTPUT_METHODS = [_][]const u8{ "addOutput", "addRawOutput" };
@@ -3540,11 +3619,10 @@ fn bodyHasIntrinsicCallRec(
     params: []const ParamNode,
     contract: ContractNode,
     names: []const []const u8,
-    depth: u32,
+    q: *CalleeQueue,
 ) bool {
-    if (depth > MAX_PRIVATE_CALL_DEPTH) return false;
     for (stmts) |stmt| {
-        if (stmtHasIntrinsicCallRec(stmt, params, contract, names, depth)) return true;
+        if (stmtHasIntrinsicCallRec(stmt, params, contract, names, q)) return true;
     }
     return false;
 }
@@ -3554,37 +3632,37 @@ fn stmtHasIntrinsicCallRec(
     params: []const ParamNode,
     contract: ContractNode,
     names: []const []const u8,
-    depth: u32,
+    q: *CalleeQueue,
 ) bool {
     switch (stmt) {
-        .expr_stmt => |expr| return exprHasIntrinsicCallRec(expr.expr, params, contract, names, depth),
-        .const_decl => |cd| return exprHasIntrinsicCallRec(cd.value, params, contract, names, depth),
+        .expr_stmt => |expr| return exprHasIntrinsicCallRec(expr.expr, params, contract, names, q),
+        .const_decl => |cd| return exprHasIntrinsicCallRec(cd.value, params, contract, names, q),
         .let_decl => |ld| {
-            if (ld.value) |v| return exprHasIntrinsicCallRec(v, params, contract, names, depth);
+            if (ld.value) |v| return exprHasIntrinsicCallRec(v, params, contract, names, q);
             return false;
         },
-        .assign => |assign| return exprHasIntrinsicCallRec(assign.value, params, contract, names, depth),
+        .assign => |assign| return exprHasIntrinsicCallRec(assign.value, params, contract, names, q),
         // The canonical AST has no assert node — the reference tiers see an
         // expression-statement calling `assert` and walk its argument. The
         // sol / rust / ruby surface parsers here lower it to `.assert_stmt`.
-        .assert_stmt => |as_s| return exprHasIntrinsicCallRec(as_s.condition, params, contract, names, depth),
+        .assert_stmt => |as_s| return exprHasIntrinsicCallRec(as_s.condition, params, contract, names, q),
         .if_stmt => |if_s| {
-            if (exprHasIntrinsicCallRec(if_s.condition, params, contract, names, depth)) return true;
-            if (bodyHasIntrinsicCallRec(if_s.then_body, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(if_s.condition, params, contract, names, q)) return true;
+            if (bodyHasIntrinsicCallRec(if_s.then_body, params, contract, names, q)) return true;
             if (if_s.else_body) |eb| {
-                if (bodyHasIntrinsicCallRec(eb, params, contract, names, depth)) return true;
+                if (bodyHasIntrinsicCallRec(eb, params, contract, names, q)) return true;
             }
             return false;
         },
         // `ForStmt` carries an integer init/bound, not expressions, so the
         // loop header holds nothing to walk.
-        .for_stmt => |for_s| return bodyHasIntrinsicCallRec(for_s.body, params, contract, names, depth),
+        .for_stmt => |for_s| return bodyHasIntrinsicCallRec(for_s.body, params, contract, names, q),
         // Ruby's parse_ruby promotes a private method's trailing
         // expression-statement to a return-statement for implicit-return
         // semantics. Walk the return value the same way.
         .return_stmt => |maybe_expr| {
             if (maybe_expr) |expr| {
-                return exprHasIntrinsicCallRec(expr, params, contract, names, depth);
+                return exprHasIntrinsicCallRec(expr, params, contract, names, q);
             }
             return false;
         },
@@ -3596,7 +3674,7 @@ fn exprHasIntrinsicCallRec(
     params: []const ParamNode,
     contract: ContractNode,
     names: []const []const u8,
-    depth: u32,
+    q: *CalleeQueue,
 ) bool {
     switch (expr) {
         .method_call => |mc| {
@@ -3608,41 +3686,41 @@ fn exprHasIntrinsicCallRec(
                 // Recurse into private helper if this is a method call
                 // on `this` / `self` / stateful-context.
                 if (lookupPrivateMethod(contract, mc.method)) |target| {
-                    if (bodyHasIntrinsicCallRec(target.body, target.params, contract, names, depth + 1)) return true;
+                    q.enqueue(target);
                 }
             }
             for (mc.args) |arg| {
-                if (exprHasIntrinsicCallRec(arg, params, contract, names, depth)) return true;
+                if (exprHasIntrinsicCallRec(arg, params, contract, names, q)) return true;
             }
         },
         .call => |call| {
             // Bareword identifier call on a private helper.
             if (lookupPrivateMethod(contract, call.callee)) |target| {
-                if (bodyHasIntrinsicCallRec(target.body, target.params, contract, names, depth + 1)) return true;
+                q.enqueue(target);
             }
             for (call.args) |arg| {
-                if (exprHasIntrinsicCallRec(arg, params, contract, names, depth)) return true;
+                if (exprHasIntrinsicCallRec(arg, params, contract, names, q)) return true;
             }
         },
         .binary_op => |bin| {
-            if (exprHasIntrinsicCallRec(bin.left, params, contract, names, depth)) return true;
-            if (exprHasIntrinsicCallRec(bin.right, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(bin.left, params, contract, names, q)) return true;
+            if (exprHasIntrinsicCallRec(bin.right, params, contract, names, q)) return true;
         },
         .unary_op => |un| {
-            if (exprHasIntrinsicCallRec(un.operand, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(un.operand, params, contract, names, q)) return true;
         },
         .ternary => |tern| {
-            if (exprHasIntrinsicCallRec(tern.condition, params, contract, names, depth)) return true;
-            if (exprHasIntrinsicCallRec(tern.then_expr, params, contract, names, depth)) return true;
-            if (exprHasIntrinsicCallRec(tern.else_expr, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(tern.condition, params, contract, names, q)) return true;
+            if (exprHasIntrinsicCallRec(tern.then_expr, params, contract, names, q)) return true;
+            if (exprHasIntrinsicCallRec(tern.else_expr, params, contract, names, q)) return true;
         },
         .index_access => |idx| {
-            if (exprHasIntrinsicCallRec(idx.object, params, contract, names, depth)) return true;
-            if (exprHasIntrinsicCallRec(idx.index, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(idx.object, params, contract, names, q)) return true;
+            if (exprHasIntrinsicCallRec(idx.index, params, contract, names, q)) return true;
         },
         .array_literal => |elems| {
             for (elems) |el| {
-                if (exprHasIntrinsicCallRec(el, params, contract, names, depth)) return true;
+                if (exprHasIntrinsicCallRec(el, params, contract, names, q)) return true;
             }
         },
         else => {},
@@ -3662,44 +3740,43 @@ fn exprHasIntrinsicCallRec(
 /// `requireOutputP2PKH(...)`; with `zero_only`, only a call whose output index
 /// is the literal 0 counts.
 pub fn methodCallsRequireOutputP2PKH(method: MethodNode, contract: ContractNode, zero_only: bool) bool {
-    return bodyCallsRequireOutputP2PKHRec(method.body, contract, zero_only, 0);
+    return anyReachableBody(contract, method.body, method.params, RequireOutputP2PKHScan{ .contract = contract, .zero_only = zero_only });
 }
 
-fn bodyCallsRequireOutputP2PKHRec(stmts: []const Statement, contract: ContractNode, zero_only: bool, depth: u32) bool {
-    if (depth > MAX_PRIVATE_CALL_DEPTH) return false;
+fn bodyCallsRequireOutputP2PKHRec(stmts: []const Statement, contract: ContractNode, zero_only: bool, q: *CalleeQueue) bool {
     for (stmts) |stmt| {
-        if (stmtCallsRequireOutputP2PKHRec(stmt, contract, zero_only, depth)) return true;
+        if (stmtCallsRequireOutputP2PKHRec(stmt, contract, zero_only, q)) return true;
     }
     return false;
 }
 
-fn stmtCallsRequireOutputP2PKHRec(stmt: Statement, contract: ContractNode, zero_only: bool, depth: u32) bool {
+fn stmtCallsRequireOutputP2PKHRec(stmt: Statement, contract: ContractNode, zero_only: bool, q: *CalleeQueue) bool {
     switch (stmt) {
-        .expr_stmt => |expr| return exprCallsRequireOutputP2PKHRec(expr.expr, contract, zero_only, depth),
-        .const_decl => |cd| return exprCallsRequireOutputP2PKHRec(cd.value, contract, zero_only, depth),
+        .expr_stmt => |expr| return exprCallsRequireOutputP2PKHRec(expr.expr, contract, zero_only, q),
+        .const_decl => |cd| return exprCallsRequireOutputP2PKHRec(cd.value, contract, zero_only, q),
         .let_decl => |ld| {
-            if (ld.value) |v| return exprCallsRequireOutputP2PKHRec(v, contract, zero_only, depth);
+            if (ld.value) |v| return exprCallsRequireOutputP2PKHRec(v, contract, zero_only, q);
             return false;
         },
-        .assign => |assign| return exprCallsRequireOutputP2PKHRec(assign.value, contract, zero_only, depth),
-        .assert_stmt => |as_s| return exprCallsRequireOutputP2PKHRec(as_s.condition, contract, zero_only, depth),
+        .assign => |assign| return exprCallsRequireOutputP2PKHRec(assign.value, contract, zero_only, q),
+        .assert_stmt => |as_s| return exprCallsRequireOutputP2PKHRec(as_s.condition, contract, zero_only, q),
         .if_stmt => |if_s| {
-            if (exprCallsRequireOutputP2PKHRec(if_s.condition, contract, zero_only, depth)) return true;
-            if (bodyCallsRequireOutputP2PKHRec(if_s.then_body, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(if_s.condition, contract, zero_only, q)) return true;
+            if (bodyCallsRequireOutputP2PKHRec(if_s.then_body, contract, zero_only, q)) return true;
             if (if_s.else_body) |eb| {
-                if (bodyCallsRequireOutputP2PKHRec(eb, contract, zero_only, depth)) return true;
+                if (bodyCallsRequireOutputP2PKHRec(eb, contract, zero_only, q)) return true;
             }
             return false;
         },
-        .for_stmt => |for_s| return bodyCallsRequireOutputP2PKHRec(for_s.body, contract, zero_only, depth),
+        .for_stmt => |for_s| return bodyCallsRequireOutputP2PKHRec(for_s.body, contract, zero_only, q),
         .return_stmt => |maybe_expr| {
-            if (maybe_expr) |expr| return exprCallsRequireOutputP2PKHRec(expr, contract, zero_only, depth);
+            if (maybe_expr) |expr| return exprCallsRequireOutputP2PKHRec(expr, contract, zero_only, q);
             return false;
         },
     }
 }
 
-fn exprCallsRequireOutputP2PKHRec(expr: Expression, contract: ContractNode, zero_only: bool, depth: u32) bool {
+fn exprCallsRequireOutputP2PKHRec(expr: Expression, contract: ContractNode, zero_only: bool, q: *CalleeQueue) bool {
     switch (expr) {
         .call => |call| {
             if (std.mem.eql(u8, call.callee, "requireOutputP2PKH")) {
@@ -3712,41 +3789,41 @@ fn exprCallsRequireOutputP2PKHRec(expr: Expression, contract: ContractNode, zero
                 }
             }
             if (lookupPrivateMethod(contract, call.callee)) |target| {
-                if (bodyCallsRequireOutputP2PKHRec(target.body, contract, zero_only, depth + 1)) return true;
+                q.enqueue(target);
             }
             for (call.args) |arg| {
-                if (exprCallsRequireOutputP2PKHRec(arg, contract, zero_only, depth)) return true;
+                if (exprCallsRequireOutputP2PKHRec(arg, contract, zero_only, q)) return true;
             }
         },
         .method_call => |mc| {
             if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) {
                 if (lookupPrivateMethod(contract, mc.method)) |target| {
-                    if (bodyCallsRequireOutputP2PKHRec(target.body, contract, zero_only, depth + 1)) return true;
+                    q.enqueue(target);
                 }
             }
             for (mc.args) |arg| {
-                if (exprCallsRequireOutputP2PKHRec(arg, contract, zero_only, depth)) return true;
+                if (exprCallsRequireOutputP2PKHRec(arg, contract, zero_only, q)) return true;
             }
         },
         .binary_op => |bin| {
-            if (exprCallsRequireOutputP2PKHRec(bin.left, contract, zero_only, depth)) return true;
-            if (exprCallsRequireOutputP2PKHRec(bin.right, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(bin.left, contract, zero_only, q)) return true;
+            if (exprCallsRequireOutputP2PKHRec(bin.right, contract, zero_only, q)) return true;
         },
         .unary_op => |un| {
-            if (exprCallsRequireOutputP2PKHRec(un.operand, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(un.operand, contract, zero_only, q)) return true;
         },
         .ternary => |tern| {
-            if (exprCallsRequireOutputP2PKHRec(tern.condition, contract, zero_only, depth)) return true;
-            if (exprCallsRequireOutputP2PKHRec(tern.then_expr, contract, zero_only, depth)) return true;
-            if (exprCallsRequireOutputP2PKHRec(tern.else_expr, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(tern.condition, contract, zero_only, q)) return true;
+            if (exprCallsRequireOutputP2PKHRec(tern.then_expr, contract, zero_only, q)) return true;
+            if (exprCallsRequireOutputP2PKHRec(tern.else_expr, contract, zero_only, q)) return true;
         },
         .index_access => |idx| {
-            if (exprCallsRequireOutputP2PKHRec(idx.object, contract, zero_only, depth)) return true;
-            if (exprCallsRequireOutputP2PKHRec(idx.index, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(idx.object, contract, zero_only, q)) return true;
+            if (exprCallsRequireOutputP2PKHRec(idx.index, contract, zero_only, q)) return true;
         },
         .array_literal => |elems| {
             for (elems) |el| {
-                if (exprCallsRequireOutputP2PKHRec(el, contract, zero_only, depth)) return true;
+                if (exprCallsRequireOutputP2PKHRec(el, contract, zero_only, q)) return true;
             }
         },
         else => {},
