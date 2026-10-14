@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compile, compileFromANF, loadANFFromJSON } from '../../packages/runar-compiler/src/index.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildIrTiers, compileHex } from './tier-harness.js';
+import { isCiEnv } from '../anf-interpreter/driver-gate.js';
 
 /**
  * N-205 (b) — verifyRabinSig key provenance on the `--ir` path, in all seven
@@ -381,7 +382,7 @@ describe('N-205 (b): --ir verifyRabinSig key provenance (all 7 tiers)', () => {
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') expect(missing).toEqual([]);
+    if (isCiEnv(process.env)) expect(missing).toEqual([]);
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
 
