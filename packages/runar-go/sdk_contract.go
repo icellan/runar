@@ -2774,6 +2774,20 @@ func (c *RunarContract) prepareCallTerminal(
 ) (*PreparedCall, error) {
 	termOutputs := options.TerminalOutputs
 
+	// N-271: this builder lays out exactly one contract input (plus an
+	// optional fee/funding input below) and never reads
+	// options.AdditionalContractInputs -- accepting it here would silently
+	// spend less than the caller asked for while reporting success. Fail
+	// closed instead of dropping the extra UTXOs.
+	if len(options.AdditionalContractInputs) > 0 {
+		return nil, fmt.Errorf(
+			"RunarContract.PrepareCall(%s): AdditionalContractInputs is only supported "+
+				"on the OP_PUSH_TX call path. Terminal calls spend the contract into a "+
+				"caller-supplied output set and take a single contract input.",
+			methodName,
+		)
+	}
+
 	// Terminal P2PKH funding inputs. Two callers feed this single mechanism —
 	// both are added to the terminal tx BEFORE the OP_PUSH_TX preimage is
 	// computed (so hashPrevouts covers them) and consumed entirely as fee with

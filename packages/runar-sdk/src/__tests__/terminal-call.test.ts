@@ -163,4 +163,46 @@ describe('RunarContract terminal call', () => {
     const inputCountByte = termTxHex.slice(8, 10);
     expect(inputCountByte).toBe('01');
   });
+
+  // N-271: a call that supplies BOTH terminalOutputs and
+  // additionalContractInputs must refuse with a named error. The terminal
+  // builder lays out exactly one contract input (plus an optional fee /
+  // funding input); it never reads options.additionalContractInputs at all.
+  // Before the fix this test proves the extra UTXO is silently dropped
+  // instead of being rejected or spent — the call succeeds and reports a
+  // txid, but the broadcast tx has only one input, not two.
+  //
+  // This test does NOT prove additionalContractInputs could ever be made to
+  // work on the terminal path (merging it validly) — only that dropping it
+  // silently is unacceptable and must become a refusal.
+  it('terminal call with additionalContractInputs fails closed instead of silently dropping them', async () => {
+    const { provider, signer } = await setupFundedProvider(100_000);
+    const artifact = makeArtifact({
+      script: '51', // OP_TRUE
+      abi: {
+        constructor: { params: [] },
+        methods: [
+          { name: 'cancel', params: [], isPublic: true },
+        ],
+      },
+    });
+
+    const contract = new RunarContract(artifact, []);
+    await contract.deploy(provider, signer, { satoshis: 50_000 });
+
+    const payoutScript = '76a914' + 'bb'.repeat(20) + '88ac';
+    const extraUtxo = {
+      txid: 'ee'.repeat(32),
+      outputIndex: 0,
+      satoshis: 1_000,
+      script: '51',
+    };
+
+    await expect(
+      contract.call('cancel', [], provider, signer, {
+        terminalOutputs: [{ scriptHex: payoutScript, satoshis: 49_000 }],
+        additionalContractInputs: [extraUtxo],
+      }),
+    ).rejects.toThrow(/additionalContractInputs/);
+  });
 });

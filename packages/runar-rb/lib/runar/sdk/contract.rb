@@ -1312,6 +1312,18 @@ module Runar
         method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
         intent_witness_hex = ''
       )
+        # N-271: this builder lays out exactly one contract input (plus an
+        # optional fee/funding input below) and never reads
+        # opts.additional_contract_inputs -- accepting it here would
+        # silently spend less than the caller asked for while reporting
+        # success. Fail closed instead of dropping the extra UTXOs.
+        unless Array(opts.additional_contract_inputs).empty?
+          raise ArgumentError,
+                "RunarContract.call(#{method_name}): additional_contract_inputs is only " \
+                'supported on the OP_PUSH_TX call path. Terminal calls spend the contract ' \
+                'into a caller-supplied output set and take a single contract input.'
+        end
+
         # Fee input (#118) is signed by funding_signer when set (#134); nil →
         # the connected signer.
         funding_signer = opts.funding_signer || signer

@@ -2920,6 +2920,65 @@ func TestTerminalCall_TxStructure(t *testing.T) {
 	}
 }
 
+// N-271: a call that supplies BOTH TerminalOutputs and
+// AdditionalContractInputs must refuse with a named error. prepareCallTerminal
+// lays out exactly one contract input (plus an optional fee/funding input)
+// and never reads options.AdditionalContractInputs at all. Before the fix
+// this proves the extra UTXO is silently dropped instead of being rejected
+// or spent -- the call succeeds and reports a txid, but the broadcast tx has
+// only one input, not two.
+//
+// This does NOT prove AdditionalContractInputs could ever be made to work on
+// the terminal path (merging it validly) -- only that dropping it silently
+// is unacceptable and must become a refusal.
+func TestTerminalCall_AdditionalContractInputsFailsClosed(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods: []ABIMethod{
+			{Name: "cancel", Params: nil, IsPublic: true},
+		},
+	})
+
+	contract := NewRunarContract(artifact, nil)
+
+	provider := NewAlwaysAckMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    100000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 50000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	payoutScript := "76a914" + strings.Repeat("bb", 20) + "88ac"
+	extraUtxo := UTXO{
+		Txid:        strings.Repeat("ee", 32),
+		OutputIndex: 0,
+		Satoshis:    1000,
+		Script:      "51",
+	}
+
+	_, _, err = contract.Call("cancel", nil, provider, signer, &CallOptions{
+		TerminalOutputs: []TerminalOutput{
+			{ScriptHex: payoutScript, Satoshis: 49000},
+		},
+		AdditionalContractInputs: []*UTXO{&extraUtxo},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil (additionalContractInputs was silently dropped)")
+	}
+	if !strings.Contains(err.Error(), "AdditionalContractInputs") {
+		t.Fatalf("expected error to name AdditionalContractInputs, got: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Row 353: All input sequences are 0xffffffff in call transaction
 // ---------------------------------------------------------------------------

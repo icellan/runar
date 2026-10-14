@@ -216,6 +216,13 @@ pub const ContractError = error{
     /// SDK fails closed rather than silently dropping outputs and stranding the
     /// funds (the built tx would mismatch the covenant's hashOutputs).
     RawOutputLayoutUnsupported,
+    /// A call supplies BOTH `options.terminal_outputs` and
+    /// `options.additional_contract_inputs` (N-271). The terminal builder
+    /// lays out exactly one contract input (plus an optional fee/funding
+    /// input) and never threads `additional_contract_inputs` into the tx.
+    /// Fail closed rather than silently spending less than the caller asked
+    /// for while reporting success.
+    TerminalAdditionalContractInputsUnsupported,
 };
 
 /// N-045 (defence in depth): every fixed-width method arg must have its
@@ -756,6 +763,17 @@ pub const RunarContract = struct {
         // continuation), funding inputs come from options.funding_utxos
         // (rather than provider-fetched UTXOs), and there is no change.
         const is_terminal_call = if (options) |o| o.terminal_outputs != null else false;
+        // N-271: the terminal layout below is exactly one contract input
+        // (plus an optional fee/funding input); additional_contract_inputs
+        // is never threaded through it. Fail closed instead of silently
+        // spending less than the caller asked for while reporting success.
+        if (is_terminal_call) {
+            if (options) |o| {
+                if (o.additional_contract_inputs) |aci| {
+                    if (aci.len > 0) return ContractError.TerminalAdditionalContractInputsUnsupported;
+                }
+            }
+        }
         const terminal_outputs: []const types.ContractOutput =
             if (is_terminal_call) options.?.terminal_outputs.? else &.{};
         const terminal_funding: []const types.UTXO =
@@ -1899,6 +1917,15 @@ pub const RunarContract = struct {
         // Terminal-output detection: caller-supplied outputs replace the
         // automatic continuation/change layout. See `call()` for details.
         const is_terminal_call = if (options) |o| o.terminal_outputs != null else false;
+        // N-271: see the identical guard in `call()` -- this builder also
+        // lays out exactly one contract input for a terminal call.
+        if (is_terminal_call) {
+            if (options) |o| {
+                if (o.additional_contract_inputs) |aci| {
+                    if (aci.len > 0) return ContractError.TerminalAdditionalContractInputsUnsupported;
+                }
+            }
+        }
         const terminal_outputs: []const types.ContractOutput =
             if (is_terminal_call) options.?.terminal_outputs.? else &.{};
         const terminal_funding: []const types.UTXO =
@@ -2173,6 +2200,15 @@ pub const RunarContract = struct {
         // supplies `terminal_outputs`, the prepared tx has no continuation
         // and no change; funding inputs come from `funding_utxos`.
         const is_terminal_call = if (options) |o| o.terminal_outputs != null else false;
+        // N-271: see the identical guard in `call()` -- this builder also
+        // lays out exactly one contract input for a terminal call.
+        if (is_terminal_call) {
+            if (options) |o| {
+                if (o.additional_contract_inputs) |aci| {
+                    if (aci.len > 0) return ContractError.TerminalAdditionalContractInputsUnsupported;
+                }
+            }
+        }
         const terminal_outputs: []const types.ContractOutput =
             if (is_terminal_call) options.?.terminal_outputs.? else &.{};
         const terminal_funding: []const types.UTXO =
@@ -4870,6 +4906,51 @@ test "terminal call adds fee_utxo input to pay the miner fee (#118)" {
         defer allocator.free(raw_tx);
         try std.testing.expect(std.mem.indexOf(u8, raw_tx, "cc" ** 32) == null);
     }
+}
+
+// N-271: a call that supplies BOTH terminal_outputs and
+// additional_contract_inputs must refuse with a named error. The terminal
+// builder lays out exactly one contract input (plus an optional fee/funding
+// input) and never threads additional_contract_inputs into the tx. Before
+// the fix this proves the extra UTXO is silently dropped instead of being
+// rejected or spent -- the call succeeds and returns a txid, but the
+// broadcast tx has only one contract input, not two.
+//
+// This does NOT prove additional_contract_inputs could ever be made to work
+// on the terminal path (merging it validly) -- only that dropping it
+// silently is unacceptable and must become a refusal.
+test "call with terminal_outputs and additional_contract_inputs fails closed" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"OpOne","version":"1","compilerVersion":"1.0","script":"51","asm":"OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"go","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try prov.addKnownOutpoint("fe" ** 32, 0, "51", 5_000);
+    try contract.setCurrentUtxo(.{
+        .txid = "fe" ** 32,
+        .output_index = 0,
+        .satoshis = 5_000,
+        .script = "51",
+    });
+
+    const term_p2pkh = "76a914" ++ ("aa" ** 20) ++ "88ac";
+    const term_outputs = [_]types.ContractOutput{.{ .script = term_p2pkh, .satoshis = 4500 }};
+    const extra_utxos = [_]types.UTXO{.{ .txid = "ee" ** 32, .output_index = 0, .satoshis = 1000, .script = "51" }};
+    const opts = types.CallOptions{ .terminal_outputs = &term_outputs, .additional_contract_inputs = &extra_utxos };
+
+    const result = contract.call("go", &.{}, prov.provider(), signer.signer(), opts);
+    try std.testing.expectError(ContractError.TerminalAdditionalContractInputsUnsupported, result);
 }
 
 // Issue #133: the non-terminal call funding path coin-selects the smallest

@@ -2120,6 +2120,23 @@ impl RunarContract {
         change_pkh_hex: &str,
         witness_hex: &str,
     ) -> Result<PreparedCall, String> {
+        // N-271: this builder lays out exactly one contract input (plus an
+        // optional fee/funding input below) and never reads
+        // options.additional_contract_inputs -- accepting it here would
+        // silently spend less than the caller asked for while reporting
+        // success. Fail closed instead of dropping the extra UTXOs.
+        if options
+            .and_then(|o| o.additional_contract_inputs.as_ref())
+            .is_some_and(|v| !v.is_empty())
+        {
+            return Err(format!(
+                "RunarContract.call({}): additional_contract_inputs is only supported on the \
+                 OP_PUSH_TX call path. Terminal calls spend the contract into a \
+                 caller-supplied output set and take a single contract input.",
+                method_name,
+            ));
+        }
+
         let term_code_sep_idx = self.get_code_sep_index(self.find_method_index(method_name));
         // Issue #123: terminal calls build the preimage under the method's mode.
         let term_sig_hash_type = self.get_sig_hash_type(self.find_method_index(method_name));

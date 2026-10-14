@@ -1213,6 +1213,19 @@ export class RunarContract {
     if (options?.terminalOutputs) {
       const terminalOutputs = options.terminalOutputs;
 
+      // N-271: the terminal builder below lays out exactly one contract
+      // input (plus an optional fee/funding input) and never reads
+      // additionalContractInputs — accepting it here would silently spend
+      // less than the caller asked for while reporting success. Fail
+      // closed instead of dropping the extra UTXOs.
+      if (options.additionalContractInputs && options.additionalContractInputs.length > 0) {
+        throw new Error(
+          `RunarContract.call(${methodName}): additionalContractInputs is only supported ` +
+            'on the OP_PUSH_TX call path. Terminal calls spend the contract into a ' +
+            'caller-supplied output set and take a single contract input.',
+        );
+      }
+
       let termUnlockScript: string;
       if (needsOpPushTx) {
         termUnlockScript = encodePushData('00'.repeat(72)) +
