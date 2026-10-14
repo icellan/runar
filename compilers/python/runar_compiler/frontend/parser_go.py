@@ -978,12 +978,19 @@ class _GoParser:
                 # Parse receiver
                 self.expect(TOK_LPAREN)
                 recv_tok = self.expect(TOK_IDENT)
-                receiver_name = recv_tok.value
-                # Skip the *TypeName
-                self.match(TOK_STAR)
-                type_tok = self.expect(TOK_IDENT)
+                if self.check(TOK_RPAREN):
+                    # N-018: unnamed receiver `(Type)` -- the only
+                    # identifier is the type. Real Go forbids referencing
+                    # it in the method body at all, so no name is bound.
+                    receiver_name = ""
+                    receiver_type = recv_tok.value
+                else:
+                    receiver_name = recv_tok.value
+                    # Skip the *TypeName
+                    self.match(TOK_STAR)
+                    type_tok = self.expect(TOK_IDENT)
+                    receiver_type = type_tok.value
                 self.expect(TOK_RPAREN)
-                receiver_type = type_tok.value
             else:
                 self.pos = saved
 
@@ -1035,7 +1042,8 @@ class _GoParser:
     def _looks_like_receiver(self) -> bool:
         """Look ahead from LPAREN to decide if this is a method receiver.
 
-        A receiver looks like: (name *Type) or (name Type)
+        A receiver looks like: (name *Type), (name Type), or -- N-018 -- the
+        unnamed form (Type), which has only the type and no receiver name.
         A regular param list would have different structure.
         """
         saved = self.pos
@@ -1045,9 +1053,11 @@ class _GoParser:
             self.pos = saved
             return False
 
-        self.advance()  # skip receiver name
+        self.advance()  # skip receiver name (or the type, if unnamed)
 
-        # After receiver name, expect * or IDENT (the type), then RPAREN
+        # After the receiver name, expect * or IDENT (the type), then
+        # RPAREN. An unnamed receiver `(Type)` has only the type: RPAREN
+        # comes right away.
         if self.check(TOK_STAR):
             self.advance()
             if self.check(TOK_IDENT):
@@ -1065,6 +1075,11 @@ class _GoParser:
                 result = self.check(TOK_IDENT)
                 self.pos = saved
                 return result
+        elif self.check(TOK_RPAREN):
+            self.advance()
+            result = self.check(TOK_IDENT)
+            self.pos = saved
+            return result
 
         self.pos = saved
         return False
@@ -1700,12 +1715,15 @@ class _GoParser:
         return expr
 
     def _is_receiver(self, name: str) -> bool:
-        """Check if the given name is the method receiver (e.g. 'c', 'self')."""
-        if self.receiver_name and name == self.receiver_name:
-            return True
-        if name in ("c", "self"):
-            return True
-        return False
+        """Check if the given name is the method receiver.
+
+        N-018: this must be an exact match on the actual declared receiver
+        name, never a hardcoded "c"/"self" -- that wrongly turned ANY
+        same-spelled parameter or local into a self-reference even when the
+        receiver was named something else, or unnamed (self.receiver_name
+        == "", which real Go forbids referencing at all).
+        """
+        return bool(self.receiver_name) and name == self.receiver_name
 
     def _parse_primary(self) -> Expression:
         tok = self.peek()

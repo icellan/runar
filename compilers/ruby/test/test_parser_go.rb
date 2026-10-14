@@ -239,6 +239,67 @@ class TestParserGo < Minitest::Test
     ], f010_errors(src)
   end
 
+  # ---------------------------------------------------------------------------
+  # N-018: a free `init`/`main` is not an ordinary private helper. Real Go
+  # reserves both names for the package initializer / entry point, which can
+  # never be called as a function; the Go/Rust/Python/Java tiers already skip
+  # it (TS carried the identical bug and is fixed alongside this one -- see
+  # 01-parse-go.test.ts).
+  #
+  # A 0-param free `init()` is not a case this test reaches: the existing
+  # init-extraction pass below (`m.name == "init" && m.params.empty?`) already
+  # absorbs it regardless of receiver. A free `init` WITH a parameter does
+  # reach it.
+  #
+  # Proves: this tier's .runar.go parser drops a free `init(param)`/`main()`
+  # from the method set. Does NOT prove: the other six tiers.
+  # ---------------------------------------------------------------------------
+  def test_n018_drops_free_init_param_and_main
+    src = F010_PRELUDE + F010_GUARDED + <<~GO
+      func main() {
+      \trunar.Assert(true)
+      }
+
+      func init(amount runar.Bigint) {
+      \trunar.Assert(amount > 0)
+      }
+    GO
+    assert_equal [], f010_errors(src)
+    assert_equal ['unlock(public)'], f010_methods(src)
+  end
+
+  # ---------------------------------------------------------------------------
+  # N-018: the unnamed receiver `(T)` must leave the receiver unreferenceable.
+  # Real Go forbids referencing an unnamed receiver in the method body at all.
+  # This tier already gets that right (receiver name is set to ""); it locks
+  # the behaviour in. Go, Rust and Zig instead defaulted the unnamed
+  # receiver's name to "c", wrongly turning a parameter literally named `c`
+  # into a self-reference (fixed alongside this test; see their own suites).
+  # Python and Java instead failed to parse `(T)` at all (also fixed).
+  #
+  # Proves: a parameter named `c` stays an ordinary member access, not a
+  # PropertyAccessExpr on the contract. Does NOT prove: the other six tiers.
+  # ---------------------------------------------------------------------------
+  def test_n018_unnamed_receiver_parameter_named_c_stays_plain
+    src = F010_PRELUDE + F010_GUARDED + <<~GO
+      func (Guarded) CheckC(c runar.PubKey) {
+      \trunar.Assert(c.PubKey)
+      }
+    GO
+    result = parse(src, 'Guarded.runar.go')
+    assert_empty result.errors.map(&:format_message)
+    method = result.contract.methods.find { |m| m.name == 'checkC' }
+    refute_nil method
+    assert_call = method.body[0].expr
+    arg = assert_call.args[0]
+    assert_instance_of RunarCompiler::Frontend::MemberExpr, arg,
+                        "c.PubKey should be a member access on the parameter `c`, " \
+                        "not a PropertyAccessExpr -- the unnamed receiver must not bind the name \"c\""
+    assert_instance_of RunarCompiler::Frontend::Identifier, arg.object
+    assert_equal 'c', arg.object.name
+    assert_equal 'pubKey', arg.property
+  end
+
   private
 
   def find_bytestring_literal(stmts)

@@ -1221,7 +1221,10 @@ impl<'a> GoParser<'a> {
             n
         } else if matches!(self.current().typ, TokenType::RParen) {
             // Unnamed receiver `(Type)`: the only identifier is the type.
-            std::mem::replace(&mut recv_name, "c".to_string())
+            // N-018: real Go forbids referencing it in the method body at
+            // all, so it must not default to "c" -- that wrongly turned a
+            // same-spelled parameter into a self-reference.
+            std::mem::replace(&mut recv_name, String::new())
         } else {
             String::new()
         };
@@ -2364,11 +2367,14 @@ impl<'a> GoParser<'a> {
                     return Some(Expression::Identifier { name: callee_name });
                 }
 
-                // Receiver access: c.Field or self.Field
-                if (name == self.receiver_name && !self.receiver_name.is_empty())
-                    || name == "c"
-                    || name == "self"
-                {
+                // Receiver access: <receiver_name>.Field. N-018: this must be
+                // an exact match on the actual declared receiver name, never
+                // a hardcoded "c"/"self" -- that wrongly turned ANY
+                // same-spelled parameter or local into a self-reference even
+                // when the receiver was named something else, or unnamed
+                // (receiver_name == "", which real Go forbids referencing at
+                // all).
+                if name == self.receiver_name && !self.receiver_name.is_empty() {
                     if matches!(self.current().typ, TokenType::Dot) {
                         self.advance(); // consume '.'
                         let prop_raw = self.expect_ident();
@@ -2942,5 +2948,75 @@ func (c *VarDemo) Check(data runar.ByteString) {
             f010_errors(&src),
             vec!["multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract".to_string()]
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // N-018: a free `init`/`main` is not an ordinary private helper. Real Go
+    // reserves both names for the package initializer / entry point, which
+    // can never be called as a function; this tier already skips it (the
+    // fix for TS/Ruby/Zig matches this tier's existing behaviour; see their
+    // own suites). This locks the behaviour in.
+    //
+    // A 0-param free `init()` is not a case this test reaches: the existing
+    // init-extraction pass (`m.name == "init" && m.params.is_empty()`)
+    // already absorbs it regardless of receiver. A free `init` WITH a
+    // parameter does reach `parse_standalone_func`'s skip.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_n018_free_init_param_and_main_are_dropped() {
+        let src = format!(
+            "{}{}\nfunc main() {{\n\trunar.Assert(true)\n}}\n\nfunc init(amount runar.Bigint) {{\n\trunar.Assert(amount > 0)\n}}\n",
+            F010_PRELUDE, F010_GUARDED
+        );
+        assert_eq!(f010_errors(&src), Vec::<String>::new());
+        assert_eq!(f010_methods(&src), vec!["unlock(public)"]);
+    }
+
+    // -------------------------------------------------------------------------
+    // N-018: the unnamed receiver `(T)` must leave the receiver
+    // unreferenceable. Real Go forbids referencing an unnamed receiver in
+    // the method body at all -- there is no name bound to it. This tier
+    // instead defaulted the unnamed receiver's name to "c" AND
+    // (independently) hardcoded "c"/"self" as always meaning "the receiver"
+    // regardless of the actual declared name, so a parameter literally
+    // named `c` was silently read as the contract's own `PubKey` --
+    // `this.pubKey`, not the parameter. The TS/Ruby reference already gets
+    // this right; Go, Zig, Python and Java carried the identical
+    // hardcoded-alias bug and are fixed alongside this one (see their own
+    // suites).
+    //
+    // Proves: this tier's .runar.go parser never treats a same-spelled
+    // non-receiver identifier as the contract's self, for an unnamed
+    // receiver; `c.PubKey` parses as a MemberExpr on the identifier `c`, not
+    // a PropertyAccess on the contract. Does NOT prove: the other six
+    // tiers.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_n018_unnamed_receiver_param_named_c_stays_plain() {
+        let src = format!(
+            "{}{}\nfunc (Guarded) CheckC(c runar.PubKey) {{\n\trunar.Assert(c.PubKey)\n}}\n",
+            F010_PRELUDE, F010_GUARDED
+        );
+        let result = parse_go_contract(&src, Some("Guarded.runar.go"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.expect("contract");
+        let method = contract.methods.iter().find(|m| m.name == "checkC").expect("checkC method");
+        let Statement::ExpressionStatement { expression, .. } = &method.body[0] else {
+            panic!("body[0] is not an ExpressionStatement: {:?}", method.body[0]);
+        };
+        let Expression::CallExpr { args, .. } = expression else {
+            panic!("expression is not a CallExpr: {:?}", expression);
+        };
+        let Expression::MemberExpr { object, property } = &args[0] else {
+            panic!(
+                "c.PubKey parsed as {:?}, want MemberExpr -- the unnamed receiver must not bind the name \"c\"",
+                args[0]
+            );
+        };
+        let Expression::Identifier { name } = object.as_ref() else {
+            panic!("member.object is not an Identifier: {:?}", object);
+        };
+        assert_eq!(name, "c");
+        assert_eq!(property, "pubKey");
     }
 }

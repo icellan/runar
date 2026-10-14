@@ -716,6 +716,11 @@ module RunarCompiler
             add_error(Frontend.go_foreign_receiver_message(f[:go_name], f[:receiver_type], @contract_name))
             next
           end
+          # N-018: a free `init`/`main` is not an ordinary private helper.
+          # Real Go reserves both names for the package initializer / entry
+          # point, which can never be called as a function.
+          next if f[:receiver_type].nil? && %w[init main].include?(f[:go_name])
+
           methods << f[:method]
         end
 

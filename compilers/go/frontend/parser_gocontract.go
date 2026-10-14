@@ -327,11 +327,15 @@ func (p *goContractParser) extractContract() *ContractNode {
 			visibility = "public"
 		}
 
-		// Extract receiver name for property access resolution
+		// Extract receiver name for property access resolution. N-018: an
+		// unnamed receiver `(Type)` binds no name at all -- real Go forbids
+		// referencing it in the method body -- so it must not default to
+		// "c", which would wrongly turn a same-spelled parameter into a
+		// self-reference.
 		if len(funcDecl.Recv.List[0].Names) > 0 {
 			p.receiverName = funcDecl.Recv.List[0].Names[0].Name
 		} else {
-			p.receiverName = "c" // default
+			p.receiverName = ""
 		}
 
 		params := p.extractParams(funcDecl.Type.Params)
@@ -742,8 +746,14 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 			if ident.Name == "runar" {
 				return Identifier{Name: mapGoBuiltin(e.Sel.Name)}
 			}
-			// receiver.Field -> property access (e.g. c.Count, m.Value)
-			if ident.Name == p.receiverName || ident.Name == "c" || ident.Name == "self" {
+			// receiver.Field -> property access (e.g. c.Count, m.Value).
+			// N-018: this must be an exact match on the actual declared
+			// receiver name, never a hardcoded "c"/"self" -- that wrongly
+			// turned ANY same-spelled parameter or local into a
+			// self-reference even when the receiver was named something
+			// else, or unnamed (p.receiverName == "", which real Go forbids
+			// referencing at all).
+			if p.receiverName != "" && ident.Name == p.receiverName {
 				return PropertyAccessExpr{Property: goFieldToCamel(e.Sel.Name)}
 			}
 			// Any other package selector (math.Log, fmt.Println, etc.) is not valid Rúnar

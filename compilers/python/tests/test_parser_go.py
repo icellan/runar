@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import pytest
 
+from runar_compiler.frontend.ast_nodes import (
+    CallExpr,
+    ExpressionStmt,
+    Identifier,
+    MemberExpr,
+)
 from runar_compiler.frontend.parser_dispatch import parse_source
 
 
@@ -205,3 +211,63 @@ class TestF010ContractStructAndReceivers:
             "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract "
             "or runar.UnsafeSmartContract"
         ]
+
+
+# ---------------------------------------------------------------------------
+# N-018: a free `init`/`main` is not an ordinary private helper. Real Go
+# reserves both names for the package initializer / entry point, which can
+# never be called as a function; this tier already skips it (the fix for
+# TS/Ruby/Zig matches this tier's existing behaviour; see their own
+# suites). This locks the behaviour in.
+#
+# A 0-param free `init()` is not a case this test reaches: the existing
+# init-extraction pass (`m.name == "init" and not m.params`) already
+# absorbs it regardless of receiver. A free `init` WITH a parameter does
+# reach `_parse_func_decl`'s skip.
+#
+# N-018 also covers the unnamed receiver `(T)`: it must leave the receiver
+# unreferenceable (real Go forbids referencing it in the method body at all
+# -- there is no name bound to it). This tier instead failed to parse
+# `(T)` at all (a generic parse error, since `_looks_like_receiver` only
+# recognised the two-identifier `(name Type)` shape) AND (independently)
+# hardcoded "c"/"self" as always meaning "the receiver" regardless of the
+# actual declared name, so a parameter literally named `c` would have been
+# silently read as the contract's own `PubKey` once parsing was fixed to
+# accept the shape. The TS/Ruby reference already gets this right; Go,
+# Rust, Zig and Java carried the identical hardcoded-alias bug (fixed
+# alongside this one; see their own suites).
+#
+# Proves: this tier's .runar.go parser accepts an unnamed receiver and
+# never treats a same-spelled non-receiver identifier as the contract's
+# self. Does NOT prove: the other six tiers.
+# ---------------------------------------------------------------------------
+class TestN018FreeInitMainAndUnnamedReceiver:
+    def test_free_init_param_and_main_are_dropped(self):
+        src = (
+            F010_PRELUDE + F010_GUARDED
+            + "\nfunc main() {\n\trunar.Assert(true)\n}\n"
+            + "\nfunc init(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+        )
+        assert _f010_errors(src) == []
+        assert _f010_methods(src) == ["unlock(public)"]
+
+    def test_unnamed_receiver_param_named_c_stays_plain(self):
+        src = F010_PRELUDE + F010_GUARDED + (
+            "\nfunc (Guarded) CheckC(c runar.PubKey) {\n\trunar.Assert(c.PubKey)\n}\n"
+        )
+        result = parse_source(src, "Guarded.runar.go")
+        assert result.errors == [], result.error_strings()
+        c = result.contract
+        assert c is not None
+        method = next(m for m in c.methods if m.name == "checkC")
+        stmt = method.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        assert isinstance(stmt.expr, CallExpr)
+        arg = stmt.expr.args[0]
+        assert isinstance(arg, MemberExpr), (
+            f"c.PubKey parsed as {type(arg).__name__}, want MemberExpr -- "
+            "the unnamed receiver must not bind the name \"c\""
+        )
+        assert isinstance(arg.object, Identifier)
+        assert arg.object.name == "c"
+        assert arg.property == "pubKey"

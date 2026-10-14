@@ -1132,11 +1132,20 @@ public final class GoParser {
                     pos = saved;
                     expect(Tok.LPAREN);
                     Token recvTok = expect(Tok.IDENT);
-                    localReceiverName = recvTok.value;
-                    match(Tok.STAR);
-                    Token typeTok = expect(Tok.IDENT);
+                    if (check(Tok.RPAREN)) {
+                        // N-018: unnamed receiver `(Type)` -- the only
+                        // identifier is the type. Real Go forbids
+                        // referencing it in the method body at all, so no
+                        // name is bound.
+                        localReceiverName = "";
+                        receiverType = recvTok.value;
+                    } else {
+                        localReceiverName = recvTok.value;
+                        match(Tok.STAR);
+                        Token typeTok = expect(Tok.IDENT);
+                        receiverType = typeTok.value;
+                    }
                     expect(Tok.RPAREN);
-                    receiverType = typeTok.value;
                 } else {
                     pos = saved;
                 }
@@ -1198,6 +1207,13 @@ public final class GoParser {
                     pos = saved;
                     return result;
                 }
+            } else if (check(Tok.RPAREN)) {
+                // N-018: unnamed receiver `(Type)` -- only the type, no
+                // receiver name.
+                advance();
+                boolean result = check(Tok.IDENT);
+                pos = saved;
+                return result;
             }
             pos = saved;
             return false;
@@ -1741,8 +1757,13 @@ public final class GoParser {
         }
 
         boolean isReceiver(String name) {
-            if (!receiverName.isEmpty() && name.equals(receiverName)) return true;
-            return "c".equals(name) || "self".equals(name);
+            // N-018: this must be an exact match on the actual declared
+            // receiver name, never a hardcoded "c"/"self" -- that wrongly
+            // turned ANY same-spelled parameter or local into a
+            // self-reference even when the receiver was named something
+            // else, or unnamed (receiverName == "", which real Go forbids
+            // referencing at all).
+            return !receiverName.isEmpty() && name.equals(receiverName);
         }
 
         Expression parsePrimary() {

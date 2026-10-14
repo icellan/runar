@@ -1014,3 +1014,58 @@ func TestParseGoContract_F010_TwoContractStructs(t *testing.T) {
 		t.Fatalf("errors = %q, want exactly [%q]", got, want)
 	}
 }
+
+// N-018: the unnamed receiver `(T)` must leave the receiver unreferenceable.
+// Real Go forbids referencing an unnamed receiver in the method body at all
+// -- there is no name bound to it. This tier instead defaulted the unnamed
+// receiver's name to "c" AND (independently) hardcoded "c"/"self" as always
+// meaning "the receiver" regardless of the actual declared name, so a
+// parameter literally named `c` was silently read as the contract's own
+// `PubKey` -- `this.pubKey`, not the parameter. The TS/Ruby reference
+// already gets this right (receiver name "", no hardcoded alias); Rust,
+// Zig, Python and Java carried the identical hardcoded-alias bug and are
+// fixed alongside this one (see their own suites).
+//
+// This tier's SelectorExpr grammar only understands a dotted expression
+// whose base is `runar` or the receiver -- unlike the lenient tiers, it has
+// no general `ident.field` fallback, so the correct, fail-closed answer for
+// an unrelated identifier is a parse error, not a silently-accepted
+// PropertyAccessExpr.
+//
+// Proves: this tier's .runar.go parser never treats a same-spelled
+// non-receiver identifier as the contract's self, for an unnamed receiver.
+// Does NOT prove: the other six tiers.
+func TestParseGoContract_N018_UnnamedReceiverParamNamedCIsNotSelf(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc (Guarded) CheckC(c runar.PubKey) {\n\trunar.Assert(c.PubKey)\n}\n"
+	result := ParseSource([]byte(src), "Guarded.runar.go")
+	errs := result.ErrorStrings()
+	if len(errs) == 0 {
+		t.Fatalf("c.PubKey was silently accepted (c is not the receiver -- it is "+
+			"unnamed); want a parse error, got none; contract = %+v", result.Contract)
+	}
+	for _, e := range errs {
+		if strings.Contains(e, "unsupported expression 'c.PubKey'") {
+			return
+		}
+	}
+	t.Fatalf("errors = %q, want one naming 'c.PubKey' as unsupported", errs)
+}
+
+// N-018: a free `init`/`main` is not an ordinary private helper. This tier
+// already skips it (the fix for TS/Ruby/Zig matches this tier's existing
+// behaviour; see their own suites). This locks the behaviour in.
+//
+// A 0-param free `init()` is not a case this test reaches: the existing
+// init-extraction pass below (`m.Name == "init" && len(m.Params) == 0`)
+// already absorbs it regardless of receiver. A free `init` WITH a parameter
+// does reach the skip added by F-010's standalone-function loop.
+func TestParseGoContract_N018_FreeInitParamAndMainAreDropped(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc main() {\n\trunar.Assert(true)\n}\n" +
+		"\nfunc init(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+	if errs := f010Errors(src); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %q", errs)
+	}
+	if got := strings.Join(f010Methods(t, src), ","); got != "unlock(public)" {
+		t.Fatalf("methods = %s, want unlock(public)", got)
+	}
+}

@@ -12,6 +12,7 @@ import runar.compiler.ir.ast.ExpressionStatement;
 import runar.compiler.ir.ast.Identifier;
 import runar.compiler.ir.ast.IncrementExpr;
 import runar.compiler.ir.ast.MemberExpr;
+import runar.compiler.ir.ast.MethodNode;
 import runar.compiler.ir.ast.ParentClass;
 import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PrimitiveTypeName;
@@ -513,5 +514,64 @@ class GoParserTest {
                 + "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract",
             f010Refusal(F010_PRELUDE + F010_GUARDED
                 + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n"));
+    }
+
+    // ------------------------------------------------------------------
+    // N-018: a free `init`/`main` is not an ordinary private helper. Real Go
+    // reserves both names for the package initializer / entry point, which
+    // can never be called as a function; this tier already skips it (the
+    // fix for TS/Ruby/Zig matches this tier's existing behaviour; see their
+    // own suites). This locks the behaviour in.
+    //
+    // A 0-param free `init()` is not a case this test reaches: the existing
+    // init-extraction pass (`m.name().equals("init") && m.params().isEmpty()`)
+    // already absorbs it regardless of receiver. A free `init` WITH a
+    // parameter does reach `parseFuncDecl`'s skip.
+    // ------------------------------------------------------------------
+    @Test
+    void n018FreeInitParamAndMainAreDropped() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED
+            + "\nfunc main() {\n\trunar.Assert(true)\n}\n"
+            + "\nfunc init(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n";
+        assertEquals(java.util.List.of("unlock(public)"), f010Methods(src));
+    }
+
+    // ------------------------------------------------------------------
+    // N-018: the unnamed receiver `(T)` must leave the receiver
+    // unreferenceable. Real Go forbids referencing an unnamed receiver in
+    // the method body at all -- there is no name bound to it. This tier
+    // instead failed to parse `(T)` at all (a generic parse error, since
+    // `looksLikeReceiver` only recognised the two-identifier `(name Type)`
+    // shape) AND (independently) hardcoded "c"/"self" as always meaning
+    // "the receiver" regardless of the actual declared name. The TS/Ruby
+    // reference already gets this right; Go, Rust, Zig and Python carried
+    // the identical hardcoded-alias bug (fixed alongside this one; see
+    // their own suites).
+    //
+    // Proves: this tier's .runar.go parser accepts an unnamed receiver and
+    // never treats a same-spelled non-receiver identifier as the contract's
+    // self; `c.PubKey` parses as a MemberExpr on the parameter `c`, not a
+    // PropertyAccessExpr on the contract. Does NOT prove: the other six
+    // tiers.
+    // ------------------------------------------------------------------
+    @Test
+    void n018UnnamedReceiverParamNamedCStaysPlain() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED
+            + "\nfunc (Guarded) CheckC(c runar.PubKey) {\n\trunar.Assert(c.PubKey)\n}\n";
+        ContractNode c = GoParser.parse(src, "Guarded.runar.go");
+        MethodNode method = c.methods().stream()
+            .filter(m -> m.name().equals("checkC"))
+            .findFirst()
+            .orElseThrow();
+        ExpressionStatement stmt = (ExpressionStatement) method.body().get(0);
+        CallExpr call = (CallExpr) stmt.expression();
+        Expression arg = call.args().get(0);
+        assertInstanceOf(MemberExpr.class, arg,
+            "c.PubKey parsed as " + arg.getClass().getSimpleName()
+                + ", want MemberExpr -- the unnamed receiver must not bind the name \"c\"");
+        MemberExpr member = (MemberExpr) arg;
+        assertInstanceOf(Identifier.class, member.object());
+        assertEquals("c", ((Identifier) member.object()).name());
+        assertEquals("pubKey", member.property());
     }
 }

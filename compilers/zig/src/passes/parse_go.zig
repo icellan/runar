@@ -954,6 +954,12 @@ const Parser = struct {
                     self.errors.append(self.allocator, full) catch {};
                     continue;
                 }
+            } else if (std.mem.eql(u8, f.go_name, "init") or std.mem.eql(u8, f.go_name, "main")) {
+                // N-018: a free `init`/`main` is not an ordinary private
+                // helper. Real Go reserves both names for the package
+                // initializer / entry point, which can never be called as a
+                // function.
+                continue;
             }
             methods.append(self.allocator, f.method) catch {};
         }
@@ -1328,9 +1334,12 @@ const Parser = struct {
             if (self.current.kind == .ident) {
                 receiver_type = self.bump().text;
             } else if (self.current.kind == .rparen) {
-                // Unnamed receiver `(Type)`: the only identifier is the type.
+                // Unnamed receiver `(Type)`: the only identifier is the
+                // type. N-018: real Go forbids referencing it in the method
+                // body at all, so it must not default to "c" -- that wrongly
+                // turned a same-spelled parameter into a self-reference.
                 receiver_type = self.receiver_name;
-                self.receiver_name = "c";
+                self.receiver_name = "";
             }
             _ = self.expect(.rparen);
             has_receiver = true;
@@ -2339,10 +2348,13 @@ const Parser = struct {
     // ---- Helpers ----
 
     fn isReceiver(self: *const Parser, name: []const u8) bool {
-        return std.mem.eql(u8, name, self.receiver_name) or
-            std.mem.eql(u8, name, "c") or
-            std.mem.eql(u8, name, "self") or
-            std.mem.eql(u8, name, "m");
+        // N-018: this must be an exact match on the actual declared
+        // receiver name, never a hardcoded "c"/"self"/"m" -- that wrongly
+        // turned ANY same-spelled parameter or local into a self-reference
+        // even when the receiver was named something else, or unnamed
+        // (self.receiver_name == "", which real Go forbids referencing at
+        // all).
+        return self.receiver_name.len > 0 and std.mem.eql(u8, name, self.receiver_name);
     }
 
     fn isCompoundAssignOp(k: TokenKind) bool {
@@ -2935,4 +2947,69 @@ test "F-010: a file with two contract structs is refused" {
         f010_prelude ++ f010_guarded ++ "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n",
         "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract",
     );
+}
+
+// N-018: a free `init`/`main` is not an ordinary private helper. Real Go
+// reserves both names for the package initializer / entry point, which can
+// never be called as a function; the Go/Rust/Python/Java tiers already skip
+// it (TS/Ruby carried the identical bug and are fixed alongside this one;
+// see their own suites).
+//
+// A 0-param free `init()` is not a case this test reaches: the existing
+// init-extraction pass below (`m.name == "init" and m.params.len == 0`)
+// already absorbs it regardless of receiver. A free `init` WITH a parameter
+// does reach the skip added by F-010's standalone-function loop.
+test "N-018: a free init(param)/main() is dropped, not kept as a private helper" {
+    try f010ExpectMethods(
+        f010_prelude ++ f010_guarded ++
+            "\nfunc main() {\n\trunar.Assert(true)\n}\n" ++
+            "\nfunc init(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n",
+        &.{"unlock"},
+        &.{true},
+    );
+}
+
+// N-018: the unnamed receiver `(T)` must leave the receiver unreferenceable.
+// Real Go forbids referencing an unnamed receiver in the method body at all
+// -- there is no name bound to it. This tier instead defaulted the unnamed
+// receiver's name to "c" AND (independently) hardcoded "c"/"self"/"m" as
+// always meaning "the receiver" regardless of the actual declared name, so
+// a parameter literally named `c` was silently read as the contract's own
+// `PubKey` -- `this.pubKey`, not the parameter. The TS/Ruby reference
+// already gets this right; Go, Rust, Python and Java carried the identical
+// hardcoded-alias bug and are fixed alongside this one (see their own
+// suites).
+//
+// Proves: this tier's .runar.go parser never treats a same-spelled
+// non-receiver identifier as the contract's self, for an unnamed receiver;
+// `c.PubKey` parses as a property_access on the parameter `c`, not on
+// "this". Does NOT prove: the other six tiers.
+test "N-018: unnamed receiver's parameter named c is not self" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = f010_prelude ++ f010_guarded ++
+        "\nfunc (Guarded) CheckC(c runar.PubKey) {\n\trunar.Assert(c.PubKey)\n}\n";
+    const r = parseGo(arena.allocator(), source, "Guarded.runar.go");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const c = r.contract.?;
+    var method: ?MethodNode = null;
+    for (c.methods) |m| {
+        if (std.mem.eql(u8, m.name, "checkC")) method = m;
+    }
+    try std.testing.expect(method != null);
+    const stmt = method.?.body[0];
+    const call = switch (stmt) {
+        .expr_stmt => |es| switch (es.expr) {
+            .call => |call| call,
+            else => return error.TestExpectedCall,
+        },
+        else => return error.TestExpectedExprStmt,
+    };
+    const pa = switch (call.args[0]) {
+        .property_access => |pa| pa,
+        else => return error.TestExpectedPropertyAccess,
+    };
+    try std.testing.expectEqualStrings("c", pa.object);
+    try std.testing.expectEqualStrings("pubKey", pa.property);
 }

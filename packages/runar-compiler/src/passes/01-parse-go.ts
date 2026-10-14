@@ -508,6 +508,13 @@ class GoParser extends ParserCore<GoToken> {
           goForeignReceiverMessage(f.goName, f.receiverType, this.contractName), 'error', f.method.sourceLocation));
         continue;
       }
+      // N-018: a free `init`/`main` is not an ordinary private helper. Real
+      // Go reserves both names for the package initializer / entry point,
+      // which can never be called as a function; the Go/Rust/Python/Java
+      // tiers already skip it here (see their equivalent loop).
+      if (f.receiverType === null && (f.goName === 'init' || f.goName === 'main')) {
+        continue;
+      }
       methods.push(f.method);
     }
 
