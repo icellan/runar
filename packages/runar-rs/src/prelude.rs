@@ -1097,8 +1097,12 @@ pub fn bool(n: Int) -> bool {
 }
 
 /// Absolute value.
+/// Panics if n is i64::MIN (|i64::MIN| is 2^63, which overflows i64),
+/// consistently in debug and release — matches `gcd`'s overflow handling.
 pub fn abs(n: Int) -> Int {
-    if n < 0 { -n } else { n }
+    n.checked_abs().unwrap_or_else(|| {
+        panic!("runar: i64 overflow in abs — |i64::MIN| not representable; Bitcoin Script supports arbitrary precision but Rust tests use i64")
+    })
 }
 
 /// Smaller of two values.
@@ -1498,6 +1502,29 @@ mod tests {
     #[should_panic(expected = "i64 overflow")]
     fn test_gcd_min_panics() {
         gcd(i64::MIN, 1);
+    }
+
+    // N-289: `abs(i64::MIN)` is `|-(-2^63)| = 2^63`, which does not fit i64 —
+    // the naive `if n < 0 { -n } else { n }` relied on Rust's unchecked
+    // negation, which panics with "attempt to negate with overflow" in a
+    // debug build (overflow-checks on) and silently WRAPS to i64::MIN itself
+    // (still negative) in a release build (overflow-checks off) — a release
+    // binary's `abs()` could return a negative number. This test pins the
+    // behaviour to a single, deliberate, debug/release-independent panic
+    // (`checked_abs`, matching the `gcd` fix above), not Rust's implicit
+    // overflow panic that only `should_panic(expected = "i64 overflow")`
+    // would catch in a debug build and silently wrap past in release.
+    #[test]
+    fn test_abs_small_values() {
+        assert_eq!(abs(-7), 7);
+        assert_eq!(abs(7), 7);
+        assert_eq!(abs(0), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "i64 overflow")]
+    fn test_abs_min_panics() {
+        abs(i64::MIN);
     }
 
     // -----------------------------------------------------------------------
