@@ -56,6 +56,11 @@ Drivers MUST decode `"Xn"` → bigint when reading currentState/args/constructor
 and MUST encode bigints back as `"Xn"` strings when writing state/dataOutputs
 satoshis fields.
 
+A value outside a tier's native integer width (e.g. Rust's and Zig's `i64`,
+N-163) MUST still round-trip byte-identically as its `"Xn"` string — carried
+through state unchanged even though the tier refuses to compute with it
+(design B: refuse on use, pass through otherwise).
+
 ## Output JSON (stdout)
 
 ```json
