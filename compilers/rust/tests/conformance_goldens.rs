@@ -36,20 +36,26 @@ fn find_rust_source(test_dir: &Path) -> Option<PathBuf> {
     // (1) source.json lookup
     let config_path = test_dir.join("source.json");
     if config_path.exists() {
-        if let Ok(raw) = fs::read_to_string(&config_path) {
-            if let Ok(cfg) = serde_json::from_str::<Value>(&raw) {
-                if let Some(rel) = cfg
-                    .get("sources")
-                    .and_then(|s| s.get(".runar.rs"))
-                    .and_then(|v| v.as_str())
-                {
-                    let resolved = test_dir.join(rel);
-                    // Canonicalize so the path is absolute and normalized;
-                    // existence is implied by canonicalize() succeeding.
-                    if let Ok(abs) = fs::canonicalize(&resolved) {
-                        return Some(abs);
-                    }
-                }
+        // N-217: fail loud. A read or parse error here used to be
+        // swallowed (`if let Ok(...)`) and treated as "source.json
+        // doesn't exist", silently falling through to the glob fallback
+        // as if the config had never existed. Let it panic instead --
+        // the same fail-closed approach F-264 (Ruby) and F-323 (Python)
+        // took for the identical pattern in their own harnesses.
+        let raw = fs::read_to_string(&config_path)
+            .unwrap_or_else(|e| panic!("read {}: {}", config_path.display(), e));
+        let cfg: Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("parse {}: {}", config_path.display(), e));
+        if let Some(rel) = cfg
+            .get("sources")
+            .and_then(|s| s.get(".runar.rs"))
+            .and_then(|v| v.as_str())
+        {
+            let resolved = test_dir.join(rel);
+            // Canonicalize so the path is absolute and normalized;
+            // existence is implied by canonicalize() succeeding.
+            if let Ok(abs) = fs::canonicalize(&resolved) {
+                return Some(abs);
             }
         }
     }
@@ -129,14 +135,14 @@ fn fixture_allowlisted_for_rust(test_dir: &Path) -> bool {
     if !config_path.exists() {
         return true;
     }
-    let raw = match fs::read_to_string(&config_path) {
-        Ok(r) => r,
-        Err(_) => return true,
-    };
-    let cfg: Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return true,
-    };
+    // N-217: fail loud (see find_rust_source above). A read or parse
+    // error here used to be swallowed (`Err(_) => return true`) and
+    // treated as "no allowlist declared", silently admitting the fixture
+    // instead of surfacing the real cause.
+    let raw = fs::read_to_string(&config_path)
+        .unwrap_or_else(|e| panic!("read {}: {}", config_path.display(), e));
+    let cfg: Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("parse {}: {}", config_path.display(), e));
     match cfg.get("compilers") {
         Some(Value::Array(arr)) => arr
             .iter()
@@ -557,6 +563,62 @@ fn test_run_one_fixture_reports_missing_source_for_unresolvable_fixture() {
         other => panic!("run_one_fixture did not report MissingSource: {:?}", other),
     }
     assert!(is_fixture_failure(&outcome), "MissingSource must be a failure");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ----------------------------------------------------------------------
+// N-217: `find_rust_source` and `fixture_allowlisted_for_rust` each
+// swallowed a `source.json` read/parse error (`if let Ok(...)` /
+// `Err(_) => return true`) and treated it as "no config" or "no
+// allowlist", silently falling through to the glob fallback or admitting
+// the fixture instead of surfacing the real cause -- the identical
+// pattern F-264 (Ruby) and F-323 (Python) closed in their own harnesses.
+// Fixed below to panic (fail loud) on a read or parse error, matching
+// those two tiers' fail-closed approach. Exercised against synthetic,
+// throwaway fixture directories only; never against the real conformance
+// corpus.
+// ----------------------------------------------------------------------
+
+/// What this proves: `find_rust_source` does not silently swallow a
+/// malformed (non-JSON) `source.json` and fall through to the `*.runar.rs`
+/// glob fallback as if no config existed -- it now panics, surfacing the
+/// real cause instead of misreporting a broken config as a plain
+/// "no source found" (or, worse here, a resolution via a glob fallback
+/// that happens to find an unrelated file).
+///
+/// What this does not prove: that the real conformance corpus contains a
+/// fixture with malformed JSON today -- it does not. Also does not
+/// exercise the read-error (as opposed to parse-error) half of the same
+/// swallow; both routes share the same fix, but only the parse-error
+/// route is covered here to keep the fixture simple and portable.
+#[test]
+#[should_panic(expected = "parse ")]
+fn test_find_rust_source_panics_on_malformed_source_json() {
+    let dir = f285_scratch_dir("n217-find-malformed");
+    fs::write(dir.join("source.json"), "{not valid json").expect("write source.json");
+    // No *.runar.rs file anywhere in the scratch dir, so a swallow would
+    // fall through route (2) and quietly return None instead of panicking.
+
+    let _ = find_rust_source(&dir);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// What this proves: `fixture_allowlisted_for_rust` does not silently
+/// swallow a malformed `source.json` and treat it as "no allowlist
+/// declared" (`return true`) -- a broken config must surface, not
+/// silently admit the fixture as if rust were unconditionally allowed.
+///
+/// What this does not prove: that the real conformance corpus contains a
+/// fixture with malformed JSON today -- it does not.
+#[test]
+#[should_panic(expected = "parse ")]
+fn test_fixture_allowlisted_for_rust_panics_on_malformed_source_json() {
+    let dir = f285_scratch_dir("n217-allowlist-malformed");
+    fs::write(dir.join("source.json"), "{not valid json").expect("write source.json");
+
+    let _ = fixture_allowlisted_for_rust(&dir);
 
     let _ = fs::remove_dir_all(&dir);
 }
