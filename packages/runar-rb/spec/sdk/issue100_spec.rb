@@ -16,7 +16,18 @@ require 'tmpdir'
 # rubocop:disable RSpec/DescribeClass
 RSpec.describe 'Issue #100 — terminal var-len state read gets _codePart' do
   # rubocop:enable RSpec/DescribeClass
-  SRC = <<~TS
+  # Named I100_SRC (not the bare SRC the file used before) because `SRC = ...`
+  # directly inside an `RSpec.describe do ... end` block defines a TOP-LEVEL
+  # Ruby constant, not a scoped one — a bare `SRC` here collides with any
+  # other spec file that also binds a bare `SRC` (e.g.
+  # n227_zero_mutable_field_fee_floor_spec.rb), and whichever loads last
+  # wins for every unqualified `SRC` reference for the rest of the process.
+  # That is exactly why this item's own full-suite run showed
+  # `uses_code_part` nil / wrong ABI methods and not alone (CK18-FU8). The
+  # sibling issue106/issue123 specs already avoid this via distinct names
+  # (`E106_SRC`, `S123_SINGLE_SRC`); this file now follows the same
+  # convention.
+  I100_SRC = <<~TS
     import { StatefulSmartContract, assert, substr } from 'runar-lang';
     import type { ByteString } from 'runar-lang';
     class StateRead extends StatefulSmartContract {
@@ -29,15 +40,21 @@ RSpec.describe 'Issue #100 — terminal var-len state read gets _codePart' do
 
   # Compile via the Ruby compiler CLI; skip cleanly if the repo layout/CLI is
   # unavailable (keeps the SDK gem's spec run self-contained).
-  def compile_state_read
+  def compile_state_read(src = I100_SRC)
     repo_root = File.expand_path('../../../..', __dir__)
     cli = File.join(repo_root, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
     return nil unless File.exist?(cli)
 
-    src_path = File.join(Dir.tmpdir, 'StateRead.runar.ts')
-    File.write(src_path, SRC)
-    out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
-    status.success? ? out : nil
+    # Per-call private temp dir (not the shared Dir.tmpdir root) so a
+    # concurrent compile of this same spec can't collide on the filename
+    # the CLI dispatches on (CK18-FU8).
+    Dir.mktmpdir do |dir|
+      src_path = File.join(dir, 'StateRead.runar.ts')
+      File.write(src_path, src)
+      yield if block_given?
+      out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
+      return status.success? ? out : nil
+    end
   end
 
   # Parse input[0]'s unlocking-script hex out of a raw transaction hex.
@@ -83,5 +100,31 @@ RSpec.describe 'Issue #100 — terminal var-len state read gets _codePart' do
     unlock = input0_unlock(provider.get_broadcasted_txs.last)
     # PUSHDATA2 (0x4d) prefix => codePart push leads the unlock (issue #100).
     expect(unlock[0, 2]).to eq('4d')
+  end
+
+  # CK18-FU8: compile_state_read used to write its source to a single fixed
+  # path (File.join(Dir.tmpdir, 'StateRead.runar.ts')) shared by every
+  # caller. A second concurrent compile of this same file — another rspec
+  # process running this spec at the same time, or a full-suite run
+  # overlapping a solo run — writes to that identical path and can corrupt
+  # whichever compile reads it last. This test forces that exact overlap
+  # deterministically: the block passed to compile_state_read runs after
+  # this call's own write but before its compiler subprocess reads the
+  # file, simulating a second concurrent writer landing on the shared path.
+  # It proves: a per-call-isolated temp path makes the compile immune to a
+  # second writer on the legacy shared path, which is what CK18-FU8 fixes.
+  # It does not prove: real OS-level process scheduling always produces
+  # this exact interleaving in the wild — only that IF it does, the fix
+  # tolerates it (the forced overlap removes timing luck from the proof).
+  it 'is not corrupted by a second concurrent compile sharing the same tmp path' do
+    other_src = I100_SRC.sub('termCheck', 'termCheckOther')
+
+    compiled = compile_state_read do
+      File.write(File.join(Dir.tmpdir, 'StateRead.runar.ts'), other_src)
+    end
+    skip 'Ruby compiler CLI unavailable' if compiled.nil?
+
+    artifact = Runar::SDK::RunarArtifact.from_json(compiled)
+    expect(artifact.abi.methods.map(&:name)).to include('termCheck')
   end
 end

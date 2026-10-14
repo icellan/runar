@@ -41,10 +41,15 @@ RSpec.describe 'Issue #106 — EMPTY_SIG for OR-CHECKSIG branched authorization'
     cli = File.join(repo_root, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
     return nil unless File.exist?(cli)
 
-    src_path = File.join(Dir.tmpdir, 'OrChecksig.runar.ts')
-    File.write(src_path, E106_SRC)
-    out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
-    status.success? ? out : nil
+    # Per-call private temp dir (not the shared Dir.tmpdir root) so a
+    # concurrent compile of this same spec can't collide on the filename
+    # the CLI dispatches on (CK18-FU8).
+    Dir.mktmpdir do |dir|
+      src_path = File.join(dir, 'OrChecksig.runar.ts')
+      File.write(src_path, E106_SRC)
+      out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
+      return status.success? ? out : nil
+    end
   end
 
   # Parse input[0]'s unlocking-script hex out of a raw transaction hex.

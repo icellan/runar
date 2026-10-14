@@ -113,10 +113,15 @@ RSpec.describe 'Issue #123 — SDK sighash threading' do
     cli = File.join(repo_root, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
     return nil unless File.exist?(cli)
 
-    src_path = File.join(Dir.tmpdir, 'SingleCounter.runar.ts')
-    File.write(src_path, S123_SINGLE_SRC)
-    out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
-    status.success? ? out : nil
+    # Per-call private temp dir (not the shared Dir.tmpdir root) so a
+    # concurrent compile of this same spec can't collide on the filename
+    # the CLI dispatches on (CK18-FU8).
+    Dir.mktmpdir do |dir|
+      src_path = File.join(dir, 'SingleCounter.runar.ts')
+      File.write(src_path, S123_SINGLE_SRC)
+      out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
+      return status.success? ? out : nil
+    end
   end
 
   it 'ABI advertises SINGLE|FORKID (0x43) so the SDK builds the matching preimage' do
