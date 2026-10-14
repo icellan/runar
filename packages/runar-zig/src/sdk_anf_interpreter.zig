@@ -989,6 +989,13 @@ fn evalNode(
             // numeric path — it is a byte op and must keep accepting
             // non-minimal bytes.
             try assertMinimalNumericOperand(eval_ctx, uo.operand, operand);
+            // N-281: `-minInt(i64)` has no i64 representation; `evalUnaryOp`'s
+            // `-%val` would wrap instead of returning the on-chain value. Same
+            // rejection channel as the N-163 `*` / math-builtin overflow
+            // refusals above.
+            if (std.mem.eql(u8, uo.op, "-") and toInt(operand) == std.math.minInt(i64)) {
+                return error.ScriptNumberError;
+            }
             return evalUnaryOp(allocator, uo.op, operand, uo.result_type);
         },
         .call => |c| {
@@ -1509,8 +1516,10 @@ fn evalBinOp(allocator: std.mem.Allocator, op: []const u8, left: ANFValue, right
     const l = toInt(left);
     const r = toInt(right);
 
-    if (std.mem.eql(u8, op, "+")) return .{ .int = l +% r };
-    if (std.mem.eql(u8, op, "-")) return .{ .int = l -% r };
+    // N-281 (sibling of N-163): refuse a sum/difference outside i64 rather
+    // than wrap it (`+%`/`-%`).
+    if (std.mem.eql(u8, op, "+")) return .{ .int = std.math.add(i64, l, r) catch return error.ScriptNumberError };
+    if (std.mem.eql(u8, op, "-")) return .{ .int = std.math.sub(i64, l, r) catch return error.ScriptNumberError };
     // N-163: refuse a product outside i64 rather than wrap it.
     if (std.mem.eql(u8, op, "*")) return .{ .int = std.math.mul(i64, l, r) catch return error.ScriptNumberError };
     if (std.mem.eql(u8, op, "/")) return .{ .int = if (r == 0) 0 else @divTrunc(l, r) };
@@ -1630,6 +1639,10 @@ fn mathBuiltinOverflowsI64(func: []const u8, arg_names: []const []const u8, env:
     const eql = std.mem.eql;
     const a = toInt(getArg(arg_names, 0, env));
     const b = toInt(getArg(arg_names, 1, env));
+    // N-281: `abs(minInt(i64))` has no i64 representation (`-minInt(i64)`
+    // overflows); `evalCall`'s `-v` would panic (Debug/ReleaseSafe) or wrap
+    // (ReleaseFast) rather than return the on-chain value.
+    if (eql(u8, func, "abs")) return a == std.math.minInt(i64);
     if (eql(u8, func, "pow")) {
         var result: i64 = 1;
         var i: i64 = 0;

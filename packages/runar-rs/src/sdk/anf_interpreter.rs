@@ -1195,6 +1195,16 @@ fn eval_value(
                         binding_name: binding_name.to_string(),
                     });
                 }
+                // N-281: `-i64::MIN` has no i64 representation; `eval_unary_op`'s
+                // native `-v` would panic (debug) or wrap (release) instead of
+                // returning the on-chain value. Same rejection channel as the
+                // N-163 `*` / math-builtin overflow refusals above.
+                if op == "-" && operand.to_i64() == i64::MIN {
+                    return Err(AssertionFailureError {
+                        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
                 eval_unary_op(&op, &operand, result_type)
             }
         }
@@ -1801,8 +1811,10 @@ fn eval_bin_op(op: &str, left: &Val, right: &Val, result_type: &str) -> Result<V
     let r = right.to_i64();
 
     Ok(match op {
-        "+" => Val::Int(l.wrapping_add(r)),
-        "-" => Val::Int(l.wrapping_sub(r)),
+        // N-281 (sibling of N-163): refuse a sum/difference outside i64
+        // rather than wrap it (`wrapping_add`/`wrapping_sub`).
+        "+" => return l.checked_add(r).map(Val::Int).ok_or(()),
+        "-" => return l.checked_sub(r).map(Val::Int).ok_or(()),
         // N-163: refuse a product outside i64 rather than wrap it.
         "*" => return l.checked_mul(r).map(Val::Int).ok_or(()),
         "/" => Val::Int(if r == 0 { 0 } else { l / r }),
@@ -1890,6 +1902,10 @@ fn wide_refusal(strict: Option<&StrictCtx>, binding_name: &str) -> AssertionFail
 fn math_builtin_overflows_i64(func: &str, args: &[Val]) -> bool {
     let arg = |i: usize| args.get(i).map(|v| v.to_i64()).unwrap_or(0);
     match func {
+        // N-281: `abs(i64::MIN)` has no i64 representation (`-i64::MIN`
+        // overflows); `eval_call`'s `v.abs()` would panic (debug) or wrap
+        // (release) rather than return the on-chain value.
+        "abs" => arg(0) == i64::MIN,
         "pow" => (0..arg(1)).try_fold(1i64, |acc, _| acc.checked_mul(arg(0))).is_none(),
         "mulDiv" => {
             let c = args.get(2).map(|v| v.to_i64()).unwrap_or(1) as i128;

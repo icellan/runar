@@ -176,3 +176,96 @@ test "N-163: SDK ANF interpreter refuses an i64-overflowing binop *" {
         return error.TestUnexpectedResult;
     } else |_| {}
 }
+
+// N-281 (sibling of N-163): shared plumbing for the four checks below. Each
+// runs a tiny single-binding method through the full interpreter (same path
+// `computeNewState` uses in production) and reads back `result`.
+fn n281Run(a: std.mem.Allocator, body: []ANFBinding) !i64 {
+    var props = [_]ANFProperty{.{ .name = "result", .type_name = "int", .readonly = false }};
+    var methods = [_]ANFMethod{.{ .name = "run", .params = &.{}, .body = body, .is_public = true }};
+    const anf = ANFProgram{ .contract_name = "AddSubAbsProbe", .properties = &props, .methods = &methods };
+    var cs = std.StringHashMap(ANFValue).init(a);
+    defer cs.deinit();
+    try cs.put("result", .{ .int = 0 });
+    var call_args = std.StringHashMap(ANFValue).init(a);
+    defer call_args.deinit();
+    var ns = try interp.computeNewState(a, &anf, "run", cs, call_args, &.{});
+    defer ns.deinit();
+    return ns.get("result").?.int;
+}
+
+fn n281BinOp(a: std.mem.Allocator, op: []const u8, x: i64, y: i64) !i64 {
+    var body = [_]ANFBinding{
+        .{ .name = "a", .value = .{ .load_const = .{ .value = .{ .int = x } } } },
+        .{ .name = "b", .value = .{ .load_const = .{ .value = .{ .int = y } } } },
+        .{ .name = "r", .value = .{ .bin_op = .{ .op = op, .left = "a", .right = "b" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } },
+    };
+    return n281Run(a, &body);
+}
+
+fn n281UnaryNegate(a: std.mem.Allocator, x: i64) !i64 {
+    var body = [_]ANFBinding{
+        .{ .name = "a", .value = .{ .load_const = .{ .value = .{ .int = x } } } },
+        .{ .name = "r", .value = .{ .unary_op = .{ .op = "-", .operand = "a" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } },
+    };
+    return n281Run(a, &body);
+}
+
+fn n281Abs(a: std.mem.Allocator, x: i64) !i64 {
+    const args = [_][]const u8{"a"};
+    var body = [_]ANFBinding{
+        .{ .name = "a", .value = .{ .load_const = .{ .value = .{ .int = x } } } },
+        .{ .name = "r", .value = .{ .call = .{ .func = "abs", .args = args[0..] } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } },
+    };
+    return n281Run(a, &body);
+}
+
+fn n281ExpectRefused(what: []const u8, got: anyerror!i64) !void {
+    if (got) |v| {
+        std.debug.print("N-281: {s} must be refused, returned {d}\n", .{ what, v });
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}
+
+// N-281: `a + b` past i64 must be refused, not wrapped (`+%`).
+// Proves: the binop `+` fails closed on i64 overflow and still adds in
+// range. Does NOT prove: `-` / unary `-` / `abs` overflow (separate tests
+// below) or the compiled script itself.
+test "N-281: SDK ANF interpreter refuses an i64-overflowing binop +" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(i64, 13), try n281BinOp(allocator, "+", 6, 7));
+    try n281ExpectRefused("maxInt(i64) + 1", n281BinOp(allocator, "+", std.math.maxInt(i64), 1));
+}
+
+// N-281: `a - b` past i64 must be refused, not wrapped (`-%`).
+// Proves: the binop `-` fails closed on i64 underflow and still subtracts
+// in range. Does NOT prove: `+` / unary `-` / `abs` overflow or the script.
+test "N-281: SDK ANF interpreter refuses an i64-overflowing binop -" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(i64, -1), try n281BinOp(allocator, "-", 6, 7));
+    try n281ExpectRefused("minInt(i64) - 1", n281BinOp(allocator, "-", std.math.minInt(i64), 1));
+}
+
+// N-281: unary `-` on `minInt(i64)` (`-minInt(i64) == maxInt(i64) + 1`) must
+// be refused, not wrapped (`-%`).
+// Proves: `unary_op -` fails closed at `minInt(i64)` and still negates in
+// range. Does NOT prove: `+` / `-` / `abs` overflow or the compiled script.
+test "N-281: SDK ANF interpreter refuses an i64-overflowing unary -" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(i64, -6), try n281UnaryNegate(allocator, 6));
+    try n281ExpectRefused("-minInt(i64)", n281UnaryNegate(allocator, std.math.minInt(i64)));
+}
+
+// N-281: `abs(minInt(i64))` (`== maxInt(i64) + 1`) must be refused, not
+// wrapped or crashed by a native `-v` overflow.
+// Proves: `call abs` fails closed at `minInt(i64)` and still computes the
+// right absolute value either side of it. Does NOT prove: `+` / `-` / unary
+// `-` overflow or the compiled script itself.
+test "N-281: SDK ANF interpreter refuses abs(minInt(i64))" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(i64, 6), try n281Abs(allocator, -6));
+    try n281ExpectRefused("abs(minInt(i64))", n281Abs(allocator, std.math.minInt(i64)));
+}
