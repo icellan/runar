@@ -646,6 +646,14 @@ module RunarCompiler
           advance
         end
 
+        # N-225: no `#[runar::contract]` struct means there is no contract to
+        # compile. Refuse it like Go/Rust/Zig (nil contract + one error)
+        # instead of silently building an empty "UnnamedContract" placeholder.
+        if @contract_name.empty?
+          add_error("no Rúnar contract struct found in Rust source")
+          return nil
+        end
+
         # Process init() method: extract property initializers
         final_methods = []
         methods.each do |m|
