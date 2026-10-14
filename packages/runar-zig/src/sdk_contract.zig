@@ -60,6 +60,24 @@ test "isLikelyOrChecksig recognises both `||` lowerings and excludes multi-sig" 
     }
 }
 
+/// Call-scope inputs `buildExtraContractUnlock` needs to build the real
+/// unlock of an additional contract input (N-293). All slices are borrowed.
+const ExtraUnlockCtx = struct {
+    options: ?types.CallOptions,
+    resolved_args: []const types.StateValue,
+    user_params: []const types.ABIParam,
+    sig_indices: []const usize,
+    sign: signer_mod.Signer,
+    code_sep_idx: ?i32,
+    sig_hash_type: u32,
+    method_uses_code_part: bool,
+    change_pkh_hex: ?[]const u8,
+    needs_new_amount: bool,
+    new_satoshis: i64,
+    method_selector_hex: ?[]const u8,
+    witness_hex: []const u8,
+};
+
 // ---------------------------------------------------------------------------
 // Call-path funding fee-sizing helpers (findings C2 + C15)
 // ---------------------------------------------------------------------------
@@ -1565,6 +1583,37 @@ pub const RunarContract = struct {
             witness_hex,
         );
 
+        // N-293: every additional contract input also gets its REAL first-pass
+        // unlock (own preimage + own Sig) before the rebuild, so the rebuild's
+        // fee/change is sized from real bytes on every contract input, as TS
+        // prepareCall does. Keeping the zero-preimage placeholder here under-
+        // sized each extra input by (real preimage - 181) bytes.
+        const extra_unlock_ctx: ExtraUnlockCtx = .{
+            .options = options,
+            .resolved_args = resolved_args,
+            .user_params = user_params,
+            .sig_indices = sig_indices.items,
+            .sign = sign,
+            .code_sep_idx = code_sep_idx,
+            .sig_hash_type = sig_hash_type,
+            .method_uses_code_part = method_uses_code_part,
+            .change_pkh_hex = change_pkh_hex,
+            .needs_new_amount = needs_new_amount,
+            .new_satoshis = new_satoshis,
+            .method_selector_hex = method_selector_hex,
+            .witness_hex = witness_hex,
+        };
+        for (extra_contract_utxos, 0..) |xu, ei| {
+            const x_unlock = self.buildExtraContractUnlock(&extra_unlock_ctx, signed_tx, ei, xu, change_amount) catch |err| {
+                self.allocator.free(first_unlock);
+                ptx_result.deinit(self.allocator);
+                return err;
+            };
+            self.allocator.free(extra_placeholder_unlocks.items[ei]);
+            extra_placeholder_unlocks.items[ei] = x_unlock;
+            extra_call_inputs.items[ei].unlocking_script = x_unlock;
+        }
+
         // Rebuild transaction with real unlocking script (size may differ)
         {
             var rebuild_result = call_mod.buildCallTransaction(
@@ -1595,8 +1644,8 @@ pub const RunarContract = struct {
         //   0:                       primary contract input
         //   1..1+n_extra:            additional contract inputs
         //   1+n_extra..end:          P2PKH funding inputs (these — sign here)
-        // Extra contract inputs keep their pre-built placeholder unlocks for
-        // this convergence pass; we patch real ones below in the final pass.
+        // Extra contract inputs carry their first-pass real unlocks (N-293)
+        // for this convergence pass; we patch final ones below.
         {
             const funding_offset: usize = 1 + extra_call_inputs.items.len;
             for (additional_utxos.items, 0..) |utxo, ui| {
@@ -1690,85 +1739,7 @@ pub const RunarContract = struct {
         // ByteString param treated as allPrevouts gets the substituted value.
         for (extra_contract_utxos, 0..) |xu, ei| {
             const inp_idx = 1 + ei;
-            // Per-input args: copy primary resolved_args (which already has
-            // real sig for slot 0 and real prevouts substituted), then apply
-            // any per-input overrides from `additional_contract_input_args`.
-            var per_input_args = try self.allocator.alloc(types.StateValue, resolved_args.len);
-            defer {
-                for (per_input_args) |*pa| pa.deinit(self.allocator);
-                self.allocator.free(per_input_args);
-            }
-            for (resolved_args, 0..) |a, ai| per_input_args[ai] = try a.clone(self.allocator);
-
-            if (options) |o| {
-                if (o.additional_contract_input_args) |aia| {
-                    if (ei < aia.len) {
-                        const overrides = aia[ei];
-                        for (overrides, 0..) |ov, oi| {
-                            if (oi >= per_input_args.len) break;
-                            // `.int = 0` means "auto-resolve" for Sig/ByteString
-                            // (same convention as the primary args). For other
-                            // types, a literal 0 user value is taken at face.
-                            if (ov == .int and ov.int == 0) {
-                                const ptype = user_params[oi].type_name;
-                                if (std.mem.eql(u8, ptype, "Sig")) {
-                                    var sig_subscript = xu.script;
-                                    if (code_sep_idx) |cs| {
-                                        const off: usize = @intCast((@as(usize, @intCast(cs)) + 1) * 2);
-                                        if (off <= sig_subscript.len) sig_subscript = sig_subscript[off..];
-                                    }
-                                    const real_sig = try sign.sign(self.allocator, signed_tx, inp_idx, sig_subscript, xu.satoshis, null);
-                                    per_input_args[oi].deinit(self.allocator);
-                                    per_input_args[oi] = .{ .bytes = real_sig };
-                                    continue;
-                                }
-                                // Name-gated exactly like the primary resolution:
-                                // only the well-known `allPrevouts` slot is the
-                                // SDK's to fill. For any other ByteString param
-                                // `.int = 0` is the caller's own empty value, and
-                                // substituting prevouts here is what actually
-                                // reaches the chain (the placeholder pass above
-                                // is only used for fee sizing).
-                                if ((std.mem.eql(u8, ptype, "ByteString") or std.mem.eql(u8, ptype, "Ripemd160")) and
-                                    std.mem.eql(u8, user_params[oi].name, AUTO_PREVOUTS_PARAM_NAME))
-                                {
-                                    const real_pv = try extractAllPrevoutsHex(self.allocator, signed_tx);
-                                    per_input_args[oi].deinit(self.allocator);
-                                    per_input_args[oi] = .{ .bytes = real_pv };
-                                    continue;
-                                }
-                            }
-                            per_input_args[oi].deinit(self.allocator);
-                            per_input_args[oi] = try ov.clone(self.allocator);
-                        }
-                    }
-                }
-            }
-
-            // Compute OP_PUSH_TX preimage for this input.
-            var xptx = oppushtx_mod.computeOpPushTxWithSigHash(
-                self.allocator,
-                signed_tx,
-                inp_idx,
-                xu.script,
-                xu.satoshis,
-                code_sep_idx orelse -1,
-                sig_hash_type,
-            ) catch return ContractError.CallFailed;
-            defer xptx.deinit(self.allocator);
-
-            const x_unlock = try self.buildStatefulUnlockScript(
-                xptx.sig_hex,
-                per_input_args,
-                method_uses_code_part,
-                change_pkh_hex,
-                change_amount,
-                needs_new_amount,
-                new_satoshis,
-                xptx.preimage_hex,
-                method_selector_hex,
-                witness_hex,
-            );
+            const x_unlock = try self.buildExtraContractUnlock(&extra_unlock_ctx, signed_tx, ei, xu, change_amount);
             defer self.allocator.free(x_unlock);
             const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, x_unlock);
             self.allocator.free(signed_tx);
@@ -2733,6 +2704,111 @@ pub const RunarContract = struct {
     /// then `_serialisedOutputs`, ABI order). Empty when the method has no
     /// auto-injected intent params.
     ///
+    /// Real stateful unlock for additional contract input `ei` (tx input
+    /// `1 + ei`) against `signed_tx`: its own OP_PUSH_TX preimage, and every
+    /// auto-signed Sig slot signed for THIS input (N-293: it used to inherit the
+    /// primary input's signature, which commits to input 0's sighash). Then any
+    /// per-input overrides from `additional_contract_input_args` apply. Mirrors
+    /// TS `buildStatefulUnlock` for inputIdx > 0. Caller owns the result.
+    fn buildExtraContractUnlock(
+        self: *RunarContract,
+        ctx: *const ExtraUnlockCtx,
+        signed_tx: []const u8,
+        ei: usize,
+        xu: types.UTXO,
+        change_amount: i64,
+    ) ![]u8 {
+        const inp_idx = 1 + ei;
+        var sig_subscript = xu.script;
+        if (ctx.code_sep_idx) |cs| {
+            const off: usize = @intCast((@as(usize, @intCast(cs)) + 1) * 2);
+            if (off <= sig_subscript.len) sig_subscript = sig_subscript[off..];
+        }
+        // Per-input args: copy primary resolved_args (real prevouts already
+        // substituted on the final pass), sign the auto-signed Sig slots for
+        // this input, then apply any per-input overrides.
+        var per_input_args = try self.allocator.alloc(types.StateValue, ctx.resolved_args.len);
+        var n_init: usize = 0;
+        defer {
+            for (per_input_args[0..n_init]) |*pa| pa.deinit(self.allocator);
+            self.allocator.free(per_input_args);
+        }
+        for (ctx.resolved_args) |a| {
+            per_input_args[n_init] = try a.clone(self.allocator);
+            n_init += 1;
+        }
+        for (ctx.sig_indices) |idx| {
+            const real_sig = try ctx.sign.sign(self.allocator, signed_tx, inp_idx, sig_subscript, xu.satoshis, null);
+            per_input_args[idx].deinit(self.allocator);
+            per_input_args[idx] = .{ .bytes = real_sig };
+        }
+
+        if (ctx.options) |o| {
+            if (o.additional_contract_input_args) |aia| {
+                if (ei < aia.len) {
+                    const overrides = aia[ei];
+                    for (overrides, 0..) |ov, oi| {
+                        if (oi >= per_input_args.len) break;
+                        // `.int = 0` means "auto-resolve" for Sig/ByteString
+                        // (same convention as the primary args). For other
+                        // types, a literal 0 user value is taken at face.
+                        if (ov == .int and ov.int == 0) {
+                            const ptype = ctx.user_params[oi].type_name;
+                            if (std.mem.eql(u8, ptype, "Sig")) {
+                                const real_sig = try ctx.sign.sign(self.allocator, signed_tx, inp_idx, sig_subscript, xu.satoshis, null);
+                                per_input_args[oi].deinit(self.allocator);
+                                per_input_args[oi] = .{ .bytes = real_sig };
+                                continue;
+                            }
+                            // Name-gated exactly like the primary resolution:
+                            // only the well-known `allPrevouts` slot is the
+                            // SDK's to fill. For any other ByteString param
+                            // `.int = 0` is the caller's own empty value, and
+                            // substituting prevouts here is what actually
+                            // reaches the chain (the placeholder pass above
+                            // is only used for fee sizing).
+                            if ((std.mem.eql(u8, ptype, "ByteString") or std.mem.eql(u8, ptype, "Ripemd160")) and
+                                std.mem.eql(u8, ctx.user_params[oi].name, AUTO_PREVOUTS_PARAM_NAME))
+                            {
+                                const real_pv = try extractAllPrevoutsHex(self.allocator, signed_tx);
+                                per_input_args[oi].deinit(self.allocator);
+                                per_input_args[oi] = .{ .bytes = real_pv };
+                                continue;
+                            }
+                        }
+                        per_input_args[oi].deinit(self.allocator);
+                        per_input_args[oi] = try ov.clone(self.allocator);
+                    }
+                }
+            }
+        }
+
+        // Compute OP_PUSH_TX preimage for this input.
+        var xptx = oppushtx_mod.computeOpPushTxWithSigHash(
+            self.allocator,
+            signed_tx,
+            inp_idx,
+            xu.script,
+            xu.satoshis,
+            ctx.code_sep_idx orelse -1,
+            ctx.sig_hash_type,
+        ) catch return ContractError.CallFailed;
+        defer xptx.deinit(self.allocator);
+
+        return self.buildStatefulUnlockScript(
+            xptx.sig_hex,
+            per_input_args,
+            ctx.method_uses_code_part,
+            ctx.change_pkh_hex,
+            change_amount,
+            ctx.needs_new_amount,
+            ctx.new_satoshis,
+            xptx.preimage_hex,
+            ctx.method_selector_hex,
+            ctx.witness_hex,
+        );
+    }
+
     /// BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
     /// preimage (see codegen emitCheckPreimageBinding), so NO signature is pushed
     /// here — the unlocking script carries only _codePart (if needed) and the
