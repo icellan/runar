@@ -2248,6 +2248,22 @@ pub const RunarContract = struct {
                 }
             }
         }
+        // N-277: the non-terminal branch below (unlike call()'s stateful
+        // branch, which builds a REAL per-input unlock for every extra
+        // contract input via extra_call_inputs/extra_resolved_args) has no
+        // per-input unlock builder, and PreparedCall carries no field to
+        // hand an extra input's unlock to finalizeCall. Without this guard,
+        // options.additional_contract_inputs is never read again below --
+        // the caller's extra UTXO would be silently dropped (spent neither
+        // here nor by finalizeCall) while prepareCall reports success. Fail
+        // closed with the same error call()/prepareCall's other branches use.
+        if (!is_terminal_call) {
+            if (options) |o| {
+                if (o.additional_contract_inputs) |aci| {
+                    if (aci.len > 0) return ContractError.AdditionalContractInputsUnsupported;
+                }
+            }
+        }
         const terminal_outputs: []const types.ContractOutput =
             if (is_terminal_call) options.?.terminal_outputs.? else &.{};
         const terminal_funding: []const types.UTXO =
@@ -5071,9 +5087,10 @@ test "call on a plain SmartContract with additional_contract_inputs fails closed
 // Does NOT prove additional_contract_inputs could be made to work via
 // prepareCall for a plain SmartContract or a zero-mutable-field
 // StatefulSmartContract. Does NOT exercise `prepareCallStateful` (a REAL
-// StatefulSmartContract with mutable fields) -- that function also never
-// threads additional_contract_inputs, a separate, pre-existing gap outside
-// this item's scope (see dispatcher notes).
+// StatefulSmartContract with mutable fields) -- that function now REFUSES
+// non-terminal additional_contract_inputs with the same error instead of
+// silently threading (or dropping) them (N-277; see "prepareCallStateful
+// with additional_contract_inputs fails closed (non-terminal)" below).
 test "prepareCall on a plain SmartContract with additional_contract_inputs fails closed (non-terminal)" {
     const allocator = std.testing.allocator;
     const json =
@@ -5102,6 +5119,75 @@ test "prepareCall on a plain SmartContract with additional_contract_inputs fails
     const opts = types.CallOptions{ .additional_contract_inputs = &extra_utxos };
 
     const result = contract.prepareCall("go", &.{}, prov.provider(), signer.signer(), opts);
+    try std.testing.expectError(ContractError.AdditionalContractInputsUnsupported, result);
+}
+
+// N-277: `prepareCallStateful` -- the REAL stateful two-phase path, entered
+// when `state_fields` is non-empty (see `prepareCall`'s `is_stateful` gate,
+// which the two tests above do NOT exercise) -- never reads
+// `options.additional_contract_inputs` outside its N-271 terminal guard
+// (`is_terminal_call` branch). Unlike `call()`'s stateful branch (which
+// builds a REAL per-input unlock for every extra contract input via
+// `extra_call_inputs` / `extra_resolved_args`), `prepareCallStateful` has no
+// such builder, and `PreparedCall` carries no field to hand an extra input's
+// unlock to `finalizeCall` even if it did. Before the fix this silently
+// drops the caller's extra UTXO: `prepareCall` succeeds, returns a
+// `PreparedCall` whose tx spends only the ONE primary contract input, and
+// the caller's second UTXO is neither spent nor refused while the call
+// reports success -- the N-271/N-276 failure mode, in the one branch those
+// items didn't cover (N-276's own comment on this file names
+// `prepareCallStateful` as a "pre-existing gap outside this item's scope").
+//
+// Does NOT prove `additional_contract_inputs` could be made to work via
+// `prepareCallStateful` -- only that silently dropping it is unacceptable.
+// A real per-input unlock in this two-phase path (mirroring `call()`'s
+// ~300-line merge machinery, plus new `PreparedCall` fields and a
+// `finalizeCall` extension to splice sigs into each extra input) is a
+// separate, larger item; see dispatcher notes for N-277.
+test "prepareCallStateful with additional_contract_inputs fails closed (non-terminal)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    // Fail-closed MockProvider must know the outpoint the call spends (Phase
+    // A5 non-vacuity) -- mirrors the "prepareCall -> finalizeCall round-trip"
+    // fixture above, which this test reuses (non-vacuity: that fixture
+    // already succeeds today with no additional_contract_inputs).
+    try prov.addKnownOutpoint("ee" ** 32, 0, "005100", 2_000);
+    try contract.setCurrentUtxo(.{
+        .txid = "ee" ** 32,
+        .output_index = 0,
+        .satoshis = 2_000,
+        .script = "005100",
+    });
+
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const extra_utxos = [_]types.UTXO{.{ .txid = "ff" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100" }};
+    const opts = types.CallOptions{ .new_state = &new_state, .additional_contract_inputs = &extra_utxos };
+
+    const args = [_]types.StateValue{.{ .int = 0 }};
+    var result = contract.prepareCall("increment", &args, prov.provider(), signer.signer(), opts);
+    // Clean up an Ok result (pre-fix) so a leak panic never masks the
+    // expectError failure below -- the RED run must fail for exactly the
+    // "no error was returned" reason, not an unrelated allocator panic.
+    if (result) |*prepared| {
+        prepared.deinit(allocator);
+    } else |_| {}
+
     try std.testing.expectError(ContractError.AdditionalContractInputsUnsupported, result);
 }
 
