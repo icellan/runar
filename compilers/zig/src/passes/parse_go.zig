@@ -863,6 +863,9 @@ const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
     current: Token,
+    /// N-154: the token `bump` consumed last (null before the first), so a
+    /// `;` can tell whether it ends a statement on the same line.
+    prev: ?Token = null,
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
@@ -998,6 +1001,7 @@ const Parser = struct {
 
     fn bump(self: *Parser) Token {
         const prev = self.current;
+        self.prev = prev;
         self.current = self.fetch();
         return prev;
     }
@@ -1658,10 +1662,30 @@ const Parser = struct {
         if (self.expect(.lbrace) == null) return &.{};
         var stmts: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            self.skipStatementSeparators();
+            if (self.current.kind == .rbrace or self.current.kind == .eof) break;
             if (self.parseStatement()) |s| stmts.append(self.allocator, s) catch {};
         }
         _ = self.expect(.rbrace);
         return stmts.items;
+    }
+
+    /// N-154: a `;` that ends a statement on the same line separates it from
+    /// the next one (`a := 1; b := 2`, `runar.Assert(x);`), as go/parser
+    /// accepts. Any other `;` -- right after `{`, after another `;`, or on a
+    /// later line than the statement it would end (where Go has already
+    /// inserted one) -- is an EMPTY statement, which stays refused (N-153)
+    /// with the TS reference's diagnostic. Called before every statement of
+    /// a block, never in a `for` header.
+    fn skipStatementSeparators(self: *Parser) void {
+        while (self.current.kind == .semicolon) {
+            const separates = if (self.prev) |p|
+                p.kind != .lbrace and p.kind != .semicolon and p.line == self.current.line
+            else
+                false;
+            if (!separates) self.addError("Unexpected token in expression: ';'");
+            _ = self.bump();
+        }
     }
 
     // ---- Statements ----
@@ -1963,8 +1987,9 @@ const Parser = struct {
     fn parseReturnStmt(self: *Parser) ?Statement {
         _ = self.bump(); // consume 'return'
 
-        // If the next token is } or eof, it's a bare return
-        if (self.current.kind == .rbrace or self.current.kind == .eof) {
+        // If the next token is } or eof (or, N-154, a `;` separator), it's a
+        // bare return
+        if (self.current.kind == .rbrace or self.current.kind == .eof or self.current.kind == .semicolon) {
             return .{ .return_stmt = null };
         }
 

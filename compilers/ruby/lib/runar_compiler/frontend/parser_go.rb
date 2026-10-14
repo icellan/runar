@@ -1072,6 +1072,9 @@ module RunarCompiler
         expect(TOK_LBRACE)
         body = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          skip_statement_separators
+          break if check(TOK_RBRACE) || check(TOK_EOF)
+
           body << parse_statement
         end
         expect(TOK_RBRACE)
@@ -1113,6 +1116,24 @@ module RunarCompiler
         nested { parse_statement_inner }
       end
 
+      # N-154: a `;` that ends a statement on the same line separates it from
+      # the next one (`a := 1; b := 2`, `runar.Assert(x);`), as go/parser
+      # accepts. Any other `;` -- after another `;`, or on a later line than
+      # the statement it would end (where Go has already inserted one) -- is
+      # an EMPTY statement, which stays refused (N-153) with the TS
+      # reference's diagnostic. Called before every statement of a block
+      # (so a `;` right after `{` is refused too), never in a `for` header.
+      def skip_statement_separators
+        while check(TOK_SEMICOLON)
+          prev = @pos.positive? ? @tokens[@pos - 1] : nil
+          separates = !prev.nil? &&
+                      prev.kind != TOK_LBRACE && prev.kind != TOK_SEMICOLON &&
+                      prev.line == peek.line
+          add_error("Unexpected token in expression: ';'") unless separates
+          advance
+        end
+      end
+
       def parse_statement_inner
         location = loc
 
@@ -1135,7 +1156,8 @@ module RunarCompiler
         if check_ident("return")
           advance
           value = nil
-          if !check(TOK_RBRACE) && !check(TOK_EOF)
+          # N-154: a `;` separator also ends a bare return.
+          if !check(TOK_RBRACE) && !check(TOK_EOF) && !check(TOK_SEMICOLON)
             value = parse_expression
           end
           return ReturnStmt.new(value: value, source_location: location)
@@ -1234,6 +1256,9 @@ module RunarCompiler
         expect(TOK_LBRACE)
         then_block = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          skip_statement_separators
+          break if check(TOK_RBRACE) || check(TOK_EOF)
+
           then_block << parse_statement
         end
         expect(TOK_RBRACE)
@@ -1247,6 +1272,9 @@ module RunarCompiler
           else
             expect(TOK_LBRACE)
             while !check(TOK_RBRACE) && !check(TOK_EOF)
+              skip_statement_separators
+              break if check(TOK_RBRACE) || check(TOK_EOF)
+
               else_block << parse_statement
             end
             expect(TOK_RBRACE)
@@ -1321,6 +1349,9 @@ module RunarCompiler
         expect(TOK_LBRACE)
         body = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          skip_statement_separators
+          break if check(TOK_RBRACE) || check(TOK_EOF)
+
           body << parse_statement
         end
         expect(TOK_RBRACE)

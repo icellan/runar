@@ -907,6 +907,7 @@ class GoParser extends ParserCore<GoToken> {
     const body: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       body.push(this.parseStatement());
+      this.skipStatementSeparators();
     }
     this.expect('}');
 
@@ -951,6 +952,25 @@ class GoParser extends ParserCore<GoToken> {
     return this.nest.nested(this.loc(), () => this.parseStatementInner());
   }
 
+  /**
+   * N-154: a `;` that ends a statement on the same line separates it from
+   * the next one (`a := 1; b := 2`, `runar.Assert(x);`), as go/parser
+   * accepts. Any other `;` — after another `;`, or on a later line than the
+   * statement it would end (where Go has already inserted one) — is an
+   * EMPTY statement, which stays refused (N-153). Called only between the
+   * statements of a block, never in a `for` header.
+   */
+  private skipStatementSeparators(): void {
+    while (this.current().type === ';') {
+      const prev = this.tokens[this.pos - 1];
+      const separates = prev !== undefined && prev.type !== '{' && prev.type !== ';' && prev.line === this.current().line;
+      if (!separates) {
+        this.errors.push(makeDiagnostic(`Unexpected token in expression: ';'`, 'error', this.loc()));
+      }
+      this.advance();
+    }
+  }
+
   private parseStatementInner(): Statement {
     const location = this.loc();
 
@@ -973,8 +993,9 @@ class GoParser extends ParserCore<GoToken> {
     // return
     if (this.current().type === 'return') {
       this.advance();
-      // Return value is optional; if the next token is '}' there's no value
-      const value = this.current().type !== '}' ? this.parseExpression() : undefined;
+      // Return value is optional; if the next token is '}' (or, N-154, a
+      // `;` separator) there's no value
+      const value = this.current().type !== '}' && this.current().type !== ';' ? this.parseExpression() : undefined;
       return { kind: 'return_statement', value, sourceLocation: location };
     }
 
@@ -1113,6 +1134,7 @@ class GoParser extends ParserCore<GoToken> {
     const thenBranch: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       thenBranch.push(this.parseStatement());
+      this.skipStatementSeparators();
     }
     this.expect('}');
 
@@ -1127,6 +1149,7 @@ class GoParser extends ParserCore<GoToken> {
         elseBranch = [];
         while (this.current().type !== '}' && this.current().type !== 'eof') {
           elseBranch.push(this.parseStatement());
+          this.skipStatementSeparators();
         }
         this.expect('}');
       }
@@ -1206,6 +1229,7 @@ class GoParser extends ParserCore<GoToken> {
     const body: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       body.push(this.parseStatement());
+      this.skipStatementSeparators();
     }
     this.expect('}');
 

@@ -62,6 +62,7 @@ test {
     _ = @import("passes/r065_go_loop_header_test.zig");
     _ = @import("passes/n011_ts_contract_class_selection_test.zig");
     _ = @import("tests/n153_statement_shapes.zig");
+    _ = @import("tests/n154_go_semicolon_separator.zig");
     _ = @import("passes/constant_fold.zig");
     _ = @import("passes/ec_optimizer.zig");
     _ = @import("passes/embed_always_warn.zig");
