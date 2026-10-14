@@ -202,10 +202,13 @@ If you write a rejection assertion, make it name the input and the mechanism.
 
 ## When `TestContract` is enough, and when a real `Spend` is mandatory
 
-`TestContract` is an **AST interpreter with mocked ECDSA**. It walks the parsed
-contract (`RunarInterpreter.executeMethod` over the `ContractNode`), not the
-compiled Bitcoin Script, and `checkSig` / `checkMultiSig` / `checkPreimage` /
-`verifyRabinSig` always return `true`.
+`TestContract` is an **AST interpreter whose crypto is a mixture, not a
+blanket mock** (R-112). It walks the parsed contract
+(`RunarInterpreter.executeMethod` over the `ContractNode`), not the compiled
+Bitcoin Script. `checkSig` and `verifyRabinSig` run the real algorithm;
+`checkPreimage` is stubbed to `true`; `checkMultiSig` refuses outright — it
+throws rather than answer, because it cannot verify a signature set without
+array values.
 
 > **`TestContract` proves business logic. It never proves spendability.**
 
@@ -562,7 +565,15 @@ The full per-tier tooling for Go, Rust, Python, Zig, Ruby, and Java is documente
 
 `TestContract` is the primary test helper. It compiles a contract from source, uses the **interpreter** (not the Script VM) to execute methods, and tracks state changes.
 
-> **Important:** `TestContract` uses mocked ECDSA cryptographic operations — `checkSig`, `checkMultiSig`, and `checkPreimage` always return `true`. This is intentional: it lets you test business logic (state transitions, assertions, arithmetic) without managing real keys or signatures. The post-quantum (`verifyWOTS`, `verifySLHDSA_SHA2_*`) and Schnorr / EC-arithmetic builtins are **not** mocked — they execute the real algorithm in the interpreter. See [Cryptographic verification in tests](#cryptographic-verification-in-tests) below for the full mocked-vs-real list and the escape hatches for exercising real ECDSA / preimage rejection.
+> **Important:** `TestContract`'s crypto is a mixture, not a blanket mock
+> (R-112). `checkSig` and `verifyRabinSig` execute the real algorithm;
+> `checkPreimage` is stubbed to `true`, which is intentional: it lets you
+> test business logic (state transitions, assertions, arithmetic) without
+> managing a real transaction sighash. `checkMultiSig` refuses — it throws
+> rather than answer, because it cannot verify a signature set without array
+> values; use `ScriptVM` for a real `OP_CHECKMULTISIG`. The post-quantum
+> (`verifyWOTS`, `verifySLHDSA_SHA2_*`) and Schnorr / EC-arithmetic builtins
+> are also real. See [Cryptographic verification in tests](#cryptographic-verification-in-tests) below for the full mocked-vs-real list and the escape hatches for exercising real ECDSA / preimage rejection.
 
 > **`TestContract` proves business logic, never spendability.** It is an AST
 > interpreter — it never runs the compiled Bitcoin Script. See
@@ -646,7 +657,7 @@ expect(result.success).toBe(true);
 
 ## Cryptographic verification in tests
 
-`TestContract` runs contracts through the reference **AST** interpreter (`RunarInterpreter`, which walks the parsed `ContractNode`), not a Bitcoin Script VM. The interpreter mocks the ECDSA / preimage builtins so you can write business-logic tests without managing real keys, signatures, or transaction sighashes. The trade-off: a `TestContract` test that "rejects a bad signature" by passing a malformed `sig` value **does not actually exercise ECDSA verification** — `checkSig` returned `true` either way. The rejection in such a test, if there is one, comes from some *other* assertion in the method (a hash mismatch, a state check, etc.), not from the signature being invalid.
+`TestContract` runs contracts through the reference **AST** interpreter (`RunarInterpreter`, which walks the parsed `ContractNode`), not a Bitcoin Script VM. Its crypto is a mixture, not a blanket mock (R-112): `checkSig` and `verifyRabinSig` run the real algorithm, `checkPreimage` is stubbed to `true` (real preimage verification needs a full transaction context, which an off-chain unit test does not have), and `checkMultiSig` refuses — it throws rather than answer, because it cannot verify a signature set without array values. The remaining trade-off: a `TestContract` test that "rejects a bad signature" by passing a malformed `sig` value **does** exercise real ECDSA verification — `checkSig` fails it. What such a test cannot exercise is preimage/sighash validity: a malformed `preimage` field is caught, if at all, by some *other* assertion in the method (a hash mismatch, a state check, etc.), not by `checkPreimage`, which always returns `true`.
 
 This applies to every native-tier package — `runar` (Go), `runar::prelude` (Rust), `runar` (Python), `runar` (Zig), `runar` (Ruby), `runar.lang` (Java) — but the crypto is **not** a blanket mock, and the helper names are not uniform. What is actually true today:
 
@@ -665,10 +676,10 @@ This applies to every native-tier package — `runar` (Go), `runar::prelude` (Ru
 
 | Builtin | Behavior in interpreter | Notes |
 |---------|------------------------|-------|
-| `checkSig` | **Mocked → always `true`** | Real ECDSA verification requires a transaction sighash that the interpreter does not synthesize. |
-| `checkMultiSig` | **Mocked → always `true`** | Same reason as `checkSig`. |
+| `checkSig` | **Real** | Runs the actual ECDSA verification over the fixed `TEST_MESSAGE`. A bad or malformed signature fails it. |
+| `checkMultiSig` | **Refuses — throws** | Cannot verify a signature set without array values; use `ScriptVM` for a real `OP_CHECKMULTISIG`. |
 | `checkPreimage` | **Mocked → always `true`** | The interpreter does not synthesize a BIP-143 preimage; use `setMockPreimage` to control the *fields* the contract reads. |
-| `verifyRabinSig` | **Mocked → always `true`** | Rabin verification is not implemented in the interpreter. |
+| `verifyRabinSig` | **Real** | Runs the actual Rabin verification: `(sig² + padding) mod n === SHA256(msg) mod n`. |
 | `verifyWOTS` | **Real** | Runs the actual WOTS+ verification (hash-chain replay). A bad WOTS+ signature *does* fail this check. |
 | `verifySLHDSA_SHA2_*` | **Real** (all 6 parameter sets) | Runs the actual FIPS 205 verifier. |
 | `sha256`, `hash160`, `hash256`, `ripemd160` | **Real** | Standard hash functions. |
@@ -676,7 +687,7 @@ This applies to every native-tier package — `runar` (Go), `runar::prelude` (Ru
 | `ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY` | **Real** | secp256k1 field/group arithmetic. Schnorr-ZKP and other EC-arithmetic contracts therefore *do* fail the interpreter when the math is wrong. |
 | All math / bitwise / preimage-extractor builtins | **Real** (or fixed test values for preimage extractors) | See the `TestContract` mock-preimage table for the configurable subset. |
 
-The pattern: **mocked = anything whose real implementation needs an ECDSA / Bitcoin sighash context the interpreter does not own**; **real = anything that's a pure function of its inputs** (hashes, EC arithmetic, hash-based PQ signatures, modular arithmetic). PQ and Schnorr-ZKP contracts are exempt from BUG-005's caveats for exactly this reason.
+The pattern: **stubbed = `checkPreimage` only**, because real preimage verification needs a full transaction context the interpreter does not own; **refuses = `checkMultiSig`**, because it needs array values the interpreter does not have; **real = everything else** — ECDSA (`checkSig`), Rabin (`verifyRabinSig`), hashes, EC arithmetic, and hash-based PQ signatures are all pure functions of their inputs. PQ and Schnorr-ZKP contracts are exempt from BUG-005's caveats for exactly this reason.
 
 ### Escape hatches for real-crypto rejection
 
