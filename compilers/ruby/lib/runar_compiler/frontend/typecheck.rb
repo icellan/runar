@@ -386,6 +386,8 @@ module RunarCompiler
         # N-109: for every contract method, the indices of the parameters it
         # consumes (directly or through further helper calls). Private helpers
         # are inlined, so a call consumes the arguments at those positions.
+        # N-288: each entry is [indices, props]; props are the "prop:<name>"
+        # origins the method consumes, which a call consumes in the caller.
         # Computed lazily by TypeChecker.consumed_param_summary.
         @consumed_params = nil
 
@@ -1551,13 +1553,14 @@ module RunarCompiler
       # 2026-04-30 audit finding F6.
       def check_affine_consumption(func_name, args, env)
         consumed_indices = CONSUMING_FUNCTIONS[func_name]
+        consumed_props = []
         if consumed_indices.nil?
           # N-109: a call to a contract method consumes the arguments at the
           # parameter positions that method consumes.
           return if BUILTIN_FUNCTIONS.key?(func_name) || !@method_sigs.key?(func_name)
 
           @consumed_params ||= TypeChecker.consumed_param_summary(@contract)
-          consumed_indices = @consumed_params[func_name] || []
+          consumed_indices, consumed_props = @consumed_params[func_name] || [[], []]
         end
 
         consumed_indices.each do |param_index|
@@ -1585,23 +1588,34 @@ module RunarCompiler
             @consumed_values[origin] = true
           end
         end
+
+        # N-288: the call also consumes every property the method consumes.
+        consumed_props.each do |origin|
+          if @consumed_values[origin] || consumed_per_loop_iteration?(origin, env)
+            add_error("affine value 'this.#{origin.delete_prefix('prop:')}' has already been consumed")
+          else
+            @consumed_values[origin] = true
+          end
+        end
       end
 
       # N-109: run the affine checker over each method body with throwaway
-      # diagnostics and record which parameters end up consumed. Reusing the
+      # diagnostics and record which parameters (and, N-288, which
+      # "prop:<name>" property origins) end up consumed. Reusing the
       # checker inherits alias, if-arm and loop handling. Consumption only grows
       # as summaries grow, so iterating until no entry changes terminates, also
       # for recursive call graphs (refused separately by the validator).
       # Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
       def self.consumed_param_summary(contract)
         summary = {}
-        contract.methods.each { |m| summary[m.name] = [] }
+        contract.methods.each { |m| summary[m.name] = [[], []] }
         changed = true
         while changed
           changed = false
           contract.methods.each do |method|
             consumed = TypeChecker.new(contract).send(:consumed_param_indices, method, summary)
-            next if consumed.length == summary[method.name].length
+            prev = summary[method.name]
+            next if consumed[0].length == prev[0].length && consumed[1].length == prev[1].length
 
             summary[method.name] = consumed
             changed = true
@@ -1610,8 +1624,9 @@ module RunarCompiler
         summary
       end
 
-      # N-109: the indices of +method+'s parameters its body consumes, with
-      # helper calls resolved through +summary+.
+      # N-109: the indices of +method+'s parameters its body consumes, and
+      # (N-288) the "prop:<name>" property origins it consumes, as
+      # [indices, props], with helper calls resolved through +summary+.
       def consumed_param_indices(method, summary)
         @consumed_params = summary
         env = TypeEnv.new
@@ -1622,7 +1637,9 @@ module RunarCompiler
           env.define(param.name, type_node_to_string(param.type))
         end
         check_statements(method.body, env)
-        method.params.each_index.select { |i| @consumed_values[method.params[i].name] }
+        indices = method.params.each_index.select { |i| @consumed_values[method.params[i].name] }
+        props = @consumed_values.select { |origin, used| used && origin.start_with?("prop:") }.keys.sort
+        [indices, props]
       end
 
       # F-110: true when +origin+ is bound outside the innermost enclosing loop

@@ -3,6 +3,7 @@ package frontend
 import (
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 )
 
@@ -486,8 +487,18 @@ type typeChecker struct {
 	// consumedParams maps every contract method to the indices of the
 	// parameters it consumes, directly or through further helper calls
 	// (N-109). Private helpers are inlined, so a call consumes the arguments
-	// at those positions. Computed lazily by consumedParamSummary.
-	consumedParams map[string][]int
+	// at those positions. N-288: also the "prop:<name>" origin keys it
+	// consumes, which a call consumes in the caller. Computed lazily by
+	// consumedParamSummary.
+	consumedParams map[string]methodConsumption
+}
+
+// methodConsumption is what a contract method consumes when it is called
+// (inlined): the indices of its affine parameters (N-109) and the
+// "prop:<name>" origin keys of the affine properties it consumes (N-288).
+type methodConsumption struct {
+	params []int
+	props  []string
 }
 
 // methodEffects returns the named method's effects, following private helpers.
@@ -1608,6 +1619,7 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 // 2026-04-30 audit finding F6.
 func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression, env *typeEnv) {
 	consumedIndices, ok := consumingFunctions[funcName]
+	var consumedProps []string
 	if !ok {
 		// N-109: a call to a contract method consumes the arguments at the
 		// parameter positions that method consumes.
@@ -1620,7 +1632,8 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 		if tc.consumedParams == nil {
 			tc.consumedParams = consumedParamSummary(tc.contract)
 		}
-		consumedIndices = tc.consumedParams[funcName]
+		consumedIndices = tc.consumedParams[funcName].params
+		consumedProps = tc.consumedParams[funcName].props
 	}
 
 	for _, paramIndex := range consumedIndices {
@@ -1653,6 +1666,15 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 			tc.consumedValues[origin] = true
 		}
 	}
+
+	// N-288: the call also consumes every property the method consumes.
+	for _, origin := range consumedProps {
+		if tc.consumedValues[origin] || tc.consumedPerLoopIteration(origin, env) {
+			tc.addError(fmt.Sprintf("affine value 'this.%s' has already been consumed", strings.TrimPrefix(origin, "prop:")))
+		} else {
+			tc.consumedValues[origin] = true
+		}
+	}
 }
 
 // consumedParamSummary runs the affine checker over each method body with
@@ -1661,10 +1683,10 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 // only grows as summaries grow, so iterating until no entry changes
 // terminates, also for recursive call graphs (refused separately by the
 // validator). Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
-func consumedParamSummary(contract *ContractNode) map[string][]int {
-	summary := make(map[string][]int, len(contract.Methods))
+func consumedParamSummary(contract *ContractNode) map[string]methodConsumption {
+	summary := make(map[string]methodConsumption, len(contract.Methods))
 	for _, method := range contract.Methods {
-		summary[method.Name] = []int{}
+		summary[method.Name] = methodConsumption{params: []int{}, props: []string{}}
 	}
 	for changed := true; changed; {
 		changed = false
@@ -1672,7 +1694,8 @@ func consumedParamSummary(contract *ContractNode) map[string][]int {
 			scratch := newTypeChecker(contract)
 			scratch.consumedParams = summary
 			consumed := scratch.consumedParamIndices(method)
-			if len(consumed) != len(summary[method.Name]) {
+			prev := summary[method.Name]
+			if len(consumed.params) != len(prev.params) || len(consumed.props) != len(prev.props) {
 				summary[method.Name] = consumed
 				changed = true
 			}
@@ -1682,8 +1705,8 @@ func consumedParamSummary(contract *ContractNode) map[string][]int {
 }
 
 // consumedParamIndices returns the indices of method's parameters its body
-// consumes (N-109).
-func (tc *typeChecker) consumedParamIndices(method MethodNode) []int {
+// consumes (N-109) and the property origin keys it consumes (N-288).
+func (tc *typeChecker) consumedParamIndices(method MethodNode) methodConsumption {
 	env := newTypeEnv()
 	tc.currentMethodLoc = &method.SourceLocation
 	tc.consumedValues = make(map[string]bool)
@@ -1698,7 +1721,14 @@ func (tc *typeChecker) consumedParamIndices(method MethodNode) []int {
 			indices = append(indices, i)
 		}
 	}
-	return indices
+	props := []string{}
+	for origin, consumed := range tc.consumedValues {
+		if consumed && strings.HasPrefix(origin, "prop:") {
+			props = append(props, origin)
+		}
+	}
+	sort.Strings(props)
+	return methodConsumption{params: indices, props: props}
 }
 
 // consumedPerLoopIteration reports whether origin is bound outside the

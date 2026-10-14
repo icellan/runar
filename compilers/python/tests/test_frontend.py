@@ -2373,6 +2373,56 @@ def test_n109_affine_consumption_through_helpers(helpers, params, body, want):
         assert any(want in m for m in msgs), msgs
 
 
+_N288_H = "private h(): void { assert(checkSig(this.sig, this.pk)); }"
+_N288_DOUBLE = "affine value 'this.sig' has already been consumed"
+_N288_STATELESS = (
+    "class C extends SmartContract {\n"
+    "  readonly pk: PubKey;\n"
+    "  readonly sig: Sig;\n"
+    "  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }\n"
+)
+_N288_STATEFUL = (
+    "class C extends StatefulSmartContract {\n"
+    "  count: bigint;\n"
+    "  constructor(count: bigint) { super(count); this.count = count; }\n"
+)
+_N288_CASES = [
+    (_N288_STATELESS, _N288_H, "", "this.h(); this.h();", _N288_DOUBLE),
+    (_N288_STATELESS, _N288_H, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", _N288_DOUBLE),
+    (_N288_STATELESS, _N288_H, "", "assert(checkSig(this.sig, this.pk)); this.h();", _N288_DOUBLE),
+    (_N288_STATELESS, _N288_H + " private g(t: bigint): void { assert(t > 0n); this.h(); }", "", "this.g(1n); this.g(2n);", _N288_DOUBLE),
+    (_N288_STATELESS, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", _N288_DOUBLE),
+    (_N288_STATEFUL, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"),
+    (_N288_STATELESS, _N288_H, "", "this.h();", None),
+    (_N288_STATELESS, _N288_H, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", None),
+    (_N288_STATELESS, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", None),
+]
+
+
+@pytest.mark.parametrize("header,helpers,params,body,want", _N288_CASES)
+def test_n288_affine_property_consumption_through_helpers(header, helpers, params, body, want):
+    """N-288: the N-109 summary covered parameters only. A helper that consumes
+    a PROPERTY (``checkSig(this.sig, ..)``, ``checkPreimage(this.txPreimage)``)
+    is inlined at every call site, so calling it twice must get the diagnostic a
+    direct double use of the property gets, also per loop iteration, after a
+    direct consume, through an alias and transitively; a single call, one call
+    per if/else arm, and a helper that only reads the property stay legal.
+    Proves the type checker's verdict only, not the emitted script."""
+    source = (
+        header
+        + f"  {helpers}\n"
+        + f"  public m({params}) {{\n    {body}\n    assert(true);\n  }}\n"
+        + "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
+
+
 # ---------------------------------------------------------------------------
 # Validator — gap rows V3, V4, V6, V7, V8, V10, V11, V12, V15, V21,
 #              V23, V24, V25, V26, V27

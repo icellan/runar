@@ -504,17 +504,27 @@ fn consuming_param_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
+/// N-109 / N-288: what a contract method consumes when it is called (it is
+/// inlined): the indices of its affine parameters and the `prop:<name>`
+/// origin keys of the affine properties it consumes.
+#[derive(Clone, Default)]
+struct MethodConsumption {
+    params: Vec<usize>,
+    props: Vec<String>,
+}
+
 /// N-109: run the affine checker over each method body with throwaway
-/// diagnostics and record which parameters end up consumed. Reusing the checker
+/// diagnostics and record which parameters (and, N-288, which `prop:<name>`
+/// property origins) end up consumed. Reusing the checker
 /// inherits alias, if-arm and loop handling. Consumption only grows as
 /// summaries grow, so iterating until no entry changes terminates, also for
 /// recursive call graphs (refused separately by the validator). Mirrors
 /// `consumedParamSummary` in the TS reference 03-typecheck.ts.
-fn consumed_param_summary(contract: &ContractNode) -> HashMap<String, Vec<usize>> {
-    let mut summary: HashMap<String, Vec<usize>> = contract
+fn consumed_param_summary(contract: &ContractNode) -> HashMap<String, MethodConsumption> {
+    let mut summary: HashMap<String, MethodConsumption> = contract
         .methods
         .iter()
-        .map(|m| (m.name.clone(), Vec::new()))
+        .map(|m| (m.name.clone(), MethodConsumption::default()))
         .collect();
     let mut changed = true;
     while changed {
@@ -524,7 +534,10 @@ fn consumed_param_summary(contract: &ContractNode) -> HashMap<String, Vec<usize>
             let mut scratch = TypeChecker::new(contract, &mut scratch_errors);
             scratch.consumed_params = Some(summary.clone());
             let consumed = scratch.consumed_param_indices(method);
-            if consumed.len() != summary.get(&method.name).map_or(0, |v| v.len()) {
+            let (prev_params, prev_props) = summary
+                .get(&method.name)
+                .map_or((0, 0), |v| (v.params.len(), v.props.len()));
+            if consumed.params.len() != prev_params || consumed.props.len() != prev_props {
                 summary.insert(method.name.clone(), consumed);
                 changed = true;
             }
@@ -559,8 +572,9 @@ struct TypeChecker<'a> {
     /// N-109: for every contract method, the indices of the parameters it
     /// consumes (directly or through further helper calls). Private helpers
     /// are inlined, so a call consumes the arguments at those positions.
-    /// Computed lazily by `consumed_param_summary`.
-    consumed_params: Option<HashMap<String, Vec<usize>>>,
+    /// N-288: also the `prop:<name>` origins it consumes, which a call
+    /// consumes in the caller. Computed lazily by `consumed_param_summary`.
+    consumed_params: Option<HashMap<String, MethodConsumption>>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -1971,8 +1985,8 @@ terminal (no state mutation)",
         args: &[Expression],
         env: &mut TypeEnv,
     ) {
-        let indices: Vec<usize> = match consuming_param_indices(func_name) {
-            Some(indices) => indices.to_vec(),
+        let MethodConsumption { params: indices, props: consumed_props } = match consuming_param_indices(func_name) {
+            Some(indices) => MethodConsumption { params: indices.to_vec(), props: Vec::new() },
             None => {
                 // N-109: a call to a contract method consumes the arguments
                 // at the parameter positions that method consumes.
@@ -2026,10 +2040,25 @@ terminal (no state mutation)",
                 self.consumed_values.insert(origin);
             }
         }
+
+        // N-288: the call also consumes every property the method consumes.
+        for origin in consumed_props {
+            if self.consumed_values.contains(&origin)
+                || self.consumed_per_loop_iteration(&origin, env)
+            {
+                self.add_error(format!(
+                    "affine value 'this.{}' has already been consumed",
+                    origin.trim_start_matches("prop:")
+                ));
+            } else {
+                self.consumed_values.insert(origin);
+            }
+        }
     }
 
-    /// N-109: the indices of `method`'s parameters its body consumes.
-    fn consumed_param_indices(&mut self, method: &MethodNode) -> Vec<usize> {
+    /// N-109: the indices of `method`'s parameters its body consumes, and
+    /// (N-288) the `prop:<name>` property origins it consumes.
+    fn consumed_param_indices(&mut self, method: &MethodNode) -> MethodConsumption {
         let mut env = TypeEnv::new();
         self.current_method_loc = Some(method.source_location.clone());
         self.consumed_values.clear();
@@ -2038,13 +2067,21 @@ terminal (no state mutation)",
             env.define(&param.name, type_node_to_ttype(&param.param_type));
         }
         self.check_statements(&method.body, &mut env);
-        method
+        let params = method
             .params
             .iter()
             .enumerate()
             .filter(|(_, p)| self.consumed_values.contains(&p.name))
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        let mut props: Vec<String> = self
+            .consumed_values
+            .iter()
+            .filter(|o| o.starts_with("prop:"))
+            .cloned()
+            .collect();
+        props.sort();
+        MethodConsumption { params, props }
     }
 
     /// F-110: true when `origin` is bound outside the innermost enclosing loop
@@ -2721,6 +2758,46 @@ class C extends SmartContract {
             let source = format!(
                 "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
                 params, body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
+    }
+
+    /// N-288: the N-109 summary covered parameters only. A helper that
+    /// consumes a PROPERTY (`checkSig(this.sig, ..)`,
+    /// `checkPreimage(this.txPreimage)`) is inlined at every call site, so
+    /// calling it twice must get the diagnostic a direct double use of the
+    /// property gets, also per loop iteration, after a direct consume, through
+    /// an alias and transitively; a single call, one call per if/else arm, and
+    /// a helper that only reads the property stay legal. Proves the type
+    /// checker's verdict only, not the emitted script.
+    #[test]
+    fn n288_affine_property_consumption_through_helpers() {
+        let h = "private h(): void { assert(checkSig(this.sig, this.pk)); }";
+        let double = "affine value 'this.sig' has already been consumed";
+        let stateless = "class C extends SmartContract {\n  readonly pk: PubKey;\n  readonly sig: Sig;\n  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }\n";
+        let stateful = "class C extends StatefulSmartContract {\n  count: bigint;\n  constructor(count: bigint) { super(count); this.count = count; }\n";
+        let transitive = format!("{} private g(t: bigint): void {{ assert(t > 0n); this.h(); }}", h);
+        let cases: Vec<(&str, &str, &str, &str, &str)> = vec![
+            (stateless, h, "", "this.h(); this.h();", double),
+            (stateless, h, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", double),
+            (stateless, h, "", "assert(checkSig(this.sig, this.pk)); this.h();", double),
+            (stateless, &transitive, "", "this.g(1n); this.g(2n);", double),
+            (stateless, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", double),
+            (stateful, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"),
+            (stateless, h, "", "this.h();", ""),
+            (stateless, h, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", ""),
+            (stateless, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", ""),
+        ];
+        for (header, helpers, params, body, want) in cases {
+            let source = format!(
+                "{}  {}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                header, helpers, params, body
             );
             let errs = f063_type_errors(&source);
             if want.is_empty() {

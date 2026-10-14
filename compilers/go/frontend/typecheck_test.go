@@ -2487,6 +2487,68 @@ class C extends SmartContract {
 	}
 }
 
+// TestTypeCheck_N288_AffinePropertyConsumptionThroughHelpers: the N-109
+// summary covered parameters only. A helper that consumes a PROPERTY
+// (`checkSig(this.sig, ..)`, `checkPreimage(this.txPreimage)`) is inlined at
+// every call site, so calling it twice must get the diagnostic a direct double
+// use of the property gets, also per loop iteration, after a direct consume,
+// through an alias and transitively; a single call, one call per if/else arm,
+// and a helper that only reads the property stay legal. Proves the type
+// checker's verdict only, not the emitted script.
+func TestTypeCheck_N288_AffinePropertyConsumptionThroughHelpers(t *testing.T) {
+	const h = "private h(): void { assert(checkSig(this.sig, this.pk)); }"
+	const double = "affine value 'this.sig' has already been consumed"
+	const stateless = `class C extends SmartContract {
+  readonly pk: PubKey;
+  readonly sig: Sig;
+  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }
+`
+	const stateful = `class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+`
+	cases := []struct {
+		name, header, helpers, params, body, want string
+	}{
+		{"twice", stateless, h, "", "this.h(); this.h();", double},
+		{"loop2", stateless, h, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", double},
+		{"directThenHelper", stateless, h, "", "assert(checkSig(this.sig, this.pk)); this.h();", double},
+		{"transitive", stateless, h + " private g(t: bigint): void { assert(t > 0n); this.h(); }", "", "this.g(1n); this.g(2n);", double},
+		{"aliasInHelper", stateless, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", double},
+		{"txPreimageTwice", stateful, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"},
+		{"once", stateless, h, "", "this.h();", ""},
+		{"oncePerArm", stateless, h, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", ""},
+		{"readOnlyHelper", stateless, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, StatefulSmartContract, assert, Sig, PubKey, checkSig, checkPreimage, len } from 'runar-lang';
+
+` + c.header + `  ` + c.helpers + `
+  public m(` + c.params + `) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // F-265: substr() literal negative start is a compile-time error
 //

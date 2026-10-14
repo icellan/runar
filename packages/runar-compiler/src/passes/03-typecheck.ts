@@ -448,6 +448,16 @@ const CONSUMING_FUNCTIONS: Record<string, number[]> = {
   'checkPreimage': [0],   // first param (SigHashPreimage) is consumed
 };
 
+/**
+ * N-109 / N-288: what a contract method consumes when it is called (it is
+ * inlined): the indices of its affine parameters, and the `prop:<name>` origin
+ * keys of the affine properties it consumes.
+ */
+interface MethodConsumption {
+  params: number[];
+  props: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Type checker
 // ---------------------------------------------------------------------------
@@ -489,10 +499,12 @@ class TypeChecker {
    * N-109: for every contract method, the indices of the parameters it
    * consumes (directly or through further helper calls). Private helpers are
    * inlined, so a call consumes the arguments at those positions exactly as a
-   * direct `checkSig`/`checkPreimage` would. Computed once, by a fixpoint over
-   * scratch checkers that share this map (see `consumedParamSummary`).
+   * direct `checkSig`/`checkPreimage` would. N-288: also the property origin
+   * keys (`prop:<name>`) it consumes, which a call consumes in the caller.
+   * Computed once, by a fixpoint over scratch checkers that share this map
+   * (see `consumedParamSummary`).
    */
-  private consumedParams: Map<string, number[]> | null;
+  private consumedParams: Map<string, MethodConsumption> | null;
 
   /** Lazily computed side-effect summary (follows private helpers). */
   private sideEffects: SideEffectSummary | null = null;
@@ -507,7 +519,7 @@ class TypeChecker {
   constructor(
     contract: ContractNode,
     errors: CompilerDiagnostic[],
-    consumedParams: Map<string, number[]> | null = null,
+    consumedParams: Map<string, MethodConsumption> | null = null,
   ) {
     this.contract = contract;
     this.errors = errors;
@@ -2062,8 +2074,10 @@ class TypeChecker {
   ): void {
     // N-109: a call to a contract method consumes the arguments at the
     // parameter positions that method consumes.
-    const consumedIndices = CONSUMING_FUNCTIONS[funcName]
-      ?? (BUILTIN_FUNCTIONS.has(funcName) ? undefined : this.methodConsumedParams(funcName));
+    const methodConsumption = CONSUMING_FUNCTIONS[funcName] || BUILTIN_FUNCTIONS.has(funcName)
+      ? undefined
+      : this.methodConsumedParams(funcName);
+    const consumedIndices = CONSUMING_FUNCTIONS[funcName] ?? methodConsumption?.params;
     if (!consumedIndices) return;
 
     for (const paramIndex of consumedIndices) {
@@ -2094,13 +2108,28 @@ class TypeChecker {
         this.consumedValues.add(origin);
       }
     }
+
+    // N-288: the call also consumes every property the method consumes.
+    for (const origin of methodConsumption?.props ?? []) {
+      const label = `this.${origin.slice('prop:'.length)}`;
+      if (this.consumedValues.has(origin) || this.consumedPerLoopIteration(origin, env)) {
+        this.errors.push(makeDiagnostic(
+          `affine value '${label}' has already been consumed`,
+          'error',
+          args[0]?.sourceLocation ?? this.currentStmtLoc,
+        ));
+      } else {
+        this.consumedValues.add(origin);
+      }
+    }
   }
 
   /**
-   * N-109: the parameter indices contract method `name` consumes, or
-   * undefined when `name` is not a contract method.
+   * N-109: the parameter indices (and, N-288, the property origin keys)
+   * contract method `name` consumes, or undefined when `name` is not a
+   * contract method.
    */
-  private methodConsumedParams(name: string): number[] | undefined {
+  private methodConsumedParams(name: string): MethodConsumption | undefined {
     if (!this.methodSigs.has(name)) return undefined;
     if (this.consumedParams === null) this.consumedParams = this.consumedParamSummary();
     return this.consumedParams.get(name);
@@ -2114,16 +2143,17 @@ class TypeChecker {
    * entry changes terminates, also for the recursive call graphs 02-validate
    * refuses separately.
    */
-  private consumedParamSummary(): Map<string, number[]> {
-    const summary = new Map<string, number[]>();
-    for (const method of this.contract.methods) summary.set(method.name, []);
+  private consumedParamSummary(): Map<string, MethodConsumption> {
+    const summary = new Map<string, MethodConsumption>();
+    for (const method of this.contract.methods) summary.set(method.name, { params: [], props: [] });
     let changed = true;
     while (changed) {
       changed = false;
       for (const method of this.contract.methods) {
         const scratch = new TypeChecker(this.contract, [], summary);
         const consumed = scratch.consumedParamIndices(method);
-        if (consumed.length !== summary.get(method.name)!.length) {
+        const prev = summary.get(method.name)!;
+        if (consumed.params.length !== prev.params.length || consumed.props.length !== prev.props.length) {
           summary.set(method.name, consumed);
           changed = true;
         }
@@ -2132,8 +2162,11 @@ class TypeChecker {
     return summary;
   }
 
-  /** N-109: the indices of `method`'s parameters its body consumes. */
-  private consumedParamIndices(method: MethodNode): number[] {
+  /**
+   * N-109: the indices of `method`'s parameters its body consumes, and
+   * (N-288) the property origin keys it consumes.
+   */
+  private consumedParamIndices(method: MethodNode): MethodConsumption {
     const env = new TypeEnv();
     this.consumedValues = new Set();
     this.affineAliases = new Map();
@@ -2145,7 +2178,8 @@ class TypeChecker {
     method.params.forEach((param, i) => {
       if (this.consumedValues.has(param.name)) indices.push(i);
     });
-    return indices;
+    const props = [...this.consumedValues].filter(origin => origin.startsWith('prop:')).sort();
+    return { params: indices, props };
   }
 
   /**

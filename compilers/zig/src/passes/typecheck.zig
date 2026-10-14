@@ -383,12 +383,27 @@ fn isAffineType(t: RunarType) bool {
 }
 
 /// Functions that consume affine values, mapped to the parameter indices that get consumed.
-/// N-109: method name -> indices of the parameters that method consumes.
-const ConsumedParamSummary = std.StringHashMapUnmanaged([]u8);
+/// N-109 / N-288: what a contract method consumes when it is called (it is
+/// inlined): the indices of its affine parameters, and the `prop:<name>`
+/// origin keys of the affine properties it consumes. Both slices, and every
+/// key string, are owned by the summary.
+const MethodConsumption = struct {
+    params: []u8,
+    props: [][]u8,
+
+    fn deinit(self: MethodConsumption, allocator: Allocator) void {
+        allocator.free(self.params);
+        for (self.props) |key| allocator.free(key);
+        allocator.free(self.props);
+    }
+};
+
+/// N-109: method name -> what that method consumes.
+const ConsumedParamSummary = std.StringHashMapUnmanaged(MethodConsumption);
 
 fn freeConsumedParamSummary(allocator: Allocator, summary: *ConsumedParamSummary) void {
     var it = summary.iterator();
-    while (it.next()) |entry| allocator.free(entry.value_ptr.*);
+    while (it.next()) |entry| entry.value_ptr.deinit(allocator);
     summary.deinit(allocator);
     allocator.destroy(summary);
 }
@@ -474,6 +489,14 @@ const TypeChecker = struct {
         // StatefulSmartContract gets implicit txPreimage property
         if (contract.parent_class == .stateful_smart_contract) {
             try self.prop_types.put(allocator, "txPreimage", .sig_hash_preimage);
+            // N-288: and an origin key for it, so `this.txPreimage` is
+            // tracked as an affine origin like every other property (the TS
+            // reference keys it `prop:txPreimage`). Without one, consuming it
+            // twice -- directly or through a helper -- went unnoticed.
+            const gop = try self.prop_origin_keys.getOrPut(allocator, "txPreimage");
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try std.fmt.allocPrint(allocator, "prop:{s}", .{"txPreimage"});
+            }
         }
 
         // Register method signatures
@@ -521,7 +544,10 @@ const TypeChecker = struct {
         summary.* = .empty;
         errdefer freeConsumedParamSummary(allocator, summary);
         for (contract.methods) |method| {
-            try summary.put(allocator, method.name, try allocator.alloc(u8, 0));
+            try summary.put(allocator, method.name, .{
+                .params = try allocator.alloc(u8, 0),
+                .props = try allocator.alloc([]u8, 0),
+            });
         }
         var changed = true;
         while (changed) {
@@ -536,21 +562,22 @@ const TypeChecker = struct {
                 scratch.consumed_params = summary;
                 const consumed = try scratch.consumedParamIndices(method);
                 const slot = summary.getPtr(method.name).?;
-                if (consumed.len != slot.len) {
-                    allocator.free(slot.*);
+                if (consumed.params.len != slot.params.len or consumed.props.len != slot.props.len) {
+                    slot.deinit(allocator);
                     slot.* = consumed;
                     changed = true;
                 } else {
-                    allocator.free(consumed);
+                    consumed.deinit(allocator);
                 }
             }
         }
         return summary;
     }
 
-    /// N-109: the indices of `method`'s parameters its body consumes. The
-    /// caller owns the returned slice.
-    fn consumedParamIndices(self: *TypeChecker, method: MethodNode) ![]u8 {
+    /// N-109: the indices of `method`'s parameters its body consumes, and
+    /// (N-288) the `prop:<name>` property origins it consumes. The caller
+    /// owns the result (free with `MethodConsumption.deinit`).
+    fn consumedParamIndices(self: *TypeChecker, method: MethodNode) !MethodConsumption {
         var env = try TypeEnv.init(self.allocator);
         defer env.deinit();
         self.consumed_values.clearRetainingCapacity();
@@ -570,7 +597,28 @@ const TypeChecker = struct {
                 try out.append(self.allocator, @intCast(i));
             }
         }
-        return out.toOwnedSlice(self.allocator);
+        var props: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (props.items) |key| self.allocator.free(key);
+            props.deinit(self.allocator);
+        }
+        var it = self.consumed_values.iterator();
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.* or !std.mem.startsWith(u8, entry.key_ptr.*, "prop:")) continue;
+            const key = try self.allocator.dupe(u8, entry.key_ptr.*);
+            props.append(self.allocator, key) catch |err| {
+                self.allocator.free(key);
+                return err;
+            };
+        }
+        std.mem.sort([]u8, props.items, {}, struct {
+            fn lessThan(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+        const params = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(params);
+        return .{ .params = params, .props = try props.toOwnedSlice(self.allocator) };
     }
 
     /// One emitted state value: what the state continuation actually carries.
@@ -1797,6 +1845,7 @@ const TypeChecker = struct {
     /// cannot launder a double-consumption past the affine check.
     /// 2026-04-30 audit finding F6.
     fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, env: *TypeEnv) void {
+        var consumed_props: []const []u8 = &.{};
         const indices = consumedIndices(func_name) orelse blk: {
             // N-109: a call to a contract method consumes the arguments at
             // the parameter positions that method consumes.
@@ -1811,7 +1860,9 @@ const TypeChecker = struct {
                 self.owns_consumed_params = true;
                 break :s computed;
             };
-            break :blk summary.get(func_name) orelse return;
+            const mc = summary.get(func_name) orelse return;
+            consumed_props = mc.props;
+            break :blk mc.params;
         };
 
         for (indices) |param_index| {
@@ -1833,6 +1884,21 @@ const TypeChecker = struct {
                     .property_access => |pa| self.addError("affine value 'this.{s}' has already been consumed", .{pa.property}),
                     else => self.addError("affine value '{s}' has already been consumed", .{origin}),
                 }
+                continue;
+            }
+            self.consumed_values.put(self.allocator, origin, true) catch {};
+        }
+
+        // N-288: the call also consumes every property the method consumes.
+        // The key is re-resolved to this checker's own `prop_origin_keys`
+        // entry so `consumed_values` never borrows a summary-owned string.
+        for (consumed_props) |summary_key| {
+            const prop_name = summary_key["prop:".len..];
+            const origin = self.prop_origin_keys.get(prop_name) orelse continue;
+            const consumed = (self.consumed_values.get(origin) orelse false) or
+                self.consumedPerLoopIteration(origin, env);
+            if (consumed) {
+                self.addError("affine value 'this.{s}' has already been consumed", .{prop_name});
                 continue;
             }
             self.consumed_values.put(self.allocator, origin, true) catch {};

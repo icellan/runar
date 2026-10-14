@@ -855,6 +855,44 @@ class TestTypecheck < Minitest::Test
     end
   end
 
+  # N-288: the N-109 summary covered parameters only. A helper that consumes a
+  # PROPERTY (`checkSig(this.sig, ..)`, `checkPreimage(this.txPreimage)`) is
+  # inlined at every call site, so calling it twice must get the diagnostic a
+  # direct double use of the property gets, also per loop iteration, after a
+  # direct consume, through an alias and transitively; a single call, one call
+  # per if/else arm, and a helper that only reads the property stay legal.
+  # Proves the type checker's verdict only, not the emitted script.
+  N288_H = "private h(): void { assert(checkSig(this.sig, this.pk)); }"
+  N288_DOUBLE = "affine value 'this.sig' has already been consumed"
+  N288_STATELESS = "class C extends SmartContract {\n  readonly pk: PubKey;\n  readonly sig: Sig;\n" \
+                   "  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }\n"
+  N288_STATEFUL = "class C extends StatefulSmartContract {\n  count: bigint;\n" \
+                  "  constructor(count: bigint) { super(count); this.count = count; }\n"
+  N288_CASES = [
+    [N288_STATELESS, N288_H, "", "this.h(); this.h();", N288_DOUBLE],
+    [N288_STATELESS, N288_H, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", N288_DOUBLE],
+    [N288_STATELESS, N288_H, "", "assert(checkSig(this.sig, this.pk)); this.h();", N288_DOUBLE],
+    [N288_STATELESS, "#{N288_H} private g(t: bigint): void { assert(t > 0n); this.h(); }", "", "this.g(1n); this.g(2n);", N288_DOUBLE],
+    [N288_STATELESS, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", N288_DOUBLE],
+    [N288_STATEFUL, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"],
+    [N288_STATELESS, N288_H, "", "this.h();", nil],
+    [N288_STATELESS, N288_H, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", nil],
+    [N288_STATELESS, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", nil],
+  ].freeze
+
+  def test_n288_affine_property_consumption_through_helpers
+    N288_CASES.each do |header, helpers, params, body, want|
+      source = "#{header}  #{helpers}\n" \
+               "  public m(#{params}) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # F-265: substr() literal negative start is a compile-time error
   #

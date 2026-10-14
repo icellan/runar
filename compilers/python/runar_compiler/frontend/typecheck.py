@@ -473,14 +473,19 @@ _CONSUMING_FUNCTIONS: dict[str, list[int]] = {
 # Type checker
 # ---------------------------------------------------------------------------
 
-def _consumed_param_summary(contract: ContractNode) -> dict[str, list[int]]:
+def _consumed_param_summary(
+    contract: ContractNode,
+) -> dict[str, tuple[list[int], list[str]]]:
     """N-109: run the affine checker over each method body with throwaway
-    diagnostics and record which parameters end up consumed. Reusing the
+    diagnostics and record which parameters (and, N-288, which ``prop:<name>``
+    property origins) end up consumed. Reusing the
     checker inherits alias, if-arm and loop handling. Consumption only grows as
     summaries grow, so iterating until no entry changes terminates, also for
     recursive call graphs (refused separately by the validator). Mirrors
     ``consumedParamSummary`` in the TS reference 03-typecheck.ts."""
-    summary: dict[str, list[int]] = {m.name: [] for m in contract.methods}
+    summary: dict[str, tuple[list[int], list[str]]] = {
+        m.name: ([], []) for m in contract.methods
+    }
     changed = True
     while changed:
         changed = False
@@ -488,7 +493,8 @@ def _consumed_param_summary(contract: ContractNode) -> dict[str, list[int]]:
             scratch = _TypeChecker(contract)
             scratch._consumed_params = summary
             consumed = scratch._consumed_param_indices(method)
-            if len(consumed) != len(summary[method.name]):
+            prev = summary[method.name]
+            if len(consumed[0]) != len(prev[0]) or len(consumed[1]) != len(prev[1]):
                 summary[method.name] = consumed
                 changed = True
     return summary
@@ -519,8 +525,10 @@ class _TypeChecker:
         # N-109: for every contract method, the indices of the parameters it
         # consumes (directly or through further helper calls). Private helpers
         # are inlined, so a call consumes the arguments at those positions.
+        # N-288: each entry also carries the ``prop:<name>`` origins the
+        # method consumes, which a call consumes in the caller.
         # Computed lazily by _consumed_param_summary.
-        self._consumed_params: dict[str, list[int]] | None = None
+        self._consumed_params: dict[str, tuple[list[int], list[str]]] | None = None
 
         for prop in contract.properties:
             self.prop_types[prop.name] = _type_node_to_string(prop.type)
@@ -1557,6 +1565,7 @@ class _TypeChecker:
         launder a double-consumption past the affine check.
         2026-04-30 audit finding F6."""
         consumed_indices = _CONSUMING_FUNCTIONS.get(func_name)
+        consumed_props: list[str] = []
         if consumed_indices is None:
             # N-109: a call to a contract method consumes the arguments at the
             # parameter positions that method consumes.
@@ -1564,7 +1573,7 @@ class _TypeChecker:
                 return
             if self._consumed_params is None:
                 self._consumed_params = _consumed_param_summary(self.contract)
-            consumed_indices = self._consumed_params.get(func_name, [])
+            consumed_indices, consumed_props = self._consumed_params.get(func_name, ([], []))
 
         for param_index in consumed_indices:
             if param_index >= len(args):
@@ -1594,8 +1603,18 @@ class _TypeChecker:
             else:
                 self.consumed_values[origin] = True
 
-    def _consumed_param_indices(self, method: MethodNode) -> list[int]:
-        """N-109: the indices of ``method``'s parameters its body consumes."""
+        # N-288: the call also consumes every property the method consumes.
+        for origin in consumed_props:
+            if self.consumed_values.get(origin, False) or self._consumed_per_loop_iteration(origin, env):
+                self._add_error(
+                    f"affine value 'this.{origin[len('prop:'):]}' has already been consumed"
+                )
+            else:
+                self.consumed_values[origin] = True
+
+    def _consumed_param_indices(self, method: MethodNode) -> tuple[list[int], list[str]]:
+        """N-109: the indices of ``method``'s parameters its body consumes,
+        and (N-288) the ``prop:<name>`` property origins it consumes."""
         env = _TypeEnv()
         self._current_method_loc = method.source_location
         self.consumed_values = {}
@@ -1603,7 +1622,9 @@ class _TypeChecker:
         for param in method.params:
             env.define(param.name, _type_node_to_string(param.type))
         self._check_statements(method.body, env)
-        return [i for i, p in enumerate(method.params) if self.consumed_values.get(p.name, False)]
+        indices = [i for i, p in enumerate(method.params) if self.consumed_values.get(p.name, False)]
+        props = sorted(o for o, used in self.consumed_values.items() if used and o.startswith("prop:"))
+        return indices, props
 
     def _consumed_per_loop_iteration(self, origin: str, env: _TypeEnv) -> bool:
         """F-110: true when ``origin`` is bound outside the innermost enclosing
