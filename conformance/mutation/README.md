@@ -31,6 +31,7 @@ harness would need a per-mutant rebuild; they do not today.)
 | `branch-merged-locals-vm` | `npx vitest run packages/runar-testing/src/__tests__/branch-merged-locals-vm.test.ts` | branch-merged locals (≥2, or asymmetric arms) deployed and called through the real `@bsv/sdk` `Spend`, asserting `expectedState` — not just accept/reject (PALMER-1, `23ef2d2b`) |
 | `branch-result-depth-invariant` | `npx vitest run packages/runar-compiler/src/__tests__/branch-result-depth-invariant.test.ts` | Layer C of `lowerIf` (`7b888035`): the parent `stackMap` must describe the physical stack after `OP_ENDIF`. Registered so the branch-merge mutants can **measure** whether it fires — for a depth-preserving, name-corrupting defect it does **not** |
 | `real-crypto-branch-merged-locals` | `cd conformance && npx vitest run witnesses/real-crypto-execution.test.ts -t branch-merged-locals` | the `branch-merged-locals` witness replayed through the real `@bsv/sdk` `Spend` (2 accepts + 1 tamper-reject), not the interpreter |
+| `real-crypto-private-helper-outputs` | `cd conformance && npx vitest run witnesses/real-crypto-execution.test.ts -t private-helper-outputs` | the `private-helper-outputs` witness (side-effect-summary.ts's regression fixture: public methods delegate output/mutation effects to private helpers) replayed through the real `@bsv/sdk` `Spend`, not the interpreter (N-287) |
 | `state-push-framing-vm` | `npx vitest run packages/runar-testing/src/__tests__/state-push-framing-vm.test.ts` | state-section `<len><data>` framing through a deployed continuation and the real Script VM, over the full 1-byte value-class matrix (PALMER-2, `23ef2d2b`) |
 | `c28-state-strict` | `npx vitest run packages/runar-sdk/src/__tests__/c28-state-strict.test.ts` | `deserializeState` strictness unit pins, including a direct malformed-input case (`deserializeState(fields, '55')` must throw `/is not a push opcode/`) — the gate that actually detects a *decoder*-only OP_N regression (see Phase E1 below) |
 | `sdk-vertical-constructor-slots` | `cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter bigint-0` | TS SDK's constructor-slot splice (`buildCodeScript()` in `contract.ts`) against the independently-derived code part in `conformance/sdk-vertical` (Phase C3 / TG-016) |
@@ -52,7 +53,7 @@ mutation. (The two cases previously called out as missing goldens —
 
 ## Corpus shape
 
-`mutants.json` has 28 mutants across three groups:
+`mutants.json` has 33 mutants across four groups:
 
 - 16 covering the four original audit bug classes — **off-by-one stack
   index**, **swapped operands**, **dropped OP_VERIFY**, **if-without-else
@@ -65,11 +66,42 @@ mutation. (The two cases previously called out as missing goldens —
   the branch-private residue drain's depth-1 special case, the empty-else
   reconcile predicate (two mutants), and the `sinkBelow` DISTANCE. All 6 are
   caught by `stack-frame-mutation-pins` (see Gates above).
+- 5 **N-287** additions closing a gap in the corpus itself: every prior
+  peephole mutant patches the *declarative mirror* `peephole-rules.ts`, never
+  the real engine in `peephole.ts` (its N-264 bottom-up if-arm walk and
+  F-392's opcode-string-form rule matching), and nothing patched
+  `side-effect-summary.ts`'s private-method call-graph walk at all. See
+  below.
 
 Note on the peephole stage: `peephole-rules.ts` is the declarative mirror the
 bounded-exhaustive sweep executes rule-by-rule, so corrupting a rule's
 `replacement` into an unsound one is exactly what `peephole-exhaustive` exists
-to catch — a faithful test of that gate's detection power.
+to catch — a faithful test of that gate's detection power. It does **not**
+exercise `peephole.ts`'s own walk/emission code (`optimizeStackIR`,
+`withOptimizedArms`, `applyOnePass`) at all — `optimizeStackIR` never imports
+or consults `peephole-rules.ts` (see that file's own header comment) — which
+is the gap the N-287 group below measures.
+
+## N-287 additions — peephole.ts walk/emission + side-effect-summary.ts (2026-10)
+
+Five mutants probed with a broad candidate gate list per mutant (via
+`--filter`), then stamped with exactly the gates that fired — not tuned, not
+assumed:
+
+| id | targets | result |
+|---|---|---|
+| `peephole-walk-drops-else-arm` | `optimizeStackIR`'s N-264 bottom-up collection: disables `if (op.else) lists.push(op.else)`, so an if-statement's else arm is never itself optimized | caught by `differential-witness`, `real-crypto-branch-merged-locals`, `stack-frame-mutation-pins` |
+| `peephole-withoptimizedarms-swap-then-else` | `withOptimizedArms` swaps the rebuilt `then`/`else` arms | caught by `differential-witness`, `branch-merged-locals-vm`, `real-crypto-branch-merged-locals`, `stack-frame-mutation-pins` |
+| `peephole-f392-roll0-opcode-form-matches-pick` | F-392's opcode-string-form matching: the `PUSH 0, Roll{0}` rule's `isOpcode(…, 'OP_ROLL')` disjunct is changed to `'OP_PICK'`, so it wrongly intercepts a `PUSH 0, OP_PICK` window that should become `dup` and erases both ops instead | **documented survivor** — see `finding` on the mutant; no current codegen path emits a depth-0/1 opcode-string Roll/Pick pair (WOTS+ codegen, the only known opcode-string emitter, uses depth 2/3), so every one of F-392's five small-depth opcode-string branches is individually unreachable by this corpus's gates |
+| `sideeffect-unioninto-and-instead-of-or` | `unionInto` flips one effect-propagation `||=` to `&&=`, so a private helper's `mutatesState` effect is silently dropped from its public caller's summary | caught **only** by the new `real-crypto-private-helper-outputs` gate (added by this item) — no other existing gate detects it |
+| `sideeffect-ifstmt-skip-else-branch` | `collectStmt`'s `if_statement` case: disables the `stmt.else` walk, so a private helper's side effect hidden only inside an else-branch never surfaces | **documented survivor** — see `finding` on the mutant; `private-helper-outputs` (the fixture this walk exists for) puts every helper's effect at the top level or in a then-branch, never exclusively in an else |
+
+`real-crypto-private-helper-outputs` (new gate, added alongside these
+mutants) replays `conformance/witnesses/real-crypto/private-helper-outputs.json`
+through `witnesses/real-crypto-execution.test.ts -t private-helper-outputs` —
+the existing regression fixture for side-effect-summary.ts's call-graph walk
+(see that file's own module docstring), not previously wired into this
+harness's gate table.
 
 ## Formerly a documented survivor, now closed
 

@@ -10,15 +10,16 @@
     "c28-state-strict": "npx vitest run packages/runar-sdk/src/__tests__/c28-state-strict.test.ts",
     "sdk-vertical-constructor-slots": "cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter bigint-0",
     "sdk-vertical-codeseparator": "cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter codesep-tag-zero",
-    "stack-frame-mutation-pins": "npx vitest run packages/runar-testing/src/__tests__/stack-frame-mutation-pins.test.ts"
+    "stack-frame-mutation-pins": "npx vitest run packages/runar-testing/src/__tests__/stack-frame-mutation-pins.test.ts",
+    "real-crypto-private-helper-outputs": "cd conformance && npx vitest run witnesses/real-crypto-execution.test.ts -t private-helper-outputs"
   },
   "_schema": {
     "id": "stable unique id",
     "file": "repo-relative path to the compiler src file",
     "find": "exact substring that MUST occur exactly once in file",
     "replace": "replacement substring injecting the bug",
-    "class": "one of: off-by-one stack index | swapped operands | dropped OP_VERIFY | if-without-else regression | branch-merge regression | state-framing regression | constructor-slot splice regression | codeSeparator off-by-one",
-    "stage": "compiler pipeline stage: anf-lower | stack-lower | emit | constant-fold | peephole; or SDK-layer stage: sdk-state | sdk-splice",
+    "class": "one of: off-by-one stack index | swapped operands | dropped OP_VERIFY | if-without-else regression | branch-merge regression | state-framing regression | constructor-slot splice regression | codeSeparator off-by-one | dropped side-effect detection",
+    "stage": "compiler pipeline stage: anf-lower | stack-lower | emit | constant-fold | peephole | side-effect-summary; or SDK-layer stage: sdk-state | sdk-splice",
     "expectCaughtBy": "gate names that MUST fail (catch) this mutant; empty => documented survivor",
     "checkGates": "for documented survivors: gates run to CONFIRM the mutant survives them",
     "finding": "for documented survivors: the measured coverage hole this mutant records"
@@ -218,7 +219,7 @@
         "branch-merged-locals-vm",
         "real-crypto-branch-merged-locals"
       ],
-      "finding": "PALMER-1 inversion, RE-DERIVED 2026-08-06 against 4b0f688f (multi-result branch node). MEASURED per-gate firing (2026-08-06, each gate run separately against the applied patch): branch-merged-locals-vm 5/9 shapes fail (S3 k=2 same-set, S6 k=3, S7 k=2 mixed types, S8 the filed 4-local asymmetric reproducer, S9 nested — S1/S2 k=1 and S4/S5 are untouched by a list truncated to its FIRST entry); real-crypto-branch-merged-locals 1/3 spends fail (the toFirst==0 accept, where the else-arm reassigns nb and na must survive); branch-result-depth-invariant does NOT fire (18/18 still pass) and is deliberately NOT listed — this defect preserves arm depth and corrupts which NAME occupies a slot, and that invariant only sees depth. The previous patch disabled `if (mergedLocals.length >= 2)` inside branchOutputRejectionReason — a function that only runs when an if arm emits an output, which the branch-merged-locals fixtures never do — so it applied cleanly, gated nothing, and SURVIVED while baseline.json recorded it as caught. The current patch truncates collectBranchMergedLocals' canonical merge list to its first entry, so only ONE local ever gets the explicit two-pass copy-then-rebind block both arms need and every other genuinely-reassigned local falls through to undeclared-result machinery — the pre-23ef2d2b behaviour, in the place that now decides it."
+      "finding": "PALMER-1 inversion, RE-DERIVED 2026-08-06 against 4b0f688f (multi-result branch node). MEASURED per-gate firing (2026-08-06, each gate run separately against the applied patch): branch-merged-locals-vm 5/9 shapes fail (S3 k=2 same-set, S6 k=3, S7 k=2 mixed types, S8 the filed 4-local asymmetric reproducer, S9 nested \u2014 S1/S2 k=1 and S4/S5 are untouched by a list truncated to its FIRST entry); real-crypto-branch-merged-locals 1/3 spends fail (the toFirst==0 accept, where the else-arm reassigns nb and na must survive); branch-result-depth-invariant does NOT fire (18/18 still pass) and is deliberately NOT listed \u2014 this defect preserves arm depth and corrupts which NAME occupies a slot, and that invariant only sees depth. The previous patch disabled `if (mergedLocals.length >= 2)` inside branchOutputRejectionReason \u2014 a function that only runs when an if arm emits an output, which the branch-merged-locals fixtures never do \u2014 so it applied cleanly, gated nothing, and SURVIVED while baseline.json recorded it as caught. The current patch truncates collectBranchMergedLocals' canonical merge list to its first entry, so only ONE local ever gets the explicit two-pass copy-then-rebind block both arms need and every other genuinely-reassigned local falls through to undeclared-result machinery \u2014 the pre-23ef2d2b behaviour, in the place that now decides it."
     },
     {
       "id": "stacklower-merge-locals-property-only",
@@ -232,7 +233,7 @@
         "branch-result-depth-invariant",
         "real-crypto-branch-merged-locals"
       ],
-      "finding": "PALMER-1 inversion (stack-lower face), RE-DERIVED 2026-08-06 against 4b0f688f. The previous patch added the `_properties` guard to `elseMatchesThenNResultLayout`, which after 4b0f688f is only reachable when nDeclared === 0 — every branch-merged-locals shape now takes the declared-results path instead, so the patch applied to dead code and SURVIVED while baseline.json recorded it as caught. The current patch puts the same pre-23ef2d2b `_properties` membership guard on the decision that replaced it: the by-name adoption of the declared results in lowerIf. A merged LOCAL is then registered under the if-binding's name instead of its own, so the parent's stackMap names a different slot than the one the arms actually left — one stackMap name for N physical results, which is exactly the pre-fix failure. MEASURED per-gate firing (2026-08-06, each gate run separately, twice, against two different working-tree states): branch-merged-locals-vm 8/9 shapes fail (all but S2, the if-without-else shape, which never reaches the declared-results adoption); branch-result-depth-invariant 12/18 fail — unlike its anf-lower peer this face also moves the stale-slot roll-out, so Layer C (7b888035) sees it; real-crypto-branch-merged-locals 3/3 spends fail. All three listed because all three were observed to fire in both runs."
+      "finding": "PALMER-1 inversion (stack-lower face), RE-DERIVED 2026-08-06 against 4b0f688f. The previous patch added the `_properties` guard to `elseMatchesThenNResultLayout`, which after 4b0f688f is only reachable when nDeclared === 0 \u2014 every branch-merged-locals shape now takes the declared-results path instead, so the patch applied to dead code and SURVIVED while baseline.json recorded it as caught. The current patch puts the same pre-23ef2d2b `_properties` membership guard on the decision that replaced it: the by-name adoption of the declared results in lowerIf. A merged LOCAL is then registered under the if-binding's name instead of its own, so the parent's stackMap names a different slot than the one the arms actually left \u2014 one stackMap name for N physical results, which is exactly the pre-fix failure. MEASURED per-gate firing (2026-08-06, each gate run separately, twice, against two different working-tree states): branch-merged-locals-vm 8/9 shapes fail (all but S2, the if-without-else shape, which never reaches the declared-results adoption); branch-result-depth-invariant 12/18 fail \u2014 unlike its anf-lower peer this face also moves the stale-slot roll-out, so Layer C (7b888035) sees it; real-crypto-branch-merged-locals 3/3 spends fail. All three listed because all three were observed to fire in both runs."
     },
     {
       "id": "sdkstate-encode-minimaldata-opn",
@@ -349,6 +350,80 @@
       "expectCaughtBy": [
         "stack-frame-mutation-pins"
       ]
+    },
+    {
+      "id": "peephole-walk-drops-else-arm",
+      "file": "packages/runar-compiler/src/optimizer/peephole.ts",
+      "find": "        if (op.else) lists.push(op.else);",
+      "replace": "        if (false) lists.push(op.else); // N-287 probe: else arm never collected for its own optimization pass",
+      "class": "if-without-else regression",
+      "stage": "peephole",
+      "expectCaughtBy": [
+        "differential-witness",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ]
+    },
+    {
+      "id": "peephole-withoptimizedarms-swap-then-else",
+      "file": "packages/runar-compiler/src/optimizer/peephole.ts",
+      "find": "      then: optimizedThen,\n      else: optimizedElse,",
+      "replace": "      then: optimizedElse,\n      else: optimizedThen,",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "expectCaughtBy": [
+        "differential-witness",
+        "branch-merged-locals-vm",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ]
+    },
+    {
+      "id": "peephole-f392-roll0-opcode-form-matches-pick",
+      "file": "packages/runar-compiler/src/optimizer/peephole.ts",
+      "find": "          ((ops[1]!.op === 'roll' && ops[1]!.depth === 0) || isOpcode(ops[1]!, 'OP_ROLL'))) return [];",
+      "replace": "          ((ops[1]!.op === 'roll' && ops[1]!.depth === 0) || isOpcode(ops[1]!, 'OP_PICK'))) return [];",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "expectCaughtBy": [],
+      "checkGates": [
+        "peephole-exhaustive",
+        "differential-witness",
+        "fold-equivalence",
+        "branch-merged-locals-vm",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ],
+      "finding": "F-392's opcode-string-form matching in the Roll{0}/Pick{0} peephole rules is untested at the engine level: corrupting the Roll{0} rule's opcode check from 'OP_ROLL' to 'OP_PICK' makes it wrongly intercept a `PUSH 0, OP_PICK` opcode-form window (which should become `dup` via the later Pick{0} rule) and erase both ops instead -- a real semantic corruption for any codegen path emitting that exact depth-0 opcode-string pair. It survives every gate probed (measured, not assumed) because no current codegen path emits that pair: WOTS+ codegen (packages/runar-compiler/src/passes/wots-codegen.ts), the one known opcode-string emitter for Roll/Pick, uses depth 2 (OP_PICK) and depth 3 (OP_ROLL) only, never depth 0/1 pairs that F-392's own small-depth rules target. Each of the five opcode-string-form branches (Roll{0,1,2}, Pick{0,1}) is therefore individually unreachable by any fixture in this corpus's gate set; a defect confined to any one of them is undetectable until a fixture exercises that exact depth. Fix candidate (out of scope here, per the dispatcher addendum's 'do not change compiler source'): a witnessed fixture that drives WOTS+ codegen through a depth 0/1 opcode-string Roll/Pick, or a direct unit test against applyOnePass/optimizeStackIR with a synthetic opcode-string op list (bypassing codegen entirely)."
+    },
+    {
+      "id": "sideeffect-unioninto-and-instead-of-or",
+      "file": "packages/runar-compiler/src/passes/side-effect-summary.ts",
+      "find": "  target.mutatesState ||= source.mutatesState;",
+      "replace": "  target.mutatesState &&= source.mutatesState;",
+      "class": "dropped side-effect detection",
+      "stage": "side-effect-summary",
+      "expectCaughtBy": [
+        "real-crypto-private-helper-outputs"
+      ]
+    },
+    {
+      "id": "sideeffect-ifstmt-skip-else-branch",
+      "file": "packages/runar-compiler/src/passes/side-effect-summary.ts",
+      "find": "        if (stmt.else) for (const inner of stmt.else) collectStmt(inner, into);",
+      "replace": "        if (false) for (const inner of stmt.else) collectStmt(inner, into); // N-287 probe: else-branch effects never surface",
+      "class": "dropped side-effect detection",
+      "stage": "side-effect-summary",
+      "expectCaughtBy": [],
+      "checkGates": [
+        "differential-witness",
+        "branch-merged-locals-vm",
+        "real-crypto-branch-merged-locals",
+        "real-crypto-private-helper-outputs",
+        "state-push-framing-vm",
+        "c28-state-strict"
+      ],
+      "finding": "side-effect-summary.ts's collectStmt walks an if-statement's `else` block only to detect side effects (mutatesState/hasStateOutput/hasDataOutput/usesPreimage/requireOutputP2PKH) buried there; disabling that traversal means a private helper whose ONLY side effect lives inside an else-branch is classified as having no effect at all, so a stateful public method calling it would be wrongly treated as terminal (no continuation injected -- a fund-loss-class miscompilation of the same shape as the private-helper-outputs regression this item's new real-crypto-private-helper-outputs gate exists for). It survives every gate probed (measured, not assumed): private-helper-outputs (the regression fixture whose own docstring names side-effect-summary.ts's call-graph walk as the mechanism under test) puts every helper's effect in the then-position or at the top level, never exclusively inside an else branch, so no witnessed fixture currently exercises this specific line. Fix candidate (out of scope here): extend private-helper-outputs (or add a sibling fixture) with a private helper whose output/mutation is reachable ONLY via an else arm."
     }
   ]
 }

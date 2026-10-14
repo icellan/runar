@@ -123,6 +123,16 @@ export const GATES: Record<string, GateSpec> = {
     cwd: 'conformance',
     argv: ['npx', 'vitest', 'run', 'witnesses/real-crypto-execution.test.ts', '-t', 'branch-merged-locals'],
   },
+  // N-287: real-crypto witness replay for private-helper-outputs — the
+  // regression fixture for side-effect-summary.ts's call-graph walk (a public
+  // method's continuation shape must reflect side effects buried in a private
+  // helper it calls). Deployed through the actual @bsv/sdk Spend, not the
+  // interpreter, so a dropped/corrupted effect changes the compiled
+  // continuation shape and the real spend rejects.
+  'real-crypto-private-helper-outputs': {
+    cwd: 'conformance',
+    argv: ['npx', 'vitest', 'run', 'witnesses/real-crypto-execution.test.ts', '-t', 'private-helper-outputs'],
+  },
   'state-push-framing-vm': {
     cwd: '.',
     argv: ['npx', 'vitest', 'run', 'packages/runar-testing/src/__tests__/state-push-framing-vm.test.ts'],
