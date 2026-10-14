@@ -263,14 +263,14 @@
     {
       "id": "sdksplice-constructor-slot-wrong-length",
       "file": "packages/runar-sdk/src/contract.ts",
-      "find": "encoded: encodeArg(this.constructorArgs[slot.paramIndex]),",
-      "replace": "encoded: encodeArg(this.constructorArgs[slot.paramIndex]) + '00',",
+      "find": "encoded: encodeArg(this.resolveConstructorArg(slot.paramIndex)),",
+      "replace": "encoded: encodeArg(this.resolveConstructorArg(slot.paramIndex)) + '00',",
       "class": "constructor-slot splice regression",
       "stage": "sdk-splice",
       "expectCaughtBy": [
         "sdk-vertical-constructor-slots"
       ],
-      "finding": "Phase C3 (TG-016) mutant: appends a stray byte to every constructor-slot substitution in buildCodeScript(), so the deployed code part is one byte too long per slot and every subsequent byte offset shifts. Caught by the compiler<->SDK vertical pin (conformance/sdk-vertical), which compares the TS SDK's deployed script against an INDEPENDENTLY re-derived code part (reference/derive.ts, imports nothing from packages/**) -- horizontal 7-SDK agreement alone would not have caught a bug that only one tier's splice logic has."
+      "finding": "Phase C3 (TG-016) mutant: appends a stray byte to every constructor-slot substitution in buildCodeScript(), so the deployed code part is one byte too long per slot and every subsequent byte offset shifts. Caught by the compiler<->SDK vertical pin (conformance/sdk-vertical), which compares the TS SDK's deployed script against an INDEPENDENTLY re-derived code part (reference/derive.ts, imports nothing from packages/**) -- horizontal 7-SDK agreement alone would not have caught a bug that only one tier's splice logic has. Re-derived 2026-10-14 after N-223 (packages/runar-sdk/src/contract.ts) wrapped this read in `resolveConstructorArg(paramIndex)` for a shared out-of-range guard; the find string `encoded: encodeArg(this.constructorArgs[slot.paramIndex]),` no longer occurred (0x) so the mutant was STALE. Re-pointed at the new call site with the same stray-byte-per-slot fault and re-measured by hand (apply, run the gate with output visible, revert -- not inferred from exit code alone): `cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts --tiers typescript --filter bigint-0` exits 1 with `[tier:typescript] deployed locking script does not begin with the independently-derived code part (first difference at byte 2: 7b vs 00)` and `[tier:typescript] does not match expected-locking.hex (...)` -- the vertical pin's own SDK-vs-independent-derivation comparison in step [4] of vertical-runner.ts fires, not `[golden]` (step [3], which never touches the SDK and is unaffected by a contract.ts mutation) and not an SDK-side length-guard throw. Same gate, same failure mode as the original 2026-08 measurement."
     },
     {
       "id": "sdksplice-codeseparator-off-by-one",
