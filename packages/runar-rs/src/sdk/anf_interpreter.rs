@@ -82,8 +82,11 @@ enum Val {
     Int(i64),
     Bool(bool),
     Bytes(String),
-    /// N-259: an `array_literal` binding's element values, in order. Its
-    /// only consumer is `checkMultiSig`; it never reaches state or outputs.
+    /// N-259: an `array_literal` binding's element values, in order.
+    /// N-275: also produced by `Val::from_sdk` when a caller passes a
+    /// pre-built list directly as a method arg (`SdkValue::Array`), without
+    /// going through an `array_literal` binding. Its only consumer is
+    /// `checkMultiSig`; it never reaches state or outputs.
     Array(Vec<Val>),
     Undefined,
 }
@@ -99,10 +102,17 @@ impl Val {
             // EmptySig is a signature slot (issue #106); its value never feeds
             // state/data-output computation, so treat it as Undefined like Auto.
             SdkValue::EmptySig => Val::Undefined,
-            // Array values must be flattened into scalar slots by the
-            // caller before reaching the ANF interpreter. Treat any
-            // leaked Array as Undefined so downstream code fails loudly.
-            SdkValue::Array(_) => Val::Undefined,
+            // N-275: a caller may pass a pre-built sig/pk list directly as a
+            // method arg (not via an `array_literal` ANF binding) — e.g.
+            // `args["sigs"] = SdkValue::Array([..])` for `checkMultiSig`, as
+            // TS/Java accept. Map element-wise instead of discarding to
+            // Undefined, which made `verify_multi_sig_real` see non-Array
+            // operands and answer `false` for every such call (fail-closed
+            // on a VALID multisig). `FixedArray` state fields still flatten
+            // to scalar slots before reaching here (see `fixed_array`
+            // handling elsewhere); this arm only matters for values that
+            // reach `Val::from_sdk` as an actual `SdkValue::Array`.
+            SdkValue::Array(items) => Val::Array(items.iter().map(Val::from_sdk).collect()),
         }
     }
 
@@ -3277,5 +3287,177 @@ mod real_crypto_tests {
             let hex = num2bin_hex(n, 8);
             assert_eq!(bin2num_i64(&hex), n, "round trip of {} through {}", n, hex);
         }
+    }
+
+    // N-275 — `Val::from_sdk` mapped `SdkValue::Array(_)` to `Val::Undefined`,
+    // so a caller passing a PRE-BUILT sig/pk list as a method arg (as the TS
+    // reference's `anf-interpreter-real-crypto.spec.ts` "passes when both
+    // sigs verify against a 2-of-2 pubkey set" case does — `{ sigs: [sig1,
+    // sig2], pks: [pk1, pk2] }`, a plain array value, not an `array_literal`
+    // ANF binding) never reached `Val::Array` at all: the `sigs`/`pks`
+    // params landed in `env` as `Undefined`, `verify_multi_sig_real` saw
+    // non-Array operands and returned `Some(false)` (its documented
+    // "operands that are not arrays yield `Some(false)`" case), and a VALID
+    // multisig got rejected by the enclosing `assert` — fail-closed, but
+    // wrong: TS and Java accept exactly this call shape.
+    //
+    // This test drives `execute_on_chain_authoritative` directly with
+    // `args["sigs"]` / `args["pks"]` as `SdkValue::Array(..)` (mirroring how
+    // an SDK caller passes a pre-built list through `call()`), for a 2-of-3
+    // multisig: two real ECDSA signatures (over the method's sighash) by the
+    // first two of three keys, supplied in ascending key order — the same
+    // order `OP_CHECKMULTISIG` / `verify_multi_sig_real` require.
+    //
+    // What it proves: a method param whose arg value is `SdkValue::Array`
+    // (built outside the ANF body, never through an `array_literal`
+    // binding) reaches `checkMultiSig` as a real `Val::Array` and a valid
+    // 2-of-3 signature set is accepted, matching the TS reference — and
+    // (second assertion) that the elements are mapped THROUGH in order, not
+    // that any array makes `checkMultiSig` true: reversing `sigs` to
+    // `[sig2, sig1]` against the same `pks` makes the walk compare sig1
+    // against pk3 then pk2 (neither matches), so `nsigs(2) > nkeys(1)` and
+    // the call aborts (`None` from `verify_multi_sig_real`) exactly as it
+    // would for a genuinely wrong signature set.
+    // What it does not prove: `array_literal`-built lists (N-259, already
+    // covered elsewhere), NULLFAIL/abort behavior for malformed array
+    // elements, or `FixedArray` state-field flattening (a different, already
+    // -working path that never constructs `SdkValue::Array` at this layer —
+    // `contract.rs::encode_arg` panics on an unflattened `SdkValue::Array`,
+    // so one can never reach here from that path).
+    #[test]
+    fn execute_on_chain_authoritative_accepts_2_of_3_multisig_passed_as_array_args() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+
+        fn key_from_byte(last: u8) -> SigningKey {
+            let mut bytes = [0u8; 32];
+            bytes[31] = last;
+            SigningKey::from_bytes(&bytes.into()).unwrap()
+        }
+
+        fn sign_der_hex(key: &SigningKey, sighash: &[u8; 32]) -> String {
+            let (sig, _): (K256Signature, k256::ecdsa::RecoveryId) =
+                key.sign_prehash(sighash).unwrap();
+            bytes_to_hex(sig.to_der().as_bytes())
+        }
+
+        let digest = Sha256::digest(b"N-275-multisig-args-test");
+        let mut sighash = [0u8; 32];
+        sighash.copy_from_slice(&digest);
+
+        let key1 = key_from_byte(1);
+        let key2 = key_from_byte(2);
+        let key3 = key_from_byte(3);
+        let sig1 = sign_der_hex(&key1, &sighash);
+        let sig2 = sign_der_hex(&key2, &sighash);
+        let pk1 = bytes_to_hex(&key1.verifying_key().to_sec1_bytes());
+        let pk2 = bytes_to_hex(&key2.verifying_key().to_sec1_bytes());
+        let pk3 = bytes_to_hex(&key3.verifying_key().to_sec1_bytes());
+
+        // unlock(sigs, pks): assert(checkMultiSig(sigs, pks)); value = 1.
+        let anf = ANFProgram {
+            contract_name: "MultisigGuard".to_string(),
+            properties: vec![ANFProperty {
+                name: "value".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: false,
+                initial_value: None,
+            }],
+            methods: vec![ANFMethod {
+                name: "unlock".to_string(),
+                params: vec![
+                    ANFParam { name: "sigs".to_string(), param_type: "Sig[]".to_string() },
+                    ANFParam { name: "pks".to_string(), param_type: "PubKey[]".to_string() },
+                ],
+                is_public: true,
+                body: vec![
+                    ANFBinding {
+                        name: "sigsArg".to_string(),
+                        value: serde_json::json!({ "kind": "load_param", "name": "sigs" }),
+                    },
+                    ANFBinding {
+                        name: "pksArg".to_string(),
+                        value: serde_json::json!({ "kind": "load_param", "name": "pks" }),
+                    },
+                    ANFBinding {
+                        name: "msigOk".to_string(),
+                        value: serde_json::json!({
+                            "kind": "call",
+                            "func": "checkMultiSig",
+                            "args": ["sigsArg", "pksArg"],
+                        }),
+                    },
+                    ANFBinding {
+                        name: "assertMsig".to_string(),
+                        value: serde_json::json!({ "kind": "assert", "value": "msigOk" }),
+                    },
+                    ANFBinding {
+                        name: "one".to_string(),
+                        value: serde_json::json!({ "kind": "load_const", "value": 1 }),
+                    },
+                    ANFBinding {
+                        name: "upd".to_string(),
+                        value: serde_json::json!({
+                            "kind": "update_prop",
+                            "name": "value",
+                            "value": "one",
+                        }),
+                    },
+                ],
+            }],
+        };
+
+        let mut state = HashMap::new();
+        state.insert("value".to_string(), SdkValue::Int(0));
+
+        let mut args = HashMap::new();
+        args.insert(
+            "sigs".to_string(),
+            SdkValue::Array(vec![
+                SdkValue::Bytes(sig1.clone()),
+                SdkValue::Bytes(sig2.clone()),
+            ]),
+        );
+        args.insert(
+            "pks".to_string(),
+            SdkValue::Array(vec![
+                SdkValue::Bytes(pk1.clone()),
+                SdkValue::Bytes(pk2.clone()),
+                SdkValue::Bytes(pk3.clone()),
+            ]),
+        );
+
+        let ctx = OnChainCryptoContext { sighash };
+
+        let (new_state, _, _) =
+            execute_on_chain_authoritative(&anf, "unlock", &state, &args, &[], &ctx).expect(
+                "a valid 2-of-3 multisig passed via args (SdkValue::Array) must be accepted",
+            );
+        assert_eq!(new_state.get("value"), Some(&SdkValue::Int(1)));
+
+        // Non-vacuity: the elements are mapped THROUGH in order, not just
+        // "any array makes checkMultiSig true". Reversing `sigs` to
+        // `[sig2, sig1]` against the same `pks` breaks the ascending-order
+        // requirement `OP_CHECKMULTISIG` / `verify_multi_sig_real` enforce
+        // (sig1 is examined against pk3 then pk2, neither matches, so
+        // `nsigs(2) > nkeys(1)`), and must abort rather than succeed.
+        let mut reversed_args = HashMap::new();
+        reversed_args.insert(
+            "sigs".to_string(),
+            SdkValue::Array(vec![SdkValue::Bytes(sig2), SdkValue::Bytes(sig1)]),
+        );
+        reversed_args.insert(
+            "pks".to_string(),
+            SdkValue::Array(vec![
+                SdkValue::Bytes(pk1),
+                SdkValue::Bytes(pk2),
+                SdkValue::Bytes(pk3),
+            ]),
+        );
+        // Aborts at the `checkMultiSig` call binding itself (`msigOk`), not
+        // the enclosing `assert` — `verify_multi_sig_real` returning `None`
+        // short-circuits straight to `Err` (see the `"call"` dispatch arm).
+        let err = execute_on_chain_authoritative(&anf, "unlock", &state, &reversed_args, &[], &ctx)
+            .expect_err("reversed sig order must not satisfy checkMultiSig");
+        assert_eq!(err.binding_name, "msigOk");
     }
 }
