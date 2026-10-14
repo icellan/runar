@@ -124,9 +124,28 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
 		{"P384Add", EmitP384Add, 11555},
 		{"P384Mul", EmitP384Mul, 211986},
+		// N-226: Go had no op-count golden for EmitVerifyECDSA_P384,
+		// EmitP384MulGen or EmitP384Negate, pinning only P384Add/P384Mul above.
+		// P384MulGen is P384Mul's `push G; swap; mul` wrapper, +2 ops for the
+		// same reason EcMulGen is EcMul+2 and P256MulGen is P256Mul+2 (Rust's
+		// p384_mul_gen golden takes the identical +2 over its p384_mul).
+		{"P384MulGen", EmitP384MulGen, 211988},
+		// Matches Rust's p384_negate golden (1404) exactly, the same as
+		// P256Negate matching Rust's p256_negate at 956 -- Negate has no
+		// per-tier StackOp-granularity divergence, unlike the Mul/MulGen
+		// ladder (Rust emits 4 fewer raw ops there; see compilers/rust
+		// tests/crypto_codegen_tests.rs's P384Mul comment).
+		{"P384Negate", EmitP384Negate, 1404},
 		// R-135: +3 ops for the exact-signature-length gate
 		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
 		{"VerifyWOTS", EmitVerifyWOTS, 15491},
+		// Rust's verify_ecdsa_p384 golden is 453361; Go runs +8 ops higher,
+		// the same Δ8 the Go/Rust P-256 verifier pair carries (VerifyECDSA_P256
+		// 297393 vs Rust's verify_ecdsa_p256 297385) -- a documented, stable
+		// per-tier StackOp-counting difference, not a behavioural divergence
+		// (the emitted hex is byte-identical across all 7 tiers; see
+		// conformance/tests/p384-wallet).
+		{"VerifyECDSA_P384", EmitVerifyECDSA_P384, 453369},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
