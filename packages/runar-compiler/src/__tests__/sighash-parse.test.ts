@@ -139,3 +139,120 @@ describe('F-039 malformed @sighash directive is fail-closed (TS surface)', () =>
     ).toBe(0x43);
   });
 });
+
+// N-199 (user decision R75, "Refuse, all 7 tiers"): a `@sighash` /
+// `@embedAlways` directive inside the contract class body that attaches to no
+// member is a compile error with one shared message. ts-morph never attaches a
+// comment that shares a line with the PRECEDING token (it is that token's
+// trailing trivia), so `foo(): void {} // @sighash SINGLE|FORKID` above a
+// public method used to compile under the default ALL|FORKID with no
+// diagnostic. "Attached" means: in the leading trivia of a method (for
+// `@sighash`) or of a property (for `@embedAlways`) — the member kind that
+// reads it. The error is located at the marker's `@` (1-based line, 0-based
+// column).
+//
+// Proves: the TS reference refuses a lost directive in every class-body
+// position (same-line trailing comment, above the constructor, at the end of
+// the body, inside a method body, on the wrong member kind) with the shared
+// text and the marker's location, and still accepts attached directives and
+// prose mentions OUTSIDE the class body (file / class doc comments).
+// Does not prove: the other six tiers agree — that is
+// conformance/negatives/n199-lost-directive-parity.test.ts plus each tier's
+// own unit test; nor anything about a marker outside the class body, which
+// stays prose (shipped fixtures document the directives in header comments).
+describe('N-199 lost @sighash / @embedAlways directive is refused (TS surface)', () => {
+  const LOST_SIGHASH =
+    '@sighash directive is not attached to any method and would be silently ignored; put the comment on its own line directly above the method it annotates (a comment that shares a line with the preceding code belongs to that code)';
+  const LOST_EMBED =
+    '@embedAlways directive is not attached to any property and would be silently ignored; put the comment on its own line directly above the property it annotates (a comment that shares a line with the preceding code belongs to that code)';
+
+  /** 1-based line and 0-based column of the n-th occurrence of `marker`. */
+  const at = (src: string, marker: string, nth = 0) => {
+    let idx = -1;
+    for (let k = 0; k <= nth; k++) idx = src.indexOf(marker, idx + 1);
+    const before = src.slice(0, idx);
+    return { line: before.split('\n').length, column: idx - (before.lastIndexOf('\n') + 1) };
+  };
+  const errs = (src: string) =>
+    parse(src, 'X.runar.ts').errors
+      .filter((e) => e.severity === 'error')
+      .map((e) => ({ message: e.message, line: e.loc?.line, column: e.loc?.column }));
+
+  const stateful = (body: string) => `import { StatefulSmartContract } from 'runar-lang';
+export class C extends StatefulSmartContract {
+  n: bigint;
+  constructor(n: bigint) { super(n); this.n = n; }
+${body}
+}
+`;
+
+  it.each([
+    ['a line comment sharing a line with the preceding method (the item\'s case)',
+      '  private foo(): void {} // @sighash SINGLE|FORKID\n  public bump(): void { this.addOutput(1000n, this.n); }'],
+    ['a JSDoc sharing a line with the preceding method',
+      '  private foo(): void {} /** @sighash SINGLE|FORKID */\n  public bump(): void { this.addOutput(1000n, this.n); }'],
+    ['a directive at the end of the class body',
+      '  public bump(): void { this.addOutput(1000n, this.n); }\n  /** @sighash SINGLE|FORKID */'],
+    ['a directive inside a method body',
+      '  public bump(): void {\n    // @sighash SINGLE|FORKID\n    this.addOutput(1000n, this.n);\n  }'],
+    ['a directive on a property',
+      '  /** @sighash SINGLE|FORKID */\n  readonly k: bigint = 1n;\n  public bump(): void { this.addOutput(1000n, this.n); }'],
+  ])('refuses @sighash in %s', (_label, body) => {
+    const src = stateful(body);
+    expect(errs(src)).toEqual([{ message: LOST_SIGHASH, ...at(src, '@sighash') }]);
+  });
+
+  it('refuses @sighash above the constructor', () => {
+    const src = `import { StatefulSmartContract } from 'runar-lang';
+export class C extends StatefulSmartContract {
+  n: bigint;
+  /** @sighash SINGLE|FORKID */
+  constructor(n: bigint) { super(n); this.n = n; }
+  public bump(): void { this.addOutput(1000n, this.n); }
+}
+`;
+    expect(errs(src)).toEqual([{ message: LOST_SIGHASH, ...at(src, '@sighash') }]);
+  });
+
+  it.each([
+    ['a line comment sharing a line with the preceding property',
+      '  readonly a: bigint; // @embedAlways\n  readonly tag: bigint;\n  constructor(a: bigint, tag: bigint) { super(a, tag); this.a = a; this.tag = tag; }\n  public go(x: bigint): void { assert(x == this.a); }'],
+    ['a directive on a method',
+      '  readonly a: bigint;\n  constructor(a: bigint) { super(a); this.a = a; }\n  /** @embedAlways */\n  public go(x: bigint): void { assert(x == this.a); }'],
+  ])('refuses @embedAlways in %s', (_label, body) => {
+    const src = `import { SmartContract, assert } from 'runar-lang';
+export class C extends SmartContract {
+${body}
+}
+`;
+    expect(errs(src)).toEqual([{ message: LOST_EMBED, ...at(src, '@embedAlways') }]);
+  });
+
+  it('reports every lost directive, in source order', () => {
+    const src = stateful(
+      '  private foo(): void {} // @sighash SINGLE|FORKID\n  public bump(): void { this.addOutput(1000n, this.n); } // @embedAlways',
+    );
+    expect(errs(src)).toEqual([
+      { message: LOST_SIGHASH, ...at(src, '@sighash') },
+      { message: LOST_EMBED, ...at(src, '@embedAlways') },
+    ]);
+  });
+
+  it('accepts attached directives and prose mentions outside the class body', () => {
+    const src = `import { StatefulSmartContract } from 'runar-lang';
+// File header prose: this contract uses @sighash SINGLE|FORKID and @embedAlways.
+/** Class doc: \`@sighash\` lives on bump, \`@embedAlways\` on tag. */
+export class C extends StatefulSmartContract {
+  n: bigint;
+  /** @embedAlways */
+  readonly tag: bigint;
+  constructor(n: bigint, tag: bigint) { super(n, tag); this.n = n; this.tag = tag; }
+  private foo(): void {}
+  // @sighash SINGLE|FORKID
+  public bump(): void { this.addOutput(1000n, this.n); }
+}
+`;
+    expect(errs(src)).toEqual([]);
+    expect(methodByName(src, 'bump').sighashType).toBe(0x43);
+  });
+});

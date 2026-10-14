@@ -124,6 +124,18 @@ pub const SIGHASH_MALFORMED_ERROR: &str = "@sighash: malformed directive; expect
 pub const SIGHASH_MULTIPLE_ERROR: &str =
     "@sighash: more than one @sighash directive on this method; declare exactly one";
 
+/// N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+/// `@sighash` / `@embedAlways` marker inside the contract class body that is
+/// not in the leading comments of the member kind that reads it (`@sighash` ->
+/// a method, `@embedAlways` -> a property). Mirrors the TS reference
+/// `lostDirectiveMessage` (sighash-directive.ts).
+pub fn lost_directive_message(directive: &str) -> String {
+    let target = if directive == "@sighash" { "method" } else { "property" };
+    format!(
+        "{directive} directive is not attached to any {target} and would be silently ignored; put the comment on its own line directly above the {target} it annotates (a comment that shares a line with the preceding code belongs to that code)"
+    )
+}
+
 const SIGHASH_MARKER: &str = "@sighash";
 
 /// Extract and parse an `@sighash` directive from a method's leading-comment

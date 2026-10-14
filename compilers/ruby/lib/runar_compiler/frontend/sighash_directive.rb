@@ -53,6 +53,17 @@ module RunarCompiler
                                 "|-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)"
       SIGHASH_MULTIPLE_ERROR = "@sighash: more than one @sighash directive on this method; declare exactly one"
 
+      # N-199 (R75): shared diagnostic, identical in all seven tiers (TS:
+      # lostDirectiveMessage in sighash-directive.ts), for a `@sighash` /
+      # `@embedAlways` marker in the class body that no member of the kind that
+      # reads it (method / property) claims.
+      def lost_directive_message(directive)
+        target = directive == "@sighash" ? "method" : "property"
+        "#{directive} directive is not attached to any #{target} and would be silently ignored; " \
+          "put the comment on its own line directly above the #{target} it annotates " \
+          "(a comment that shares a line with the preceding code belongs to that code)"
+      end
+
       SIGHASH_MARKER = "@sighash"
 
       # Parse the flag list of an `@sighash` directive.

@@ -68,7 +68,7 @@ module RunarCompiler
       TOK_ARROW        = 45  # =>
 
       # A single token produced by the tokenizer.
-      Token = Struct.new(:kind, :value, :line, :col, keyword_init: true)
+      Token = Struct.new(:kind, :value, :line, :col, :offset, keyword_init: true)
     end
 
     # -----------------------------------------------------------------------
@@ -244,7 +244,7 @@ module RunarCompiler
             i += 1
           end
           ctext = source[c_start...i]
-          directives << { line: c_line, col: c_col, text: ctext } if ctext&.match?(DIRECTIVE_RE)
+          directives << { line: c_line, col: c_col, text: ctext, start: c_start, stop: i } if ctext&.match?(DIRECTIVE_RE)
           next
         end
 
@@ -276,11 +276,12 @@ module RunarCompiler
             i += 1 if i < n
           end
           ctext = source[c_start...i]
-          directives << { line: c_line, col: c_col, text: ctext } if ctext&.match?(DIRECTIVE_RE)
+          directives << { line: c_line, col: c_col, text: ctext, start: c_start, stop: i } if ctext&.match?(DIRECTIVE_RE)
           next
         end
 
         start_col = col
+        start_off = i
 
         # Template string literals (backticks)
         if ch == "`"
@@ -402,7 +403,7 @@ module RunarCompiler
         # Single-character operators
         one_kind = ONE_CHAR_OPS[ch]
         unless one_kind.nil?
-          tokens << Token.new(kind: one_kind, value: ch, line: line, col: start_col)
+          tokens << Token.new(kind: one_kind, value: ch, line: line, col: start_col, offset: start_off)
           i += 1
           col += 1
           next
@@ -442,9 +443,14 @@ module RunarCompiler
         # each immediately precedes (see gather_member_directives). Set by
         # parse_ts.
         @directives = []
+        # N-199: source text and the directive records claimed by methods
+        # (non-constructor) and by properties, for report_lost_directives.
+        @source = ""
+        @method_directives = []
+        @property_directives = []
       end
 
-      attr_accessor :tokens, :pos, :errors, :directives
+      attr_accessor :tokens, :pos, :errors, :directives, :source
 
       # -- Error helpers ----------------------------------------------------
 
@@ -645,7 +651,7 @@ module RunarCompiler
           raise "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
         end
 
-        expect(TOK_LBRACE)
+        lbrace = expect(TOK_LBRACE)
 
         properties = []
         constructor = nil
@@ -672,7 +678,10 @@ module RunarCompiler
           end
         end
 
-        expect(TOK_RBRACE)
+        rbrace = expect(TOK_RBRACE)
+
+        # N-199 (R75): a directive in the class body that no member reads.
+        report_lost_directives(lbrace, rbrace)
 
         if constructor.nil?
           add_error("contract must have a constructor")
@@ -771,6 +780,7 @@ module RunarCompiler
             @errors << Diagnostic.new(message: Frontend.static_method_message(member_name),
                                       severity: Severity::ERROR, loc: location)
           end
+          @method_directives.concat(member_directives)
           return parse_method(member_name, visibility, location, sighash_text)
         end
 
@@ -794,6 +804,7 @@ module RunarCompiler
 
           skip_semicolons
 
+          @property_directives.concat(member_directives)
           return PropertyNode.new(
             name: member_name,
             type: type_node,
@@ -808,6 +819,7 @@ module RunarCompiler
         if check(TOK_SEMICOLON)
           advance
           add_error("property '#{member_name}' must have an explicit type annotation")
+          @property_directives.concat(member_directives)
           return PropertyNode.new(
             name: member_name,
             type: CustomType.new(name: "unknown"),
@@ -820,6 +832,40 @@ module RunarCompiler
         # Skip unknown
         skip_to_next_member
         nil
+      end
+
+      # N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker
+      # inside the contract class braces that is not in a comment claimed as
+      # leading trivia by a member of the kind that reads it (`@sighash` by a
+      # method, `@embedAlways` by a property). A comment sharing a line with the
+      # preceding token is never claimed (F-282), so such a directive used to
+      # be dropped silently. The raw body text is scanned with the same marker
+      # rules as the non-TS guard; text outside the class braces is prose.
+      # Located at the marker's `@` (1-based line, 0-based column, as TS's
+      # locFromPos). Mirrors reportLostDirectives in the TS reference.
+      def report_lost_directives(lbrace, rbrace)
+        return if lbrace.offset.nil? || rbrace.offset.nil? || rbrace.offset <= lbrace.offset
+
+        body_start = lbrace.offset + 1
+        body = @source[body_start...rbrace.offset]
+        lost = []
+        [[/@sighash/, "@sighash", @method_directives],
+         [/@embedAlways\b/, "@embedAlways", @property_directives]].each do |re, directive, claimed|
+          body.scan(re) do
+            pos = body_start + Regexp.last_match.begin(0)
+            next if claimed.any? { |d| d[:start] <= pos && pos < d[:stop] }
+
+            lost << [pos, directive]
+          end
+        end
+        lost.sort_by(&:first).each do |pos, directive|
+          before = @source[0...pos]
+          line = before.count("\n") + 1
+          col = pos - ((before.rindex(/[\n\r]/) || -1) + 1)
+          @errors << Diagnostic.new(message: SighashDirective.lost_directive_message(directive),
+                                    severity: Severity::ERROR,
+                                    loc: SourceLocation.new(file: @file_name, line: line, column: col))
+        end
       end
 
       # Return the directive records that attach to the member whose first
@@ -2033,6 +2079,7 @@ module RunarCompiler
       toks, directives = TsTokens.tokenize(source, lex, file_name)
       p.tokens = toks
       p.directives = directives
+      p.source = source
       p.pos = 0
 
       begin

@@ -30,7 +30,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     with_lex_errors,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
-from runar_compiler.frontend.sighash_directive import extract_sighash_directive
+from runar_compiler.frontend.sighash_directive import extract_sighash_directive, lost_directive_message
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ _SIGHASH_TOKEN_RE = re.compile(r"@sighash")
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col", "leading_comments")
+    __slots__ = ("kind", "value", "line", "col", "leading_comments", "offset", "leading_spans")
 
     def __init__(self, kind: int, value: str, line: int, col: int,
                  leading_comments: str = ""):
@@ -109,6 +109,10 @@ class Token:
         # token (the token's "leading trivia"). Populated by the tokenizer so the
         # parser can detect ``@embedAlways`` / ``@sighash`` comment directives.
         self.leading_comments = leading_comments
+        # N-199: source offset of the token, and the [start, end) offsets of
+        # the comments in ``leading_comments`` (lost-directive check).
+        self.offset = -1
+        self.leading_spans: tuple = ()
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +175,8 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     # it as leading trivia. Comments are otherwise discarded; the parser needs
     # the trivia to detect ``@embedAlways`` / ``@sighash`` directives.
     pending_comments: list[str] = []
+    pending_spans: list[tuple[int, int]] = []  # N-199: offsets of pending_comments
+    tok_start = 0  # N-199: offset of the token being scanned
     # F-282: a comment only becomes eligible to attach as leading trivia once
     # a line break has been crossed since the last real token (or at the very
     # start of the file). Mirrors ts-morph/TypeScript's own leading-comment
@@ -189,7 +195,10 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         nonlocal collecting
         if pending_comments:
             tok.leading_comments = "\n".join(pending_comments)
+            tok.leading_spans = tuple(pending_spans)
             pending_comments.clear()
+            pending_spans.clear()
+        tok.offset = tok_start
         collecting = False
         tokens.append(tok)
 
@@ -225,6 +234,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 i += 1
             if collecting:
                 pending_comments.append(source[_comment_start:i])
+                pending_spans.append((_comment_start, i))
             continue
 
         # Multi-line comment /* ... */
@@ -248,9 +258,11 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                     i += 1
             if collecting:
                 pending_comments.append(source[_comment_start:i])
+                pending_spans.append((_comment_start, i))
             continue
 
         start_col = col
+        tok_start = i
 
         # Template string literals (backticks)
         if ch == "`":
@@ -404,6 +416,7 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         i += 1
         col += 1
 
+    tok_start = n
     _add(Token(TOK_EOF, "", line, col))
     return tokens
 
@@ -439,6 +452,7 @@ _UNSUPPORTED_STATEMENT_KEYWORDS = {
 class _TsParser:
     def __init__(self, file_name: str):
         self.file_name = file_name
+        self.source = ""  # N-199: raw text, for the lost-directive scan
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
@@ -626,23 +640,29 @@ class _TsParser:
                 f"or UnsafeSmartContract found"
             )
 
-        self.expect(TOK_LBRACE)
+        lbrace = self.expect(TOK_LBRACE)
 
         properties: list[PropertyNode] = []
         constructor: MethodNode | None = None
         methods: list[MethodNode] = []
+        # N-199: comment spans attached to methods / properties.
+        method_spans: list[tuple[int, int]] = []
+        prop_spans: list[tuple[int, int]] = []
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             self.skip_semicolons()
             if self.check(TOK_RBRACE) or self.check(TOK_EOF):
                 break
 
+            # Same token _parse_class_member reads its directive trivia from.
+            member_spans = self.peek().leading_spans
             member = self._parse_class_member(parent_class)
             if member is None:
                 continue
 
             if isinstance(member, PropertyNode):
                 properties.append(member)
+                prop_spans.extend(member_spans)
             elif isinstance(member, MethodNode):
                 if member.name == "constructor":
                     if constructor is not None:
@@ -650,8 +670,12 @@ class _TsParser:
                     constructor = member
                 else:
                     methods.append(member)
+                    method_spans.extend(member_spans)
 
-        self.expect(TOK_RBRACE)
+        rbrace = self.expect(TOK_RBRACE)
+
+        # N-199 (R75): a directive in the class body that no member reads.
+        self._report_lost_directives(lbrace, rbrace, method_spans, prop_spans)
 
         if constructor is None:
             self.add_error("contract must have a constructor")
@@ -671,6 +695,38 @@ class _TsParser:
             methods=methods,
             source_file=self.file_name,
         )
+
+    def _report_lost_directives(
+        self, lbrace: Token, rbrace: Token,
+        method_spans: list[tuple[int, int]], prop_spans: list[tuple[int, int]],
+    ) -> None:
+        """N-199 (user decision R75): refuse a ``@sighash`` / ``@embedAlways``
+        marker inside the contract class body that is not in the leading
+        comments of a member of the kind that reads it (``@sighash`` of a
+        method, ``@embedAlways`` of a property). A comment sharing a line with
+        the preceding token never attaches (F-282), so such a directive used to
+        be dropped silently. Text outside the class braces is prose and is not
+        scanned. Mirrors reportLostDirectives in the TS reference."""
+        source = self.source
+        if lbrace.kind != TOK_LBRACE or rbrace.kind != TOK_RBRACE or lbrace.offset < 0 or rbrace.offset < 0:
+            return
+        start, end = lbrace.offset + 1, rbrace.offset
+        lost: list[tuple[int, str]] = []
+        for regex, directive, spans in (
+            (_SIGHASH_TOKEN_RE, "@sighash", method_spans),
+            (_EMBED_ALWAYS_RE, "@embedAlways", prop_spans),
+        ):
+            for m in regex.finditer(source, start, end):
+                pos = m.start()
+                if not any(s <= pos < e for s, e in spans):
+                    lost.append((pos, directive))
+        lost.sort()
+        for pos, directive in lost:
+            line = source.count("\n", 0, pos) + 1
+            col = pos - (source.rfind("\n", 0, pos) + 1)
+            self.errors.append(Diagnostic(
+                message=lost_directive_message(directive), severity=Severity.ERROR,
+                loc=SourceLocation(file=self.file_name, line=line, column=col)))
 
     # -- Class members -------------------------------------------------------
 
@@ -1871,6 +1927,7 @@ def parse_ts(source: str, file_name: str) -> ParseResult:
 def _parse_ts_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a TypeScript-syntax Runar contract (.runar.ts)."""
     p = _TsParser(file_name)
+    p.source = source
     p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 

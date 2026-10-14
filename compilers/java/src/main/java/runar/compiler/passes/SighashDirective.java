@@ -138,6 +138,19 @@ public final class SighashDirective {
     public static final String SIGHASH_MULTIPLE_ERROR =
         "@sighash: more than one @sighash directive on this method; declare exactly one";
 
+    /**
+     * N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+     * {@code @sighash} / {@code @embedAlways} marker inside the contract class
+     * body that is not in the leading comments of the member kind that reads it
+     * ({@code @sighash} -> a method, {@code @embedAlways} -> a property).
+     */
+    public static String lostDirectiveMessage(String directive) {
+        String target = directive.equals("@sighash") ? "method" : "property";
+        return directive + " directive is not attached to any " + target
+            + " and would be silently ignored; put the comment on its own line directly above the "
+            + target + " it annotates (a comment that shares a line with the preceding code belongs to that code)";
+    }
+
     private static final String SIGHASH_MARKER = "@sighash";
 
     private static boolean isAsciiWordChar(char c) {

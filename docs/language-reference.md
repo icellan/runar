@@ -875,6 +875,15 @@ separator, or an empty flag list. `@sighash` directly followed by any other
 character is refused the same way, so `@sighashSINGLE|FORKID` (no space) and
 `@sighashType` are errors, not prose.
 
+Inside the contract class body, a `@sighash` that is not in a method's leading
+comments, or an `@embedAlways` that is not in a property's, is a compile error
+in every tier (N-199): it would otherwise be silently ignored. That covers a
+comment sharing a line with the preceding code (`foo() {} // @sighash
+SINGLE|FORKID` belongs to `foo`'s closing brace, not to the next method), one
+above the constructor, one at the end of the class, one inside a method body,
+and one on the wrong kind of member. Mentions outside the class braces (file or
+class doc comments) are prose and are not checked.
+
 `SINGLE|FORKID` commits to only the output at the same index as the input being
 signed, which is what lets one party fix their own output and leave the rest of
 the transaction open for a counterparty to complete.

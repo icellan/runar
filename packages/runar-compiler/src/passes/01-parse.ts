@@ -57,7 +57,7 @@ import { parseRustSource } from './01-parse-rust.js';
 import { parseRubySource } from './01-parse-ruby.js';
 import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
-import { extractSighashDirective } from './sighash-directive.js';
+import { extractSighashDirective, lostDirectiveMessage } from './sighash-directive.js';
 import { normalizeLoopConditions } from './loop-condition.js';
 import { OPCODES } from './06-emit.js';
 import { SourceNestingError, withNestingLimit } from './source-limits.js';
@@ -310,6 +310,9 @@ function parseTsSurface(source: string, file: string, errors: CompilerDiagnostic
   // Extract methods
   const methods = parseMethods(contractClass, file, errors);
 
+  // N-199 (R75): a directive in the class body that no member reads.
+  reportLostDirectives(contractClass, file, errors);
+
   const contract: ContractNode = {
     kind: 'contract',
     name: contractName,
@@ -526,6 +529,48 @@ function parseSighashOnMethod(
 // N-039 (R85): no word boundary. `@sighashSINGLE|FORKID` / `@sighashType` reach
 // extractSighashDirective and are refused as malformed, not ignored as prose.
 const SIGHASH_TOKEN_RE = /@sighash/;
+
+/**
+ * N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker inside
+ * the contract class body that is not in the leading comments of a member of
+ * the kind that reads it — `@sighash` of a method, `@embedAlways` of a
+ * property. ts-morph never attaches a comment that shares a line with the
+ * preceding token (it is that token's trailing trivia), so before this check
+ * `foo(): void {} // @sighash SINGLE|FORKID` above a public method compiled
+ * under the default ALL|FORKID with no diagnostic; a directive above the
+ * constructor, at the end of the body, inside a method body or on the wrong
+ * member kind was dropped the same way. Markers are matched in the raw text
+ * with the same rules as the non-TS guard (`@sighash` anywhere,
+ * `@embedAlways` word-bounded). Text outside the class braces (file and class
+ * doc comments) is prose and is not scanned.
+ */
+function reportLostDirectives(cls: ClassDeclaration, file: string, errors: CompilerDiagnostic[]): void {
+  const open = cls.getFirstChildByKind(SyntaxKind.OpenBraceToken);
+  const close = cls.getLastChildByKind(SyntaxKind.CloseBraceToken);
+  if (!open || !close) return;
+  const text = cls.getSourceFile().getFullText();
+  const bodyStart = open.getEnd();
+  const body = text.slice(bodyStart, close.getStart());
+  const spansOf = (members: Array<MethodDeclaration | PropertyDeclaration>): Array<[number, number]> =>
+    members.flatMap((m) => [
+      ...m.getJsDocs().map((j): [number, number] => [j.getStart(), j.getEnd()]),
+      ...m.getLeadingCommentRanges().map((r): [number, number] => [r.getPos(), r.getEnd()]),
+    ]);
+  const lost: Array<{ pos: number; directive: '@sighash' | '@embedAlways' }> = [];
+  for (const [re, directive, spans] of [
+    [/@sighash/g, '@sighash', spansOf(cls.getMethods())],
+    [/@embedAlways\b/g, '@embedAlways', spansOf(cls.getProperties())],
+  ] as const) {
+    for (const m of body.matchAll(re)) {
+      const pos = bodyStart + m.index!;
+      if (!spans.some(([s, e]) => s <= pos && pos < e)) lost.push({ pos, directive });
+    }
+  }
+  lost.sort((a, b) => a.pos - b.pos);
+  for (const { pos, directive } of lost) {
+    errors.push(makeDiagnostic(lostDirectiveMessage(directive), 'error', locFromPos(text, pos, file)));
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -2014,8 +2059,12 @@ function reportUnterminatedLiterals(
 }
 
 function locFromNode(node: Node, file: string): SourceLocation {
-  const pos = node.getStart();
-  const breaks = lineBreaksOf(node.getSourceFile().getFullText());
+  return locFromPos(node.getSourceFile().getFullText(), node.getStart(), file);
+}
+
+/** `locFromNode` for a raw offset into the source text. */
+function locFromPos(text: string, pos: number, file: string): SourceLocation {
+  const breaks = lineBreaksOf(text);
   // N-180: the same numbers ts-morph's getStartLineNumber() / getLineAndColumnAtPos()
   // give (line = 1 + count of '\n' before pos; column = distance from the last
   // '\n' or '\r' before pos), but by binary search over a per-text index —

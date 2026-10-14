@@ -1,10 +1,12 @@
 package frontend
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/big"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -459,11 +461,13 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 	var properties []PropertyNode
 	var constructor *MethodNode
 	var methods []MethodNode
+	var methodSpans, propSpans [][2]uint32
 
 	for i := 0; i < int(body.ChildCount()); i++ {
 		member := body.Child(i)
 		switch member.Type() {
 		case "public_field_definition":
+			propSpans = append(propSpans, memberCommentSpans(member)...)
 			prop := p.parseProperty(member)
 			if prop != nil {
 				properties = append(properties, *prop)
@@ -474,11 +478,15 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 				ctor := p.parseConstructor(member)
 				constructor = &ctor
 			} else {
+				methodSpans = append(methodSpans, memberCommentSpans(member)...)
 				method := p.parseMethod(member)
 				methods = append(methods, method)
 			}
 		}
 	}
+
+	// N-199 (R75): a directive in the class body that no member reads.
+	p.reportLostDirectives(body, methodSpans, propSpans)
 
 	if constructor == nil {
 		p.addError("contract must have a constructor")
@@ -567,6 +575,17 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 // including) the first comment that starts on the same row that sibling
 // ends on.
 func (p *parseContext) leadingCommentText(node *sitter.Node) string {
+	var parts []string
+	for _, c := range leadingCommentNodes(node) {
+		parts = append(parts, p.nodeText(c))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// leadingCommentNodes returns the comment siblings leadingCommentText reads
+// (nearest first). N-199 uses their byte spans to find a directive that no
+// member reads.
+func leadingCommentNodes(node *sitter.Node) []*sitter.Node {
 	var prevNonComment *sitter.Node
 	for s := node.PrevSibling(); s != nil; s = s.PrevSibling() {
 		if s.Type() != "comment" {
@@ -579,14 +598,77 @@ func (p *parseContext) leadingCommentText(node *sitter.Node) string {
 	if hasBoundary {
 		boundaryRow = prevNonComment.EndPoint().Row
 	}
-	var parts []string
+	var out []*sitter.Node
 	for prev := node.PrevSibling(); prev != nil && prev.Type() == "comment"; prev = prev.PrevSibling() {
 		if hasBoundary && prev.StartPoint().Row <= boundaryRow {
 			break
 		}
-		parts = append(parts, p.nodeText(prev))
+		out = append(out, prev)
 	}
-	return strings.Join(parts, "\n")
+	return out
+}
+
+// memberCommentSpans returns the byte spans of node's leading comments.
+func memberCommentSpans(node *sitter.Node) [][2]uint32 {
+	var spans [][2]uint32
+	for _, c := range leadingCommentNodes(node) {
+		spans = append(spans, [2]uint32{c.StartByte(), c.EndByte()})
+	}
+	return spans
+}
+
+// LostDirectiveMsg is the N-199 (R75) diagnostic shared verbatim by all seven
+// tiers (TS: lostDirectiveMessage in sighash-directive.ts).
+func LostDirectiveMsg(directive string) string {
+	target := "property"
+	if directive == "@sighash" {
+		target = "method"
+	}
+	return fmt.Sprintf("%s directive is not attached to any %s and would be silently ignored; put the comment on its own line directly above the %s it annotates (a comment that shares a line with the preceding code belongs to that code)", directive, target, target)
+}
+
+var sighashMarkerRE = regexp.MustCompile(`@sighash`)
+
+// reportLostDirectives (N-199, user decision R75) refuses a `@sighash` /
+// `@embedAlways` marker inside the contract class body that is not in the
+// leading comments of a member of the kind that reads it (`@sighash` of a
+// method, `@embedAlways` of a property). A comment sharing a line with the
+// preceding token never attaches (F-282), so such a directive used to be
+// dropped silently. Text outside the class braces is prose and not scanned.
+// Mirrors reportLostDirectives in the TS reference (01-parse.ts).
+func (p *parseContext) reportLostDirectives(body *sitter.Node, methodSpans, propSpans [][2]uint32) {
+	start, end := body.StartByte()+1, body.EndByte()-1
+	if end <= start {
+		return
+	}
+	type lost struct {
+		pos       int
+		directive string
+	}
+	var found []lost
+	scan := func(re *regexp.Regexp, directive string, spans [][2]uint32) {
+		for _, m := range re.FindAllIndex(p.source[start:end], -1) {
+			pos := uint32(m[0]) + start
+			attached := false
+			for _, s := range spans {
+				if s[0] <= pos && pos < s[1] {
+					attached = true
+					break
+				}
+			}
+			if !attached {
+				found = append(found, lost{int(pos), directive})
+			}
+		}
+	}
+	scan(sighashMarkerRE, "@sighash", methodSpans)
+	scan(embedAlwaysDirectiveRE, "@embedAlways", propSpans)
+	sort.Slice(found, func(i, j int) bool { return found[i].pos < found[j].pos })
+	for _, f := range found {
+		lineStart := bytes.LastIndexByte(p.source[:f.pos], '\n') + 1
+		loc := SourceLocation{File: p.fileName, Line: bytes.Count(p.source[:f.pos], []byte{'\n'}) + 1, Column: f.pos - lineStart}
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg(f.directive), Severity: SeverityError, Loc: &loc})
+	}
 }
 
 // ---------------------------------------------------------------------------

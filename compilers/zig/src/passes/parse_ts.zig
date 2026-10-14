@@ -449,6 +449,10 @@ const Parser = struct {
     /// leading comment trivia of `self.current` is `source[prev_token_end ..
     /// current.start]`. Used to detect `@embedAlways` / `@sighash` directives.
     prev_token_end: usize = 0,
+    /// N-199: byte spans of the leading trivia `leadingTrivia()` handed to a
+    /// method (for `@sighash`) / a property (for `@embedAlways`).
+    method_spans: std.ArrayListUnmanaged([2]usize) = .empty,
+    prop_spans: std.ArrayListUnmanaged([2]usize) = .empty,
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
@@ -753,6 +757,7 @@ const Parser = struct {
         }
 
         if (self.expect(.lbrace) == null) return null;
+        const body_start = self.prev_token_end;
 
         var properties: std.ArrayListUnmanaged(PropertyNode) = .empty;
         var constructor: ?ConstructorNode = null;
@@ -773,6 +778,8 @@ const Parser = struct {
                 .none => {},
             }
         }
+        // N-199 (R75): a directive in the class body that no member reads.
+        if (self.current.kind == .rbrace) self.reportLostDirectives(body_start, self.current.start);
         _ = self.expect(.rbrace);
 
         if (constructor == null) {
@@ -875,6 +882,7 @@ const Parser = struct {
             // method's leading comment trivia. Only public methods are spending
             // entry points, so a directive on a private helper is meaningless.
             m.sighash_type = self.parseSighashDirective(member_trivia, member_name, is_public, member_first_tok);
+            self.recordTriviaSpan(&self.method_spans, member_trivia);
             return .{ .method = m };
         }
 
@@ -907,6 +915,7 @@ const Parser = struct {
             // the TS `/@embedAlways\b/` scan: the marker must be at a word
             // boundary so `embedAlwaysX` does not trip.
             const embed_always = containsDirectiveToken(member_trivia, "@embedAlways");
+            self.recordTriviaSpan(&self.prop_spans, member_trivia);
 
             // Capture FixedArray length + element type so expand_fixed_arrays
             // can see the shape after typecheck.
@@ -1067,6 +1076,53 @@ const Parser = struct {
 
         const body = self.parseBlock();
         return .{ .name = name, .is_public = is_public, .params = params, .body = body, .source_loc = loc };
+    }
+
+    /// N-199: remember the byte span of a member's leading trivia (a slice of
+    /// the source, or "" when there is none).
+    fn recordTriviaSpan(self: *Parser, spans: *std.ArrayListUnmanaged([2]usize), trivia: []const u8) void {
+        if (trivia.len == 0) return;
+        const start = @intFromPtr(trivia.ptr) - @intFromPtr(self.tokenizer.source.ptr);
+        spans.append(self.allocator, .{ start, start + trivia.len }) catch {};
+    }
+
+    /// N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker
+    /// inside the contract class body (`source[body_start..body_end]`) that is
+    /// not in the leading trivia of a member of the kind that reads it —
+    /// `@sighash` of a method, `@embedAlways` of a property. A comment sharing
+    /// a line with the preceding token never attaches (F-282), so such a
+    /// directive used to be dropped silently. Markers are matched with the
+    /// non-TS guard's rules (`@sighash` anywhere, `@embedAlways` word-bounded);
+    /// text outside the class braces is prose. Located at the marker's `@`
+    /// (1-based line, 0-based byte column), all of them in source order.
+    /// Mirrors reportLostDirectives in the TS reference (01-parse.ts).
+    fn reportLostDirectives(self: *Parser, body_start: usize, body_end: usize) void {
+        const src = self.tokenizer.source;
+        if (body_end <= body_start or body_end > src.len) return;
+        var i = body_start;
+        while (i < body_end) : (i += 1) {
+            if (src[i] != '@') continue;
+            const rest = src[i..body_end];
+            var msg: ?[]const u8 = null;
+            if (std.mem.startsWith(u8, rest, "@sighash")) {
+                if (!inSpans(self.method_spans.items, i)) msg = sighash_directive.LOST_SIGHASH_ERROR;
+            } else if (std.mem.startsWith(u8, rest, "@embedAlways") and containsDirectiveToken(rest[0..@min(rest.len, "@embedAlways".len + 1)], "@embedAlways")) {
+                if (!inSpans(self.prop_spans.items, i)) msg = sighash_directive.LOST_EMBED_ALWAYS_ERROR;
+            }
+            if (msg) |m| {
+                const line = std.mem.count(u8, src[0..i], "\n") + 1;
+                const line_start = if (std.mem.lastIndexOfScalar(u8, src[0..i], '\n')) |nl| nl + 1 else 0;
+                const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, line, i - line_start, m }) catch return;
+                self.errors.append(self.allocator, f) catch {};
+            }
+        }
+    }
+
+    fn inSpans(spans: []const [2]usize, pos: usize) bool {
+        for (spans) |s| {
+            if (s[0] <= pos and pos < s[1]) return true;
+        }
+        return false;
     }
 
     /// Detect + parse a `/** @sighash <FLAGS> */` (or `// @sighash ...`)
@@ -3255,7 +3311,9 @@ test "F-282: @sighash sharing a line with the preceding member is not honoured" 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const r = parseTs(arena.allocator(), source, "C.runar.ts");
-    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    // N-199 (R75): still not honoured, and now refused as a lost directive.
+    try std.testing.expectEqual(@as(usize, 1), r.errors.len);
+    try std.testing.expect(std.mem.endsWith(u8, r.errors[0], sighash_directive.LOST_SIGHASH_ERROR));
     try std.testing.expect(r.contract.?.methods[0].sighash_type == null);
 }
 
@@ -3272,7 +3330,9 @@ test "F-282: a trailing same-line @sighash comment does not leak to the next met
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const r = parseTs(arena.allocator(), source, "C.runar.ts");
-    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    // N-199 (R75): still not honoured, and now refused as a lost directive.
+    try std.testing.expectEqual(@as(usize, 1), r.errors.len);
+    try std.testing.expect(std.mem.endsWith(u8, r.errors[0], sighash_directive.LOST_SIGHASH_ERROR));
     try std.testing.expect(r.contract.?.methods[0].sighash_type == null); // bump
     try std.testing.expect(r.contract.?.methods[1].sighash_type == null); // other
 }

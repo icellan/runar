@@ -24,6 +24,7 @@ use super::ast::{
 };
 use super::diagnostic::{lex_error, static_method_message, Diagnostic, OPTIONAL_CHAINING};
 use super::int_literal::{invalid_integer_literal, parse_int_literal};
+use super::sighash_directive::lost_directive_message;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -296,6 +297,9 @@ fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
 
     // Extract methods
     let methods = parse_methods(class, file, &mut errors, &comments, &cm);
+
+    // N-199 (R75): a directive in the class body that no member reads.
+    report_lost_directives(class, source, fm.start_pos, &comments, file, &mut errors);
 
     let contract = ContractNode {
         name: contract_name,
@@ -575,6 +579,99 @@ fn leading_comment_text(comments: &SingleThreadedComments, pos: BytePos) -> Opti
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+/// Byte spans (relative to the source text) of the leading comments SWC
+/// attaches at `pos` — exactly the comments `leading_comment_text` reads.
+fn leading_comment_spans(comments: &SingleThreadedComments, pos: BytePos, start: BytePos) -> Vec<(usize, usize)> {
+    comments
+        .get_leading(pos)
+        .unwrap_or_default()
+        .iter()
+        .map(|c| ((c.span.lo.0 - start.0) as usize, (c.span.hi.0 - start.0) as usize))
+        .collect()
+}
+
+/// N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker
+/// inside the contract class body that is not in the leading comments of a
+/// member of the kind that reads it (`@sighash` of a method, `@embedAlways` of
+/// a property). SWC, like ts-morph, never attaches a comment that shares a
+/// line with the preceding token, so such a directive used to be dropped
+/// silently. Markers match like the non-TS guard (`@sighash` anywhere,
+/// `@embedAlways` word-bounded); text outside the class braces is prose and is
+/// not scanned. Mirrors `reportLostDirectives` in the TS reference.
+fn report_lost_directives(
+    class: &Class,
+    source: &str,
+    start: BytePos,
+    comments: &SingleThreadedComments,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let bytes = source.as_bytes();
+    let rel = |p: BytePos| (p.0 - start.0) as usize;
+    // The body's `{`: the first one after the heritage clauses, skipping comments.
+    let mut i = rel(class.span.lo);
+    if let Some(sc) = &class.super_class {
+        i = i.max(rel(sc.span().hi));
+    }
+    if let Some(tp) = &class.super_type_params {
+        i = i.max(rel(tp.span.hi));
+    }
+    for imp in &class.implements {
+        i = i.max(rel(imp.span.hi));
+    }
+    while i < bytes.len() && bytes[i] != b'{' {
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i = source[i + 2..].find("*/").map(|k| i + 2 + k + 2).unwrap_or(bytes.len());
+        } else {
+            i += 1;
+        }
+    }
+    let body_start = i + 1;
+    let body_end = rel(class.span.hi).saturating_sub(1);
+    if body_start >= body_end || body_end > bytes.len() {
+        return;
+    }
+
+    let mut method_spans = Vec::new();
+    let mut prop_spans = Vec::new();
+    for member in &class.body {
+        match member {
+            ClassMember::Method(m) => method_spans.extend(leading_comment_spans(comments, m.span().lo, start)),
+            ClassMember::ClassProp(p) => prop_spans.extend(leading_comment_spans(comments, p.span().lo, start)),
+            _ => {}
+        }
+    }
+
+    let body = &source[body_start..body_end];
+    let mut lost: Vec<(usize, &str)> = Vec::new();
+    for (marker, spans, bounded) in [("@sighash", &method_spans, false), ("@embedAlways", &prop_spans, true)] {
+        let mut from = 0;
+        while let Some(k) = body[from..].find(marker) {
+            let at = body_start + from + k;
+            from += k + 1;
+            if bounded {
+                let after = at + marker.len();
+                if after < bytes.len() && (bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_') {
+                    continue;
+                }
+            }
+            if !spans.iter().any(|&(s, e)| s <= at && at < e) {
+                lost.push((at, marker));
+            }
+        }
+    }
+    lost.sort_by_key(|&(at, _)| at);
+    for (at, marker) in lost {
+        let line = source[..at].matches('\n').count() + 1;
+        let col = at - source[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        errors.push(lex_error(&lost_directive_message(marker), file, line, col));
+    }
 }
 
 /// True when `marker` (e.g. `@embedAlways`) appears in `text` followed by a
@@ -2339,6 +2436,52 @@ mod tests {
         let c = r.contract.unwrap();
         let m = c.methods.iter().find(|m| m.name == "unlock").unwrap();
         assert_eq!(m.sighash_type, Some(0x43));
+    }
+
+    // N-199 (user decision R75): a `@sighash` / `@embedAlways` marker inside
+    // the contract class body that is not in the leading comments of the
+    // member kind that reads it (method / property) is refused with the shared
+    // message, located at the marker's `@` (1-based line, 0-based column as
+    // printed).
+    //
+    // Proves: the Rust TS-surface parser refuses each lost-directive shape the
+    // TS reference refuses (sighash-parse.test.ts, "N-199"), with the same text
+    // and location, and still accepts attached directives and prose outside the
+    // class body.
+    // Does not prove: cross-tier agreement (conformance/negatives/
+    // n199-lost-directive-parity.test.ts does) or non-ASCII column units.
+    #[test]
+    fn test_n199_lost_directive_refused() {
+        let stateful = |body: &str| format!(
+            "import {{ StatefulSmartContract }} from 'runar-lang';\nexport class C extends StatefulSmartContract {{\n  n: bigint;\n  constructor(n: bigint) {{ super(n); this.n = n; }}\n{}\n}}\n",
+            body
+        );
+        let bump = "  public bump(): void { this.addOutput(1000n, this.n); }";
+        let cases: Vec<(&str, String, &str)> = vec![
+            ("line comment sharing a line with the preceding method", stateful(&format!("  private foo(): void {{}} // @sighash SINGLE|FORKID\n{}", bump)), "@sighash"),
+            ("JSDoc sharing a line with the preceding method", stateful(&format!("  private foo(): void {{}} /** @sighash SINGLE|FORKID */\n{}", bump)), "@sighash"),
+            ("end of class body", stateful(&format!("{}\n  /** @sighash SINGLE|FORKID */", bump)), "@sighash"),
+            ("inside a method body", stateful("  public bump(): void {\n    // @sighash SINGLE|FORKID\n    this.addOutput(1000n, this.n);\n  }"), "@sighash"),
+            ("on a property", stateful(&format!("  /** @sighash SINGLE|FORKID */\n  readonly k: bigint = 1n;\n{}", bump)), "@sighash"),
+            ("above the constructor", format!("import {{ StatefulSmartContract }} from 'runar-lang';\nexport class C extends StatefulSmartContract {{\n  n: bigint;\n  /** @sighash SINGLE|FORKID */\n  constructor(n: bigint) {{ super(n); this.n = n; }}\n{}\n}}\n", bump), "@sighash"),
+            ("@embedAlways sharing a line with the preceding property", "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n  readonly a: bigint; // @embedAlways\n  readonly tag: bigint;\n  constructor(a: bigint, tag: bigint) { super(a, tag); this.a = a; this.tag = tag; }\n  public go(x: bigint): void { assert(x == this.a); }\n}\n".to_string(), "@embedAlways"),
+            ("@embedAlways on a method", "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n  readonly a: bigint;\n  constructor(a: bigint) { super(a); this.a = a; }\n  /** @embedAlways */\n  public go(x: bigint): void { assert(x == this.a); }\n}\n".to_string(), "@embedAlways"),
+        ];
+        for (name, src, marker) in &cases {
+            let r = parse_source(src, Some("X.runar.ts"));
+            let idx = src.find(marker).unwrap();
+            let line = src[..idx].matches('\n').count() + 1;
+            let col = idx - src[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let want = format!("X.runar.ts:{}:{}: {}", line, col, lost_directive_message(marker));
+            assert_eq!(r.error_strings(), vec![want], "case: {}", name);
+        }
+
+        let control = format!("import {{ StatefulSmartContract }} from 'runar-lang';\n// File header prose: this contract uses @sighash SINGLE|FORKID and @embedAlways.\n/** Class doc: `@sighash` lives on bump, `@embedAlways` on tag. */\nexport class C extends StatefulSmartContract {{\n  n: bigint;\n  /** @embedAlways */\n  readonly tag: bigint;\n  constructor(n: bigint, tag: bigint) {{ super(n, tag); this.n = n; this.tag = tag; }}\n  private foo(): void {{}}\n  // @sighash SINGLE|FORKID\n{}\n}}\n", bump);
+        let r = parse_source(&control, Some("X.runar.ts"));
+        assert!(r.errors.is_empty(), "control: unexpected errors: {:?}", r.error_strings());
+        let c = r.contract.unwrap();
+        assert_eq!(c.methods.iter().find(|m| m.name == "bump").unwrap().sighash_type, Some(0x43));
+        assert!(c.properties.iter().find(|p| p.name == "tag").unwrap().embed_always);
     }
 
     #[test]

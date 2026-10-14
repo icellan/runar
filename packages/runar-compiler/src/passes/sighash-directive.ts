@@ -122,6 +122,18 @@ export const SIGHASH_MALFORMED_ERROR =
 export const SIGHASH_MULTIPLE_ERROR =
   '@sighash: more than one @sighash directive on this method; declare exactly one';
 
+/**
+ * N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+ * `@sighash` / `@embedAlways` marker inside the contract class body that is
+ * not in the leading comments of the member kind that reads it (`@sighash` ->
+ * a method, `@embedAlways` -> a property). Such a directive was silently
+ * ignored; it is now a compile error located at the marker's `@`.
+ */
+export function lostDirectiveMessage(directive: '@sighash' | '@embedAlways'): string {
+  const target = directive === '@sighash' ? 'method' : 'property';
+  return `${directive} directive is not attached to any ${target} and would be silently ignored; put the comment on its own line directly above the ${target} it annotates (a comment that shares a line with the preceding code belongs to that code)`;
+}
+
 const SIGHASH_MARKER = '@sighash';
 
 /**

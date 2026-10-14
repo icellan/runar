@@ -176,6 +176,20 @@ def extract_sighash_directive(comment_text: str) -> SighashParseResult | None:
     return parse_sighash_flags(seg)
 
 
+def lost_directive_message(directive: str) -> str:
+    """N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+    ``@sighash`` / ``@embedAlways`` marker inside the contract class body that
+    is not in the leading comments of the member kind that reads it
+    (``@sighash`` -> a method, ``@embedAlways`` -> a property). Mirrors the TS
+    reference's ``lostDirectiveMessage`` (sighash-directive.ts)."""
+    target = "method" if directive == "@sighash" else "property"
+    return (
+        f"{directive} directive is not attached to any {target} and would be silently ignored; "
+        f"put the comment on its own line directly above the {target} it annotates "
+        f"(a comment that shares a line with the preceding code belongs to that code)"
+    )
+
+
 def describe_sighash(value: int) -> str:
     """Human-readable rendering of a sighash value (for diagnostics)."""
     parts: list[str] = []

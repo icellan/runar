@@ -78,7 +78,7 @@ public final class TsParser {
         List<Token> tokens = tokenize(source, comments, filename, lex);
         // F-011: refuse an unterminated literal before parsing what follows it.
         if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
-        Parser p = new Parser(tokens, filename, comments);
+        Parser p = new Parser(tokens, filename, comments, source);
         // F-213: measures (A) and (B). Counted to match the TS reference's
         // ts-morph mapping (tsChildNesting in passes/01-parse.ts).
         ContractNode contract = SourceNesting.guard(p::parseContract, ParseException::new);
@@ -102,7 +102,7 @@ public final class TsParser {
      * line — a pure line comparison cannot tell them apart when a member's
      * whole declaration sits on one line.
      */
-    private record CommentInfo(int line, int col, String text) {}
+    private record CommentInfo(int line, int col, String text, int start, int end) {}
 
     /** Checked exception for parse-time problems. */
     public static class ParseException extends Exception {
@@ -304,7 +304,7 @@ public final class TsParser {
                 }
                 // Capture leading trivia so the parser can detect .runar.ts
                 // comment directives (#109 @embedAlways / #123 @sighash).
-                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, i)));
+                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, i), commentStart, i));
                 continue;
             }
 
@@ -334,7 +334,8 @@ public final class TsParser {
                 if (!closed && i < n) {
                     i++;
                 }
-                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, Math.min(i, n))));
+                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, Math.min(i, n)),
+                    commentStart, Math.min(i, n)));
                 continue;
             }
 
@@ -544,10 +545,16 @@ public final class TsParser {
         boolean fatal = false;
         String fatalMsg = null;
 
-        Parser(List<Token> tokens, String fileName, List<CommentInfo> comments) {
+        /** N-199: raw source, and the comments each member kind read as leading trivia. */
+        final String source;
+        final List<CommentInfo> methodComments = new ArrayList<>();
+        final List<CommentInfo> propertyComments = new ArrayList<>();
+
+        Parser(List<Token> tokens, String fileName, List<CommentInfo> comments, String source) {
             this.tokens = tokens;
             this.fileName = fileName;
             this.comments = comments;
+            this.source = source;
         }
 
         /**
@@ -573,18 +580,103 @@ public final class TsParser {
          */
         String collectLeadingComments(int afterLine, int memberLine, int memberCol) {
             StringBuilder sb = new StringBuilder();
+            for (CommentInfo c : leadingCommentInfos(afterLine, memberLine, memberCol)) {
+                if (sb.length() > 0) {
+                    sb.append('\n');
+                }
+                sb.append(c.text());
+            }
+            return sb.toString();
+        }
+
+        /** The comments {@link #collectLeadingComments} concatenates. */
+        List<CommentInfo> leadingCommentInfos(int afterLine, int memberLine, int memberCol) {
+            List<CommentInfo> out = new ArrayList<>();
             for (CommentInfo c : comments) {
                 boolean afterPrevToken = c.line() > afterLine;
                 boolean beforeMember = c.line() < memberLine
                     || (c.line() == memberLine && c.col() < memberCol);
                 if (afterPrevToken && beforeMember) {
-                    if (sb.length() > 0) {
-                        sb.append('\n');
-                    }
-                    sb.append(c.text());
+                    out.add(c);
                 }
             }
-            return sb.toString();
+            return out;
+        }
+
+        /**
+         * N-199 (user decision R75): refuse a {@code @sighash} /
+         * {@code @embedAlways} marker inside the contract class body that is
+         * not in the leading comments of a member of the kind that reads it
+         * ({@code @sighash} of a method, {@code @embedAlways} of a property).
+         * A comment sharing a line with the preceding token never attaches
+         * (F-282), so such a directive used to be dropped silently. Text
+         * outside the class braces is prose and not scanned. Mirrors
+         * reportLostDirectives in the TS reference (01-parse.ts).
+         */
+        void reportLostDirectives(Token open, Token close) {
+            int bodyStart = offsetOf(open.line, open.col) + 1;
+            int bodyEnd = close.kind == TOK_RBRACE ? offsetOf(close.line, close.col) : source.length();
+            if (bodyEnd <= bodyStart) {
+                return;
+            }
+            String body = source.substring(bodyStart, bodyEnd);
+            java.util.TreeMap<Integer, String> lost = new java.util.TreeMap<>();
+            scanLost(body, bodyStart, SIGHASH_TOKEN_RE, "@sighash", methodComments, lost);
+            scanLost(body, bodyStart, EMBED_ALWAYS_RE, "@embedAlways", propertyComments, lost);
+            for (Map.Entry<Integer, String> e : lost.entrySet()) {
+                int pos = e.getKey();
+                int lineStart = lineStartBefore(pos);
+                int line = 1;
+                for (int k = 0; k < pos; k++) {
+                    if (source.charAt(k) == '\n') line++;
+                }
+                addError(LexDiag.at(fileName, line, pos - lineStart,
+                    SighashDirective.lostDirectiveMessage(e.getValue())));
+            }
+        }
+
+        private static void scanLost(String body, int bodyStart, Pattern re, String directive,
+                                     List<CommentInfo> spans, Map<Integer, String> lost) {
+            java.util.regex.Matcher m = re.matcher(body);
+            while (m.find()) {
+                int pos = bodyStart + m.start();
+                boolean attached = false;
+                for (CommentInfo c : spans) {
+                    if (c.start() <= pos && pos < c.end()) {
+                        attached = true;
+                        break;
+                    }
+                }
+                if (!attached) {
+                    lost.put(pos, directive);
+                }
+            }
+        }
+
+        /** Offset of the first char after the last '\n' or '\r' before {@code pos}. */
+        private int lineStartBefore(int pos) {
+            for (int k = pos - 1; k >= 0; k--) {
+                char c = source.charAt(k);
+                if (c == '\n' || c == '\r') return k + 1;
+            }
+            return 0;
+        }
+
+        /** Source offset of a token at (line, col), using the tokenizer's line rules. */
+        private int offsetOf(int line, int col) {
+            int l = 1;
+            int i = 0;
+            int n = source.length();
+            while (l < line && i < n) {
+                char c = source.charAt(i++);
+                if (c == '\n') {
+                    l++;
+                } else if (c == '\r') {
+                    if (i < n && source.charAt(i) == '\n') i++;
+                    l++;
+                }
+            }
+            return i + col;
         }
 
         void addError(String msg) {
@@ -790,7 +882,7 @@ public final class TsParser {
                 );
             }
 
-            expect(TOK_LBRACE);
+            Token openBrace = expect(TOK_LBRACE);
 
             List<PropertyNode> properties = new ArrayList<>();
             MethodNode constructor = null;
@@ -820,6 +912,9 @@ public final class TsParser {
                 }
             }
 
+            // N-199 (R75): a directive in the class body that no member reads.
+            reportLostDirectives(openBrace, peek());
+
             expect(TOK_RBRACE);
 
             if (constructor == null) {
@@ -846,6 +941,7 @@ public final class TsParser {
             // detect the .runar.ts comment directives (#109 @embedAlways on a
             // readonly field, #123 @sighash on a public method).
             int prevTokenLine = pos > 0 ? tokens.get(pos - 1).line : 0;
+            List<CommentInfo> leadingInfos = leadingCommentInfos(prevTokenLine, location.line(), location.column());
             String leadingComments = collectLeadingComments(prevTokenLine, location.line(), location.column());
 
             String visibility = "private";
@@ -894,6 +990,7 @@ public final class TsParser {
                     // N-050: a static method is not a contract method.
                     addError(LexDiag.staticMethod(memberName));
                 }
+                methodComments.addAll(leadingInfos);
                 return parseMethod(memberName, visibility, location, leadingComments);
             }
 
@@ -904,6 +1001,9 @@ public final class TsParser {
             }
 
             // Property: name: Type
+            if (check(TOK_COLON) || check(TOK_SEMICOLON)) {
+                propertyComments.addAll(leadingInfos);
+            }
             if (check(TOK_COLON)) {
                 advance();
                 TypeNode typeNode = parseType();

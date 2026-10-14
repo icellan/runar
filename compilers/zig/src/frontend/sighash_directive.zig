@@ -131,6 +131,13 @@ pub fn parseFlags(allocator: std.mem.Allocator, flags_text: []const u8) ParseRes
 pub const SIGHASH_MALFORMED_ERROR = "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
 pub const SIGHASH_MULTIPLE_ERROR = "@sighash: more than one @sighash directive on this method; declare exactly one";
 
+/// N-199 (R75): shared diagnostics, identical in all seven tiers (TS:
+/// lostDirectiveMessage in sighash-directive.ts), for a `@sighash` /
+/// `@embedAlways` marker inside the contract class body that is not in the
+/// leading comments of the member kind that reads it.
+pub const LOST_SIGHASH_ERROR = "@sighash directive is not attached to any method and would be silently ignored; put the comment on its own line directly above the method it annotates (a comment that shares a line with the preceding code belongs to that code)";
+pub const LOST_EMBED_ALWAYS_ERROR = "@embedAlways directive is not attached to any property and would be silently ignored; put the comment on its own line directly above the property it annotates (a comment that shares a line with the preceding code belongs to that code)";
+
 fn isWordByte(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }

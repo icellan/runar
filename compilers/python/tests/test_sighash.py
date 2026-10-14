@@ -16,6 +16,7 @@ from runar_compiler.frontend.sighash_directive import (
     extract_sighash_directive,
     describe_sighash,
     SIGHASH_DEFAULT,
+    lost_directive_message,
 )
 
 
@@ -168,7 +169,11 @@ class C extends StatefulSmartContract {
   n: bigint;
   constructor(n: bigint) { super(n); this.n = n; } /** @sighash SINGLE|FORKID */ public bump(): void { this.n = this.n + 1n; }
 }"""
-        assert _method_by_name(src, "bump").sighash_type is None
+        # N-199 (R75): still not attached, and the lost directive is now
+        # refused instead of compiling under the default ALL|FORKID.
+        r = parse_source(src, "X.runar.ts")
+        assert [e.message for e in r.errors] == [lost_directive_message("@sighash")]
+        assert next(m for m in r.contract.methods if m.name == "bump").sighash_type is None
 
     def test_trailing_comment_does_not_leak_to_next_method(self):
         src = """
@@ -179,7 +184,8 @@ class C extends SmartContract {
   public other(): void {}
 }"""
         r = parse_source(src, "X.runar.ts")
-        assert not r.errors, r.error_strings()
+        # N-199 (R75): the trailing directive attaches to nothing -> refused.
+        assert [e.message for e in r.errors] == [lost_directive_message("@sighash")]
         bump = next(m for m in r.contract.methods if m.name == "bump")
         other = next(m for m in r.contract.methods if m.name == "other")
         assert bump.sighash_type is None
@@ -488,3 +494,87 @@ class C extends SmartContract {
 }"""
         errs = _errors_of(src)
         assert any("hashOutputs" in e and "zeroed under NONE" in e for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# N-199 (user decision R75): a `@sighash` / `@embedAlways` marker inside the
+# contract class body that is not in the leading comments of the member kind
+# that reads it (method / property) is refused with the shared message, located
+# at the marker's `@` (1-based line, 0-based column).
+#
+# Proves: the Python TS-surface parser refuses each lost-directive shape the TS
+# reference refuses (sighash-parse.test.ts "N-199", Go TestN199_LostDirectiveRefused)
+# with the same text and location, and still accepts attached directives and
+# prose outside the class body.
+# Does not prove: cross-tier agreement (conformance/negatives/
+# n199-lost-directive-parity.test.ts does) or non-ASCII column units.
+# ---------------------------------------------------------------------------
+
+_N199_LOST_SIGHASH = (
+    "@sighash directive is not attached to any method and would be silently ignored; "
+    "put the comment on its own line directly above the method it annotates "
+    "(a comment that shares a line with the preceding code belongs to that code)"
+)
+_N199_LOST_EMBED = (
+    "@embedAlways directive is not attached to any property and would be silently ignored; "
+    "put the comment on its own line directly above the property it annotates "
+    "(a comment that shares a line with the preceding code belongs to that code)"
+)
+_N199_STATEFUL = (
+    "import { StatefulSmartContract } from 'runar-lang';\nexport class C extends StatefulSmartContract {\n"
+    "  n: bigint;\n  constructor(n: bigint) { super(n); this.n = n; }\n%s\n}\n"
+)
+_N199_BUMP = "  public bump(): void { this.addOutput(1000n, this.n); }"
+_N199_CASES = [
+    ("same-line line comment", _N199_STATEFUL % ("  private foo(): void {} // @sighash SINGLE|FORKID\n" + _N199_BUMP), "@sighash"),
+    ("same-line jsdoc", _N199_STATEFUL % ("  private foo(): void {} /** @sighash SINGLE|FORKID */\n" + _N199_BUMP), "@sighash"),
+    ("end of class body", _N199_STATEFUL % (_N199_BUMP + "\n  /** @sighash SINGLE|FORKID */"), "@sighash"),
+    ("inside a method body", _N199_STATEFUL % "  public bump(): void {\n    // @sighash SINGLE|FORKID\n    this.addOutput(1000n, this.n);\n  }", "@sighash"),
+    ("on a property", _N199_STATEFUL % ("  /** @sighash SINGLE|FORKID */\n  readonly k: bigint = 1n;\n" + _N199_BUMP), "@sighash"),
+    ("above the constructor",
+     "import { StatefulSmartContract } from 'runar-lang';\nexport class C extends StatefulSmartContract {\n  n: bigint;\n"
+     "  /** @sighash SINGLE|FORKID */\n  constructor(n: bigint) { super(n); this.n = n; }\n" + _N199_BUMP + "\n}\n", "@sighash"),
+    ("embedAlways sharing a line with the preceding property",
+     "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n  readonly a: bigint; // @embedAlways\n"
+     "  readonly tag: bigint;\n  constructor(a: bigint, tag: bigint) { super(a, tag); this.a = a; this.tag = tag; }\n"
+     "  public go(x: bigint): void { assert(x == this.a); }\n}\n", "@embedAlways"),
+    ("embedAlways on a method",
+     "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n  readonly a: bigint;\n"
+     "  constructor(a: bigint) { super(a); this.a = a; }\n  /** @embedAlways */\n"
+     "  public go(x: bigint): void { assert(x == this.a); }\n}\n", "@embedAlways"),
+]
+
+
+class TestN199LostDirective:
+    def test_shared_message_text(self):
+        assert lost_directive_message("@sighash") == _N199_LOST_SIGHASH
+        assert lost_directive_message("@embedAlways") == _N199_LOST_EMBED
+
+    def test_refuses_each_lost_directive_at_the_marker(self):
+        for name, src, marker in _N199_CASES:
+            r = parse_source(src, "X.runar.ts")
+            idx = src.index(marker)
+            want_line = src[:idx].count("\n") + 1
+            want_col = idx - (src.rfind("\n", 0, idx) + 1)
+            want_msg = _N199_LOST_SIGHASH if marker == "@sighash" else _N199_LOST_EMBED
+            got = [(e.message, e.loc.line if e.loc else None, e.loc.column if e.loc else None) for e in r.errors]
+            assert got == [(want_msg, want_line, want_col)], (name, got)
+
+    def test_reports_every_lost_directive_in_source_order(self):
+        src = _N199_STATEFUL % (
+            "  private foo(): void {} // @sighash SINGLE|FORKID\n"
+            "  public bump(): void { this.addOutput(1000n, this.n); } // @embedAlways"
+        )
+        r = parse_source(src, "X.runar.ts")
+        assert [e.message for e in r.errors] == [_N199_LOST_SIGHASH, _N199_LOST_EMBED]
+
+    def test_control_attached_directives_and_outside_prose_compile(self):
+        src = (
+            "import { StatefulSmartContract } from 'runar-lang';\n"
+            "// File header prose: this contract uses @sighash SINGLE|FORKID and @embedAlways.\n"
+            "/** Class doc: `@sighash` lives on bump, `@embedAlways` on tag. */\n"
+            "export class C extends StatefulSmartContract {\n  n: bigint;\n  /** @embedAlways */\n  readonly tag: bigint;\n"
+            "  constructor(n: bigint, tag: bigint) { super(n, tag); this.n = n; this.tag = tag; }\n"
+            "  private foo(): void {}\n  // @sighash SINGLE|FORKID\n" + _N199_BUMP + "\n}\n"
+        )
+        assert _method_by_name(src, "bump").sighash_type == 0x43
