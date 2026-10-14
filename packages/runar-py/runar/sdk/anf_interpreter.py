@@ -89,9 +89,10 @@ class OnChainCryptoContext:
       and ECDSA-verifying against this sighash. Any mismatch returns ``False``,
       tripping the enclosing ``assert(...)`` and raising
       :class:`AssertionFailureError`.
-    * verifies ``checkMultiSig(sigs, pks)`` by iterating signatures
-      left-to-right and consuming pubkeys greedily, mirroring Bitcoin's
-      ``OP_CHECKMULTISIG``.
+    * verifies ``checkMultiSig(sigs, pks)`` as ``OP_CHECKMULTISIG`` does: last
+      signature against last key first, the same encoding gates on every
+      examined pair, NULLFAIL on a failing check with a non-empty signature
+      (N-259, see :func:`_verify_multi_sig`).
     * verifies ``checkPreimage(preimage)`` by computing
       ``hash256(preimage) == SHA256(SHA256(preimage))`` and byte-comparing it
       to this sighash — the on-chain ``OP_PUSH_TX`` semantic.
@@ -1173,6 +1174,13 @@ def _eval_value(
         return _verify_preimage(env.get(pre_ref), real_crypto.sighash)
     if kind in ('deserialize_state', 'get_state_script'):
         return None
+    # N-259: the element values, in order. Its only consumer is
+    # ``checkMultiSig``, which lenient mode mocks to ``True`` and on-chain mode
+    # verifies over these lists; returning ``None`` made on-chain
+    # ``checkMultiSig`` answer ``False`` for every input, a valid multisig
+    # included.
+    if kind == 'array_literal':
+        return [env.get(ref) for ref in value.get('elements', [])]
 
     return None
 
@@ -2048,7 +2056,8 @@ def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
     NOT re-hash before verifying). Returns ``False`` on any parse error or
     signature mismatch. The ``checkSig`` call site first applies
     :func:`_check_sig_encoding_error` and aborts on a malformed encoding, as
-    ``OP_CHECKSIG`` does (N-197); ``checkMultiSig`` does not.
+    ``OP_CHECKSIG`` does (N-197); so does ``checkMultiSig``, per examined pair
+    (N-259).
     """
     sig_bytes = _to_byte_array(sig_val)
     pk_bytes = _to_byte_array(pk_val)
@@ -2067,25 +2076,49 @@ def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
 
 
 def _verify_multi_sig(sigs_val: Any, pks_val: Any, sighash: bytes) -> bool:
-    """OP_CHECKMULTISIG semantic: iterate sigs left-to-right, consume pks
-    greedily. Returns ``True`` iff every signature finds a matching pubkey.
+    """N-259: ``OP_CHECKMULTISIG`` as ``@bsv/sdk`` ``Spend`` runs it over the
+    compiled layout ``0 <sig1..sigN> N <pk1..pkM> M``.
+
+    The LAST signature is examined against the LAST key first and both lists
+    are walked toward the first. Each examined pair passes the N-197 encoding
+    gates first and a malformed one aborts (a pair never reached is never
+    checked); a signature that verifies consumes its key, a key is consumed
+    either way, and the check fails once fewer keys remain than signatures.
+    N > M aborts, as in ``Spend``. NULLFAIL (BIP146, N-198): a failing check
+    with ANY non-empty signature aborts on a node (``Spend`` has no NULLFAIL);
+    only an all-empty one returns ``False``. ``ValueError`` is this module's
+    opcode-abort signal (F-134).
     """
     if not isinstance(sigs_val, list) or not isinstance(pks_val, list):
         return False
     if len(sigs_val) > len(pks_val):
-        return False
-    pk_idx = 0
-    for sig in sigs_val:
-        matched = False
-        while pk_idx < len(pks_val):
-            ok = _verify_ecdsa(sig, pks_val[pk_idx], sighash)
-            pk_idx += 1
-            if ok:
-                matched = True
-                break
-        if not matched:
-            return False
-    return True
+        raise ValueError(
+            f'checkMultiSig: {len(sigs_val)} signatures for {len(pks_val)} public keys — '
+            'OP_CHECKMULTISIG aborts the script when there are more signatures than keys'
+        )
+    isig = len(sigs_val) - 1
+    ikey = len(pks_val) - 1
+    success = True
+    while success and isig >= 0:
+        reason = _check_sig_encoding_error(sigs_val[isig], pks_val[ikey])
+        if reason is not None:
+            raise ValueError(
+                f'checkMultiSig: {reason} — OP_CHECKMULTISIG aborts the script on a malformed '
+                'signature or public key encoding, it does not push false'
+            )
+        if len(_to_byte_array(sigs_val[isig]) or b'') > 0 and _verify_ecdsa(
+                sigs_val[isig], pks_val[ikey], sighash):
+            isig -= 1
+        ikey -= 1
+        if isig > ikey:  # fewer keys left than signatures
+            success = False
+    if not success and any(len(_to_byte_array(s) or b'') > 0 for s in sigs_val):
+        raise ValueError(
+            'checkMultiSig: a signature is non-empty and the check fails (NULLFAIL) — '
+            'OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push '
+            'false; a multisig that must fail takes empty signatures (EMPTY_SIG)'
+        )
+    return success
 
 
 def _verify_preimage(preimage_val: Any, sighash: bytes) -> bool:

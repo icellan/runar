@@ -55,9 +55,10 @@ module Runar
     #   trailing sighash type byte stripped), and ECDSA-verifying against the
     #   sighash. Any mismatch returns +false+, which then trips the enclosing
     #   +assert(...)+ and raises {AssertionFailureError}.
-    # - verifies +checkMultiSig(sigs, pks)+ by iterating signatures
-    #   left-to-right and consuming pubkeys greedily, mirroring Bitcoin's
-    #   +OP_CHECKMULTISIG+.
+    # - verifies +checkMultiSig(sigs, pks)+ as +OP_CHECKMULTISIG+ does: last
+    #   signature against last key first, the same encoding gates on every
+    #   examined pair, NULLFAIL on a failing check with a non-empty signature
+    #   (N-259, see +verify_multi_sig_real+).
     # - verifies +checkPreimage(preimage)+ by computing
     #   +SHA256(SHA256(preimage))+ and comparing it to +sighash+ byte-for-byte
     #   — the on-chain +OP_PUSH_TX+ semantic.
@@ -790,6 +791,14 @@ module Runar
           # On-chain-only operations — skip in simulation.
           nil
 
+        when 'array_literal'
+          # N-259: the element values, in order. Its only consumer is
+          # +checkMultiSig+, which lenient mode mocks to +true+ and on-chain
+          # mode verifies over these lists; returning +nil+ made on-chain
+          # +checkMultiSig+ answer +false+ for every input, a valid multisig
+          # included.
+          (value['elements'] || []).map { |ref| env[ref] }
+
         else
           nil
         end
@@ -1369,7 +1378,8 @@ module Runar
       # +Runar::ECDSA.parse_der_signature_bytes+). Returns +false+ on any
       # decode error so the enclosing +assert(...)+ fires. The +checkSig+ call
       # site first applies +check_sig_encoding_error+ and aborts on a malformed
-      # encoding, as +OP_CHECKSIG+ does (N-197); +checkMultiSig+ does not.
+      # encoding, as +OP_CHECKSIG+ does (N-197); so does +checkMultiSig+, per
+      # examined pair (N-259).
       #
       # The 32-byte sighash is the ECDSA digest itself (no extra hash) — this
       # mirrors the on-chain +OP_CHECKSIG+ semantic, where the script
@@ -1390,28 +1400,49 @@ module Runar
         end
       end
 
-      # Verify a list of signatures against a list of pubkeys. Mirrors
-      # Bitcoin's +OP_CHECKMULTISIG+: iterate sigs left-to-right, consume
-      # pubkeys greedily.
+      # N-259: +OP_CHECKMULTISIG+ as +@bsv/sdk+ +Spend+ runs it over the
+      # compiled layout +0 <sig1..sigN> N <pk1..pkM> M+. The LAST signature is
+      # examined against the LAST key first and both lists are walked toward
+      # the first. Each examined pair passes the N-197 encoding gates first and
+      # a malformed one aborts (a pair never reached is never checked); a
+      # signature that verifies consumes its key, a key is consumed either way,
+      # and the check fails once fewer keys remain than signatures. N > M
+      # aborts, as in +Spend+. NULLFAIL (BIP146, N-198): a failing check with
+      # ANY non-empty signature aborts on a node (+Spend+ has no NULLFAIL);
+      # only an all-empty one returns +false+.
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
       def verify_multi_sig_real(sigs_val, pks_val, sighash_bytes)
         return false unless sigs_val.is_a?(Array) && pks_val.is_a?(Array)
-        return false if sigs_val.length > pks_val.length
 
-        pk_idx = 0
-        sigs_val.each do |sig|
-          matched = false
-          while pk_idx < pks_val.length
-            ok = verify_ecdsa_real(sig, pks_val[pk_idx], sighash_bytes)
-            pk_idx += 1
-            if ok
-              matched = true
-              break
-            end
-          end
-          return false unless matched
+        if sigs_val.length > pks_val.length
+          raise "checkMultiSig: #{sigs_val.length} signatures for #{pks_val.length} public keys — " \
+                'OP_CHECKMULTISIG aborts the script when there are more signatures than keys'
         end
-        true
+
+        isig = sigs_val.length - 1
+        ikey = pks_val.length - 1
+        success = true
+        while success && isig >= 0
+          reason = check_sig_encoding_error(sigs_val[isig], pks_val[ikey])
+          if reason
+            raise "checkMultiSig: #{reason} — OP_CHECKMULTISIG aborts the script on a malformed " \
+                  'signature or public key encoding, it does not push false'
+          end
+          if !to_hex_arg(sigs_val[isig]).to_s.empty? &&
+             verify_ecdsa_real(sigs_val[isig], pks_val[ikey], sighash_bytes)
+            isig -= 1
+          end
+          ikey -= 1
+          success = false if isig > ikey # fewer keys left than signatures
+        end
+        if !success && sigs_val.any? { |s| !to_hex_arg(s).to_s.empty? }
+          raise 'checkMultiSig: a signature is non-empty and the check fails (NULLFAIL) — ' \
+                'OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push ' \
+                'false; a multisig that must fail takes empty signatures (EMPTY_SIG)'
+        end
+        success
       end
+      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength
 
       # Verify that +SHA256(SHA256(preimage)) == sighash+ — the on-chain
       # +OP_PUSH_TX+ semantic for +checkPreimage+.

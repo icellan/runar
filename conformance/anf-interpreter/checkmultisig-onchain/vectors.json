@@ -1,0 +1,125 @@
+{
+  "_doc": "N-259. Replayed by ../checkmultisig-onchain.test.ts through every SDK ANF interpreter in on-chain mode (TS in-process, the six drivers via --mode=on-chain) and through @bsv/sdk Spend.validate() on the compiled probe ../programs/CheckMultiSigOrProbe.runar.ts, i.e. assert(checkMultiSig([s1, s2], [pk1, pk2, pk3]) || checkSig(sigB, pubB)). `sighash` is the digest Spend computes for that probe's locking script in ScriptExecutionContract's fixed spend context (version 1, SIGHASH_ALL|FORKID, no other inputs or outputs); the test recomputes it on every run, so every signature here verifies under Spend too. Keys: k1/k2/k3 = priv 0x11../0x22../0x33.., pubB = priv 0x44.., the out-of-set key = 0x55..; signatures are RFC 6979 low-S ECDSA plus a 0x41 sighash-type byte (the high-S case is the n-s twin of k3's). A malformed key is the compressed key with its prefix replaced by 0x05. `outcome` is every SDK interpreter's verdict: succeeds (sigB is empty, so only the multisig can satisfy the assert), false (the multisig pushes false and sigB carries the spend), assert (nothing verifies), aborts (with `reason`). OP_CHECKMULTISIG examines s2 against pk3 first, then walks both lists toward s1/pk1, applies the encoding gates only to the pairs it examines, and stops once fewer keys remain than signatures. A `nullfail` case aborts on a BSV node under NULLFAIL (BIP146: a failed OP_CHECKMULTISIG with any non-empty signature); Spend has no NULLFAIL and pushes false, so for those cases Spend is NOT the oracle.",
+  "sighash": "323c1632c8d57ac845468b30afcde3dd766366469de35db5ed768df0717eb214",
+  "pubB": "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+  "cases": [
+    {
+      "name": "2-of-3, signers 1 and 2",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3045022100924ed4a5a112bd645f17096039c410d879c796a7c6c4328b4d19ed0fae59b96e02205771d7371c3bb9b9fbeda5adc8aef3bdd4470cf083a64f66b45ca79a0f19701e41",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "succeeds"
+    },
+    {
+      "name": "2-of-3, signers 1 and 3 (pk2 is examined and skipped)",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3044022079634beec9e2620824bb4df1f76522f6722059eb6d75103239967a557456562302200b3bdc6f106806a8bb8965c309492cb5b0a5e23f0014b2826da66fb1cd8ee43941",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "succeeds"
+    },
+    {
+      "name": "2-of-3, signers 2 and 3",
+      "s1": "3045022100924ed4a5a112bd645f17096039c410d879c796a7c6c4328b4d19ed0fae59b96e02205771d7371c3bb9b9fbeda5adc8aef3bdd4470cf083a64f66b45ca79a0f19701e41",
+      "s2": "3044022079634beec9e2620824bb4df1f76522f6722059eb6d75103239967a557456562302200b3bdc6f106806a8bb8965c309492cb5b0a5e23f0014b2826da66fb1cd8ee43941",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "succeeds"
+    },
+    {
+      "name": "pk1 malformed, signers 2 and 3: pk1 is never examined",
+      "s1": "3045022100924ed4a5a112bd645f17096039c410d879c796a7c6c4328b4d19ed0fae59b96e02205771d7371c3bb9b9fbeda5adc8aef3bdd4470cf083a64f66b45ca79a0f19701e41",
+      "s2": "3044022079634beec9e2620824bb4df1f76522f6722059eb6d75103239967a557456562302200b3bdc6f106806a8bb8965c309492cb5b0a5e23f0014b2826da66fb1cd8ee43941",
+      "pk1": "054f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "succeeds"
+    },
+    {
+      "name": "pk3 malformed, signers 1 and 2: pk3 is examined first",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3045022100924ed4a5a112bd645f17096039c410d879c796a7c6c4328b4d19ed0fae59b96e02205771d7371c3bb9b9fbeda5adc8aef3bdd4470cf083a64f66b45ca79a0f19701e41",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "053c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "30450221008c7dc00e2e6453f0413a8169805c52b272bf77f2f3c86c15373e7fec4eea0ff30220628a477f16724bce9b876ad3e963636d8bf634397126ea72b630069a85a55da441",
+      "outcome": "aborts",
+      "reason": "the public key is not a 33-byte compressed or 65-byte uncompressed key"
+    },
+    {
+      "name": "second signature has a high S: it is examined first",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3045022079634beec9e2620824bb4df1f76522f6722059eb6d75103239967a5574565623022100f4c42390ef97f95744769a3cf6b6d3490a08faa7af33edb9522beedb02a75d0841",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "30450221008c7dc00e2e6453f0413a8169805c52b272bf77f2f3c86c15373e7fec4eea0ff30220628a477f16724bce9b876ad3e963636d8bf634397126ea72b630069a85a55da441",
+      "outcome": "aborts",
+      "reason": "the signature does not have a low S value"
+    },
+    {
+      "name": "both signatures empty, pk1 malformed: the check stops before pk1",
+      "s1": "",
+      "s2": "",
+      "pk1": "054f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "30450221008c7dc00e2e6453f0413a8169805c52b272bf77f2f3c86c15373e7fec4eea0ff30220628a477f16724bce9b876ad3e963636d8bf634397126ea72b630069a85a55da441",
+      "outcome": "false"
+    },
+    {
+      "name": "both signatures empty, sigB empty",
+      "s1": "",
+      "s2": "",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "assert"
+    },
+    {
+      "name": "NULLFAIL: second signature by a key outside the set",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3045022100dcb4ff230cf7705b265b2c3aa026813720eb27766f5c81e227fae5d0ecefbf0f02205477f6e700254f6f3c049394c7e837cd55e2ca8f87ba4de12f5025830033e52c41",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "30450221008c7dc00e2e6453f0413a8169805c52b272bf77f2f3c86c15373e7fec4eea0ff30220628a477f16724bce9b876ad3e963636d8bf634397126ea72b630069a85a55da441",
+      "outcome": "aborts",
+      "nullfail": true,
+      "reason": "a signature is non-empty and the check fails (NULLFAIL)"
+    },
+    {
+      "name": "NULLFAIL: valid signatures in the wrong order",
+      "s1": "3045022100924ed4a5a112bd645f17096039c410d879c796a7c6c4328b4d19ed0fae59b96e02205771d7371c3bb9b9fbeda5adc8aef3bdd4470cf083a64f66b45ca79a0f19701e41",
+      "s2": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "30450221008c7dc00e2e6453f0413a8169805c52b272bf77f2f3c86c15373e7fec4eea0ff30220628a477f16724bce9b876ad3e963636d8bf634397126ea72b630069a85a55da441",
+      "outcome": "aborts",
+      "nullfail": true,
+      "reason": "a signature is non-empty and the check fails (NULLFAIL)"
+    },
+    {
+      "name": "NULLFAIL: wrong second signature, sigB empty",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3045022100dcb4ff230cf7705b265b2c3aa026813720eb27766f5c81e227fae5d0ecefbf0f02205477f6e700254f6f3c049394c7e837cd55e2ca8f87ba4de12f5025830033e52c41",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "aborts",
+      "nullfail": true,
+      "reason": "a signature is non-empty and the check fails (NULLFAIL)"
+    }
+  ]
+}

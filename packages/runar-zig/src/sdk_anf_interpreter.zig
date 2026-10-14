@@ -184,7 +184,8 @@ pub const StrictError = error{
     /// On-chain mode also raises it where `OP_CHECKSIG` aborts on a malformed
     /// signature or public-key encoding (N-197, `checkSigEncodingError`), and
     /// where a node aborts it under NULLFAIL on a non-empty signature that
-    /// does not verify (N-198).
+    /// does not verify (N-198), and where `OP_CHECKMULTISIG` aborts or a node
+    /// applies NULLFAIL to a failing multisig (N-259).
     ScriptNumberError,
 };
 
@@ -544,11 +545,11 @@ pub fn executeStrictWithFailureInfo(
 /// Failure trips the enclosing `assert(...)` and returns
 /// `error.AssertionFailure`.
 ///
-/// `checkMultiSig(sigs, pks)` iterates signatures left-to-right and consumes
-/// pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`. Right now the
-/// interpreter has no array values surface (sigs/pks come in as arrays of
-/// hex strings via `args`), so this path is exercised only when the caller
-/// supplies array-of-bytes args; behaviour matches the TS SDK reference.
+/// `checkMultiSig(sigs, pks)` runs `OP_CHECKMULTISIG` as `Spend` does: last
+/// signature against last key first, the same encoding gates on every
+/// examined pair, NULLFAIL on a failing check with a non-empty signature
+/// (N-259, see `verifyMultiSigReal`). The lists come from `array_literal`
+/// bindings or array-of-bytes args.
 ///
 /// `checkPreimage(preimage)` computes `hash256(preimage)`
 /// (`SHA256(SHA256(preimage))`) and compares to `ctx.sighash` byte-for-byte
@@ -1018,6 +1019,16 @@ fn evalNode(
             if (real_crypto != null and std.mem.eql(u8, c.func, "checkSig")) {
                 if (checkSigEncodingError(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env)) != null) {
                     return error.ScriptNumberError;
+                }
+            }
+            // N-259: on-chain checkMultiSig runs OP_CHECKMULTISIG as Spend does
+            // (`verifyMultiSigReal`); an abort (malformed encoding of an
+            // examined pair, NULLFAIL, N > M) takes the same rejection channel.
+            if (real_crypto) |rc| {
+                if (std.mem.eql(u8, c.func, "checkMultiSig")) {
+                    const ok = verifyMultiSigReal(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env), rc.sighash) orelse
+                        return error.ScriptNumberError;
+                    return .{ .boolean = ok };
                 }
             }
             const result = evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
@@ -1644,7 +1655,10 @@ fn evalCall(
         if (real_crypto) |rc| {
             const sigs_val = getArg(arg_names, 0, env);
             const pks_val = getArg(arg_names, 1, env);
-            return .{ .boolean = verifyMultiSigReal(allocator, sigs_val, pks_val, rc.sighash) };
+            // Not reached in real-crypto mode: the call-binding site runs
+            // `verifyMultiSigReal` itself and turns its abort (null) into
+            // error.ScriptNumberError. Kept total for safety.
+            return .{ .boolean = verifyMultiSigReal(allocator, sigs_val, pks_val, rc.sighash) orelse false };
         }
         return .{ .boolean = true };
     }
@@ -2133,7 +2147,8 @@ fn checkSigEncodingError(allocator: std.mem.Allocator, sig_val: ANFValue, pk_val
 /// (with optional trailing sighash type byte stripped). Returns false on
 /// any decode error so the enclosing assert fires. The `checkSig` call site
 /// first applies `checkSigEncodingError` and aborts on a malformed encoding,
-/// as `OP_CHECKSIG` does (N-197); `checkMultiSig` does not.
+/// as `OP_CHECKSIG` does (N-197); so does `checkMultiSig`, per examined pair
+/// (N-259).
 fn verifyEcdsaReal(
     allocator: std.mem.Allocator,
     sig_val: ANFValue,
@@ -2168,23 +2183,27 @@ fn verifyEcdsaReal(
     return bsvz.crypto.verifyDigest256RelaxedSec1(pk_bytes, sighash, der_slice) catch false;
 }
 
-/// Real `checkMultiSig` verification: iterate `sigs` left-to-right and
-/// consume `pks` greedily (mirrors the on-chain `OP_CHECKMULTISIG` semantic
-/// and the TS / Java SDK references at
-/// `packages/runar-sdk/src/anf-interpreter.ts::verifyMultiSig` and
-/// `packages/runar-java/src/main/java/runar/lang/sdk/AnfInterpreter.java::verifyMultiSigReal`).
+/// N-259: `OP_CHECKMULTISIG` as `@bsv/sdk` `Spend` runs it over the compiled
+/// layout `0 <sig1..sigN> N <pk1..pkM> M`. The LAST signature is examined
+/// against the LAST key first and both lists are walked toward the first. Each
+/// examined pair passes the N-197 encoding gates first and a malformed one
+/// aborts (a pair never reached is never checked); a signature that verifies
+/// consumes its key, a key is consumed either way, and the check fails once
+/// fewer keys remain than signatures. N > M aborts, as in `Spend`. NULLFAIL
+/// (BIP146, N-198): a failing check with ANY non-empty signature aborts on a
+/// node (`Spend` has no NULLFAIL); only an all-empty one yields `false`.
 ///
 /// `sigs_val` and `pks_val` must be `ANFValue.array` whose elements are
 /// `ANFValue.bytes` (hex-encoded) — what `stateValueToAnf` produces for a
 /// `StateValue.array_value` of `bytes` leaves and what an `array_literal`
-/// ANF binding produces from byte-shaped element refs. Returns `false` on
-/// any other shape so an enclosing `assert(checkMultiSig(...))` fails loudly.
+/// ANF binding produces from byte-shaped element refs. Any other shape yields
+/// `false`. Returns `null` where the script aborts.
 fn verifyMultiSigReal(
     allocator: std.mem.Allocator,
     sigs_val: ANFValue,
     pks_val: ANFValue,
     sighash: [32]u8,
-) bool {
+) ?bool {
     const sigs = switch (sigs_val) {
         .array => |a| a,
         else => return false,
@@ -2193,21 +2212,31 @@ fn verifyMultiSigReal(
         .array => |a| a,
         else => return false,
     };
-    if (sigs.len > pks.len) return false;
-    var pk_idx: usize = 0;
-    for (sigs) |sig| {
-        var matched = false;
-        while (pk_idx < pks.len) : (pk_idx += 1) {
-            const ok = verifyEcdsaReal(allocator, sig, pks[pk_idx], sighash);
-            if (ok) {
-                pk_idx += 1;
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) return false;
+    if (sigs.len > pks.len) return null;
+    var nsigs: usize = sigs.len;
+    var nkeys: usize = pks.len;
+    var success = true;
+    while (success and nsigs > 0) {
+        const sig = sigs[nsigs - 1];
+        const pk = pks[nkeys - 1];
+        if (checkSigEncodingError(allocator, sig, pk) != null) return null;
+        if (anfNonEmptyBytes(sig) and verifyEcdsaReal(allocator, sig, pk, sighash)) nsigs -= 1;
+        nkeys -= 1;
+        if (nsigs > nkeys) success = false; // fewer keys left than signatures
     }
-    return true;
+    if (!success) {
+        for (sigs) |sig| {
+            if (anfNonEmptyBytes(sig)) return null;
+        }
+    }
+    return success;
+}
+
+fn anfNonEmptyBytes(v: ANFValue) bool {
+    return switch (v) {
+        .bytes => |b| b.len > 0,
+        else => false,
+    };
 }
 
 /// Verify that hash256(preimage) equals the supplied 32-byte sighash —
@@ -4004,7 +4033,7 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 passes when sig match
     try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
 }
 
-test "executeOnChainAuthoritative — checkMultiSig 1-of-2 fails when sig matches no pk" {
+test "executeOnChainAuthoritative — checkMultiSig 1-of-2 aborts (NULLFAIL) when sig matches no pk" {
     const allocator = std.testing.allocator;
     const anf = buildMultiSigGuardAnf();
 
@@ -4048,7 +4077,9 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 fails when sig matche
         allocator, &anf, "unlock", current_state, args, &.{},
         .{ .sighash = sighash },
     );
-    try std.testing.expectError(StrictError.AssertionFailure, result);
+    // N-259: the check fails with a non-empty signature, which a node aborts
+    // under NULLFAIL (BIP146) rather than push false.
+    try std.testing.expectError(StrictError.ScriptNumberError, result);
 }
 
 test "executeOnChainAuthoritative — checkMultiSig real-crypto rejects non-array sig arg" {

@@ -284,7 +284,11 @@ class AnfInterpreterRealCryptoTest {
         AnfInterpreter.OnChainCryptoContext ctx =
             new AnfInterpreter.OnChainCryptoContext(sighash);
 
-        assertThrows(AnfInterpreter.AssertionFailureException.class, () ->
+        // N-259: OP_CHECKMULTISIG aborts on a corrupted signature, either on
+        // its encoding or, once the check fails with a non-empty signature,
+        // under NULLFAIL (BIP146) on a node; it is not an assert on a pushed
+        // false.
+        AnfInterpreter.InterpreterException e = assertThrows(AnfInterpreter.InterpreterException.class, () ->
             AnfInterpreter.executeOnChainAuthoritative(
                 multisigGuardAnf(), "unlock",
                 Map.of("value", BigInteger.ZERO),
@@ -296,6 +300,7 @@ class AnfInterpreterRealCryptoTest {
                 ctx
             )
         );
+        assertTrue(e.getMessage().contains("OP_CHECKMULTISIG aborts"), e.getMessage());
     }
 
     // ---- Mode parity (no regression in lenient/strict mocks) ------------

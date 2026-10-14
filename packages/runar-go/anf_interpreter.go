@@ -320,9 +320,10 @@ func (f *InterpreterFixture) SetMockPreimageOutputHash(bytes []byte) {
 //     parses sig as DER (with optional trailing sighash byte stripped — Bitcoin
 //     convention), and ECDSA-verifies against Sighash. On mismatch, returns
 //     false; the enclosing assert(...) trips and yields *AssertionFailureError.
-//   - checkMultiSig(sigs, pks) iterates signatures left-to-right and consumes
-//     pubkeys greedily, mirroring Bitcoin's OP_CHECKMULTISIG. Returns true iff
-//     every signature finds a matching pubkey.
+//   - checkMultiSig(sigs, pks) runs OP_CHECKMULTISIG as Spend does: last
+//     signature against last key first, the same encoding gates on every
+//     examined pair, NULLFAIL on a failing check with a non-empty signature
+//     (N-259, see anfVerifyMultiSig).
 //   - checkPreimage(preimage) computes hash256(preimage) (SHA-256 of SHA-256)
 //     and byte-compares to Sighash. Returns true on match. Mirrors the on-chain
 //     OP_PUSH_TX semantic.
@@ -1113,6 +1114,19 @@ func anfEvalValue(
 	// On-chain-only operations — skip
 	case "deserialize_state", "get_state_script":
 		return nil
+
+	// N-259: the element values, in order. Its only consumer is
+	// checkMultiSig, which lenient mode mocks to true and on-chain mode
+	// verifies over these lists; returning nil made on-chain checkMultiSig
+	// answer false for every input, a valid multisig included.
+	case "array_literal":
+		elems, _ := value["elements"].([]interface{})
+		out := make([]interface{}, len(elems))
+		for i, e := range elems {
+			ref, _ := e.(string)
+			out[i] = env[ref]
+		}
+		return out
 	}
 
 	return nil
@@ -1788,7 +1802,8 @@ func anfToHexBytes(v interface{}) []byte {
 // (compressed or uncompressed), then ECDSA-verifies against the supplied
 // 32-byte sighash. Returns false on any parse error or signature mismatch.
 // The checkSig call site first applies checkSigEncodingError and aborts on a
-// malformed encoding, as OP_CHECKSIG does (N-197); checkMultiSig does not.
+// malformed encoding, as OP_CHECKSIG does (N-197); so does checkMultiSig, per
+// examined pair (N-259).
 //
 // The digest passed to the ECDSA verify is the raw 32-byte sighash — this
 // matches the on-chain OP_CHECKSIG semantic (no extra hashing) and the TS
@@ -1812,9 +1827,15 @@ func anfVerifyEcdsa(sigVal, pkVal interface{}, sighash []byte) bool {
 	return ecdsaVerify(sigBytes, pkBytes, sighash)
 }
 
-// anfVerifyMultiSig iterates signatures left-to-right and consumes pubkeys
-// greedily, mirroring Bitcoin's OP_CHECKMULTISIG. Returns true iff every
-// signature finds a matching pubkey.
+// anfVerifyMultiSig runs OP_CHECKMULTISIG as @bsv/sdk Spend does over the
+// compiled layout `0 <sig1..sigN> N <pk1..pkM> M` (N-259): the LAST signature
+// is examined against the LAST key first and both lists are walked toward the
+// first. Each examined pair passes the N-197 encoding gates first and a
+// malformed one aborts (a pair never reached is never checked); a signature
+// that verifies consumes its key, a key is consumed either way, and the check
+// fails once fewer keys remain than signatures. N > M aborts, as in Spend.
+// NULLFAIL (BIP146, N-198): a failing check with ANY non-empty signature
+// aborts on a node (Spend has no NULLFAIL); only an all-empty one pushes false.
 func anfVerifyMultiSig(sigsVal, pksVal interface{}, sighash []byte) bool {
 	sigs, sigsOk := sigsVal.([]interface{})
 	pks, pksOk := pksVal.([]interface{})
@@ -1822,24 +1843,36 @@ func anfVerifyMultiSig(sigsVal, pksVal interface{}, sighash []byte) bool {
 		return false
 	}
 	if len(sigs) > len(pks) {
-		return false
+		panic(&ScriptOpcodeError{Opcode: "checkMultiSig", Message: fmt.Sprintf("%d signatures for %d public keys", len(sigs), len(pks)) +
+			" — OP_CHECKMULTISIG aborts the script when there are more signatures than keys"})
 	}
-	pkIdx := 0
-	for _, sig := range sigs {
-		matched := false
-		for pkIdx < len(pks) {
-			ok := anfVerifyEcdsa(sig, pks[pkIdx], sighash)
-			pkIdx++
-			if ok {
-				matched = true
-				break
+	isig, ikey := len(sigs)-1, len(pks)-1
+	success := true
+	for success && isig >= 0 {
+		sigBytes, pkBytes := anfToHexBytes(sigs[isig]), anfToHexBytes(pks[ikey])
+		if sigBytes != nil && pkBytes != nil {
+			if reason := checkSigEncodingError(sigBytes, pkBytes); reason != "" {
+				panic(&ScriptOpcodeError{Opcode: "checkMultiSig", Message: reason +
+					" — OP_CHECKMULTISIG aborts the script on a malformed signature or public key encoding, it does not push false"})
 			}
 		}
-		if !matched {
-			return false
+		if len(sigBytes) > 0 && anfVerifyEcdsa(sigs[isig], pks[ikey], sighash) {
+			isig--
+		}
+		ikey--
+		if isig > ikey { // fewer keys left than signatures
+			success = false
 		}
 	}
-	return true
+	if !success {
+		for _, s := range sigs {
+			if len(anfToHexBytes(s)) > 0 {
+				panic(&ScriptOpcodeError{Opcode: "checkMultiSig", Message: "a signature is non-empty and the check fails (NULLFAIL)" +
+					" — OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push false; a multisig that must fail takes empty signatures (EMPTY_SIG)"})
+			}
+		}
+	}
+	return success
 }
 
 // anfVerifyPreimage replicates the on-chain BIP-143 / OP_PUSH_TX semantic:

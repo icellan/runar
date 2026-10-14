@@ -243,8 +243,10 @@ export function executeStrict(
  *    DER or has a high S, or a public key that is not 02/03+33 / 04+65 bytes
  *    on the curve — throws a plain `Error` instead, because `OP_CHECKSIG`
  *    aborts the script there rather than pushing false (N-197).
- *  - verifies `checkMultiSig(sigs, pks)` by iterating signatures left-to-right
- *    and consuming pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`.
+ *  - verifies `checkMultiSig(sigs, pks)` as `OP_CHECKMULTISIG` does: last
+ *    signature against last key first, the same encoding gates on every pair
+ *    it examines, and NULLFAIL on a failing check with a non-empty signature
+ *    (N-259, see `verifyMultiSig`).
  *  - verifies `checkPreimage(preimage)` by computing `hash256(preimage)`
  *    (i.e. `SHA256(SHA256(preimage))`) and comparing it to `sighash`
  *    byte-for-byte — the on-chain `OP_PUSH_TX` semantic.
@@ -765,13 +767,12 @@ function evalValue(
     case 'get_state_script':
       return undefined;
 
-    // F-145 allowlist (formerly reached the blanket default). Its only
-    // consumer is `checkMultiSig`, which lenient mode mocks to true and
-    // real-crypto mode refuses (verifyMultiSig requires real arrays), so
-    // `undefined` never reaches state. Refusing it would break every
-    // stateful multisig call.
+    // N-259: the element values, in order. Its only consumer is
+    // `checkMultiSig`, which lenient mode mocks to true and on-chain mode
+    // verifies over these lists; returning `undefined` here made on-chain
+    // `checkMultiSig` answer false for every input, a valid multisig included.
     case 'array_literal':
-      return undefined;
+      return value.elements.map(e => env[e]);
 
     // F-145: an opaque asm span. With out_arity 0 it produces no value
     // (a check, like a lenient-mode assert); with out_arity >= 1 its result
@@ -1686,24 +1687,54 @@ function verifyEcdsa(
   }
 }
 
+/**
+ * N-259: `OP_CHECKMULTISIG` as `@bsv/sdk` `Spend` runs it over the compiled
+ * layout `0 <sig1..sigN> N <pk1..pkM> M`. It examines the LAST signature
+ * against the LAST key first and walks both lists toward the first, so:
+ *  - each EXAMINED pair passes the N-197 encoding gates first, and a malformed
+ *    one aborts the script (a pair never reached is never checked);
+ *  - a signature that verifies consumes its key; a key is consumed either way;
+ *  - the check fails as soon as fewer keys remain than signatures.
+ * N > M aborts, as in `Spend`. NULLFAIL (BIP146, N-198): when the check fails
+ * and ANY signature is non-empty a node aborts; `Spend` has no NULLFAIL and
+ * pushes false. Only an all-empty failing check pushes false here.
+ */
 function verifyMultiSig(
   sigsVal: unknown,
   pksVal: unknown,
   sighash: number[],
 ): boolean {
   if (!Array.isArray(sigsVal) || !Array.isArray(pksVal)) return false;
-  if (sigsVal.length > pksVal.length) return false;
-  let pkIdx = 0;
-  for (const sig of sigsVal) {
-    let matched = false;
-    while (pkIdx < pksVal.length) {
-      const ok = verifyEcdsa(sig, pksVal[pkIdx], sighash);
-      pkIdx++;
-      if (ok) { matched = true; break; }
-    }
-    if (!matched) return false;
+  if (sigsVal.length > pksVal.length) {
+    throw new Error(
+      `checkMultiSig: ${sigsVal.length} signatures for ${pksVal.length} public keys — ` +
+        'OP_CHECKMULTISIG aborts the script when there are more signatures than keys',
+    );
   }
-  return true;
+  let isig = sigsVal.length - 1;
+  let ikey = pksVal.length - 1;
+  let success = true;
+  while (success && isig >= 0) {
+    const encodingError = checkSigEncodingError(sigsVal[isig], pksVal[ikey]);
+    if (encodingError !== null) {
+      throw new Error(
+        `checkMultiSig: ${encodingError} — OP_CHECKMULTISIG aborts the script on a malformed ` +
+          'signature or public key encoding, it does not push false',
+      );
+    }
+    const sigLen = toByteArray(sigsVal[isig])?.length ?? 0;
+    if (sigLen > 0 && verifyEcdsa(sigsVal[isig], pksVal[ikey], sighash)) isig--;
+    ikey--;
+    if (isig > ikey) success = false; // fewer keys left than signatures
+  }
+  if (!success && sigsVal.some(s => (toByteArray(s)?.length ?? 0) > 0)) {
+    throw new Error(
+      'checkMultiSig: a signature is non-empty and the check fails (NULLFAIL) — ' +
+        'OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push false; ' +
+        'a multisig that must fail takes empty signatures (EMPTY_SIG)',
+    );
+  }
+  return success;
 }
 
 /**

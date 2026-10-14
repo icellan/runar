@@ -235,7 +235,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     });
   });
 
-  // checkMultiSig — accepts iff all sigs verify against some prefix of pks.
+  // checkMultiSig — OP_CHECKMULTISIG as Spend runs it, plus NULLFAIL (N-259).
   describe('checkMultiSig', () => {
     const anf = makeMultisigGuardANF();
     const priv2 = PrivateKey.fromHex('22'.repeat(32));
@@ -263,16 +263,24 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
       expect(result.state.value).toBe(1n);
     });
 
-    it('throws AssertionFailureError when one signature is corrupted', () => {
+    it('aborts under NULLFAIL (not an assert) when one signature is corrupted', () => {
+      // N-259: a failing OP_CHECKMULTISIG with a non-empty signature aborts on
+      // a node under NULLFAIL (BIP146), so the interpreter throws a plain Error.
       const broken = sig2.slice(0, -2) + '00';
-      expect(() => executeOnChainAuthoritative(
-        anf,
-        'unlock',
-        { value: 0n },
-        { sigs: [sigDerHex, broken], pks: [pubHex, pub2] },
-        [],
-        { sighash: sighashHex },
-      )).toThrow(AssertionFailureError);
+      let err: unknown;
+      try {
+        executeOnChainAuthoritative(
+          anf,
+          'unlock',
+          { value: 0n },
+          { sigs: [sigDerHex, broken], pks: [pubHex, pub2] },
+          [],
+          { sighash: sighashHex },
+        );
+      } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(AssertionFailureError);
+      expect((err as Error).message).toMatch(/check fails \(NULLFAIL\) — OP_CHECKMULTISIG aborts/);
     });
   });
 

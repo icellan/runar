@@ -345,10 +345,12 @@ public final class AnfInterpreter {
      * verification through BouncyCastle. Failure trips the enclosing
      * {@code assert(...)} and throws {@link AssertionFailureException}.
      *
-     * <p>{@code checkMultiSig(sigs, pks)} iterates signatures left-to-right
-     * and consumes pubkeys greedily, mirroring Bitcoin's
-     * {@code OP_CHECKMULTISIG}. {@code sigs} and {@code pks} must be
-     * {@code List<?>} of hex strings or byte arrays.
+     * <p>{@code checkMultiSig(sigs, pks)} runs {@code OP_CHECKMULTISIG} as
+     * {@code Spend} does: last signature against last key first, the same
+     * encoding gates on every examined pair, NULLFAIL on a failing check with
+     * a non-empty signature (N-259, see {@link #verifyMultiSigReal}).
+     * {@code sigs} and {@code pks} must be {@code List<?>} of hex strings or
+     * byte arrays.
      *
      * <p>{@code checkPreimage(preimage)} computes
      * {@code SHA256(SHA256(preimage))} and compares to {@code ctx.sighash}
@@ -1122,6 +1124,19 @@ public final class AnfInterpreter {
                 outputs.add(new OrderedOutput("raw", sats, script));
                 return null;
             }
+            case "array_literal": {
+                // N-259: the element values, in order. Its only consumer is
+                // checkMultiSig, which lenient mode mocks to true and on-chain
+                // mode verifies over these lists; returning null made on-chain
+                // checkMultiSig answer false for every input, a valid multisig
+                // included.
+                List<Object> out = new ArrayList<>();
+                Object elems = value.get("elements");
+                if (elems instanceof List<?> refs) {
+                    for (Object ref : refs) out.add(env.get((String) ref));
+                }
+                return out;
+            }
             default:
                 if (CHAIN_ONLY_KINDS.contains(kind)) return null;
                 return null;
@@ -1829,8 +1844,8 @@ public final class AnfInterpreter {
      * an optional trailing sighash type byte stripped. Returns false on any
      * decode error so the enclosing assert fires. The {@code checkSig} call
      * site first applies {@link #checkSigEncodingError} and aborts on a
-     * malformed encoding, as {@code OP_CHECKSIG} does (N-197);
-     * {@code checkMultiSig} does not.
+     * malformed encoding, as {@code OP_CHECKSIG} does (N-197); so does
+     * {@code checkMultiSig}, per examined pair (N-259).
      */
     static boolean verifyEcdsaReal(Object sigVal, Object pkVal, byte[] sighash) {
         byte[] sigBytes = toBytes(sigVal);
@@ -1865,9 +1880,16 @@ public final class AnfInterpreter {
     }
 
     /**
-     * Verify a list of signatures against a list of pubkeys. Mirrors
-     * Bitcoin's {@code OP_CHECKMULTISIG}: iterate sigs left-to-right,
-     * consume pubkeys greedily.
+     * N-259: {@code OP_CHECKMULTISIG} as {@code @bsv/sdk} {@code Spend} runs it
+     * over the compiled layout {@code 0 <sig1..sigN> N <pk1..pkM> M}. The LAST
+     * signature is examined against the LAST key first and both lists are
+     * walked toward the first. Each examined pair passes the N-197 encoding
+     * gates first and a malformed one aborts (a pair never reached is never
+     * checked); a signature that verifies consumes its key, a key is consumed
+     * either way, and the check fails once fewer keys remain than signatures.
+     * N &gt; M aborts, as in {@code Spend}. NULLFAIL (BIP146, N-198): a failing
+     * check with ANY non-empty signature aborts on a node ({@code Spend} has
+     * no NULLFAIL); only an all-empty one returns false.
      */
     @SuppressWarnings("unchecked")
     static boolean verifyMultiSigReal(Object sigsVal, Object pksVal, byte[] sighash) {
@@ -1876,18 +1898,37 @@ public final class AnfInterpreter {
         }
         List<Object> sigs = (List<Object>) rawSigs;
         List<Object> pks  = (List<Object>) rawPks;
-        if (sigs.size() > pks.size()) return false;
-        int pkIdx = 0;
-        for (Object sig : sigs) {
-            boolean matched = false;
-            while (pkIdx < pks.size()) {
-                boolean ok = verifyEcdsaReal(sig, pks.get(pkIdx), sighash);
-                pkIdx++;
-                if (ok) { matched = true; break; }
-            }
-            if (!matched) return false;
+        if (sigs.size() > pks.size()) {
+            throw new InterpreterException("checkMultiSig: " + sigs.size() + " signatures for " + pks.size()
+                + " public keys \u2014 OP_CHECKMULTISIG aborts the script when there are more signatures than keys");
         }
-        return true;
+        int isig = sigs.size() - 1;
+        int ikey = pks.size() - 1;
+        boolean success = true;
+        while (success && isig >= 0) {
+            String reason = checkSigEncodingError(sigs.get(isig), pks.get(ikey));
+            if (reason != null) {
+                throw new InterpreterException("checkMultiSig: " + reason
+                    + " \u2014 OP_CHECKMULTISIG aborts the script on a malformed signature or public key encoding, it does not push false");
+            }
+            byte[] sigBytes = toBytes(sigs.get(isig));
+            if (sigBytes != null && sigBytes.length > 0 && verifyEcdsaReal(sigs.get(isig), pks.get(ikey), sighash)) {
+                isig--;
+            }
+            ikey--;
+            if (isig > ikey) success = false; // fewer keys left than signatures
+        }
+        if (!success) {
+            for (Object sig : sigs) {
+                byte[] b = toBytes(sig);
+                if (b != null && b.length > 0) {
+                    throw new InterpreterException("checkMultiSig: a signature is non-empty and the check fails (NULLFAIL)"
+                        + " \u2014 OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push false;"
+                        + " a multisig that must fail takes empty signatures (EMPTY_SIG)");
+                }
+            }
+        }
+        return success;
     }
 
     /**

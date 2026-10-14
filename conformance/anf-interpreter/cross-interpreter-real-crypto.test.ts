@@ -19,8 +19,9 @@ import { enforceDriverGate } from './driver-gate.js';
 //   - Real ECDSA verify of `checkSig(sig, pk)` against the supplied 32-byte
 //     sighash. SEC1 secp256k1 pubkey, DER signature with optional trailing
 //     sighash type byte.
-//   - Real iterative `checkMultiSig(sigs, pks)` (left-to-right consume,
-//     greedy pubkey-match — Bitcoin's OP_CHECKMULTISIG semantic).
+//   - Real `checkMultiSig(sigs, pks)` as Spend runs OP_CHECKMULTISIG, with
+//     the encoding gates and NULLFAIL (N-259, pinned by
+//     ./checkmultisig-onchain.test.ts).
 //   - Real `checkPreimage(preimage)`: hash256(preimage) byte-equal to
 //     the sighash.
 //

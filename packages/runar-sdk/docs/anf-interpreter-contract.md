@@ -65,8 +65,15 @@ Every SDK ships the same three execution modes:
     So does a NON-EMPTY, well-formed signature that does not verify: a node
     rejects it under NULLFAIL (BIP146), so an OR-CHECKSIG arm that must fail
     takes an empty signature (`EMPTY_SIG`), which yields `false` (N-198).
-  - `checkMultiSig(sigs, pks)` → left-to-right consume + greedy
-    pubkey-match (Bitcoin's `OP_CHECKMULTISIG`).
+  - `checkMultiSig(sigs, pks)` → `OP_CHECKMULTISIG` as `Spend` runs it
+    (N-259): the last signature against the last key first, walking both
+    lists toward the first; a verifying signature consumes its key, a key is
+    consumed either way, and the check fails once fewer keys remain than
+    signatures. Each EXAMINED pair passes the `checkSig` encoding gates and
+    aborts on a malformed one (a key never reached is never checked); N > M
+    aborts; a failing check with any non-empty signature aborts under
+    NULLFAIL. Only an all-empty failing check yields `false`
+    (`conformance/anf-interpreter/checkmultisig-onchain.test.ts`).
   - `checkPreimage(preimage)` → `hash256(preimage) == sighash`
     byte-equal.
 
@@ -152,7 +159,7 @@ each implementation.
 | `check_preimage` | **skipped** (`anf-interpreter.ts:255`) | **skipped** | **skipped** (`AnfInterpreter.java:56`) |
 | `deserialize_state` | **skipped** (`anf-interpreter.ts:256`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
 | `get_state_script` | **skipped** (`anf-interpreter.ts:257`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
-| `array_literal` | **undefined** — explicit allowlisted case (F-145: every other unmodelled kind now throws); consumers receive arrays through `args` instead (`anf-interpreter.ts`, `case 'array_literal'`) | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` | **default-undefined** — `array_literal` is listed in `CHAIN_ONLY_KINDS` and falls through to the no-op skip (`AnfInterpreter.java:370-372`) |
+| `array_literal` | **handled** — the env-resolved `elements` values, in order (`anf-interpreter.ts`, `case 'array_literal'`, N-259); enables real-crypto `checkMultiSig` | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` | **handled** — a `List` of the env-resolved `elements` values (`AnfInterpreter.java`, `case "array_literal"`, N-259) |
 
 ### Raw stack bytes must follow the value across an ALIAS (NEW-006)
 
@@ -213,7 +220,7 @@ per-SDK in unit tests, not in the cross-interpreter golden suite.
 | `add_output` | 326 | 442 | 215 | 210 |
 | `add_data_output` | 350 | 460 | 230 | 228 |
 | on-chain-only kinds (skipped) | 367 | 471 | 241 | 239 |
-| `array_literal` | default (undefined) | default (undefined) | default (undefined) | default (undefined) |
+| `array_literal` | handled (N-259) | handled (N-259) | handled (N-259) | handled (N-259) |
 
 These four SDKs ship both lenient and strict modes; the strict entry
 point (`ExecuteStrict` / `execute_strict`) raises `AssertionFailureError`
@@ -226,7 +233,7 @@ still TS / Java / Zig only; when it lands, this matrix should grow
 
 - **On-chain-only kinds** (`check_preimage`, `deserialize_state`, `get_state_script`): the dedicated `check_preimage` ANF kind is still skipped (returns `undefined`/`null`/no-op) — it is a no-op marker on the binding side. The actual `checkPreimage(preimage)` call (which lowers to a `call` ANF kind, not `check_preimage`) IS verified in real-crypto mode. `deserialize_state` and `get_state_script` remain unconditional skips: they are simulation-only intrinsics; on-chain enforcement happens in compiled Bitcoin Script, not here. **`add_raw_output` is NOT among them** — R-198: this list, the per-kind table and the "out of scope" note below all said it was skipped, while the section above them ("`add_raw_output` simulation — supported (pass-through only)") and every implementation said otherwise. The implementations win: TS, Zig and Java each record the output and append it to the ordered state-class list so a transaction builder can emit it at the right index (finding G1).
 - **`assert`**: all three SDKs skip by default and enforce in `executeStrict` / `executeOnChainAuthoritative` — TS throws `AssertionFailureError`, Zig returns `error.AssertionFailure`, Java throws `AssertionFailureException`. The two strict modes both enforce explicit `assert(...)` predicates; only `executeOnChainAuthoritative` additionally verifies `checkSig` / `checkMultiSig` / `checkPreimage` against the caller-supplied sighash.
-- **`array_literal`**: TS + Java still rely on the next-step `call` resolving the array via `args` (`Array.isArray(...)` / `List<?>` checks in `verifyMultiSigReal`); the Zig SDK now has an explicit case that materializes an `ANFValue.array` from the binding's `elements` refs, so a contract that builds its multisig sigs/pks lists in the body via `array_literal` works under real-crypto on Zig.
+- **`array_literal`**: every SDK materializes the binding's `elements` values as a list (N-259; Zig did first), so a contract that builds its multisig sigs/pks lists in the body via `array_literal` works under real-crypto in all seven. Before N-259 six SDKs left it undefined and on-chain `checkMultiSig` answered false for every input.
 
 ## Builtin function call behaviour
 
@@ -237,7 +244,7 @@ still TS / Java / Zig only; when it lands, this matrix should grow
 | `checkSig` (lenient + strict) | mocked → `true` | mocked → `true` | mocked → `true` |
 | `checkSig` (real-crypto) | real ECDSA via `@bsv/sdk` `PublicKey.verify(sighash, sig)` (`anf-interpreter.ts` → `verifyEcdsa`) | real ECDSA via BouncyCastle `ECDSASigner.verifySignature(sighash, r, s)` (`AnfInterpreter.java` → `verifyEcdsaReal`) | real ECDSA via `bsvz.crypto.verifyDigest256RelaxedSec1(pk, sighash, der)` (`sdk_anf_interpreter.zig` → `verifyEcdsaReal`) |
 | `checkMultiSig` (lenient + strict) | mocked → `true` | mocked → `true` | mocked → `true` |
-| `checkMultiSig` (real-crypto) | real iterative ECDSA over `List<Sig>` × `List<PubKey>` (`verifyMultiSig`) | real iterative ECDSA over `List<Sig>` × `List<PubKey>` (`verifyMultiSigReal`) | real iterative ECDSA over `ANFValue.array` of `bytes` (`verifyMultiSigReal` in `sdk_anf_interpreter.zig`) |
+| `checkMultiSig` (real-crypto) | `OP_CHECKMULTISIG` order + encoding gates + NULLFAIL (`verifyMultiSig`, N-259) | same (`verifyMultiSigReal`) | same, over `ANFValue.array` of `bytes` (`verifyMultiSigReal` in `sdk_anf_interpreter.zig`) |
 | `checkPreimage` (lenient + strict) | mocked → `true` | mocked → `true` | mocked → `true` |
 | `checkPreimage` (real-crypto) | `hash256(preimage) == sighash` byte-eq (`verifyPreimage`) | `hash256(preimage) == sighash` byte-eq (`verifyPreimageReal`) | `hash256(preimage) == sighash` byte-eq (`verifyPreimageReal`) |
 | `sha256`, `hash256`, `hash160`, `ripemd160` | real, deterministic (`hashFn`) | real, deterministic via `MockCrypto` | real, deterministic via `bsvz.crypto.hash` |
@@ -266,8 +273,8 @@ continuation locking script. The on-chain runtime handles that via
 ## Known divergences (caught by the parity test)
 
 - **`assert` strictness**: all three SDKs default to lenient (asserts skipped) and opt in to strict via a separate entry point — TS `executeStrict` (throws `AssertionFailureError`), Zig `executeStrict` (returns `error.AssertionFailure`), Java `executeStrict` (throws `AssertionFailureException`). The parity test runs all three in lenient mode by default so they behave identically; strict-mode parity is exercised by per-SDK unit tests rather than the cross-interpreter golden suite.
-- **Real-crypto coverage parity**: `executeOnChainAuthoritative` lands real ECDSA + real preimage verification on TS / Zig / Java with matching shapes. Zig's `checkMultiSig` now iterates over an `ANFValue.array` of `bytes` (sigs and pks) using the same left-to-right consume + greedy-pubkey-match loop as TS / Java; see the multisig tests in `packages/runar-zig/src/sdk_anf_interpreter.zig` ("checkMultiSig 1-of-2 passes when sig matches second pk", "1-of-2 fails when sig matches no pk", "rejects non-array sig arg"). Real-crypto multisig parity is exercised per-SDK in unit tests; the cross-interpreter parity test still runs lenient mode only.
-- **`array_literal`**: TS + Java leave it default-undefined (consumers read arrays from `args`); Zig materializes an `ANFValue.array`. ANF goldens that exercise `array_literal` bindings produce identical `{state, dataOutputs}` outputs across all three because the consumer of the array is either `call(checkMultiSig)` (which returns `true` in lenient mode regardless) or a downstream `call` whose semantics don't depend on per-element identity.
+- **Real-crypto coverage parity**: `executeOnChainAuthoritative` lands real ECDSA + real preimage verification on TS / Zig / Java with matching shapes. Every SDK's `checkMultiSig` runs `OP_CHECKMULTISIG` in `Spend`'s order with the encoding gates and NULLFAIL (N-259); real-crypto multisig parity across all seven, against `Spend`, is pinned by `conformance/anf-interpreter/checkmultisig-onchain.test.ts`.
+- **`array_literal`**: every SDK materializes the list (N-259). ANF goldens that exercise `array_literal` bindings produce identical `{state, dataOutputs}` outputs because the array's only consumer is `call(checkMultiSig)`, which returns `true` in lenient mode regardless.
 
 ## Future directions
 
@@ -284,5 +291,5 @@ continuation locking script. The on-chain runtime handles that via
 - `add_raw_output` simulation is IMPLEMENTED as pass-through recording, not out
   of scope — see the per-kind matrix (R-198 corrected this line, which
   contradicted both the code and the section above it).
-- (`array_literal` element resolution in Zig has landed — see the per-kind
-  matrix and the multisig tests.)
+- (`array_literal` element resolution has landed in every SDK — N-259; see
+  the per-kind matrix.)

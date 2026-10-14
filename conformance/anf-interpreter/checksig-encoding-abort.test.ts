@@ -65,10 +65,9 @@ import { enforceDriverGate } from './driver-gate.js';
 //
 // What this does not prove: (a) bare DER with no trailing sighash-type byte —
 // Spend aborts on it, the SDK interpreters still accept it (the existing
-// real-crypto fixtures sign that way); (b) `checkMultiSig` — neither its
-// encoding gates nor NULLFAIL are applied (six of the seven SDK interpreters
-// do not model `array_literal`, so their on-chain checkMultiSig never sees a
-// signature list and answers false for every input);
+// real-crypto fixtures sign that way); (b) `checkMultiSig` — its encoding
+// gates and NULLFAIL are pinned separately by ./checkmultisig-onchain.test.ts
+// (N-259);
 // (c) the NULLFAIL verdict against a node — no engine in this file enforces
 // NULLFAIL independently of the interpreters; (d) anything about a node
 // beyond `Spend` for the encoding vectors.

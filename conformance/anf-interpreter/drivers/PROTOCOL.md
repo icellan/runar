@@ -134,9 +134,17 @@ non-zero with a stderr message.
     by `../checksig-encoding-abort.test.ts` over `../checksig-encoding/vectors.json`
     (the NULLFAIL abort uses the same channels; `../cross-interpreter-real-crypto.test.ts`
     normalises them to `{ "error": "ScriptAbort", "methodName": "<m>" }`).
-    `checkMultiSig` applies neither these gates nor NULLFAIL.
-  - `checkMultiSig(sigs, pks)` → iterate sigs left-to-right, consume
-    pubkeys greedily.
+  - `checkMultiSig(sigs, pks)` → `OP_CHECKMULTISIG` as `Spend` runs it
+    (N-259), over the lists an `array_literal` binding builds: the last
+    signature against the last key first, walking both lists toward the
+    first; a verifying signature consumes its key, a key is consumed either
+    way, and the check fails once fewer keys remain than signatures. Each
+    EXAMINED pair passes the `checkSig` encoding gates and aborts on a
+    malformed one; N > M aborts; a failing check with any non-empty signature
+    aborts under NULLFAIL (`Spend` pushes false there). Aborts use the
+    `checkSig` channels, with `OP_CHECKMULTISIG aborts` in the message (Rust:
+    an `AssertionFailureError` at the `checkMultiSig` call binding). Pinned by
+    `../checkmultisig-onchain.test.ts` over `../checkmultisig-onchain/vectors.json`.
   - `checkPreimage(preimage)` → `hash256(preimage) == sighash`
     byte-equal.
 

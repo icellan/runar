@@ -82,6 +82,9 @@ enum Val {
     Int(i64),
     Bool(bool),
     Bytes(String),
+    /// N-259: an `array_literal` binding's element values, in order. Its
+    /// only consumer is `checkMultiSig`; it never reaches state or outputs.
+    Array(Vec<Val>),
     Undefined,
 }
 
@@ -108,7 +111,8 @@ impl Val {
             Val::Int(n) => SdkValue::Int(*n),
             Val::Bool(b) => SdkValue::Bool(*b),
             Val::Bytes(s) => SdkValue::Bytes(s.clone()),
-            Val::Undefined => SdkValue::Int(0),
+            // An array never reaches state or outputs (N-259); like Undefined.
+            Val::Array(_) | Val::Undefined => SdkValue::Int(0),
         }
     }
 
@@ -117,7 +121,7 @@ impl Val {
             Val::Int(n) => *n,
             Val::Bool(b) => if *b { 1 } else { 0 },
             Val::Bytes(_) => 0,
-            Val::Undefined => 0,
+            Val::Array(_) | Val::Undefined => 0,
         }
     }
 
@@ -126,14 +130,14 @@ impl Val {
             Val::Int(n) => *n != 0,
             Val::Bool(b) => *b,
             Val::Bytes(s) => !s.is_empty() && s != "0" && s != "false",
-            Val::Undefined => false,
+            Val::Array(_) | Val::Undefined => false,
         }
     }
 
     fn as_hex(&self) -> String {
         match self {
             Val::Bytes(s) => s.clone(),
-            Val::Int(_) | Val::Bool(_) | Val::Undefined => String::new(),
+            Val::Int(_) | Val::Bool(_) | Val::Array(_) | Val::Undefined => String::new(),
         }
     }
 
@@ -482,8 +486,10 @@ impl std::error::Error for IntentInterpreterError {}
 ///    verification via `k256::ecdsa::VerifyingKey::verify_prehash`. Any
 ///    mismatch returns `false`, which then trips the enclosing `assert(...)`
 ///    and yields an [`AssertionFailureError`].
-///  - verifies `checkMultiSig(sigs, pks)` by iterating signatures left-to-right
-///    and consuming pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`.
+///  - verifies `checkMultiSig(sigs, pks)` as `OP_CHECKMULTISIG` does: last
+///    signature against last key first, the same encoding gates on every
+///    examined pair, NULLFAIL on a failing check with a non-empty signature
+///    (N-259, see `verify_multi_sig_real`).
 ///  - verifies `checkPreimage(preimage)` by computing
 ///    `SHA256(SHA256(preimage))` and comparing it to `sighash` byte-for-byte
 ///    — the on-chain `OP_PUSH_TX` semantic.
@@ -1216,7 +1222,26 @@ fn eval_value(
                 }
             }
             let witness = strict.and_then(|c| c.witness.as_ref());
-            let result = eval_call(&func, &args, real_crypto, witness, script_code);
+            // N-259: on-chain checkMultiSig runs OP_CHECKMULTISIG as Spend does
+            // (`verify_multi_sig_real`); an abort (malformed encoding of an
+            // examined pair, NULLFAIL, N > M) takes the same rejection channel
+            // as the N-197 gate above.
+            let result = match real_crypto.filter(|_| func == "checkMultiSig") {
+                Some(rc) => {
+                    let sigs = args.first().cloned().unwrap_or(Val::Undefined);
+                    let pks = args.get(1).cloned().unwrap_or(Val::Undefined);
+                    match verify_multi_sig_real(&sigs, &pks, &rc.sighash) {
+                        Some(ok) => Val::Bool(ok),
+                        None => {
+                            return Err(AssertionFailureError {
+                                method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                                binding_name: binding_name.to_string(),
+                            });
+                        }
+                    }
+                }
+                None => eval_call(&func, &args, real_crypto, witness, script_code),
+            };
             // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
             // does not verify aborts the script; only an empty one pushes
             // false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
@@ -1472,6 +1497,18 @@ fn eval_value(
             }
         }
         "deserialize_state" | "get_state_script" => Val::Undefined,
+
+        // N-259: the element values, in order. Its only consumer is
+        // `checkMultiSig`, which lenient mode mocks to true and on-chain mode
+        // verifies over these lists; `Undefined` here made on-chain
+        // `checkMultiSig` answer false for every input, a valid multisig
+        // included.
+        "array_literal" => Val::Array(
+            str_array_field(value, "elements")
+                .iter()
+                .map(|r| env.get(r).cloned().unwrap_or(Val::Undefined))
+                .collect(),
+        ),
 
         _ => Val::Undefined,
     };
@@ -1831,7 +1868,10 @@ fn eval_call(
             if let Some(rc) = real_crypto {
                 let sigs = args.first().cloned().unwrap_or(Val::Undefined);
                 let pks  = args.get(1).cloned().unwrap_or(Val::Undefined);
-                Val::Bool(verify_multi_sig_real(&sigs, &pks, &rc.sighash))
+                // Not reached in real-crypto mode: the call-binding site runs
+                // `verify_multi_sig_real` itself and turns its abort (`None`)
+                // into an AssertionFailureError. Kept total for safety.
+                Val::Bool(verify_multi_sig_real(&sigs, &pks, &rc.sighash) == Some(true))
             } else {
                 Val::Bool(true)
             }
@@ -2243,7 +2283,8 @@ fn check_sig_encoding_error(sig_val: &Val, pk_val: &Val) -> Option<&'static str>
 /// surfaces as `AssertionFailureError`, not a verify-error propagated to
 /// the caller). The `checkSig` call site first applies
 /// `check_sig_encoding_error` and aborts on a malformed encoding, as
-/// `OP_CHECKSIG` does (N-197); `checkMultiSig` does not.
+/// `OP_CHECKSIG` does (N-197); so does `checkMultiSig`, per examined pair
+/// (N-259).
 ///
 /// Note on the digest: ECDSA-verifies against the supplied `sighash`
 /// directly, with no extra SHA-256 layer. This mirrors the on-chain
@@ -2265,16 +2306,47 @@ fn verify_ecdsa_real(sig_val: &Val, pk_val: &Val, sighash: &[u8; 32]) -> bool {
     vk.verify_prehash(sighash.as_ref(), &sig).is_ok()
 }
 
-/// Verify a list of signatures against a list of pubkeys. Mirrors Bitcoin's
-/// `OP_CHECKMULTISIG`: iterate sigs left-to-right, consume pubkeys greedily.
+/// N-259: `OP_CHECKMULTISIG` as `@bsv/sdk` `Spend` runs it over the compiled
+/// layout `0 <sig1..sigN> N <pk1..pkM> M`. The LAST signature is examined
+/// against the LAST key first and both lists are walked toward the first. Each
+/// examined pair passes the N-197 encoding gates first and a malformed one
+/// aborts (a pair never reached is never checked); a signature that verifies
+/// consumes its key, a key is consumed either way, and the check fails once
+/// fewer keys remain than signatures. N > M aborts, as in `Spend`. NULLFAIL
+/// (BIP146, N-198): a failing check with ANY non-empty signature aborts on a
+/// node (`Spend` has no NULLFAIL); only an all-empty one yields `false`.
 ///
-/// The Rust interpreter's `Val` enum cannot represent arrays of bytes
-/// directly (lists leak through as `Val::Undefined` from `Val::from_sdk`),
-/// so this function returns `false` unless future ANF lowering wires a
-/// dedicated representation. The fail path matches the spec: "On any parse
-/// error → return false".
-fn verify_multi_sig_real(_sigs: &Val, _pks: &Val, _sighash: &[u8; 32]) -> bool {
-    false
+/// Returns `Some(result)`, or `None` where the script aborts. Operands that
+/// are not arrays yield `Some(false)`.
+fn verify_multi_sig_real(sigs: &Val, pks: &Val, sighash: &[u8; 32]) -> Option<bool> {
+    let (sigs, pks) = match (sigs, pks) {
+        (Val::Array(s), Val::Array(p)) => (s, p),
+        _ => return Some(false),
+    };
+    if sigs.len() > pks.len() {
+        return None;
+    }
+    let non_empty = |v: &Val| val_to_bytes(v).is_some_and(|b| !b.is_empty());
+    let mut nsigs = sigs.len();
+    let mut nkeys = pks.len();
+    let mut success = true;
+    while success && nsigs > 0 {
+        let (sig, pk) = (&sigs[nsigs - 1], &pks[nkeys - 1]);
+        if check_sig_encoding_error(sig, pk).is_some() {
+            return None;
+        }
+        if non_empty(sig) && verify_ecdsa_real(sig, pk, sighash) {
+            nsigs -= 1;
+        }
+        nkeys -= 1;
+        if nsigs > nkeys {
+            success = false; // fewer keys left than signatures
+        }
+    }
+    if !success && sigs.iter().any(non_empty) {
+        return None;
+    }
+    Some(success)
 }
 
 /// Verify that `SHA256(SHA256(preimage)) == sighash` — the on-chain
