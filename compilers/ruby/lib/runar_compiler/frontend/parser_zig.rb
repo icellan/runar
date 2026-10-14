@@ -443,6 +443,20 @@ module RunarCompiler
       TOK_FALSE     = ZigTokens::TOK_FALSE
       TOK_VOID      = ZigTokens::TOK_VOID
 
+      # N-009: the `while (cond) : (upd) { ... }` desugaring's merge
+      # placeholder. #parse_while_statement always synthesizes this name as
+      # the ForStmt's init; #parse_block_statements replaces it with the real
+      # preceding declaration when one matches the update target. A LEADING
+      # SPACE makes the name unspellable in `.runar.zig` source (no surface's
+      # identifier lexer produces a token containing whitespace), so a
+      # developer local can never collide with it -- a plain-identifier
+      # placeholder would let a local literally named "__while_no_init" that
+      # is not adjacent to its while alias the placeholder by string
+      # equality, and the ANF lowerer's condition-iterator check would then
+      # compare equal and silently unroll from this placeholder's start of 0
+      # instead of the developer's real start.
+      WHILE_NO_INIT_PLACEHOLDER = " __while_no_init"
+
       def initialize(file_name)
         @file_name = file_name
         @tokens = []
@@ -925,7 +939,7 @@ module RunarCompiler
             last_stmt = body.last
             if stmt.is_a?(ForStmt) &&
                stmt.init.is_a?(VariableDeclStmt) &&
-               stmt.init.name == "__while_no_init" &&
+               stmt.init.name == WHILE_NO_INIT_PLACEHOLDER &&
                last_stmt.is_a?(VariableDeclStmt) &&
                loop_update_target_name(stmt) == last_stmt.name
               body.pop
@@ -1184,7 +1198,7 @@ module RunarCompiler
 
         ForStmt.new(
           init: VariableDeclStmt.new(
-            name: "__while_no_init",
+            name: WHILE_NO_INIT_PLACEHOLDER,
             mutable: true,
             init: BigIntLiteral.new(value: 0),
             source_location: source_location

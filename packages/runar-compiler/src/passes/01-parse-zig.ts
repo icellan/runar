@@ -264,6 +264,22 @@ const PRIMITIVE_TYPES = new Set<PrimitiveTypeName>([
   'void',
 ]);
 
+/**
+ * N-009: the `while (cond) : (upd) { ... }` desugaring's merge placeholder.
+ * `parseWhileStatement` always synthesizes this name as the for-statement's
+ * init; `parseBlockStatements` replaces it with the real preceding
+ * declaration when one matches the update target. A LEADING SPACE makes the
+ * name unspellable in `.runar.zig` source (no surface's identifier lexer
+ * produces a token containing whitespace), so a developer local can never
+ * collide with it — if it were a plain identifier, a local literally named
+ * `__while_no_init` that is NOT adjacent to its `while` would alias the
+ * placeholder by string equality, and `04-anf-lower.ts`'s condition-iterator
+ * check (`condition.left.name !== stmt.init.name`) would then compare equal
+ * and silently unroll from this placeholder's start of 0 instead of the
+ * developer's real start.
+ */
+const WHILE_NO_INIT_PLACEHOLDER = ' __while_no_init';
+
 /** Map Zig-style builtin names to canonical Rúnar camelCase names. */
 const ZIG_BUILTIN_MAP: Record<string, string> = {
   verifyECDSAP256: 'verifyECDSA_P256',
@@ -658,7 +674,7 @@ class ZigParser extends ParserCore<ZigToken> {
           ? this.getLoopUpdateTargetName(statement)
           : null;
         if (statement.kind === 'for_statement' &&
-            (statement as ForStatement).init.name === '__while_no_init' &&
+            (statement as ForStatement).init.name === WHILE_NO_INIT_PLACEHOLDER &&
             lastStmt?.kind === 'variable_decl' &&
             loopInitName === lastStmt.name) {
           body.pop();
@@ -916,7 +932,7 @@ class ZigParser extends ParserCore<ZigToken> {
       kind: 'for_statement',
       init: {
         kind: 'variable_decl',
-        name: '__while_no_init',
+        name: WHILE_NO_INIT_PLACEHOLDER,
         mutable: true,
         init: { kind: 'bigint_literal', value: 0n },
         sourceLocation,

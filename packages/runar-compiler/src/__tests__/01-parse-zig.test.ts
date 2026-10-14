@@ -7,6 +7,7 @@ import type {
 } from '../ir/runar-ast.js';
 import { parse } from '../passes/01-parse.js';
 import { parseZigSource } from '../passes/01-parse-zig.js';
+import { compile } from '../index.js';
 
 function parseContract(source: string) {
   const directResult = parseZigSource(source, 'Contract.runar.zig');
@@ -362,8 +363,99 @@ describe('parseZigSource while loop lowering', () => {
       expect(totalDecl.name).toBe('total');
 
       const loop = requireForStatement(verify.body[1]);
-      expect(loop.init).toMatchObject({ kind: 'variable_decl', name: '__while_no_init' });
+      expect(loop.init).toMatchObject({ kind: 'variable_decl', name: ' __while_no_init' });
     }
+  });
+
+  it('N-009: a user local spelled exactly like the merge placeholder does not fool the ' +
+    'condition-iterator check into unrolling from 0', () => {
+    // Non-adjacent declaration (an unrelated `var sum` sits between the real
+    // loop variable and the `while`), same shape `conformance/negatives/N162-
+    // zig-while-non-adjacent-init.runar.zig` already refuses for a variable
+    // named `i` -- except here the developer's OWN variable is spelled
+    // `__while_no_init`, identically to the parser's merge placeholder. Before
+    // the fix this collided: the unmerged placeholder's synthesized name and
+    // the user's real declaration were both the literal string
+    // `__while_no_init`, so `04-anf-lower.ts`'s condition-iterator check
+    // (`condition.left.name !== stmt.init.name`) compared equal and let the
+    // loop compile unrolled from the placeholder's start of 0 instead of the
+    // declared start of 3 -- a silent miscompile (@bsv/sdk Spend.validate()
+    // then accepts sum=10 and rejects the correct sum=7, measured directly
+    // via ScriptExecutionContract at HEAD before this fix). This test proves
+    // only that the contract is REFUSED; the on-chain acceptance/rejection
+    // pair is recorded in prose on the N-253 conformance negative fixture,
+    // not re-measured here.
+    const source = `
+      const runar = @import("runar");
+
+      pub const Collide = struct {
+        pub const Contract = runar.SmartContract;
+
+        target: i64,
+
+        pub fn init(target: i64) Collide {
+          return .{ .target = target };
+        }
+
+        pub fn check(self: *const Collide, expected: i64) void {
+          var __while_no_init: i64 = 3;
+          var sum: i64 = 0;
+          while (__while_no_init < 5) : (__while_no_init += 1) {
+            sum = sum + __while_no_init;
+          }
+          runar.assert(sum == expected);
+          runar.assert(self.target == self.target);
+        }
+      };
+    `;
+
+    const result = compile(source, { fileName: 'Collide.runar.zig', disableConstantFolding: true });
+
+    expect(result.success).toBe(false);
+    const messages = result.diagnostics.filter(d => d.severity === 'error').map(d => d.message);
+    expect(messages.some(m => m.includes('must compare the loop variable'))).toBe(true);
+  });
+
+  it('N-009 control: a user local literally named __while_no_init still compiles ' +
+    'correctly when it IS the adjacent loop declaration', () => {
+    // The fix must not turn `__while_no_init` into a name developers cannot
+    // use at all -- only the UNMERGED placeholder is unspellable now (a
+    // leading space). When the user's `__while_no_init` declaration is
+    // adjacent to the `while` (the normal merge case), the merge gate
+    // compares the declaration's name against the UPDATE target's name
+    // (both spelled `__while_no_init`, no space), not against the
+    // placeholder, so it still folds and the real start of 3 is honoured.
+    // Same bytes as N-008's adjacent control (`577c9d00009c`): OP_7 OP_SWAP
+    // OP_NUMEQUALVERIFY OP_0 OP_0 OP_NUMEQUAL -- sum = 3 + 4 = 7.
+    const source = `
+      const runar = @import("runar");
+
+      pub const Collide = struct {
+        pub const Contract = runar.SmartContract;
+
+        target: i64,
+
+        pub fn init(target: i64) Collide {
+          return .{ .target = target };
+        }
+
+        pub fn check(self: *const Collide, expected: i64) void {
+          var sum: i64 = 0;
+          var __while_no_init: i64 = 3;
+          while (__while_no_init < 5) : (__while_no_init += 1) {
+            sum = sum + __while_no_init;
+          }
+          runar.assert(sum == expected);
+          runar.assert(self.target == self.target);
+        }
+      };
+    `;
+
+    const result = compile(source, { fileName: 'Collide.runar.zig', disableConstantFolding: true });
+
+    expect(result.diagnostics.filter(d => d.severity === 'error')).toEqual([]);
+    expect(result.success).toBe(true);
+    expect(result.artifact?.script).toBe('577c9d00009c');
   });
 });
 

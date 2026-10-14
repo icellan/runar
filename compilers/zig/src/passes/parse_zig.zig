@@ -863,7 +863,7 @@ const Parser = struct {
                 //
                 // N-008: fold exactly as the reference (01-parse-zig.ts) does —
                 // only when the preceding statement declares the variable the
-                // UPDATE advances — and otherwise keep its `__while_no_init`
+                // UPDATE advances — and otherwise keep its ` __while_no_init`
                 // placeholder iterator, which the condition never tests, so
                 // validate.zig refuses the loop with the reference's sentence.
                 // This tier used to fold on the name the CONDITION tests and,
@@ -901,7 +901,15 @@ const Parser = struct {
                         continue;
                     }
                     var unfolded = s.for_stmt;
-                    unfolded.var_name = "__while_no_init";
+                    // N-009: a LEADING SPACE makes this unspellable in
+                    // `.runar.zig` source, so a developer local literally
+                    // named "__while_no_init" can never alias this
+                    // placeholder by string equality (this tier's own
+                    // `cond_tests_iter` is already decided by this point and
+                    // does not depend on the name, but the diagnostic text
+                    // below interpolates `var_name` and must match the other
+                    // six tiers' sentinel verbatim).
+                    unfolded.var_name = " __while_no_init";
                     unfolded.cond_tests_iter = false;
                     stmts.append(self.allocator, .{ .for_stmt = unfolded }) catch {};
                     continue;

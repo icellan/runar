@@ -157,6 +157,23 @@ public final class ZigParser {
         COMPOUND_OPS.put(Kind.PERCENTEQ, Expression.BinaryOp.MOD);
     }
 
+    /**
+     * N-009: the {@code while (cond) : (upd) { ... }} desugaring's merge
+     * placeholder. {@code parseWhileStatement} always synthesizes this name
+     * as the ForStatement's init; {@code parseBlockStatements} replaces it
+     * with the real preceding declaration when one matches the update
+     * target. A LEADING SPACE makes the name unspellable in {@code
+     * .runar.zig} source (no surface's identifier lexer produces a token
+     * containing whitespace), so a developer local can never collide with it
+     * -- a plain-identifier placeholder would let a local literally named
+     * "__while_no_init" that is not adjacent to its while alias the
+     * placeholder by string equality, and the ANF lowerer's
+     * condition-iterator check would then compare equal and silently unroll
+     * from this placeholder's start of 0 instead of the developer's real
+     * start.
+     */
+    private static final String WHILE_NO_INIT_PLACEHOLDER = " __while_no_init";
+
     // ===================================================================
     // Type mapping
     // ===================================================================
@@ -941,7 +958,7 @@ public final class ZigParser {
                     // Merge `var i = 0; while(...)` patterns into a ForStmt's init slot.
                     if (s instanceof ForStatement fs
                             && fs.init() != null
-                            && "__while_no_init".equals(fs.init().name())
+                            && WHILE_NO_INIT_PLACEHOLDER.equals(fs.init().name())
                             && !body.isEmpty()) {
                         Statement last = body.get(body.size() - 1);
                         String updateName = getLoopUpdateTargetName(fs);
@@ -1114,7 +1131,7 @@ public final class ZigParser {
 
             // Placeholder init that may be patched up by parseBlockStatements.
             VariableDeclStatement init = new VariableDeclStatement(
-                "__while_no_init", null, new BigIntLiteral(BigInteger.ZERO), l);
+                WHILE_NO_INIT_PLACEHOLDER, null, new BigIntLiteral(BigInteger.ZERO), l);
             return new ForStatement(init, condition, update, body, l);
         }
 

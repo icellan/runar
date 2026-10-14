@@ -4,7 +4,8 @@
 //!
 //! The reference `.runar.zig` parser (01-parse-zig.ts) lowers every
 //! `while (cond) : (upd) { ... }` to a for-statement whose init is the
-//! placeholder `__while_no_init`, and folds the preceding statement in as the
+//! placeholder ` __while_no_init` (N-009: a leading space, unspellable in
+//! `.runar.zig` source), and folds the preceding statement in as the
 //! init only when it declares the variable the UPDATE advances. An unfolded
 //! loop keeps the placeholder, whose name the condition never tests, so the
 //! condition-iterator rule refuses it. This tier instead folded on the name the
@@ -32,8 +33,8 @@ const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
 const COND_ITER =
-    "For loop condition must compare the loop variable '__while_no_init' to a " ++
-    "compile-time constant (`__while_no_init < 10n`). The unrolled loop binds the " ++
+    "For loop condition must compare the loop variable ' __while_no_init' to a " ++
+    "compile-time constant (` __while_no_init < 10n`). The unrolled loop binds the " ++
     "iterator as `start + k*step` and takes its trip count from the bound alone, so a " ++
     "condition whose left-hand side is anything else -- a computed expression, or a " ++
     "different variable -- is not the condition the loop actually evaluates";

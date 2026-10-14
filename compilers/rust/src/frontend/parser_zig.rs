@@ -55,6 +55,19 @@ use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, Ne
 use super::parser::ParseResult;
 use std::collections::HashSet;
 
+/// The `while (cond) : (upd) { ... }` desugaring's merge placeholder (N-009).
+/// `parse_while_statement` always synthesizes this name as the ForStatement's
+/// init; `parse_block_statements` replaces it with the real preceding
+/// declaration when one matches the update target. A LEADING SPACE makes the
+/// name unspellable in `.runar.zig` source (no surface's identifier lexer
+/// produces a token containing whitespace), so a developer local can never
+/// collide with it -- a plain-identifier placeholder would let a local
+/// literally named "__while_no_init" that is not adjacent to its while alias
+/// the placeholder by string equality, and the ANF lowerer's
+/// condition-iterator check would then compare equal and silently unroll from
+/// this placeholder's start of 0 instead of the developer's real start.
+const WHILE_NO_INIT_PLACEHOLDER: &str = " __while_no_init";
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1113,7 +1126,7 @@ impl<'a> ZigParser<'a> {
                 } = stmt
                 {
                     if let Statement::VariableDecl { ref name, .. } = init.as_ref() {
-                        if name == "__while_no_init" {
+                        if name == WHILE_NO_INIT_PLACEHOLDER {
                             // Check if previous statement is a variable decl for the loop variable
                             if let Some(Statement::VariableDecl { name: prev_name, .. }) = stmts.last() {
                                 // Check the loop update target
@@ -1345,7 +1358,8 @@ impl<'a> ZigParser<'a> {
 
     /// Parse Zig while loop: `while (condition) : (continue_expr) { body }`
     ///
-    /// Emits a ForStatement. The init is synthesized as `var __while_no_init = 0`
+    /// Emits a ForStatement. The init is synthesized as the unspellable
+    /// `WHILE_NO_INIT_PLACEHOLDER` sentinel bound to 0
     /// unless `parse_block_statements` merges the preceding variable decl.
     fn parse_while_statement(&mut self) -> Statement {
         self.advance(); // while
@@ -1398,7 +1412,7 @@ impl<'a> ZigParser<'a> {
         // if the preceding statement was a variable_decl for the loop variable.
         Statement::ForStatement {
             init: Box::new(Statement::VariableDecl {
-                name: "__while_no_init".to_string(),
+                name: WHILE_NO_INIT_PLACEHOLDER.to_string(),
                 var_type: None,
                 mutable: true,
                 init: Expression::BigIntLiteral { value: BigInt::from(0) },

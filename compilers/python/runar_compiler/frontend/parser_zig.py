@@ -44,6 +44,19 @@ from runar_compiler.frontend.diagnostic import (  # F-011
 )
 
 
+# N-009: the `while (cond) : (upd) { ... }` desugaring's merge placeholder.
+# `_parse_while_statement` always synthesizes this name as the ForStmt's
+# init; `_parse_block_statements` replaces it with the real preceding
+# declaration when one matches the update target. A LEADING SPACE makes the
+# name unspellable in `.runar.zig` source (no surface's identifier lexer
+# produces a token containing whitespace), so a developer local can never
+# collide with it -- a plain-identifier placeholder would let a local
+# literally named "__while_no_init" that is not adjacent to its while alias
+# the placeholder by string equality, and the ANF lowerer's
+# condition-iterator check would then compare equal and silently unroll from
+# this placeholder's start of 0 instead of the developer's real start.
+WHILE_NO_INIT_PLACEHOLDER = " __while_no_init"
+
 # ---------------------------------------------------------------------------
 # Token types
 # ---------------------------------------------------------------------------
@@ -990,7 +1003,7 @@ class _ZigParser:
                 if (isinstance(stmt, ForStmt)
                         and stmt.init is not None
                         and isinstance(stmt.init, VariableDeclStmt)
-                        and stmt.init.name == "__while_no_init"
+                        and stmt.init.name == WHILE_NO_INIT_PLACEHOLDER
                         and body):
                     last = body[-1]
                     update_name = self._get_loop_update_target_name(stmt)
@@ -1182,7 +1195,7 @@ class _ZigParser:
         # by _parse_block_statements if a preceding var decl matches.
         return ForStmt(
             init=VariableDeclStmt(
-                name="__while_no_init",
+                name=WHILE_NO_INIT_PLACEHOLDER,
                 mutable=True,
                 init=BigIntLiteral(value=0),
                 source_location=loc,

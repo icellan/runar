@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+// zigWhileNoInitPlaceholder is the `while (cond) : (upd) { ... }` desugaring's
+// merge placeholder (N-009). parseWhileStatement always synthesizes this name
+// as the ForStmt's init; parseBlockStatements replaces it with the real
+// preceding declaration when one matches the update target. A LEADING SPACE
+// makes the name unspellable in `.runar.zig` source (no surface's identifier
+// lexer produces a token containing whitespace), so a developer local can
+// never collide with it -- a plain-identifier placeholder would let a local
+// literally named "__while_no_init" that is not adjacent to its while alias
+// the placeholder by string equality, and the ANF lowerer's condition-iterator
+// check would then compare equal and silently unroll from this placeholder's
+// start of 0 instead of the developer's real start.
+const zigWhileNoInitPlaceholder = " __while_no_init"
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1086,7 +1099,7 @@ func (p *zigParser) parseBlockStatements() []Statement {
 		if stmt != nil {
 			// Merge `var i = 0; while (i < N) : (i += 1) { ... }` into ForStmt
 			if forStmt, ok := stmt.(ForStmt); ok {
-				if forStmt.Init.Name == "__while_no_init" {
+				if forStmt.Init.Name == zigWhileNoInitPlaceholder {
 					loopTarget := zigGetLoopUpdateTargetName(forStmt)
 					if loopTarget != "" && len(body) > 0 {
 						if lastDecl, ok3 := body[len(body)-1].(VariableDeclStmt); ok3 && lastDecl.Name == loopTarget {
@@ -1288,7 +1301,7 @@ func (p *zigParser) parseWhileStatement(loc SourceLocation) Statement {
 
 	return ForStmt{
 		Init: VariableDeclStmt{
-			Name:           "__while_no_init",
+			Name:           zigWhileNoInitPlaceholder,
 			Mutable:        true,
 			Init:           BigIntLiteral{Value: big.NewInt(0)},
 			SourceLocation: loc,
