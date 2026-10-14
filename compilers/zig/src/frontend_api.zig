@@ -33,4 +33,4 @@ pub const assertSourceBytesUnderLimit = input_limits.assertSourceBytesUnderLimit
 pub const MAX_SOURCE_BYTES = input_limits.MAX_SOURCE_BYTES;
 pub const SourceSizeError = input_limits.SourceSizeError;
 pub const sighashDirectiveError = input_limits.sighashDirectiveError;
-pub const EMBED_ALWAYS_DIRECTIVE_ERROR = input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR;
+pub const embedAlwaysDirectiveError = input_limits.embedAlwaysDirectiveError;

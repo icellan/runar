@@ -307,7 +307,7 @@ test "R-093: compileCheckSource rejects an @embedAlways directive, as --source d
     try std.testing.expectEqual(CompileCheckStage.parse, result.stage.?);
     try std.testing.expectEqual(@as(usize, 1), result.messages.len);
     try std.testing.expectEqualStrings(
-        frontend.EMBED_ALWAYS_DIRECTIVE_ERROR,
+        frontend.embedAlwaysDirectiveError("Zig"),
         result.messages[0],
     );
 }

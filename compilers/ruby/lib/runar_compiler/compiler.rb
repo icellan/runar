@@ -252,10 +252,13 @@ module RunarCompiler
     end
 
     # @embedAlways (#109) is implemented for the .runar.ts surface; only the
-    # other 8 formats fail closed.
-    if source =~ /@embedAlways\b/ && !is_ts
-      return "@embedAlways directive is not supported by the Ruby compiler for " \
-             "this format (issue #109); it is honored only on the .runar.ts surface"
+    # other 8 formats fail closed. Same shared-message shape as @sighash
+    # above (N-268, mirroring N-244): named by the actual surface that
+    # triggered it, not hardcoded to "Ruby" regardless of extension.
+    if source =~ /@embedAlways\b/ && !is_ts && !surface.nil?
+      return "@embedAlways directive (issue #109) is not supported by the #{surface} " \
+             "surface parser; write the contract in TypeScript (.runar.ts) where " \
+             "@embedAlways is honoured"
     end
 
     nil

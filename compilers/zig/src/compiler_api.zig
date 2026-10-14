@@ -123,6 +123,22 @@ fn sighashGuardErrors(format: FileFormat) []const []const u8 {
     };
 }
 
+/// The shared `@embedAlways` refusal (N-268, mirroring N-244) for a non-TS
+/// surface, as a static one-element error list.
+fn embedAlwaysGuardErrors(format: FileFormat) []const []const u8 {
+    return switch (format) {
+        .runar_sol => &.{comptime input_limits.embedAlwaysDirectiveError("Solidity")},
+        .runar_move => &.{comptime input_limits.embedAlwaysDirectiveError("Move")},
+        .runar_py => &.{comptime input_limits.embedAlwaysDirectiveError("Python")},
+        .runar_go => &.{comptime input_limits.embedAlwaysDirectiveError("Go DSL")},
+        .runar_rs => &.{comptime input_limits.embedAlwaysDirectiveError("Rust")},
+        .runar_rb => &.{comptime input_limits.embedAlwaysDirectiveError("Ruby")},
+        .runar_zig => &.{comptime input_limits.embedAlwaysDirectiveError("Zig")},
+        .runar_java => &.{comptime input_limits.embedAlwaysDirectiveError("Java")},
+        .runar_ts, .unknown => unreachable,
+    };
+}
+
 /// Parse `source` by the format its `file_name` extension names, behind the
 /// two guards that apply to EVERY frontend entry: the size guard immediately
 /// below (N-136 — previously only `runPipeline`'s pass 0 enforced this, so a
@@ -171,7 +187,7 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
             return .{ .contract = null, .errors = sighashGuardErrors(format) };
         }
         if (input_limits.containsDirectiveToken(source, "@embedAlways")) {
-            return .{ .contract = null, .errors = &.{input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR} };
+            return .{ .contract = null, .errors = embedAlwaysGuardErrors(format) };
         }
     }
 

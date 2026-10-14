@@ -73,7 +73,15 @@ pub fn assertSourceBytesUnderLimit(source: []const u8) SourceSizeError!void {
 pub fn sighashDirectiveError(comptime surface: []const u8) []const u8 {
     return "@sighash directive (issue #123) is not supported by the " ++ surface ++ " surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured";
 }
-pub const EMBED_ALWAYS_DIRECTIVE_ERROR = "@embedAlways directive (issue #109) is only honoured on the TypeScript (.runar.ts) surface; write the contract in .runar.ts where @embedAlways is implemented";
+
+/// The `@embedAlways` refusal for the non-TS surface named `surface`
+/// ("Solidity", "Move", "Python", "Go DSL", "Rust", "Ruby", "Zig", "Java").
+/// Identical text in all seven tiers (N-268, mirroring N-244's `@sighash`
+/// fix — before N-268 this tier spoke its own, differently worded message
+/// that also did not name the surface).
+pub fn embedAlwaysDirectiveError(comptime surface: []const u8) []const u8 {
+    return "@embedAlways directive (issue #109) is not supported by the " ++ surface ++ " surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured";
+}
 
 fn isWordByte(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';

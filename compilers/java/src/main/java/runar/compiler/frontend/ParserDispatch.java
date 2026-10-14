@@ -82,10 +82,11 @@ public final class ParserDispatch {
                     + " surface parser; write the contract in TypeScript (.runar.ts) where "
                     + "@sighash is honoured");
             }
-            if (EMBED_ALWAYS_DIRECTIVE.matcher(source).find()) {
+            if (surface != null && EMBED_ALWAYS_DIRECTIVE.matcher(source).find()) {
                 throw new ParseException(
-                    "@embedAlways directive is only supported on the .runar.ts surface "
-                    + "(issue #109); write the contract in TypeScript syntax");
+                    "@embedAlways directive (issue #109) is not supported by the " + surface
+                    + " surface parser; write the contract in TypeScript (.runar.ts) where "
+                    + "@embedAlways is honoured");
             }
         }
 
