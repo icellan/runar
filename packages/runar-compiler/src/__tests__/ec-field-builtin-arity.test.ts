@@ -185,9 +185,17 @@ export class Probe extends SmartContract {
       // N-110 re-stamps exactly ecAdd: the secp256k1 adder's tangent y = 0
       // guard (+12 bytes) lives inside affineAdd. p256Add is the control that
       // it stayed on secp256k1, and the other seven that it touched nothing else.
+      //
+      // N-252 re-stamps p256Add: the SAME tangent y = 0 guard (+12 bytes, three
+      // picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY) lands in
+      // cAffineAdd for the NIST a = -3 curves (p256-p384-codegen.ts, `if
+      // (abortOnY0Tangent)`), landing after N-110 added the secp256k1 one. The
+      // other eight digests are unchanged, which is the control that the guard
+      // stayed confined to pNNNAdd (p384Add is not pinned here; p384Negate does
+      // not take the guard).
       ecAdd: '77e995b4398cf150ed9475ddeb8c6672fb414eda2b81d2ecb1fe2d6c0169f65f',
       ecPointX: '53726c95e164ce324e32889a6934902ad9eadd2a25ba5bfe3c813408cbe3ca87',
-      p256Add: 'e16038ed755d7263035dd43a51db9ca5c121c50b90b0546d382d86d57585e44c',
+      p256Add: '9a8b40c3157ca3243a4673929d849ed129b3cbc2b9ca1e3df985f71d9a14fa54',
       p384Negate: '84da75c3c5ceef1ada452b1156d1af554ce2d54f731d2527cd21bdd05775b7f2',
       bn254FieldAdd: '06a7ea3aa48ecd1cdd81aa2865055861b90a246547e3da832b943eded50bcd7a',
       bn254FieldNeg: '10edf181d703fb76a418265963985ded6072cf9fef2a4b457ae73b392f84027a',
