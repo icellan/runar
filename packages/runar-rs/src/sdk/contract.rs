@@ -1015,21 +1015,23 @@ impl RunarContract {
             .cloned()
             .unwrap_or_default();
 
-        // N-227 Part 2: the is_stateful branch below builds a REAL per-input
-        // unlock (its own OP_PUSH_TX preimage + signed Sig args) for every
-        // extra contract input via build_stateful_unlock. The non-stateful
-        // ("stateless") branch has no equivalent — it only ever reuses the
-        // SIZING placeholder unlock for extra inputs, because that branch
-        // never loops over extra_contract_utxos to build real ones. Shipping
-        // those placeholders as the FINAL unlocking script would broadcast
-        // an invalid spend for every input after the primary. Fail closed
-        // rather than silently ship unvalidatable bytes.
-        if !extra_contract_utxos.is_empty() && !is_stateful {
+        // N-227 Part 2 / N-258: the is_stateful branch below builds a REAL
+        // per-input unlock (its own OP_PUSH_TX preimage + signed Sig args) for
+        // every extra contract input via build_stateful_unlock. The
+        // non-stateful branch does the same (N-258) only for a
+        // zero-mutable-field StatefulSmartContract whose preimage the SDK
+        // derives (parent_stateful and needs_op_push_tx); there each extra
+        // input gets its own preimage and Sig. Any other non-stateful call (a
+        // plain SmartContract, or a caller-supplied preimage) has no per-input
+        // unlock builder, and shipping the SIZING placeholder as the FINAL
+        // unlocking script would broadcast an invalid spend for every input
+        // after the primary. Fail closed there.
+        if !extra_contract_utxos.is_empty() && !is_stateful && !(parent_stateful && needs_op_push_tx) {
             return Err(format!(
-                "RunarContract.call({}): additional_contract_inputs is not supported when the \
-                 contract has zero mutable fields (state_fields is empty) — this SDK path only \
-                 builds a placeholder unlock for extra contract inputs on that branch and the \
-                 resulting tx would be invalid",
+                "RunarContract.call({}): additional_contract_inputs is not supported for this \
+                 call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real \
+                 unlock for each extra contract input; any other path would ship a placeholder \
+                 unlock and the resulting tx would be invalid",
                 method_name,
             ));
         }
@@ -1754,6 +1756,51 @@ impl RunarContract {
                     self.build_unlocking_script(method_name, &resolved_args)?
                 );
 
+                // N-258: a zero-mutable-field StatefulSmartContract merge. Each
+                // extra contract input gets a REAL unlock of the same layout as
+                // the primary's: its own OP_PUSH_TX preimage (its own outpoint,
+                // scriptCode and amount) and its Sig params signed at its own
+                // input index over the post-OP_CODESEPARATOR subscript (the
+                // contract is parent_stateful, issue #44). Built here once so
+                // the rebuild below sizes fee/change against real bytes, and
+                // again after it because the rebuild can move the change
+                // output that the sighash commits.
+                let extra_base_args: Vec<Vec<SdkValue>> = (0..extra_contract_utxos.len())
+                    .map(|i| resolved_per_input_args.as_ref()
+                        .and_then(|v| v.get(i))
+                        .cloned()
+                        .unwrap_or_else(|| resolved_args.clone()))
+                    .collect();
+                let build_extra_unlock = |tx: &str, i: usize| -> Result<String, String> {
+                    let mu = &extra_contract_utxos[i];
+                    let mut input_args = extra_base_args[i].clone();
+                    let (extra_op_sig, extra_pre) = compute_op_push_tx_with_code_sep_sighash(
+                        tx, i + 1, &mu.script, mu.satoshis, code_sep_idx, sig_hash_type,
+                    )?;
+                    let mut sig_subscript = mu.script.clone();
+                    if code_sep_idx >= 0 {
+                        let trim_pos = ((code_sep_idx as usize) + 1) * 2;
+                        if trim_pos <= sig_subscript.len() {
+                            sig_subscript = sig_subscript[trim_pos..].to_string();
+                        }
+                    }
+                    for &idx in &sig_indices {
+                        input_args[idx] = SdkValue::Bytes(signer.sign(tx, i + 1, &sig_subscript, mu.satoshis, None)?);
+                    }
+                    if let Some(idx) = preimage_index {
+                        input_args[idx] = SdkValue::Bytes(extra_pre);
+                    }
+                    Ok(format!(
+                        "{}{}",
+                        self.build_stateful_prefix(&extra_op_sig, false),
+                        self.build_unlocking_script(method_name, &input_args)?
+                    ))
+                };
+                let mut extra_real_unlocks: Vec<String> = Vec::with_capacity(extra_contract_utxos.len());
+                for i in 0..extra_contract_utxos.len() {
+                    extra_real_unlocks.push(build_extra_unlock(&tmp_tx, i)?);
+                }
+
                 // N-227 (port of N-085): the BIP-143 scriptCode is everything
                 // AFTER the checkPreimage-injected OP_CODESEPARATOR, which can
                 // sit right at method entry — for a zero-mutable-field
@@ -1778,7 +1825,7 @@ impl RunarContract {
                         Some(extra_contract_utxos.iter().enumerate().map(|(i, utxo)| {
                             AdditionalContractInput {
                                 utxo: utxo.clone(),
-                                unlocking_script: extra_unlock_placeholders[i].clone(),
+                                unlocking_script: extra_real_unlocks[i].clone(),
                             }
                         }).collect())
                     },
@@ -1838,6 +1885,13 @@ impl RunarContract {
                     self.build_stateful_prefix(&final_op_push_tx_sig, false),
                     self.build_unlocking_script(method_name, &resolved_args)?
                 );
+
+                // N-258: re-derive every extra input's preimage and Sig
+                // against the rebuilt tx (its change output is final now).
+                for i in 0..extra_contract_utxos.len() {
+                    let unlock = build_extra_unlock(&signed_tx, i)?;
+                    signed_tx = insert_unlocking_script(&signed_tx, i + 1, &unlock)?;
+                }
             }
             signed_tx = insert_unlocking_script(&signed_tx, 0, &real_unlocking_script)?;
             if final_preimage.is_empty() && needs_op_push_tx {

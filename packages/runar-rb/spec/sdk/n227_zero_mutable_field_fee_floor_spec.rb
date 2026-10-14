@@ -176,36 +176,53 @@ RSpec.describe 'N-227 zero-mutable-field StatefulSmartContract call fee floor' d
     end
   end
 
-  # N-227 Part 2: a zero-mutable-field StatefulSmartContract call that also
-  # merges additional contract inputs must fail closed rather than broadcast
-  # an invalid tx. The is_stateful branch builds a REAL per-input unlock for
-  # every extra contract input; the non-stateful ("stateless") branch this
-  # contract's claim() takes has no equivalent — it would ship the SIZING
-  # placeholder unlock as the FINAL unlocking script for the extra input,
-  # which does not validate on-chain.
-  it 'refuses additional_contract_inputs on a zero-mutable-field contract' do
+  # N-227 Part 2, retargeted by N-258 (user decision R99): a call that spends
+  # additional contract inputs on a path with NO real per-input unlock builder
+  # must fail closed rather than broadcast an invalid tx.
+  #
+  # N-227 originally pinned this on the zero-mutable-field AllReadonlyCleanstack.
+  # N-258 gave that path real per-input unlocks (n258_zero_mutable_field_merge_spec.rb
+  # pins the merge tx to the TS vector @bsv/sdk Spend accepts) and narrowed the
+  # guard to the paths that still only have the SIZING placeholder: a plain
+  # SmartContract (no auto-injected checkPreimage) or a caller-supplied
+  # preimage. This pins the plain SmartContract case. Does NOT prove the
+  # caller-supplied-preimage case.
+  it 'refuses additional_contract_inputs on a path with no per-input unlock builder' do
     Dir.mktmpdir do |dir|
-      art = load_artifact(dir)
-      expect(art.state_fields).to be_empty
+      compiler_lib = File.expand_path('../../../../compilers/ruby/lib', __dir__)
+      $LOAD_PATH.unshift(compiler_lib) unless $LOAD_PATH.include?(compiler_lib)
+      require 'runar_compiler'
+      path = File.join(dir, 'P2PKOnly.runar.ts')
+      File.write(path, <<~TS)
+        import { SmartContract, PubKey, Sig, assert, checkSig } from 'runar-lang';
+
+        class P2PKOnly extends SmartContract {
+          readonly owner: PubKey;
+          constructor(owner: PubKey) { super(owner); this.owner = owner; }
+          public unlock(sig: Sig): void { assert(checkSig(sig, this.owner)); }
+        }
+      TS
+      art = Runar::SDK::RunarArtifact.from_json(RunarCompiler.artifact_to_json(RunarCompiler.compile_from_source(path)))
+      expect(art.parent_class).to eq('SmartContract')
 
       provider = Runar::SDK::MockProvider.new
       signer = Runar::SDK::MockSigner.new(pub_key_hex: caller_pub_key, address: caller_address)
       provider.add_utxo(caller_address, Runar::SDK::Utxo.new(
-        txid: 'aa' * 32, output_index: 0, satoshis: 100_000,
+        txid: 'bb' * 32, output_index: 0, satoshis: 100_000,
         script: "76a914#{caller_address}88ac"
       ))
+      locking_hex = Runar::SDK::RunarContract.new(art, [caller_pub_key]).get_locking_script
+      primary = Runar::SDK::Utxo.new(txid: 'aa' * 32, output_index: 0, satoshis: 5_000, script: locking_hex)
+      extra = Runar::SDK::Utxo.new(txid: 'cc' * 32, output_index: 1, satoshis: 7_000, script: locking_hex)
+      provider.add_contract_utxo(locking_hex, primary)
+      provider.add_contract_utxo("#{locking_hex}:extra", extra)
 
-      contract = Runar::SDK::RunarContract.new(art, [caller_pub_key])
-      contract.deploy(provider, signer, Runar::SDK::DeployOptions.new(satoshis: 5_000, change_address: caller_address))
-
-      extra = Runar::SDK::Utxo.new(
-        txid: 'cc' * 32, output_index: 0, satoshis: 5_000, script: contract.get_utxo.script
-      )
-
+      contract = Runar::SDK::RunarContract.from_utxo(art, primary)
       expect do
-        contract.call('claim', [nil, nil], provider, signer,
-                       Runar::SDK::CallOptions.new(additional_contract_inputs: [extra]))
-      end.to raise_error(StandardError)
+        contract.call('unlock', [nil], provider, signer,
+                      Runar::SDK::CallOptions.new(additional_contract_inputs: [extra]))
+      end.to raise_error(ArgumentError, /additional_contract_inputs is not supported/)
+      expect(provider.get_broadcasted_txs).to be_empty
     end
   end
 end

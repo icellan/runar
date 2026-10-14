@@ -34,8 +34,8 @@ Zig, Ruby or Java — each tier is a separate item slot. It also does not
 prove anything about continuation-bearing (non-empty ``state_fields``)
 stateful calls, which already take the ``is_stateful`` branch and were
 unaffected by this bug, nor about a zero-mutable-field call that also merges
-``additional_contract_inputs`` (N-227 Part 2 — a separate fail-closed guard,
-covered by the sibling test below).
+``additional_contract_inputs`` (N-258 made that merge work; the sibling test
+below pins the narrowed fail-closed guard).
 """
 
 from __future__ import annotations
@@ -173,40 +173,54 @@ def test_claim_on_all_readonly_cleanstack_pays_fee_floor():
     )
 
 
-def test_claim_with_additional_contract_inputs_is_refused():
-    """N-227 Part 2: a zero-mutable-field StatefulSmartContract call that
-    also merges ``additional_contract_inputs`` must fail closed rather than
-    broadcast an invalid tx. The ``is_stateful`` branch builds a REAL
-    per-input unlock for every extra contract input; the non-stateful
-    ("stateless") branch this contract's ``claim()`` takes has no
-    equivalent — it would ship the SIZING placeholder unlock as the FINAL
-    unlocking script for the extra input, which does not validate on-chain.
+P2PK_ONLY_SRC = """import { SmartContract, PubKey, Sig, assert, checkSig } from 'runar-lang';
+
+class P2PKOnly extends SmartContract {
+  readonly owner: PubKey;
+  constructor(owner: PubKey) { super(owner); this.owner = owner; }
+  public unlock(sig: Sig): void { assert(checkSig(sig, this.owner)); }
+}
+"""
+
+
+def test_merge_without_per_input_unlock_builder_is_refused():
+    """N-227 Part 2, retargeted by N-258 (user decision R99): a call that
+    spends ``additional_contract_inputs`` on a path with NO real per-input
+    unlock builder must fail closed rather than broadcast an invalid tx.
+
+    N-227 originally pinned this on the zero-mutable-field
+    AllReadonlyCleanstack. N-258 gave that path real per-input unlocks
+    (``test_n258_zero_mutable_field_merge.py`` proves the merge passes bsv-sdk
+    Spend on every input) and narrowed the guard to the paths that still only
+    have the SIZING placeholder: a plain SmartContract (no auto-injected
+    checkPreimage) or a caller-supplied preimage. This pins the plain
+    SmartContract case. Both contract outpoints are known to the provider, so
+    the error can only come from the guard. Does NOT prove the
+    caller-supplied-preimage case.
     """
-    art = _artifact()
-    assert not art.state_fields
+    result = compiler.compile_from_source_str_with_result(P2PK_ONLY_SRC, "P2PKOnly.runar.ts")
+    assert result.artifact is not None
+    art = RunarArtifact.from_dict(json.loads(compiler.artifact_to_json(result.artifact)))
+    assert art.parent_class == "SmartContract"
 
     signer = LocalSigner(KEY)
     address = signer.get_address()
     pub_key = signer.get_public_key()
+    locking_hex = RunarContract(art, [pub_key]).get_locking_script()
+    primary = Utxo(txid="aa" * 32, output_index=0, satoshis=5_000, script=locking_hex)
+    extra = Utxo(txid="cc" * 32, output_index=1, satoshis=7_000, script=locking_hex)
 
     provider = MockProvider("testnet")
     provider.add_utxo(address, Utxo(
-        txid="aa" * 32, output_index=0, satoshis=100_000, script=build_p2pkh_script(pub_key),
+        txid="bb" * 32, output_index=0, satoshis=100_000, script=build_p2pkh_script(pub_key),
     ))
+    provider.add_contract_utxo(locking_hex, primary)
+    provider.add_contract_utxo(locking_hex + ":extra", extra)
 
-    contract = RunarContract(art, [pub_key])
-    contract.deploy(provider, signer, DeployOptions(satoshis=5_000, change_address=address))
-
-    # The "extra" merge input's content is irrelevant — the guard must fire
-    # before any unlock is built for it. Reuse the deployed contract's own
-    # locking script so it is at least well-formed hex.
-    extra = Utxo(
-        txid="cc" * 32, output_index=0, satoshis=5_000,
-        script=contract._current_utxo.script,
-    )
-
-    with pytest.raises(Exception):
+    contract = RunarContract.from_utxo(art, primary)
+    with pytest.raises(ValueError, match="additional_contract_inputs is not supported"):
         contract.call(
-            "claim", [None, None], provider, signer,
+            "unlock", [None], provider, signer,
             CallOptions(additional_contract_inputs=[extra]),
         )
+    assert provider.get_broadcasted_txs() == []

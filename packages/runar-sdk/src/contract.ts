@@ -1422,22 +1422,23 @@ export class RunarContract {
     let contractOutputs: Array<{ script: string; satoshis: number }> | undefined;
     const extraContractUtxos = options?.additionalContractInputs ?? [];
 
-    // N-227 Part 2: the isStateful branch below builds a REAL per-input
-    // unlock (its own OP_PUSH_TX preimage + signed Sig args) for every
-    // extra contract input via buildStatefulUnlock. The non-stateful
-    // ("stateless") branch has no equivalent — it only ever reuses the
-    // SIZING placeholder unlock (72 zero-byte sig + args + witness) for
-    // extra inputs, because that branch never loops over extraContractUtxos
-    // to build real ones. Shipping those placeholders as the FINAL
-    // unlocking script would broadcast an invalid spend for every input
-    // after the primary. Fail closed rather than silently ship
-    // unvalidatable bytes.
-    if (extraContractUtxos.length > 0 && !isStateful) {
+    // N-227 Part 2 / N-258: the isStateful branch below builds a REAL
+    // per-input unlock (its own OP_PUSH_TX preimage + signed Sig args) for
+    // every extra contract input via buildStatefulUnlock. The non-stateful
+    // branch does the same (N-258) only for a zero-mutable-field
+    // StatefulSmartContract whose preimage the SDK derives (parentStateful
+    // and needsOpPushTx); there each extra input gets its own preimage and
+    // Sig. Any other non-stateful call (a plain SmartContract, or a
+    // caller-supplied preimage) has no per-input unlock builder, and
+    // shipping the SIZING placeholder as the FINAL unlocking script would
+    // broadcast an invalid spend for every input after the primary. Fail
+    // closed there.
+    if (extraContractUtxos.length > 0 && !isStateful && !(parentStateful && needsOpPushTx)) {
       throw new Error(
-        `RunarContract.call(${methodName}): additionalContractInputs is not supported when ` +
-          'the contract has zero mutable fields (stateFields is empty) — this SDK path only ' +
-          'builds a placeholder unlock for extra contract inputs on that branch and the ' +
-          'resulting tx would be invalid',
+        `RunarContract.call(${methodName}): additionalContractInputs is not supported for this ` +
+          'call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real ' +
+          'unlock for each extra contract input; any other path would ship a placeholder ' +
+          'unlock and the resulting tx would be invalid',
       );
     }
 
@@ -1949,6 +1950,37 @@ export class RunarContract {
         realUnlockingScript = this.buildStatefulPrefix(finalSig) +
           this.buildUnlockingScript(methodName, resolvedArgs);
 
+        // N-258: a zero-mutable-field StatefulSmartContract merge. Each
+        // extra contract input gets a REAL unlock of the same layout as the
+        // primary's: its own OP_PUSH_TX preimage (its own outpoint,
+        // scriptCode and amount) and its Sig params signed at its own input
+        // index over the post-OP_CODESEPARATOR subscript (the contract is
+        // parentStateful, issue #44). Built here once so the rebuild below
+        // sizes fee/change against real bytes, and again after it because
+        // the rebuild can move the change output that the sighash commits.
+        // Same subscript index call() uses to sign the primary's Sig params.
+        const sigMethodIndex = Math.max(
+          0, this.artifact.abi.methods.filter((m) => m.isPublic).findIndex((m) => m.name === methodName),
+        );
+        const buildExtraUnlock = async (currentTx: BsvTransaction, i: number): Promise<string> => {
+          const mu = extraContractUtxos[i]!;
+          const inputArgs = [...(resolvedPerInputArgs?.[i] ?? resolvedArgs)];
+          const { sigHex: extraOpSig, preimageHex: extraPre } = this.computeOpPushTxWithCodeSep(
+            currentTx, i + 1, mu.script, mu.satoshis, methodIndex,
+          );
+          const currentHex = currentTx.toHex();
+          const sigSubscript = this.getSubscriptForSigning(mu.script, sigMethodIndex);
+          for (const idx of sigIndices) {
+            inputArgs[idx] = await signer.sign(currentHex, i + 1, sigSubscript, mu.satoshis);
+          }
+          inputArgs[preimageIndex] = extraPre;
+          return this.buildStatefulPrefix(extraOpSig) + this.buildUnlockingScript(methodName, inputArgs);
+        };
+        const extraRealUnlocks: string[] = [];
+        for (let i = 0; i < extraContractUtxos.length; i++) {
+          extraRealUnlocks.push(await buildExtraUnlock(tx, i));
+        }
+
         // N-085: the BIP-143 scriptCode is everything AFTER the
         // checkPreimage-injected OP_CODESEPARATOR, which can sit right at
         // method entry — for a zero-mutable-field StatefulSmartContract
@@ -1975,7 +2007,7 @@ export class RunarContract {
           {
             contractOutputs,
             additionalContractInputs: extraContractUtxos.length > 0
-              ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlockPlaceholders[i]! }))
+              ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraRealUnlocks[i]! }))
               : undefined,
             dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
             locktime: options?.locktime,
@@ -2014,6 +2046,13 @@ export class RunarContract {
         finalPreimage = rebuiltPre;
         realUnlockingScript = this.buildStatefulPrefix(rebuiltSig) +
           this.buildUnlockingScript(methodName, resolvedArgs);
+
+        // N-258: re-derive every extra input's preimage and Sig against the
+        // rebuilt tx (its change output is final now).
+        for (let i = 0; i < extraContractUtxos.length; i++) {
+          tx.inputs[i + 1]!.unlockingScript = UnlockingScript.fromHex(await buildExtraUnlock(tx, i));
+          invalidateTxCache(tx);
+        }
       }
       tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
       invalidateTxCache(tx);

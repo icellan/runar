@@ -993,21 +993,22 @@ func (c *RunarContract) PrepareCall(
 		extraContractUtxos = options.AdditionalContractInputs
 	}
 
-	// N-227 Part 2: the isStateful branch below builds a REAL per-input
-	// unlock (its own OP_PUSH_TX preimage + signed Sig args) for every extra
-	// contract input via buildStatefulUnlock. The non-stateful ("stateless")
-	// branch has no equivalent — it only ever reuses the SIZING placeholder
-	// unlock (72 zero-byte sig + args + witness) for extra inputs, because
-	// that branch never loops over extraContractUtxos to build real ones.
-	// Shipping those placeholders as the FINAL unlocking script would
-	// broadcast an invalid spend for every input after the primary. Fail
-	// closed rather than silently ship unvalidatable bytes.
-	if len(extraContractUtxos) > 0 && !isStateful {
+	// N-227 Part 2 / N-258: the isStateful branch below builds a REAL
+	// per-input unlock (its own OP_PUSH_TX preimage + signed Sig args) for
+	// every extra contract input via buildStatefulUnlock. The non-stateful
+	// branch does the same (N-258) only for a zero-mutable-field
+	// StatefulSmartContract whose preimage the SDK derives (parentStateful
+	// and needsOpPushTx); there each extra input gets its own preimage and
+	// Sig. Any other non-stateful call (a plain SmartContract, or a
+	// caller-supplied preimage) has no per-input unlock builder, and shipping
+	// the SIZING placeholder as the FINAL unlocking script would broadcast an
+	// invalid spend for every input after the primary. Fail closed there.
+	if len(extraContractUtxos) > 0 && !isStateful && !(parentStateful && needsOpPushTx) {
 		return nil, fmt.Errorf(
-			"RunarContract.PrepareCall(%s): additionalContractInputs is not supported when the "+
-				"contract has zero mutable fields (StateFields is empty) — this SDK path only builds "+
-				"a placeholder unlock for extra contract inputs on that branch and the resulting tx "+
-				"would be invalid",
+			"RunarContract.PrepareCall(%s): additionalContractInputs is not supported for this "+
+				"call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real "+
+				"unlock for each extra contract input; any other path would ship a placeholder "+
+				"unlock and the resulting tx would be invalid",
 			methodName,
 		)
 	}
@@ -1669,6 +1670,48 @@ func (c *RunarContract) PrepareCall(
 			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
 				c.BuildUnlockingScript(methodName, resolvedArgs)
 
+			// N-258: a zero-mutable-field StatefulSmartContract merge. Each
+			// extra contract input gets a REAL unlock of the same layout as
+			// the primary's: its own OP_PUSH_TX preimage (its own outpoint,
+			// scriptCode and amount) and its Sig params signed at its own
+			// input index over the post-OP_CODESEPARATOR subscript (the
+			// contract is parentStateful, issue #44). Built here once so the
+			// rebuild below sizes fee/change against real bytes, and again
+			// after it because the rebuild can move the change output that
+			// the sighash commits.
+			buildExtraUnlock := func(txHex string, i int) (string, error) {
+				mu := extraContractUtxos[i]
+				inputArgs := make([]interface{}, len(extraResolvedArgs[i]))
+				copy(inputArgs, extraResolvedArgs[i])
+				extraOpSig, extraPre, ptxErr := ComputeOpPushTxWithSigHash(txHex, i+1,
+					mu.Script, mu.Satoshis, codeSepIdx, sigHashType)
+				if ptxErr != nil {
+					return "", fmt.Errorf("OP_PUSH_TX for input %d: %w", i+1, ptxErr)
+				}
+				sigSubscript := mu.Script
+				if codeSepIdx >= 0 {
+					sigSubscript = mu.Script[(codeSepIdx+1)*2:]
+				}
+				for _, idx := range sigIndices {
+					realSig, sigErr := signer.Sign(txHex, i+1, sigSubscript, mu.Satoshis, nil)
+					if sigErr != nil {
+						return "", fmt.Errorf("auto-signing Sig param %d for input %d: %w", idx, i+1, sigErr)
+					}
+					inputArgs[idx] = realSig
+				}
+				inputArgs[preimageIndex] = hex.EncodeToString(extraPre)
+				return groth16WAWitnessHex + c.buildStatefulPrefix(hex.EncodeToString(extraOpSig), false) +
+					c.BuildUnlockingScript(methodName, inputArgs), nil
+			}
+			extraRealUnlocks := make([]string, len(extraContractUtxos))
+			for i := range extraContractUtxos {
+				u, uErr := buildExtraUnlock(tmpTx, i)
+				if uErr != nil {
+					return nil, fmt.Errorf("RunarContract.PrepareCall: %w", uErr)
+				}
+				extraRealUnlocks[i] = u
+			}
+
 			// N-227 (port of N-085): the BIP-143 scriptCode is everything
 			// AFTER the checkPreimage-injected OP_CODESEPARATOR, which can sit
 			// right at method entry — for a zero-mutable-field
@@ -1699,7 +1742,7 @@ func (c *RunarContract) PrepareCall(
 				for i, utxo := range extraContractUtxos {
 					rebuildOpts.AdditionalContractInputs[i] = AdditionalContractInput{
 						Utxo:            *utxo,
-						UnlockingScript: extraUnlockPlaceholders[i],
+						UnlockingScript: extraRealUnlocks[i],
 					}
 				}
 			}
@@ -1760,6 +1803,16 @@ func (c *RunarContract) PrepareCall(
 			finalPreimage = hex.EncodeToString(rebuiltPre)
 			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
 				c.BuildUnlockingScript(methodName, resolvedArgs)
+
+			// N-258: re-derive every extra input's preimage and Sig against
+			// the rebuilt tx (its change output is final now).
+			for i := range extraContractUtxos {
+				u, uErr := buildExtraUnlock(signedTx, i)
+				if uErr != nil {
+					return nil, fmt.Errorf("RunarContract.PrepareCall: %w", uErr)
+				}
+				signedTx = InsertUnlockingScript(signedTx, i+1, u)
+			}
 		}
 		signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
 		if finalPreimage == "" && needsOpPushTx {

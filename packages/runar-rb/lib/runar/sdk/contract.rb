@@ -645,22 +645,24 @@ module Runar
           end
         end
 
-        # N-227 Part 2: the is_stateful branch below (stateful_preimage_passes)
-        # builds a REAL per-input unlock (its own OP_PUSH_TX preimage + signed
-        # Sig args) for every extra contract input via build_stateful_unlock.
-        # The non-stateful ("stateless") branch (stateless_preimage_pass) has
-        # no equivalent — it only ever reuses the SIZING placeholder unlock for
-        # extra inputs, because that branch never loops over
-        # extra_contract_utxos to build real ones. Shipping those placeholders
-        # as the FINAL unlocking script would broadcast an invalid spend for
-        # every input after the primary. Fail closed rather than silently ship
-        # unvalidatable bytes.
-        if !extra_contract_utxos.empty? && !is_stateful
+        # N-227 Part 2 / N-258: the is_stateful branch below
+        # (stateful_preimage_passes) builds a REAL per-input unlock (its own
+        # OP_PUSH_TX preimage + signed Sig args) for every extra contract input
+        # via build_stateful_unlock. The non-stateful branch does the same
+        # (N-258) only for a zero-mutable-field StatefulSmartContract whose
+        # preimage the SDK derives (parent_stateful and needs_op_push_tx); there
+        # each extra input gets its own preimage and Sig. Any other
+        # non-stateful call (a plain SmartContract, or a caller-supplied
+        # preimage) has no per-input unlock builder, and shipping the SIZING
+        # placeholder as the FINAL unlocking script would broadcast an invalid
+        # spend for every input after the primary. Fail closed there.
+        if !extra_contract_utxos.empty? && !is_stateful && !(parent_stateful && needs_op_push_tx)
           raise ArgumentError,
                 "RunarContract.call(#{method_name}): additional_contract_inputs is not " \
-                'supported when the contract has zero mutable fields (state_fields is ' \
-                'empty) — this SDK path only builds a placeholder unlock for extra ' \
-                'contract inputs on that branch and the resulting tx would be invalid'
+                'supported for this call — only a StatefulSmartContract (with an ' \
+                'SDK-derived preimage) builds a real unlock for each extra contract ' \
+                'input; any other path would ship a placeholder unlock and the ' \
+                'resulting tx would be invalid'
         end
 
         # Resolve per-input args for additional contract inputs.
@@ -1789,20 +1791,50 @@ module Runar
           # change_amount isn't pinned to the undersized estimate —
           # otherwise the broadcast tx pays less than the fee floor even
           # though its real byte size is larger than what fee/change were
-          # computed for. (extra_contract_utxos is always empty on this
-          # branch — see the fail-closed guard in call/prepare_call — so no
-          # additional_contract_inputs plumbing is needed in the rebuild.)
+          # computed for.
           if needs_op_push_tx && !final_op_push_tx_sig.empty?
             # Reconstructs exactly what stateless_preimage_pass just spliced
             # into signed_tx's input 0 (resolved_args[preimage_index] was
             # mutated in place by that call).
             real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) +
                           build_unlocking_script(method_name, resolved_args)
+
+            # N-258: a zero-mutable-field StatefulSmartContract merge. Each
+            # extra contract input gets a REAL unlock of the same layout as the
+            # primary's: its own OP_PUSH_TX preimage (its own outpoint,
+            # scriptCode and amount) and its Sig params signed at its own input
+            # index over the post-OP_CODESEPARATOR subscript (the contract is
+            # parent_stateful, issue #44). Built here once so the rebuild below
+            # sizes fee/change against real bytes, and again after it because
+            # the rebuild can move the change output that the sighash commits.
+            build_extra_unlock = lambda do |tx, i|
+              mu       = extra_contract_utxos[i]
+              args_for = (resolved_per_input_args[i] || resolved_args).dup
+              extra_sig, extra_pre = SDK.compute_op_push_tx(
+                tx, i + 1, mu.script, mu.satoshis, code_sep_idx,
+                resolve_sighash_type(method_name)
+              )
+              sig_subscript = mu.script
+              if code_sep_idx >= 0
+                trim_pos = (code_sep_idx + 1) * 2
+                sig_subscript = mu.script[trim_pos..] if trim_pos <= mu.script.length
+              end
+              sig_indices.each { |idx| args_for[idx] = signer.sign(tx, i + 1, sig_subscript, mu.satoshis) }
+              args_for[preimage_index] = extra_pre
+              build_stateful_prefix(extra_sig, false) + build_unlocking_script(method_name, args_for)
+            end
+            extra_real_unlocks = extra_contract_utxos.each_index.map { |i| build_extra_unlock.call(signed_tx, i) }
+
             rebuild_options = {}
             rebuild_options[:contract_outputs] = contract_outputs if contract_outputs
             rebuild_options[:data_outputs] = data_outputs if data_outputs && !data_outputs.empty?
             rebuild_options[:locktime] = locktime unless locktime.nil?
             rebuild_options[:sequence] = sequence unless sequence.nil?
+            if extra_contract_utxos.any?
+              rebuild_options[:additional_contract_inputs] = extra_contract_utxos.each_with_index.map do |utxo, i|
+                { utxo: utxo, unlocking_script: extra_real_unlocks[i] }
+              end
+            end
 
             tx_hex, _input_count, change_amount = SDK.build_call_transaction(
               contract_utxo, real_unlock, new_locking_script,
@@ -1811,7 +1843,8 @@ module Runar
               fee_rate: fee_rate,
               options: rebuild_options.empty? ? nil : rebuild_options
             )
-            signed_tx = sign_funding_inputs(tx_hex, additional_utxos, funding_signer, 1)
+            signed_tx = sign_funding_inputs(tx_hex, additional_utxos, funding_signer,
+                                            1 + extra_contract_utxos.length)
 
             # The rebuild may have changed the change output's satoshis,
             # which hashOutputs (and therefore the preimage above) commits
@@ -1824,6 +1857,12 @@ module Runar
                 signed_tx, contract_utxo, resolved_args, method_name,
                 code_sep_idx, needs_op_push_tx, preimage_index
               )
+
+            # N-258: re-derive every extra input's preimage and Sig against the
+            # rebuilt tx (its change output is final now).
+            extra_contract_utxos.each_index do |i|
+              signed_tx = SDK.insert_unlocking_script(signed_tx, i + 1, build_extra_unlock.call(signed_tx, i))
+            end
           end
 
           final_preimage = resolved_args[preimage_index] if final_preimage.empty? && needs_op_push_tx

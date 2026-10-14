@@ -34,8 +34,8 @@
 //! (non-empty `state_fields`) stateful calls, which already take the
 //! `is_stateful` branch and were unaffected by this bug, nor about a
 //! zero-mutable-field call that also merges `additional_contract_inputs`
-//! (N-227 Part 2 — a separate fail-closed guard, covered by the sibling test
-//! in this file).
+//! (N-258 made that merge work; the sibling test in this file pins the
+//! narrowed fail-closed guard).
 
 use runar_lang::sdk::script_utils::build_p2pkh_script;
 use runar_lang::sdk::types::RunarArtifact;
@@ -199,63 +199,58 @@ fn claim_on_all_readonly_cleanstack_pays_fee_floor() {
     );
 }
 
-/// N-227 Part 2: a zero-mutable-field StatefulSmartContract call that also
-/// merges `additional_contract_inputs` must fail closed rather than
-/// broadcast an invalid tx. The `is_stateful` branch builds a REAL per-input
-/// unlock for every extra contract input; the non-stateful ("stateless")
-/// branch this contract's `claim()` takes has no equivalent — it would ship
-/// the SIZING placeholder unlock as the FINAL unlocking script for the extra
-/// input, which does not validate on-chain.
+const P2PK_ONLY_SRC: &str = r#"
+class P2PKOnly extends SmartContract {
+  readonly owner: PubKey;
+  constructor(owner: PubKey) { super(owner); this.owner = owner; }
+  public unlock(sig: Sig): void { assert(checkSig(sig, this.owner)); }
+}
+"#;
+
+/// N-227 Part 2, retargeted by N-258 (user decision R99): a call that spends
+/// `additional_contract_inputs` on a path with NO real per-input unlock
+/// builder must fail closed rather than broadcast an invalid tx.
+///
+/// N-227 originally pinned this on the zero-mutable-field
+/// AllReadonlyCleanstack. N-258 gave that path real per-input unlocks
+/// (`n258_zero_mutable_field_merge.rs` pins the merge tx to the TS vector that
+/// @bsv/sdk Spend accepts) and narrowed the guard to the paths that still
+/// only have the SIZING placeholder: a plain SmartContract (no auto-injected
+/// checkPreimage) or a caller-supplied preimage. This pins the plain
+/// SmartContract case. Both contract outpoints are known to the provider, so
+/// the error can only come from the guard. Does NOT prove the
+/// caller-supplied-preimage case.
 #[test]
-fn claim_with_additional_contract_inputs_is_refused() {
-    let art = artifact();
-    assert!(art.state_fields.as_ref().map(|v| v.is_empty()).unwrap_or(true));
+fn merge_without_per_input_unlock_builder_is_refused() {
+    let a = runar_compiler_rust::compile_from_source_str(P2PK_ONLY_SRC, Some("P2PKOnly.runar.ts"))
+        .expect("compile P2PKOnly");
+    let art: RunarArtifact = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+    assert_eq!(art.parent_class.as_deref(), Some("SmartContract"));
 
     let signer = LocalSigner::new(SIGNER_KEY).unwrap();
     let address = signer.get_address().unwrap();
+    let pub_key = signer.get_public_key().unwrap();
+    let locking_hex = RunarContract::new(art.clone(), vec![SdkValue::Bytes(pub_key)]).get_locking_script();
+    let primary = Utxo { txid: "aa".repeat(32), output_index: 0, satoshis: 5_000, script: locking_hex.clone() };
+    let extra = Utxo { txid: "cc".repeat(32), output_index: 1, satoshis: 7_000, script: locking_hex.clone() };
+
     let mut provider = MockProvider::testnet();
     provider.add_utxo(&address, Utxo {
-        txid: "aa".repeat(32),
+        txid: "bb".repeat(32),
         output_index: 0,
         satoshis: 100_000,
         script: build_p2pkh_script(&address),
     });
+    provider.add_contract_utxo(&locking_hex, primary.clone());
+    provider.add_contract_utxo(&format!("{}:extra", locking_hex), extra.clone());
 
-    let mut contract = RunarContract::new(art, vec![SdkValue::Bytes(signer.get_public_key().unwrap())]);
-    contract
-        .deploy(&mut provider, &signer, &DeployOptions {
-            satoshis: 5_000,
-            change_address: Some(address.clone()),
-            funding_signer: None,
-            acknowledge_unsound: vec![],
-        })
-        .expect("deploy");
-
-    // The "extra" merge input's content is irrelevant — the guard must fire
-    // before any unlock is built for it. Reuse the deployed contract's own
-    // locking script so it is at least well-formed hex.
-    let locking_script_hex = contract.get_utxo().expect("current utxo after deploy").script.clone();
-    let extra = Utxo {
-        txid: "cc".repeat(32),
-        output_index: 0,
-        satoshis: 5_000,
-        script: locking_script_hex,
-    };
-
+    let mut contract = RunarContract::from_utxo(art, &primary).expect("from_utxo");
     let opts = CallOptions {
         additional_contract_inputs: Some(vec![extra]),
         ..Default::default()
     };
-
-    let result = contract.call(
-        "claim",
-        &[SdkValue::Auto, SdkValue::Auto],
-        &mut provider,
-        &signer,
-        Some(&opts),
-    );
-    assert!(
-        result.is_err(),
-        "expected call to refuse additional_contract_inputs on a zero-mutable-field contract, but it succeeded"
-    );
+    let result = contract.call("unlock", &[SdkValue::Auto], &mut provider, &signer, Some(&opts));
+    let err = result.expect_err("expected the additional_contract_inputs guard to refuse");
+    assert!(err.contains("additional_contract_inputs is not supported"), "unexpected error: {}", err);
+    assert!(provider.get_broadcasted_txs().is_empty());
 }

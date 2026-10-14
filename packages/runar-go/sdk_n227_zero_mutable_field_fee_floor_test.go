@@ -156,94 +156,74 @@ class AllReadonlyCleanstack extends StatefulSmartContract {
 	}
 }
 
-// N-227 Part 2: a zero-mutable-field StatefulSmartContract call that also
-// merges `additionalContractInputs` must fail closed rather than broadcast
-// an invalid tx. The isStateful branch of PrepareCall builds a REAL
-// per-input unlock for every extra contract input; the non-stateful
-// ("stateless") branch this contract's `claim()` takes has no equivalent —
-// it would ship the SIZING placeholder unlock (72 zero-byte sig + args +
-// witness) as the FINAL unlocking script for the extra input, which does
-// not validate on-chain.
+// N-227 Part 2, retargeted by N-258 (user decision R99): a call that spends
+// AdditionalContractInputs on a path with NO real per-input unlock builder
+// must fail closed rather than broadcast an invalid tx.
 //
-// What this test proves: `Call`/`PrepareCall` returns an error (instead of
-// broadcasting) when `AdditionalContractInputs` is set on a zero-mutable-
-// field StatefulSmartContract call.
+// N-227 originally pinned this on the zero-mutable-field AllReadonlyCleanstack.
+// N-258 gave that path real per-input unlocks (TestN258_..._MergeIsSpendValid
+// proves the merge passes the go-sdk interpreter on every input) and narrowed
+// the guard to the paths that still only have the SIZING placeholder: a plain
+// SmartContract (no auto-injected checkPreimage, so no per-input preimage) or a
+// caller-supplied preimage. This test pins the plain-SmartContract case.
 //
-// What this test does NOT prove: that a real per-input-unlock fix (option
-// (a)) is impossible — only that shipping placeholder unlocks is refused.
-// Java and Zig support merge on a zero-mutable-field contract via a unified
-// code path (not this branch-patch); that is a documented cross-tier
-// divergence this item does not close.
-func TestN227_ZeroMutableFieldStatefulContract_MergeIsRefused(t *testing.T) {
-	src := `import { StatefulSmartContract, PubKey, Sig, assert, checkSig } from 'runar-lang';
+// What this test proves: Call returns the guard's error, and broadcasts
+// nothing, when AdditionalContractInputs is set on a plain SmartContract call.
+// Both contract outpoints are known to the provider, so the error can only
+// come from the guard.
+//
+// What this test does NOT prove: the caller-supplied-preimage case.
+func TestN227_MergeWithoutPerInputUnlockBuilderIsRefused(t *testing.T) {
+	src := `import { SmartContract, PubKey, Sig, assert, checkSig } from 'runar-lang';
 
-class AllReadonlyCleanstack extends StatefulSmartContract {
+class P2PKOnly extends SmartContract {
   readonly owner: PubKey;
-
-  constructor(owner: PubKey) {
-    super(owner);
-    this.owner = owner;
-  }
-
-  public claim(sig: Sig): void {
-    const ownerCopy = this.owner;
-    assert(checkSig(sig, this.owner));
-  }
+  constructor(owner: PubKey) { super(owner); this.owner = owner; }
+  public unlock(sig: Sig): void { assert(checkSig(sig, this.owner)); }
 }
 `
-	tmp := t.TempDir() + "/AllReadonlyCleanstack.runar.ts"
+	tmp := t.TempDir() + "/P2PKOnly.runar.ts"
 	if err := os.WriteFile(tmp, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, err := exec.Command("go", "run", "../../compilers/go", "--source", tmp).Output()
 	if err != nil {
-		t.Fatalf("compile AllReadonlyCleanstack: %v", err)
+		t.Fatalf("compile P2PKOnly: %v", err)
 	}
 	var art RunarArtifact
 	if err := json.Unmarshal(out, &art); err != nil {
 		t.Fatalf("unmarshal artifact: %v", err)
 	}
-	if len(art.StateFields) != 0 {
-		t.Fatalf("expected zero StateFields, got %d", len(art.StateFields))
+	if art.ParentClass != "SmartContract" {
+		t.Fatalf("expected ParentClass SmartContract, got %q", art.ParentClass)
 	}
 
 	signer, err := NewLocalSigner("0000000000000000000000000000000000000000000000000000000000000003")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr, err := signer.GetAddress()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pubKey, err := signer.GetPublicKey()
-	if err != nil {
-		t.Fatal(err)
-	}
+	addr, _ := signer.GetAddress()
+	pubKey, _ := signer.GetPublicKey()
+	lockingHex := NewRunarContract(&art, []interface{}{pubKey}).GetLockingScript()
+	primary := UTXO{Txid: strings.Repeat("aa", 32), OutputIndex: 0, Satoshis: 5000, Script: lockingHex}
+	extraUtxo := UTXO{Txid: strings.Repeat("cc", 32), OutputIndex: 1, Satoshis: 7000, Script: lockingHex}
 
 	provider := NewMockProvider("testnet")
-	provider.AddUtxo(addr, UTXO{
-		Txid:        strings.Repeat("aa", 32),
-		OutputIndex: 0,
-		Satoshis:    100000,
-		Script:      BuildP2PKHScript(addr),
-	})
+	provider.AddUtxo(addr, UTXO{Txid: strings.Repeat("bb", 32), OutputIndex: 0, Satoshis: 100000, Script: BuildP2PKHScript(addr)})
+	provider.AddContractUtxo(lockingHex, &primary)
+	provider.AddContractUtxo(lockingHex+":extra", &extraUtxo)
 
-	contract := NewRunarContract(&art, []interface{}{pubKey})
-	if _, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 5000, ChangeAddress: addr}); err != nil {
-		t.Fatalf("deploy: %v", err)
+	contract, err := FromUtxo(&art, primary)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	extraUtxo := &UTXO{
-		Txid:        strings.Repeat("bb", 32),
-		OutputIndex: 0,
-		Satoshis:    5000,
-		Script:      contract.GetLockingScript(),
-	}
-
-	_, _, callErr := contract.Call("claim", []interface{}{nil, nil}, provider, signer, &CallOptions{
-		AdditionalContractInputs: []*UTXO{extraUtxo},
+	_, _, callErr := contract.Call("unlock", []interface{}{nil}, provider, signer, &CallOptions{
+		AdditionalContractInputs: []*UTXO{&extraUtxo},
 	})
-	if callErr == nil {
-		t.Fatalf("expected Call to refuse additionalContractInputs on a zero-mutable-field contract, but it succeeded")
+	if callErr == nil || !strings.Contains(callErr.Error(), "additionalContractInputs is not supported") {
+		t.Fatalf("expected the additionalContractInputs guard to refuse, got %v", callErr)
+	}
+	if n := len(provider.GetBroadcastedTxs()); n != 0 {
+		t.Fatalf("expected nothing broadcast, got %d tx(s)", n)
 	}
 }

@@ -1,30 +1,23 @@
 /**
- * N-227 Part 2: a zero-mutable-field `StatefulSmartContract` call that also
- * merges `additionalContractInputs` must fail closed rather than broadcast
- * an invalid tx.
+ * N-227 Part 2, retargeted by N-258 (user decision R99): a call that spends
+ * `additionalContractInputs` on a path with NO real per-input unlock builder
+ * must fail closed rather than broadcast an invalid tx.
  *
- * `AllReadonlyCleanstack` (same fixture N-085 uses) has ZERO mutable fields,
- * so `prepareCall`'s `isStateful` is `false` for its `claim()` method — even
- * though the contract IS `parentStateful` and still auto-injects
- * `checkPreimage`. `prepareCall`'s `isStateful` branch builds a REAL
- * per-input unlock (its own OP_PUSH_TX preimage + signed Sig args) for every
- * extra contract input via `buildStatefulUnlock`. The "stateless" branch
- * `claim()` takes has no equivalent: before this fix it only ever reused the
- * SIZING placeholder unlock (72 zero-byte sig + args + witness) for extra
- * inputs in its N-085 rebuild, shipping that placeholder as the FINAL
- * unlocking script — an invalid spend for every input after the primary.
+ * N-227 originally pinned this on a zero-mutable-field StatefulSmartContract
+ * (`AllReadonlyCleanstack`). N-258 gave that path real per-input unlocks
+ * (its own OP_PUSH_TX preimage + signed Sig for every extra input — see
+ * n258-zero-mutable-field-merge.test.ts, which proves the merge is Spend-valid),
+ * and narrowed the guard to the paths that still only have the SIZING
+ * placeholder: a plain `SmartContract` (no auto-injected checkPreimage, so no
+ * per-input preimage to build) or a caller-supplied preimage. This test pins
+ * the plain-`SmartContract` case, so the fail-closed invariant stays covered.
  *
- * What this test proves: `RunarContract.call()` throws (refusing to
- * broadcast) when `additionalContractInputs` is set on a zero-mutable-field
- * StatefulSmartContract call, instead of silently shipping unvalidatable
- * placeholder-unlock bytes.
+ * What this test proves: `RunarContract.call()` throws, and broadcasts
+ * nothing, when `additionalContractInputs` is set on a plain SmartContract
+ * call, instead of shipping placeholder-unlock bytes.
  *
- * What this test does NOT prove: that a real per-input-unlock fix is
- * impossible, or that the same guard exists in Go/Rust/Python/Ruby (it
- * does, as a parallel port — this file covers TS only). Java and Zig
- * support merge on a zero-mutable-field contract via a unified code path
- * (not this branch-patch) — that is a documented cross-tier divergence
- * this item does not close.
+ * What this test does NOT prove: the caller-supplied-preimage case, or the
+ * same guard in Go/Rust/Python/Ruby (each tier pins its own).
  */
 import { describe, it, expect } from 'vitest';
 import { compile } from 'runar-compiler';
@@ -33,8 +26,6 @@ import { MockProvider } from '../providers/mock.js';
 import { LocalSigner } from '../signers/local.js';
 import { buildP2PKHScript } from '../script-utils.js';
 import type { RunarArtifact } from 'runar-ir-schema';
-import fs from 'fs';
-import path from 'path';
 
 const SIGNER_KEY = '0000000000000000000000000000000000000000000000000000000000000003';
 
@@ -49,46 +40,43 @@ function compileSource(source: string, fileName: string): RunarArtifact {
   return result.artifact;
 }
 
-describe('N-227 Part 2 — zero-mutable-field StatefulSmartContract merge is refused', () => {
-  it('claim() with additionalContractInputs throws instead of shipping a placeholder unlock', async () => {
-    const source = fs.readFileSync(
-      path.join(__dirname, '../../../../examples/ts/all-readonly-cleanstack/AllReadonlyCleanstack.runar.ts'),
-      'utf8',
-    );
-    const artifact = compileSource(source, 'AllReadonlyCleanstack.runar.ts');
-
-    expect(artifact.parentClass).toBe('StatefulSmartContract');
-    expect(artifact.stateFields ?? []).toEqual([]);
+describe('N-227 Part 2 — a merge with no per-input unlock builder is refused', () => {
+  it('a plain SmartContract call with additionalContractInputs throws instead of shipping a placeholder unlock', async () => {
+    const source = `import { SmartContract, PubKey, Sig, assert, checkSig } from 'runar-lang';
+class P2PKOnly extends SmartContract {
+  readonly owner: PubKey;
+  constructor(owner: PubKey) { super(owner); this.owner = owner; }
+  public unlock(sig: Sig): void { assert(checkSig(sig, this.owner)); }
+}
+`;
+    const artifact = compileSource(source, 'P2PKOnly.runar.ts');
+    expect(artifact.parentClass).toBe('SmartContract');
 
     const signer = new LocalSigner(SIGNER_KEY);
     const address = await signer.getAddress();
     const pubKey = await signer.getPublicKey();
+    const lockingHex = new RunarContract(artifact, [pubKey]).getLockingScript();
+    const primary = { txid: 'aa'.repeat(32), outputIndex: 0, satoshis: 5000, script: lockingHex };
+    // Both contract outpoints are KNOWN to the provider, so a rejection can
+    // only come from the guard, not from MockProvider's unknown-input check.
+    const extraUtxo = { txid: 'cc'.repeat(32), outputIndex: 1, satoshis: 7000, script: lockingHex };
 
     const provider = new MockProvider();
     provider.addUtxo(address, {
-      txid: 'aa'.repeat(32),
+      txid: 'bb'.repeat(32),
       outputIndex: 0,
       satoshis: 100_000,
       script: buildP2PKHScript(pubKey),
     });
+    provider.addContractUtxo(lockingHex, primary);
+    provider.addContractUtxo(lockingHex + ':extra', extraUtxo);
 
-    const contract = new RunarContract(artifact, [pubKey]);
-    await contract.deploy(provider, signer, { satoshis: 5000, changeAddress: address });
-
-    // The "extra" merge input's content is irrelevant — the guard must fire
-    // before any unlock is built for it. Reuse the deployed contract's own
-    // locking script so it is at least well-formed hex.
-    const extraUtxo = {
-      txid: 'cc'.repeat(32),
-      outputIndex: 0,
-      satoshis: 5000,
-      script: contract.getLockingScript(),
-    };
-
+    const contract = RunarContract.fromUtxo(artifact, primary);
     await expect(
-      contract.call('claim', [null, null], provider, signer, {
+      contract.call('unlock', [null], provider, signer, {
         additionalContractInputs: [extraUtxo],
       }),
     ).rejects.toThrow(/additionalContractInputs is not supported/);
+    expect(provider.getBroadcastedTxs().length).toBe(0);
   });
 });
