@@ -1084,6 +1084,13 @@ public final class RunarContract {
             }
         }
 
+        // Extra contract inputs (merge / swap / any multi-input covenant),
+        // hoisted above funding coin-selection (N-294) so its outpoints can
+        // also be excluded from the funding candidates below. Empty in the
+        // single-input case, where everything here is a no-op.
+        List<UTXO> extraContractUtxos = options == null || options.additionalContractInputs == null
+            ? List.of() : options.additionalContractInputs;
+
         // Funding from the signer's P2PKH UTXOs (largest-first selection).
         // Stateless OP_PUSH_TX contracts also need a fee source because
         // the contract input typically forwards all sats to a continuation
@@ -1091,8 +1098,15 @@ public final class RunarContract {
         String funderAddress = signer.address();
         List<UTXO> all = provider.listUtxos(funderAddress);
         List<UTXO> additional = new ArrayList<>();
+        // Never fund with an outpoint this tx already spends as a contract
+        // input (the primary, or any additionalContractInputs — N-294/F-045:
+        // a merge's second token UTXO listed at the same address was picked
+        // as a P2PKH funding input too, spending one outpoint twice).
         for (UTXO u : all) {
-            if (!(u.txid().equals(currentUtxo.txid()) && u.outputIndex() == currentUtxo.outputIndex())) {
+            boolean isCurrent = u.txid().equals(currentUtxo.txid()) && u.outputIndex() == currentUtxo.outputIndex();
+            boolean isExtra = extraContractUtxos.stream()
+                .anyMatch(x -> x.txid().equals(u.txid()) && x.outputIndex() == u.outputIndex());
+            if (!isCurrent && !isExtra) {
                 additional.add(u);
             }
         }
@@ -1128,13 +1142,12 @@ public final class RunarContract {
         // sizing it here makes the layout byte-exact.
         String preimagePlaceholder = "00".repeat(bip143PreimageLen(sighashSubscript));
 
-        // Extra contract inputs (merge / swap / any multi-input covenant).
-        // Each carries its OWN args, its own auto-signed Sig slots and its own
-        // BIP-143 preimage bound to its own outpoint; only the SDK-side layout
-        // is shared. Empty in the single-input case, where everything below is
-        // a no-op and the built tx is byte-for-byte unchanged.
-        List<UTXO> extraContractUtxos = options == null || options.additionalContractInputs == null
-            ? List.of() : options.additionalContractInputs;
+        // extraContractUtxos is declared above (hoisted for the funding
+        // filter, N-294). Each carries its OWN args, its own auto-signed Sig
+        // slots and its own BIP-143 preimage bound to its own outpoint; only
+        // the SDK-side layout is shared. Empty in the single-input case,
+        // where everything below is a no-op and the built tx is byte-for-byte
+        // unchanged.
         List<List<Object>> perInputArgs = options == null ? null : options.additionalContractInputArgs;
         if (perInputArgs != null && perInputArgs.size() > extraContractUtxos.size()) {
             throw new IllegalArgumentException(
