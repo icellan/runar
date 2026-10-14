@@ -17,6 +17,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const input_limits = @import("../frontend/input_limits.zig");
 const stateful_scaffold = @import("../ir/stateful_scaffold.zig");
 const typecheck = @import("typecheck.zig");
 const validate = @import("validate.zig");
@@ -3356,10 +3357,13 @@ fn lookupPrivateMethod(contract: ContractNode, name: []const u8) ?MethodNode {
     return null;
 }
 
-// Maximum depth for the private-call recursion. Validation should
-// reject recursion in private methods, so this only triggers under
-// pathological inputs that bypass the validator.
-const MAX_PRIVATE_CALL_DEPTH: u32 = 64;
+// Maximum depth for the private-call recursion. N-279: this must be at
+// least `input_limits.MAX_CALL_DEPTH` (128) -- the deepest private-call
+// chain `validate.zig` actually admits -- or a mutation / addOutput /
+// addDataOutput / requireOutputP2PKH reachable only through a legal, deeper
+// chain gets cut off and the method is silently misclassified TERMINAL. Tied
+// to the same constant so the two limits cannot drift apart again.
+const MAX_PRIVATE_CALL_DEPTH: u32 = @intCast(input_limits.MAX_CALL_DEPTH);
 
 // N-264: the predicates below reach private helpers through a QUEUE, not by
 // recursing into a callee's body from the middle of the caller's statement
