@@ -193,6 +193,13 @@ fn json_to_val(v: &serde_json::Value) -> Val {
                 if let Ok(n) = stripped.parse::<i64>() {
                     return Val::Int(n);
                 }
+                // N-282: outside i64 -> `Wide` (same value N-163 gives a
+                // caller-supplied `SdkValue::BigInt`), never 0. A literal that
+                // isn't valid decimal at all (shouldn't happen for a
+                // compiler-emitted ANF literal) falls through to `Bytes`.
+                if let Ok(n) = stripped.parse::<num_bigint::BigInt>() {
+                    return Val::Wide(n);
+                }
             }
             // Any other JSON string is a ByteString literal. (The
             // upstream compiler always emits integers as JSON numbers

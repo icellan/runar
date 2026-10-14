@@ -2851,9 +2851,15 @@ fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{
         .string => |s| blk: {
             // Handle BigInt strings like "42n"
             if (s.len > 0 and s[s.len - 1] == 'n') {
-                if (std.fmt.parseInt(i64, s[0 .. s.len - 1], 10)) |n| {
+                const digits = s[0 .. s.len - 1];
+                if (std.fmt.parseInt(i64, digits, 10)) |n| {
                     break :blk .{ .int = n };
-                } else |_| {}
+                } else |_| {
+                    // N-282: outside i64 -> `.wide` (same value N-163 gives a
+                    // caller-supplied `StateValue.big_int`), never 0. Dupe —
+                    // the source std.json.Parsed is deinit'd by the caller.
+                    break :blk .{ .wide = try allocator.dupe(u8, digits) };
+                }
             }
             // Plain numeric string
             if (std.fmt.parseInt(i64, s, 10)) |n| {
@@ -3369,6 +3375,50 @@ test "parseANFFromJson simple counter" {
     try std.testing.expectEqualStrings("increment", program.methods[0].name);
     try std.testing.expect(program.methods[0].is_public);
     try std.testing.expectEqual(@as(usize, 4), program.methods[0].body.len);
+}
+
+// N-282: a beyond-i64 ANF `load_const` literal (`"<digits>n"`) reached
+// `parseJSONToANFValue`, and because `std.fmt.parseInt(i64, ...)` overflows
+// for both the "n"-stripped and plain-numeric attempts, fell through to the
+// `.bytes` branch -- so `toInt` read it as 0 and arithmetic on the literal
+// silently derived a post-state the on-chain script never produces (same
+// class as N-163, different entry point: N-163 covers a caller-supplied
+// `StateValue.big_int` reaching `stateValueToAnf`; this item covers the same
+// value arriving as an ANF literal through `parseJSONToANFValue`/`load_const`).
+//
+// Proves: a stateful method whose body contains a `load_const` of a
+// beyond-i64 bigint literal, used as a `bin_op` operand, is refused with
+// `error.ScriptNumberError` -- never silently computed as 0.
+// Does not prove: arithmetic on wide values (the interpreter refuses it; the
+// on-chain script computes it), or anything about the compiled script.
+test "N-282: a beyond-i64 load_const literal used in arithmetic is refused, never computed as 0" {
+    const allocator = std.testing.allocator;
+
+    // 2^70 + 12345: outside i64 (max i64 is ~9.2e18).
+    const json =
+        \\{"contractName":"WideLiteralProbe","properties":[{"name":"count","type":"bigint","readonly":false}],
+        \\"methods":[{"name":"settle","params":[],"body":[
+        \\{"name":"c","value":{"kind":"load_prop","name":"count"}},
+        \\{"name":"w","value":{"kind":"load_const","value":"1180591620717411315769n"}},
+        \\{"name":"n","value":{"kind":"bin_op","op":"+","left":"c","right":"w"}},
+        \\{"name":"u","value":{"kind":"update_prop","name":"count","value":"n"}}
+        \\],"isPublic":true}]}
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const program = try parseANFFromJson(arena.allocator(), json);
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("count", .{ .int = 5 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+
+    const result = computeNewState(allocator, &program, "settle", current_state, args, &.{});
+    try std.testing.expectError(error.ScriptNumberError, result);
 }
 
 // ---------------------------------------------------------------------------
