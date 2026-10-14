@@ -234,8 +234,8 @@ export function executeStrict(
  * `LocalSigner.sign(...)` before broadcasting). The interpreter:
  *
  *  - verifies `checkSig(sig, pk)` by parsing `pk` as a compressed/uncompressed
- *    secp256k1 point, parsing `sig` as DER (with optional trailing sighash byte
- *    stripped), and calling `pubKey.verify(sighash, signature)` — a real
+ *    secp256k1 point, parsing `sig` as DER followed by its one sighash-type
+ *    byte (checksig format — bare DER aborts, as in `Spend`, N-255), and calling `pubKey.verify(sighash, signature)` — a real
  *    ECDSA verification. An EMPTY signature returns `false`, which then
  *    trips the enclosing `assert(...)` and throws. A non-empty, well-formed
  *    signature that does not verify throws a plain `Error`: a node aborts
@@ -1633,8 +1633,9 @@ function parseDerSignatureMaybeWithSighashByte(bytes: number[]): InstanceType<ty
  * 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
  * signature, or a well-formed one that does not verify, is not an ENCODING
  * abort (`Spend` has no NULLFAIL; it pushes false) — the call site applies
- * NULLFAIL after verification (N-198). The signature layout is the one
- * {@link verifyEcdsa} accepts: DER with an optional trailing sighash byte.
+ * NULLFAIL after verification (N-198). A non-empty signature is in checksig
+ * format, DER followed by exactly one sighash-type byte, as `Spend` requires:
+ * bare DER with no sighash byte aborts (N-255).
  * Operands that are not bytes at all are left to {@link verifyEcdsa}.
  */
 function checkSigEncodingError(sigVal: unknown, pkVal: unknown): string | null {
@@ -1642,7 +1643,10 @@ function checkSigEncodingError(sigVal: unknown, pkVal: unknown): string | null {
   const pkBytes = toByteArray(pkVal);
   if (!sigBytes || !pkBytes) return null;
   if (sigBytes.length > 0) {
-    const der = sigBytes.length === sigBytes[1]! + 3 ? sigBytes.slice(0, -1) : sigBytes;
+    if (sigBytes.length < 2 || sigBytes.length !== sigBytes[1]! + 3) {
+      return 'the signature is not strict DER';
+    }
+    const der = sigBytes.slice(0, -1);
     if (!isStrictDerSignature(der)) return 'the signature is not strict DER';
     const sig = Signature.fromDER(der);
     if (!new TransactionSignature(sig.r, sig.s, 0).hasLowS()) {

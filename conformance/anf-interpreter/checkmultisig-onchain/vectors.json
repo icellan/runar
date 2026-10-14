@@ -66,6 +66,17 @@
       "reason": "the signature does not have a low S value"
     },
     {
+      "name": "second signature is bare DER (no sighash-type byte): it is examined first",
+      "s1": "3044022046d79ce8585552958c8dd8f536c54c832ab7df93be6d58e9721c6ae66f926a4a022069d3dbc7d2da76afaff98435f8a4097ce211c5b3bb7bcc2ccbc161c4030e30af41",
+      "s2": "3045022100924ed4a5a112bd645f17096039c410d879c796a7c6c4328b4d19ed0fae59b96e02205771d7371c3bb9b9fbeda5adc8aef3bdd4470cf083a64f66b45ca79a0f19701e",
+      "pk1": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "pk2": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "pk3": "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "sigB": "",
+      "outcome": "aborts",
+      "reason": "the signature is not strict DER"
+    },
+    {
       "name": "both signatures empty, pk1 malformed: the check stops before pk1",
       "s1": "",
       "s2": "",

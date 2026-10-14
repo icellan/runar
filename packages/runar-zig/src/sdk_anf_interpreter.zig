@@ -2101,8 +2101,9 @@ fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFVa
 /// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
 /// signature, or a well-formed one that does not verify, is not an encoding
 /// abort (`Spend` has no NULLFAIL; it pushes false); the `checkSig` call site
-/// applies NULLFAIL after verification (N-198). The signature layout is the one
-/// `verifyEcdsaReal` accepts: DER with an optional trailing sighash byte.
+/// applies NULLFAIL after verification (N-198). A non-empty signature is in
+/// checksig format, DER followed by exactly one sighash-type byte, as `Spend`
+/// requires: bare DER with no sighash byte aborts (N-255).
 /// Operands that are not hex bytes at all are left to `verifyEcdsaReal`.
 fn checkSigEncodingError(allocator: std.mem.Allocator, sig_val: ANFValue, pk_val: ANFValue) ?[]const u8 {
     const sig_hex = switch (sig_val) {
@@ -2118,8 +2119,8 @@ fn checkSigEncodingError(allocator: std.mem.Allocator, sig_val: ANFValue, pk_val
     const pk = bsvz.primitives.hex.decode(allocator, pk_hex) catch return null;
     defer allocator.free(pk);
     if (sig.len > 0) {
-        var der = sig;
-        if (der.len >= 2 and der.len == @as(usize, der[1]) + 3) der = der[0 .. der.len - 1];
+        if (sig.len < 2 or sig.len != @as(usize, sig[1]) + 3) return "the signature is not strict DER";
+        const der = sig[0 .. sig.len - 1];
         if (!der_mod.isStrictDerSignature(der)) return "the signature is not strict DER";
         const r_len: usize = der[3];
         const s_bytes = der[6 + r_len ..];
@@ -3667,6 +3668,17 @@ fn hexEncode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out;
 }
 
+/// Hex-encode a bare DER signature in checksig format: DER plus a 0x41
+/// (SIGHASH_ALL|FORKID) sighash-type byte. On-chain mode aborts on bare DER,
+/// as OP_CHECKSIG does (N-255).
+fn hexEncodeChecksig(allocator: std.mem.Allocator, der: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, der.len * 2 + 2);
+    _ = try bsvz.primitives.hex.encodeLower(der, out[0 .. der.len * 2]);
+    out[der.len * 2] = '4';
+    out[der.len * 2 + 1] = '1';
+    return out;
+}
+
 test "executeOnChainAuthoritative — checkSig passes with a real signature" {
     const allocator = std.testing.allocator;
     const anf = buildSigGuardAnf();
@@ -3679,7 +3691,7 @@ test "executeOnChainAuthoritative — checkSig passes with a real signature" {
     const pub_key = try priv.publicKey();
     const sig = try priv.signDigest256(sighash);
 
-    const sig_hex = try hexEncode(allocator, sig.asSlice());
+    const sig_hex = try hexEncodeChecksig(allocator, sig.asSlice());
     defer allocator.free(sig_hex);
     const pk_hex = try hexEncode(allocator, &pub_key.bytes);
     defer allocator.free(pk_hex);
@@ -3725,7 +3737,7 @@ test "executeOnChainAuthoritative — checkSig fails with a corrupted signature"
     const sig_slice = sig_bytes_buf[0..sig.asSlice().len];
     sig_slice[sig_slice.len - 1] ^= 0xff; // corrupt the last byte of S
 
-    const sig_hex = try hexEncode(allocator, sig_slice);
+    const sig_hex = try hexEncodeChecksig(allocator, sig_slice);
     defer allocator.free(sig_hex);
     const pk_hex = try hexEncode(allocator, &pub_key.bytes);
     defer allocator.free(pk_hex);
@@ -3756,7 +3768,8 @@ test "executeOnChainAuthoritative — checkSig fails with a corrupted signature"
 // bytes, ignores the sign bit and ignores bytes after the SEQUENCE.
 //
 // Proves: executeOnChainAuthoritative's checkSig reaches the fixture verdict
-// on every vector. Does not prove builtins.checkSig (tested in builtins.zig)
+// on every vector, each in checksig format (DER + one sighash-type byte,
+// N-255). Does not prove builtins.checkSig (tested in builtins.zig)
 // or the envelope path (sdk_envelope_interop_test.zig replays the der-*
 // rejection vectors).
 test "executeOnChainAuthoritative — checkSig applies strict DER to every sdk-der vector (F-242)" {
@@ -3782,7 +3795,18 @@ test "executeOnChainAuthoritative — checkSig applies strict DER to every sdk-d
         try current_state.put("value", .{ .int = 0 });
         var args = std.StringHashMap(ANFValue).init(allocator);
         defer args.deinit();
-        try args.put("sig", .{ .bytes = v.object.get("sig").?.string });
+        // In checksig format: a bare-DER vector gets a 0x41 sighash-type byte
+        // (N-255: bare DER aborts in on-chain mode before the encoding under
+        // test is reached).
+        const sig_raw = v.object.get("sig").?.string;
+        const sig_len = sig_raw.len / 2;
+        const seq_len = try std.fmt.parseInt(usize, sig_raw[2..4], 16);
+        const sig_hex = if (sig_len == seq_len + 3)
+            try allocator.dupe(u8, sig_raw)
+        else
+            try std.fmt.allocPrint(allocator, "{s}41", .{sig_raw});
+        defer allocator.free(sig_hex);
+        try args.put("sig", .{ .bytes = sig_hex });
         try args.put("pk", .{ .bytes = pk_hex });
 
         const result = executeOnChainAuthoritative(
@@ -4001,7 +4025,7 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 passes when sig match
     const pub1 = try priv1.publicKey();
     const sig1 = try priv1.signDigest256(sighash);
 
-    const sig1_hex = try hexEncode(allocator, sig1.asSlice());
+    const sig1_hex = try hexEncodeChecksig(allocator, sig1.asSlice());
     defer allocator.free(sig1_hex);
     const pk0_hex = try hexEncode(allocator, &pub0.bytes);
     defer allocator.free(pk0_hex);
@@ -4056,7 +4080,7 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 aborts (NULLFAIL) whe
     const pub1 = try priv1.publicKey();
     const sig2 = try priv2.signDigest256(sighash);
 
-    const sig2_hex = try hexEncode(allocator, sig2.asSlice());
+    const sig2_hex = try hexEncodeChecksig(allocator, sig2.asSlice());
     defer allocator.free(sig2_hex);
     const pk0_hex = try hexEncode(allocator, &pub0.bytes);
     defer allocator.free(pk0_hex);

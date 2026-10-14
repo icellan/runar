@@ -120,14 +120,15 @@ func isCanonicalDERInteger(b []byte) bool {
 // 33 bytes behind 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve
 // point. An empty signature, or a well-formed one that does not verify, is not
 // an encoding abort (Spend has no NULLFAIL; it pushes false); the checkSig call
-// site applies NULLFAIL after verification (N-198). sig is DER with an
-// optional trailing sighash-type byte, the layout ecdsaVerify accepts.
+// site applies NULLFAIL after verification (N-198). A non-empty sig is in
+// checksig format, DER followed by exactly one sighash-type byte, as Spend
+// requires: bare DER with no sighash byte aborts (N-255).
 func checkSigEncodingError(sig, pubkey []byte) string {
 	if len(sig) > 0 {
-		der := sig
-		if len(der) >= 2 && len(der) == int(der[1])+3 {
-			der = der[:len(der)-1]
+		if len(sig) < 2 || len(sig) != int(sig[1])+3 {
+			return "the signature is not strict DER"
 		}
+		der := sig[:len(sig)-1]
 		if !isStrictDERSignature(der) {
 			return "the signature is not strict DER"
 		}

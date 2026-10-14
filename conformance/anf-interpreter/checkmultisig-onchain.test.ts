@@ -45,14 +45,16 @@ import { enforceDriverGate } from './driver-gate.js';
 // SDK on-chain interpreter as it does under Spend; a wrong or out-of-order
 // signature makes it fail (abort, as a node does under NULLFAIL); the encoding
 // gates fire on exactly the pairs Spend examines, in Spend's order (a malformed
-// pk3 aborts, a malformed pk1 that is never reached does not); and an all-empty
+// pk3 aborts, a malformed pk1 that is never reached does not; a bare-DER
+// second signature with no sighash-type byte aborts, N-255); and an all-empty
 // failing multisig pushes false and lets the other arm carry the spend.
 //
 // What this does not prove: (a) NULLFAIL against a node — no engine here
 // enforces it independently of the interpreters; (b) thresholds other than
 // 2-of-3, or N > M (the compiler refuses it; each interpreter aborts as Spend
 // does, untested here); (c) the runar-testing TestContract interpreter, which
-// is not an SDK interpreter; (d) bare DER without a sighash-type byte (N-255).
+// is not an SDK interpreter; (d) the value of the sighash-type byte, which
+// neither Spend's encoding gate nor the interpreters check.
 // ---------------------------------------------------------------------------
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

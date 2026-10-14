@@ -61,6 +61,13 @@
       "aborts": false
     },
     {
+      "name": "bare DER: sigA verifies but has no sighash-type byte",
+      "sigA": "304402202014729e174761660db68a344e6de21ef31a83ecbd9137b62e4b0b75a074a304022053c62e76e2f5146e53ff19d88b1c134754fb93c9b9f7749ca6765d88c667c657",
+      "pubA": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "aborts": true,
+      "reason": "the signature is not strict DER"
+    },
+    {
       "name": "control: sigA verifies, so the A-arm succeeds",
       "sigA": "304402202014729e174761660db68a344e6de21ef31a83ecbd9137b62e4b0b75a074a304022053c62e76e2f5146e53ff19d88b1c134754fb93c9b9f7749ca6765d88c667c65741",
       "pubA": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",

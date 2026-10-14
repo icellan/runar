@@ -1346,15 +1346,18 @@ module Runar
       # behind 0x04 and decode to a curve point. An empty signature, or a
       # well-formed one that does not verify, is not an encoding abort (+Spend+
       # has no NULLFAIL; it pushes false); the +checkSig+ call site applies
-      # NULLFAIL after verification (N-198). The signature layout is the one
-      # +verify_ecdsa_real+ accepts: DER with an optional trailing sighash
-      # byte. Operands that are not hex at all are left to +verify_ecdsa_real+.
+      # NULLFAIL after verification (N-198). A non-empty signature is in
+      # checksig format, DER followed by exactly one sighash-type byte, as
+      # +Spend+ requires: bare DER with no sighash byte aborts (N-255). Operands that are not hex at all are left to +verify_ecdsa_real+.
       def check_sig_encoding_error(sig_val, pk_val)
         sig_hex = to_hex_arg(sig_val)
         pk_hex  = to_hex_arg(pk_val)
         return nil if sig_hex.nil? || pk_hex.nil?
 
         unless sig_hex.empty?
+          sig = [sig_hex].pack('H*').bytes
+          return 'the signature is not strict DER' if sig.length < 2 || sig.length != sig[1] + 3
+
           parsed = Runar::ECDSA.parse_der_signature_bytes([sig_hex].pack('H*'))
           return 'the signature is not strict DER' if parsed.nil?
           return 'the signature does not have a low S value' unless parsed[1].between?(1, Runar::ECDSA::CURVE_N >> 1)

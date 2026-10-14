@@ -55,8 +55,9 @@ Every SDK ships the same three execution modes:
   enforced AND crypto built-ins perform real verification against the
   supplied 32-byte BIP-143 sighash:
   - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1
-    secp256k1. DER signature with optional trailing sighash type byte
-    stripped. Verification is against the raw 32-byte sighash (no extra
+    secp256k1. The signature is in checksig format, DER followed by one
+    sighash type byte (stripped); bare DER with no sighash byte aborts, as in
+    `Spend` (N-255). Verification is against the raw 32-byte sighash (no extra
     SHA-256), matching the on-chain `OP_CHECKSIG` semantic. A malformed
     encoding (a non-empty signature that is not strict DER or has a high S,
     or a public key that is not 0x02/0x03 + 33 / 0x04 + 65 bytes on the

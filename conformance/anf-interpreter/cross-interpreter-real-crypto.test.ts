@@ -17,8 +17,8 @@ import { enforceDriverGate } from './driver-gate.js';
 // each per-SDK driver invoked with `--mode=on-chain`. The mode performs:
 //
 //   - Real ECDSA verify of `checkSig(sig, pk)` against the supplied 32-byte
-//     sighash. SEC1 secp256k1 pubkey, DER signature with optional trailing
-//     sighash type byte.
+//     sighash. SEC1 secp256k1 pubkey, DER signature followed by one sighash
+//     type byte (checksig format; bare DER aborts, as in Spend, N-255).
 //   - Real `checkMultiSig(sigs, pks)` as Spend runs OP_CHECKMULTISIG, with
 //     the encoding gates and NULLFAIL (N-259, pinned by
 //     ./checkmultisig-onchain.test.ts).

@@ -2247,14 +2247,18 @@ fn is_strict_der_signature(der: &[u8]) -> bool {
 /// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
 /// signature, or a well-formed one that does not verify, is not an encoding
 /// abort (`Spend` has no NULLFAIL; it pushes false); the `checkSig` call site
-/// applies NULLFAIL after verification (N-198). The signature layout is the one
-/// `verify_ecdsa_real` accepts: DER with an optional trailing sighash byte.
+/// applies NULLFAIL after verification (N-198). A non-empty signature is in
+/// checksig format, DER followed by exactly one sighash-type byte, as `Spend`
+/// requires: bare DER with no sighash byte aborts (N-255).
 /// Operands that are not bytes at all are left to `verify_ecdsa_real`.
 fn check_sig_encoding_error(sig_val: &Val, pk_val: &Val) -> Option<&'static str> {
     let sig = val_to_bytes(sig_val)?;
     let pk = val_to_bytes(pk_val)?;
     if !sig.is_empty() {
-        let der = if sig.len() >= 2 && sig.len() == sig[1] as usize + 3 { &sig[..sig.len() - 1] } else { &sig[..] };
+        if sig.len() < 2 || sig.len() != sig[1] as usize + 3 {
+            return Some("the signature is not strict DER");
+        }
+        let der = &sig[..sig.len() - 1];
         if !is_strict_der_signature(der) {
             return Some("the signature is not strict DER");
         }
@@ -3334,10 +3338,12 @@ mod real_crypto_tests {
             SigningKey::from_bytes(&bytes.into()).unwrap()
         }
 
+        // DER plus a 0x41 sighash-type byte: on-chain mode aborts on bare
+        // DER, as OP_CHECKSIG does (N-255).
         fn sign_der_hex(key: &SigningKey, sighash: &[u8; 32]) -> String {
             let (sig, _): (K256Signature, k256::ecdsa::RecoveryId) =
                 key.sign_prehash(sighash).unwrap();
-            bytes_to_hex(sig.to_der().as_bytes())
+            format!("{}41", bytes_to_hex(sig.to_der().as_bytes()))
         }
 
         let digest = Sha256::digest(b"N-275-multisig-args-test");

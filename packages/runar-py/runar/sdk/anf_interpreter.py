@@ -2013,8 +2013,9 @@ def _check_sig_encoding_error(sig_val: Any, pk_val: Any) -> Optional[str]:
     0x04 and decode to a curve point. An empty signature, or a well-formed one
     that does not verify, is not an encoding abort (``Spend`` has no NULLFAIL;
     it pushes false); the ``checkSig`` call site applies NULLFAIL after
-    verification (N-198). The signature layout is the one :func:`_verify_ecdsa` accepts: DER
-    with an optional trailing sighash byte. Operands that are not bytes at all
+    verification (N-198). A non-empty signature is in checksig format, DER
+    followed by exactly one sighash-type byte, as ``Spend`` requires: bare DER
+    with no sighash byte aborts (N-255). Operands that are not bytes at all
     are left to :func:`_verify_ecdsa`.
     """
     sig_bytes = _to_byte_array(sig_val)
@@ -2024,6 +2025,8 @@ def _check_sig_encoding_error(sig_val: Any, pk_val: Any) -> Optional[str]:
     from runar.ec import EC_N, EC_P
     from runar.ecdsa import _decompress_pubkey, _parse_der_signature
     if len(sig_bytes) > 0:
+        if len(sig_bytes) < 2 or len(sig_bytes) != sig_bytes[1] + 3:
+            return 'the signature is not strict DER'
         parsed = _parse_der_signature(sig_bytes)
         if parsed is None:
             return 'the signature is not strict DER'

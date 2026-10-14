@@ -57,15 +57,17 @@ import { enforceDriverGate } from './driver-gate.js';
 //
 // What this proves: for the three F-227 malformed encodings (corrupted DER
 // length, high S, unknown pubkey prefix) plus an off-curve uncompressed key,
-// every SDK interpreter aborts where Spend aborts; for the two NULLFAIL
+// and (N-255, user decision R105) a signature that verifies but is bare DER
+// with no trailing sighash-type byte, every SDK interpreter aborts where
+// Spend aborts; for the two NULLFAIL
 // vectors (a wrong-key signature against a compressed and an uncompressed
 // key) every interpreter aborts where a node aborts; for the three controls
 // (empty signature against a compressed and an uncompressed key, and a sigA
 // that verifies) every one succeeds — the first two through the B-arm.
 //
-// What this does not prove: (a) bare DER with no trailing sighash-type byte —
-// Spend aborts on it, the SDK interpreters still accept it (the existing
-// real-crypto fixtures sign that way); (b) `checkMultiSig` — its encoding
+// What this does not prove: (a) anything about the VALUE of the sighash-type
+// byte — Spend's encoding gate does not check it, and neither do the
+// interpreters; (b) `checkMultiSig` — its encoding
 // gates and NULLFAIL are pinned separately by ./checkmultisig-onchain.test.ts
 // (N-259);
 // (c) the NULLFAIL verdict against a node — no engine in this file enforces

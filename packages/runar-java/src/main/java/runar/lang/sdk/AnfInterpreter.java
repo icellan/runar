@@ -1804,9 +1804,10 @@ public final class AnfInterpreter {
      * An empty signature, or a well-formed one that does not verify, is not an
      * encoding abort ({@code Spend} has no NULLFAIL; it pushes false); the
      * {@code checkSig} call site applies NULLFAIL after verification (N-198).
-     * The signature
-     * layout is the one {@link #verifyEcdsaReal} accepts: DER with an optional
-     * trailing sighash byte. Operands that are not bytes at all are left to
+     * A non-empty
+     * signature is in checksig format, DER followed by exactly one sighash-type
+     * byte, as {@code Spend} requires: bare DER with no sighash byte aborts
+     * (N-255). Operands that are not bytes at all are left to
      * {@link #verifyEcdsaReal}.
      */
     static String checkSigEncodingError(Object sigVal, Object pkVal) {
@@ -1814,10 +1815,10 @@ public final class AnfInterpreter {
         byte[] pk = toBytes(pkVal);
         if (sig == null || pk == null) return null;
         if (sig.length > 0) {
-            byte[] der = sig;
-            if (der.length >= 2 && der.length == (der[1] & 0xff) + 3) {
-                der = Arrays.copyOf(der, der.length - 1);
+            if (sig.length < 2 || sig.length != (sig[1] & 0xff) + 3) {
+                return "the signature is not strict DER";
             }
+            byte[] der = Arrays.copyOf(sig, sig.length - 1);
             if (!StrictDer.isStrictDerSignature(der)) return "the signature is not strict DER";
             int rLen = der[3] & 0xff;
             BigInteger s = new BigInteger(1, Arrays.copyOfRange(der, 6 + rLen, der.length));

@@ -22,7 +22,8 @@ import { executeOnChainAuthoritative, AssertionFailureError } from '../anf-inter
 // its control's (r, s), and @bsv/sdk's consensus interpreter (`Spend`) refuses
 // it on signature ENCODING while letting every control past the encoding
 // check; (2) executeOnChainAuthoritative's checkSig reaches the fixture verdict
-// on every vector. Does not prove anything about the envelope path (see
+// on every vector, each given in checksig format (DER + one sighash-type byte;
+// bare DER aborts in on-chain mode, N-255). Does not prove anything about the envelope path (see
 // envelope.test.ts) or about curve arithmetic.
 // ---------------------------------------------------------------------------
 
@@ -65,10 +66,19 @@ function looseRS(hex: string): [bigint, bigint] {
   return [r, readInt()];
 }
 
+/**
+ * The vector in checksig format: a bare-DER vector gets a 0x41 sighash-type
+ * byte, the form OP_CHECKSIG takes (N-255: bare DER aborts there, so the
+ * encoding under test would never be reached).
+ */
+function checksigFormat(sigHex: string): number[] {
+  const b = Utils.toArray(sigHex, 'hex');
+  return b.length === b[1]! + 3 ? b : [...b, 0x41];
+}
+
 /** Run `<sig> | <pubkey> OP_CHECKSIG` through @bsv/sdk's consensus interpreter. */
 function spendError(sigHex: string): string {
-  const b = Utils.toArray(sigHex, 'hex');
-  const checksig = b.length === b[1]! + 3 ? b : [...b, 0x41];
+  const checksig = checksigFormat(sigHex);
   const spend = new Spend({
     sourceTXID: '00'.repeat(32),
     sourceOutputIndex: 0,
@@ -137,7 +147,7 @@ describe('strict DER signatures (F-242)', () => {
           guardANF(),
           'unlock',
           { value: 0n },
-          { sig: v.sig, pk: fixture.pubkey },
+          { sig: Utils.toHex(checksigFormat(v.sig)), pk: fixture.pubkey },
           [],
           { sighash: v.digest },
         );

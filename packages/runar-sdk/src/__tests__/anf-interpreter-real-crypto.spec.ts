@@ -119,7 +119,9 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
   // sha256 the supplied bytes on both sides — self-consistent for a
   // single-SDK round-trip but incompatible with cross-tier verifiers
   // (Go / Rust / Python / Ruby / Java / Zig) that ECDSA-verify the
-  // sighash directly.
+  // sighash directly. The signature carries a 0x41 (SIGHASH_ALL|FORKID)
+  // sighash-type byte: on-chain mode aborts on bare DER, as OP_CHECKSIG does
+  // (N-255).
   const priv = PrivateKey.fromHex(TEST_PRIV_HEX);
   const pubHex = priv.toPublicKey().toDER('hex') as string;
   const sigDerHex = (() => {
@@ -128,7 +130,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     const { BigNumber } = require('@bsv/sdk');
     const msgBN = new BigNumber(sighash);
     const sig = ecdsaSignRaw(msgBN, priv, true);
-    return sig.toDER('hex') as string;
+    return (sig.toDER('hex') as string) + '41';
   })();
 
   // ECDSA — checkSig
@@ -148,8 +150,9 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     });
 
     it('aborts under NULLFAIL (not an assert) when signature is corrupted', () => {
-      // Flip the last byte of r — invalidates the signature.
-      const broken = sigDerHex.slice(0, -2) + '00';
+      // Zero the last byte of s (before the sighash-type byte) — invalidates
+      // the signature.
+      const broken = sigDerHex.slice(0, -4) + '00' + sigDerHex.slice(-2);
       expect(() => executeOnChainAuthoritative(
         anf,
         'unlock',
@@ -248,7 +251,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
       const { sign: ecdsaSignRaw } = require('@bsv/sdk/primitives/ECDSA');
       const { BigNumber } = require('@bsv/sdk');
       const msgBN = new BigNumber(sighash);
-      return ecdsaSignRaw(msgBN, priv2, true).toDER('hex') as string;
+      return (ecdsaSignRaw(msgBN, priv2, true).toDER('hex') as string) + '41';
     })();
 
     it('passes when both sigs verify against a 2-of-2 pubkey set', () => {
@@ -266,7 +269,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     it('aborts under NULLFAIL (not an assert) when one signature is corrupted', () => {
       // N-259: a failing OP_CHECKMULTISIG with a non-empty signature aborts on
       // a node under NULLFAIL (BIP146), so the interpreter throws a plain Error.
-      const broken = sig2.slice(0, -2) + '00';
+      const broken = sig2.slice(0, -4) + '00' + sig2.slice(-2);
       let err: unknown;
       try {
         executeOnChainAuthoritative(

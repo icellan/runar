@@ -116,8 +116,9 @@ non-zero with a stderr message.
 - **on-chain**: asserts enforced AND crypto built-ins perform real
   verification against the supplied `sighash`:
   - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1
-    secp256k1. DER signature with optional trailing sighash type byte
-    stripped. Verification is against the raw 32-byte sighash (no extra
+    secp256k1. The signature is in checksig format, DER followed by one
+    sighash type byte (stripped); bare DER with no sighash byte aborts, as in
+    `Spend` (N-255). Verification is against the raw 32-byte sighash (no extra
     SHA-256), matching the on-chain `OP_CHECKSIG` semantic. An EMPTY
     signature that does not verify yields `false`. A NON-EMPTY, well-formed
     signature that does not verify aborts (N-198): a node rejects it under
