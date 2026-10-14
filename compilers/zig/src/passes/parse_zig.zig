@@ -539,7 +539,14 @@ const Parser = struct {
         // Rule 3: a field with no default that a method body ASSIGNS is state,
         // not a constructor constant. Without this the no-default shape was
         // inferred fully-readonly and the stateful continuation was dropped.
-        readonly_inference.applyMutationInference(self.allocator, pc, properties.items, methods.items, explicit_readonly_fields.items);
+        readonly_inference.applyMutationInference(self.allocator, pc, properties.items, methods.items, explicit_readonly_fields.items) catch {
+            // N-219: swallowing this here would be the same bug one level up
+            // -- a stateful contract compiled under memory pressure would
+            // keep whatever readonly flags rules 1/2 left it with (silently
+            // wrong, not refused) instead of failing closed.
+            self.addError("out of memory while inferring mutable fields");
+            return null;
+        };
 
         return ContractNode{
             .name = name_tok.text, .parent_class = pc, .properties = properties.items,
