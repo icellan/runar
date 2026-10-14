@@ -34,7 +34,7 @@ same way every other cross-tier fixture suite in this repo
 | TypeScript (reference) | `packages/runar-sdk/src/__tests__/f297-codegen-conformance.test.ts` | all 5 fixtures, structural + transpile-and-execute against the real `RunarContract` |
 | Java | `packages/runar-java/src/test/java/runar/lang/sdk/codegen/CodegenConformanceTest.java` | all 5 fixtures, structural + in-memory `javac` compile |
 | Ruby | `packages/runar-rb/spec/sdk/codegen_conformance_spec.rb` | all 5 fixtures, structural + `RubyVM::InstructionSequence.compile` syntax check |
-| Zig | `packages/runar-zig/src/sdk_codegen_conformance_test.zig` | all 5 fixtures (inlined as comptime literals — Zig can't `@embedFile` outside the package boundary), structural only, no compile step |
+| Zig | `packages/runar-zig/src/sdk_codegen_conformance_test.zig` | all 5 fixtures (inlined as comptime literals — Zig can't `@embedFile` outside the package boundary), structural only (see `codegen-compile-check` below for the compile step this tier lacked) |
 | Go | `packages/runar-go/sdk_codegen_test.go` | 2 of 5 fixtures (counter, p2pkh), Go-shape-only assertions, `go vet` compile + a real end-to-end deploy/call against `MockProvider` |
 | Rust | `packages/runar-rs/tests/f297_codegen_conformance.rs` | all 5 fixtures, structural + a real `cargo check` against `runar-lang` as an external dependency |
 | Python | `packages/runar-py/tests/test_f297_codegen_conformance.py` | all 5 fixtures, structural + `exec()` of the generated module in a fresh namespace |
@@ -44,6 +44,17 @@ No tier's generator fully satisfies MANIFEST.md today: `from_utxo` /
 every generator, including the TypeScript reference. Each runner above
 documents its own generator's gaps in its module doc comment rather than
 asserting them away.
+
+**Zig compile step (N-190).** Zig can't `eval` a string or in-memory-compile
+the way the other tiers' runners do, so the compile check lives as a
+separate `build.zig` step instead of inside
+`sdk_codegen_conformance_test.zig`: `src/sdk_codegen_compile_check_gen.zig`
+builds a minimal fixture, calls the real `generateZig`, appends a `test`
+block exercising the generated `fromTxId`, and prints the result to stdout;
+the `codegen-compile-check` step feeds that back in as a module importing
+`"runar-zig"` -> the real SDK and compiles + runs it. `zig build test`
+(above) runs it as part of the normal suite. It is this one gap-closer, not
+a fifth-fixture structural runner — see the doc comment in that file.
 
 ## Running
 

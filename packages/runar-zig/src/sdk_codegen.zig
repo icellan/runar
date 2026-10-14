@@ -241,7 +241,17 @@ pub fn generateZig(allocator: std.mem.Allocator, artifact: *const types.RunarArt
     try appendFmt(&out, allocator, "        output_index: i32,\n", .{});
     try appendFmt(&out, allocator, "        provider: sdk.Provider,\n", .{});
     try appendFmt(&out, allocator, "    ) !{s}Contract {{\n", .{name});
-    try appendFmt(&out, allocator, "        const utxo = try provider.getUtxo(allocator, txid, output_index) orelse return error.UtxoNotFound;\n", .{});
+    try appendFmt(&out, allocator, "        var tx = try provider.getTransaction(allocator, txid);\n", .{});
+    try appendFmt(&out, allocator, "        defer tx.deinit(allocator);\n", .{});
+    try appendFmt(&out, allocator, "        if (output_index < 0) return error.OutputIndexOutOfRange;\n", .{});
+    try appendFmt(&out, allocator, "        const out_idx: usize = @intCast(output_index);\n", .{});
+    try appendFmt(&out, allocator, "        if (out_idx >= tx.outputs.len) return error.OutputIndexOutOfRange;\n", .{});
+    try appendFmt(&out, allocator, "        const utxo = sdk.UTXO{{\n", .{});
+    try appendFmt(&out, allocator, "            .txid = txid,\n", .{});
+    try appendFmt(&out, allocator, "            .output_index = output_index,\n", .{});
+    try appendFmt(&out, allocator, "            .satoshis = tx.outputs[out_idx].satoshis,\n", .{});
+    try appendFmt(&out, allocator, "            .script = tx.outputs[out_idx].script,\n", .{});
+    try appendFmt(&out, allocator, "        }};\n", .{});
     try appendFmt(&out, allocator, "        return fromUtxo(allocator, artifact, utxo);\n", .{});
     try appendFmt(&out, allocator, "    }}\n\n", .{});
 
@@ -512,6 +522,14 @@ test "generateZig emits constructor args record + wrapper struct for stateful co
     try std.testing.expect(std.mem.indexOf(u8, src, "pub const CounterContract = struct") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn fromUtxo(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn fromTxId(") != null);
+    // N-190: fromTxId must fetch via the real Provider.getTransaction, not a
+    // nonexistent `provider.getUtxo(...)` (sdk_provider.zig's Provider.VTable
+    // has never had a `getUtxo` method). This substring check is cheap and
+    // catches the specific regression fast; it does NOT prove the body
+    // compiles — `zig build codegen-compile-check` (wired into
+    // `zig build test`) does that by actually compiling + running it.
+    try std.testing.expect(std.mem.indexOf(u8, src, "provider.getTransaction(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "provider.getUtxo(") == null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn connect(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn attachInscription(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn getLockingScript(") != null);
