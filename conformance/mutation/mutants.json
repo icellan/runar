@@ -116,8 +116,8 @@
     {
       "id": "emit-if-without-else-threshold",
       "file": "packages/runar-compiler/src/passes/06-emit.ts",
-      "find": "if (elseOps && elseOps.length > 0)",
-      "replace": "if (elseOps && elseOps.length > 1)",
+      "find": "if (frame.arm === 'then' && frame.elseOps && frame.elseOps.length > 0) {",
+      "replace": "if (frame.arm === 'then' && frame.elseOps && frame.elseOps.length > 1) {",
       "class": "if-without-else regression",
       "stage": "emit",
       "expectCaughtBy": [
