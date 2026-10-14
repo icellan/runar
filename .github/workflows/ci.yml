@@ -509,6 +509,19 @@ jobs:
           cd conformance
           npm ci
           npx tsx fuzz-regressions/replay.ts
+      - name: Fuzzer regression corpus — entries are never deleted (rule 3)
+        # The replay above only fails if an entry's PINNED VERDICTS change, or
+        # if the whole corpus is wiped to zero entries (F-250). Deleting ONE
+        # entry out of several is a passing, non-empty replay — nothing
+        # caught that until N-230. This diffs entries/ against the
+        # merge-base with origin/main (not origin/main's live tip, so a base
+        # branch that gains entries after this branch forked is never
+        # misreported as a deletion here) and fails naming any entry id that
+        # existed there and is gone now. This job's checkout already has
+        # fetch-depth: 0, so origin/main is resolvable.
+        run: |
+          cd conformance
+          npx tsx fuzz-regressions/replay.ts --check-no-deletions --base origin/main
       - name: Example tests (TS + Sol + Move)
         run: npx vitest run examples/ts/ examples/sol/ examples/move/
       - name: Chronicle opcode-policy disclosure gate
@@ -883,6 +896,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # conformance/fuzz-regressions/replay.test.ts (N-230) resolves
+          # `origin/main` for its real-corpus smoke test on
+          # checkEntriesNotDeleted. A default (shallow) checkout fetches only
+          # the checked-out ref/sha — no `origin/main` remote-tracking ref
+          # exists at all — so that test fails here, not for the reason it
+          # tests. fetch-depth: 0 is the same fix the ts-compiler and
+          # golden-provenance jobs already apply for the same reason.
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: runar-go

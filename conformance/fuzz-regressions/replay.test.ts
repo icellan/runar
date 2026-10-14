@@ -16,11 +16,22 @@
  * only that a malformed `oracle` field can no longer reach that dispatch.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { loadCorpus, runReplay, runReplayAndReport } from './replay.js';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  checkEntriesNotDeleted,
+  findDeletedEntryIds,
+  loadCorpus,
+  runCheckNoDeletions,
+  runReplay,
+  runReplayAndReport,
+} from './replay.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** Build one corpus entry directory with a valid skeleton plus overrides. */
 function writeEntry(entriesRoot: string, id: string, overrides: Record<string, unknown>): string {
@@ -102,9 +113,10 @@ describe('loadCorpus validates entry.oracle', () => {
  * under `entries/`) is unaffected.
  *
  * What they do NOT prove: that deleting ONE entry out of an otherwise
- * non-empty corpus is detected. That needs a base-ref git diff (did a
- * directory that existed on the base branch disappear?) and is a separate,
- * larger piece of work than this item's testable assertion covers. Nor do
+ * non-empty corpus is detected. That needed a base-ref git diff (did a
+ * directory that existed on the base branch disappear?) and was a separate,
+ * larger piece of work than this item's testable assertion covered — it is
+ * now covered by `checkEntriesNotDeleted` below (N-230). Nor do
  * they exercise `process.exit` directly — they rely on the thrown error
  * propagating through the existing `main().catch(...)` wrappers in this file
  * and in `conformance/fuzzer/index.ts`, which is not re-verified here.
@@ -147,5 +159,223 @@ describe('runReplay / runReplayAndReport refuse an empty corpus (F-250)', () => 
   it('does not throw for the real, checked-in corpus under entries/', () => {
     expect(loadCorpus().length).toBeGreaterThan(0);
     expect(() => runReplay()).not.toThrow();
+  });
+});
+
+/**
+ * README.md rule 3: "Entries are never deleted." The empty-corpus guard above
+ * (F-250) only catches the corpus being wiped to ZERO entries. Deleting one
+ * entry out of five is a passing, non-empty corpus — nothing in `loadCorpus`
+ * or `runReplay` sees that an id that existed on the base branch is gone
+ * (N-230).
+ *
+ * `checkEntriesNotDeleted` closes that gap: it lists the entry directory
+ * names present at the merge-base of a given ref and HEAD (via `git ls-tree`),
+ * lists the directory names present on disk now, and returns any id in the
+ * first set missing from the second. Merge-base, not the base ref's live tip,
+ * so a base branch that gains NEW entries after this branch forked is never
+ * mistaken for a deletion on this branch (mirrors the repo's documented
+ * three-dot-from-merge-base convention, e.g. `check-golden-provenance.mjs`).
+ *
+ * These tests prove: the pure diff (`findDeletedEntryIds`) is correct; the
+ * git-backed check detects a real single-entry deletion across two commits in
+ * an actual repo and names the deleted id; it does NOT false-positive when
+ * entries are only added, when nothing changed, or when the base branch moved
+ * forward with entries this branch never had; and it tolerates the base ref
+ * not having an `entries/` directory at all. It does NOT prove anything about
+ * CI wiring (the `.github/workflows/ci.yml` step), about rename detection (a
+ * rename is indistinguishable from delete+add by directory name, which is
+ * correct — the directory name is the entry's id and provenance key — and is
+ * not separately exercised here), or about what happens on a direct push to
+ * main with no PR review (merge-base == HEAD there, so the check cannot catch
+ * it; that is a documented gap, not a defect in this check).
+ */
+describe('checkEntriesNotDeleted (N-230, README.md rule 3)', () => {
+  describe('findDeletedEntryIds — pure diff', () => {
+    it('returns ids present at base but missing now', () => {
+      expect(findDeletedEntryIds(['a', 'b', 'c'], ['a', 'c'])).toEqual(['b']);
+    });
+
+    it('returns empty when nothing was deleted, including when entries were only added', () => {
+      expect(findDeletedEntryIds(['a', 'b'], ['a', 'b', 'c'])).toEqual([]);
+      expect(findDeletedEntryIds(['a', 'b'], ['a', 'b'])).toEqual([]);
+      expect(findDeletedEntryIds([], [])).toEqual([]);
+    });
+  });
+
+  describe('checkEntriesNotDeleted — over a real git repo', () => {
+    interface Repo {
+      root: string;
+      entriesDir: string;
+      git: (...args: string[]) => string;
+      writeEntry: (id: string) => void;
+      write: (rel: string, body: string) => void;
+      commit: (msg: string) => string;
+    }
+
+    const roots: string[] = [];
+
+    function repo(): Repo {
+      const root = mkdtempSync(join(tmpdir(), 'fuzz-regressions-delete-check-'));
+      roots.push(root);
+      const entriesDir = join(root, 'conformance', 'fuzz-regressions', 'entries');
+      const git = (...args: string[]) =>
+        execFileSync('git', ['-C', root, ...args], { encoding: 'utf-8' }).trim();
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'n230@example.invalid');
+      git('config', 'user.name', 'n230');
+      git('config', 'commit.gpgsign', 'false');
+      return {
+        root,
+        entriesDir,
+        git,
+        writeEntry(id) {
+          // Only the directory name matters to this check — it never reads
+          // entry.json — so an empty marker file is enough to make the
+          // directory real to git (git does not track empty directories).
+          const dir = join(entriesDir, id);
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, 'contract.runar.ts'), '// fixture\n', 'utf-8');
+        },
+        write(rel, body) {
+          writeFileSync(join(root, rel), body, 'utf-8');
+        },
+        commit(msg) {
+          git('add', '-A');
+          git('commit', '-q', '--no-verify', '-m', msg);
+          return git('rev-parse', 'HEAD');
+        },
+      };
+    }
+
+    afterAll(() => {
+      for (const r of roots) rmSync(r, { recursive: true, force: true });
+    });
+
+    it('detects a single entry deleted since the base ref and names it', () => {
+      const r = repo();
+      r.writeEntry('2026-01-01-a');
+      r.writeEntry('2026-01-02-b');
+      r.commit('base: two entries');
+
+      rmSync(join(r.entriesDir, '2026-01-02-b'), { recursive: true, force: true });
+      r.commit('branch: delete entry b');
+
+      const deleted = checkEntriesNotDeleted({ repoRoot: r.root, baseRef: 'HEAD~1' });
+      expect(deleted).toEqual(['2026-01-02-b']);
+    });
+
+    /** Run `runCheckNoDeletions` in-process, capturing console output and the returned exit code. */
+    function runCheckNoDeletionsCapturing(opts: { baseRef: string; root: string }): {
+      code: number;
+      out: string;
+    } {
+      const chunks: string[] = [];
+      const log = console.log;
+      const err = console.error;
+      console.log = (...a: unknown[]) => void chunks.push(a.join(' '));
+      console.error = (...a: unknown[]) => void chunks.push(a.join(' '));
+      try {
+        return { code: runCheckNoDeletions(opts), out: chunks.join('\n') };
+      } finally {
+        console.log = log;
+        console.error = err;
+      }
+    }
+
+    it('runCheckNoDeletions (the CLI path) returns exit code 1 and reports the deleted id, not just checkEntriesNotDeleted', () => {
+      const r = repo();
+      r.writeEntry('2026-01-01-a');
+      r.writeEntry('2026-01-02-b');
+      r.commit('base: two entries');
+
+      rmSync(join(r.entriesDir, '2026-01-02-b'), { recursive: true, force: true });
+      r.commit('branch: delete entry b');
+
+      const { code, out } = runCheckNoDeletionsCapturing({ baseRef: 'HEAD~1', root: r.root });
+      expect(code).toBe(1);
+      expect(out).toContain('RULE 3 VIOLATED');
+      expect(out).toContain('2026-01-02-b');
+    });
+
+    it('runCheckNoDeletions returns exit code 0 when nothing was deleted', () => {
+      const r = repo();
+      r.writeEntry('2026-01-01-a');
+      r.commit('base: one entry');
+      r.write('UNRELATED.md', 'touches nothing under entries/\n');
+      r.commit('branch: unrelated change, entries/ untouched');
+
+      const { code, out } = runCheckNoDeletionsCapturing({ baseRef: 'HEAD~1', root: r.root });
+      expect(code).toBe(0);
+      expect(out).not.toContain('RULE 3 VIOLATED');
+    });
+
+    it('does not flag anything when an entry is only added', () => {
+      const r = repo();
+      r.writeEntry('2026-01-01-a');
+      r.commit('base: one entry');
+
+      r.writeEntry('2026-01-02-b');
+      r.commit('branch: add entry b');
+
+      expect(checkEntriesNotDeleted({ repoRoot: r.root, baseRef: 'HEAD~1' })).toEqual([]);
+    });
+
+    it('does not flag anything when the corpus is unchanged', () => {
+      const r = repo();
+      r.writeEntry('2026-01-01-a');
+      r.commit('base: one entry');
+      r.write('UNRELATED.md', 'touches nothing under entries/\n');
+      r.commit('branch: unrelated change, entries/ untouched');
+
+      expect(checkEntriesNotDeleted({ repoRoot: r.root, baseRef: 'HEAD~1' })).toEqual([]);
+    });
+
+    it('uses the merge-base, not the base ref live tip: an entry only main gained AFTER the fork is not "deleted" on this branch', () => {
+      const r = repo();
+      r.writeEntry('2026-01-01-a');
+      r.commit('base: one entry');
+
+      r.git('checkout', '-q', '-b', 'feature');
+      r.write('UNRELATED.md', 'diverge from main\n');
+      r.commit('feature: unrelated change, diverges from main');
+
+      r.git('checkout', '-q', 'main');
+      r.writeEntry('2026-02-01-c');
+      r.commit('main: a LATER PR adds entry c (feature forked before this and never had it)');
+
+      r.git('checkout', '-q', 'feature');
+      // feature's own entries/ still only has 'a'. main's live tip now has
+      // {a, c}. Diffing against that live tip directly would see 'c' missing
+      // from feature and misreport it as DELETED — it was simply never there.
+      // The merge-base of main and feature is the original one-entry commit,
+      // so the correct answer is "nothing deleted".
+      expect(checkEntriesNotDeleted({ repoRoot: r.root, baseRef: 'main' })).toEqual([]);
+    });
+
+    it('tolerates the base ref not having an entries/ directory at all', () => {
+      const r = repo();
+      r.git('commit', '--allow-empty', '-q', '--no-verify', '-m', 'base: no conformance/ directory yet');
+
+      r.writeEntry('2026-01-01-a');
+      r.commit('branch: introduce the corpus for the first time');
+
+      expect(checkEntriesNotDeleted({ repoRoot: r.root, baseRef: 'HEAD~1' })).toEqual([]);
+    });
+  });
+
+  describe('checkEntriesNotDeleted — the real, checked-in corpus', () => {
+    it('reports no deletions against origin/main from this worktree', () => {
+      // Smoke test over the actual repo, not a fixture: proves the function
+      // runs cleanly against the real entries/ directory and the real git
+      // history available in CI (fetch-depth: 0) and in this worktree.
+      const repoRoot = resolve(__dirname, '..', '..');
+      expect(() =>
+        execFileSync('git', ['-C', repoRoot, 'rev-parse', '--verify', 'origin/main'], {
+          stdio: 'ignore',
+        }),
+      ).not.toThrow();
+      expect(checkEntriesNotDeleted({ repoRoot, baseRef: 'origin/main' })).toEqual([]);
+    });
   });
 });
