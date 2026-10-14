@@ -48,7 +48,7 @@ Layered test entry points (see the table in [`README.md`](README.md)):
 |---|---|
 | `pnpm test` | TS unit suites only (fast inner loop). |
 | `pnpm test:all` | `test` + conformance + examples + e2e + wallet-client. Excludes the live regtest node. |
-| `pnpm test:ci` | `test:all` + integration suite (requires `pnpm integration:svnode:start` first). Mirrors CI. |
+| `pnpm test:ci` | `test:all` + integration suite (requires `pnpm integration:svnode:start` first). Mirrors most of CI, not all — see `tests/n283-test-ci-mirrors-ci-contract.test.ts` for the measured, categorized gap. |
 
 **`pnpm test:all` must be green before you open a PR.** If your change touches a
 specific tier, also run that tier's native suite:

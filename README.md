@@ -617,7 +617,7 @@ Three layered local-test entry points — pick the one matching your loop:
 |---|---|---|
 | `pnpm test` | TS unit suites only (workspace `turbo run test`). ~30 s. | Iterating on a single TS package. |
 | `pnpm test:all` | `test` + `conformance:all` + `examples:all` + `e2e:all` + `wallet-client:all`. Excludes regtest integration. ~10–20 min. | Pre-PR sanity. Every cross-tier check the project owns *except* the live BSV regtest node. |
-| `pnpm test:ci` | `test:all` + `integration:all`. Requires `pnpm integration:svnode:start` first. ~20–40 min. | Mirrors what CI gates on. The contract is: green here → green CI. |
+| `pnpm test:ci` | `test:all` + `integration:all`. Requires `pnpm integration:svnode:start` first. ~20–40 min. | Mirrors most of what CI gates on, but not all of it — `tests/n283-test-ci-mirrors-ci-contract.test.ts` pins the measured gap (categorized: a couple of lint gates that need a PR/push merge-base, several narrower-vs-fuller per-tier suites, and some conformance/SDK-build/decompiler-drift gates not yet wired in locally). Green here does not guarantee green CI; that test is where the actual, counted difference lives. |
 
 Per-tier escape hatches (run an individual compiler / SDK / examples suite):
 
