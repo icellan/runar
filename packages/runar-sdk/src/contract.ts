@@ -1508,7 +1508,10 @@ export class RunarContract {
         // rather than aborting substr on an empty value.
         // getSubscriptForSigning is the SAME call every other signing path
         // uses to trim the codePart to the post-separator subscript.
-        const scriptCodeHex = this.getSubscriptForSigning(this.getCodePartHex(), methodIndex);
+        // N-189: trim the SPENT UTXO's locking script (the subscript the
+        // primary input's preimage signs), not the bare codePart — BIP-143's
+        // scriptCode carries the `OP_RETURN <state>` tail too.
+        const scriptCodeHex = this.getSubscriptForSigning(contractUtxo.script, methodIndex);
         const { state: computed, dataOutputs: anfDataOutputs, outputs: anfOutputs } = computeNewStateAndDataOutputs(
           this.artifact.anf, methodName, flatState, interpArgs,
           flatCtorArgs,

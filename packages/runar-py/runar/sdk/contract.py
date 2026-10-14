@@ -957,11 +957,14 @@ class RunarContract:
                 # _get_code_sep_index is the SAME call every other signing
                 # path uses to trim the codePart to the post-separator
                 # subscript.
-                code_part_hex = self._get_code_part_hex()
+                # N-189: trim the SPENT UTXO's locking script (the subscript
+                # the primary input's preimage signs), not the bare codePart
+                # -- BIP-143's scriptCode carries the `OP_RETURN <state>` tail.
+                utxo_script_hex = contract_utxo.script
                 method_index = self._find_method_index(method_name)
                 code_sep_idx = self._get_code_sep_index(method_index)
                 script_code_body = (
-                    code_part_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else code_part_hex
+                    utxo_script_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else utxo_script_hex
                 )
                 intent = _IntentCtx()
                 # `_encode_varint` returns a HEX STRING (see

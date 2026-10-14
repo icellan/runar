@@ -1058,10 +1058,13 @@ func (c *RunarContract) PrepareCall(
 		// rather than aborting substr on an empty value. getCodeSepIndex is
 		// the SAME call every other signing path uses to trim the codePart
 		// to the post-separator subscript.
-		codePartHex := c.getCodePartHex()
-		scriptCodeBody := codePartHex
+		//
+		// N-189: trim the SPENT UTXO's locking script (the subscript the
+		// primary input's preimage signs), not the bare codePart — BIP-143's
+		// scriptCode carries the `OP_RETURN <state>` tail too.
+		scriptCodeBody := contractUtxo.Script
 		if codeSepIdx := c.getCodeSepIndex(methodIndex); codeSepIdx >= 0 {
-			scriptCodeBody = codePartHex[(codeSepIdx+1)*2:]
+			scriptCodeBody = contractUtxo.Script[(codeSepIdx+1)*2:]
 		}
 		mockPreimage := MockPreimageAmount{
 			ScriptCode: writeVarIntHex(len(scriptCodeBody)/2) + scriptCodeBody,

@@ -204,9 +204,9 @@ def test_script_code_intent_is_bytes_varint_plus_body(monkeypatch):
     uses this value correctly (covered instead by
     ``test_default_call_path_still_works`` and the N-171 vector-replay
     tests); that this mock value matches the REAL on-chain scriptCode byte
-    for byte when the contract carries non-empty state (checked manually
-    while writing this test and found to differ -- see dispatcher notes,
-    tracked as a separate finding, not this item); or cross-tier byte parity
+    for byte when the contract carries non-empty state (it used to differ:
+    N-189 now cuts it from the spent UTXO script, pinned against the signed
+    preimage by the next test); or cross-tier byte parity
     with the other six SDKs' scriptCode construction (each builds it from
     its own codePart logic -- out of scope here, see the N-171-FU brief's
     cross-tier check).
@@ -215,6 +215,9 @@ def test_script_code_intent_is_bytes_varint_plus_body(monkeypatch):
     from runar.sdk.deployment import _encode_varint
 
     contract, provider, signer = _deploy()
+    # N-189: the scriptCode is cut from the SPENT UTXO's locking script (with
+    # its state tail), so capture it before call() advances the UTXO.
+    spent_script_hex = contract._current_utxo.script
 
     captured: dict = {}
     original = contract_mod.compute_new_state_and_data_outputs
@@ -234,11 +237,10 @@ def test_script_code_intent_is_bytes_varint_plus_body(monkeypatch):
         f"scriptCode must be bytes (TypeError-causing bug reintroduced), got {type(script_code)}"
     )
 
-    code_part_hex = contract._get_code_part_hex()
     method_index = contract._find_method_index("inc")
     code_sep_idx = contract._get_code_sep_index(method_index)
     body_hex = (
-        code_part_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else code_part_hex
+        spent_script_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else spent_script_hex
     )
     body = bytes.fromhex(body_hex)
     expected = bytes.fromhex(_encode_varint(len(body))) + body
@@ -246,4 +248,49 @@ def test_script_code_intent_is_bytes_varint_plus_body(monkeypatch):
     assert script_code == expected, (
         "scriptCode must be varint(len(body)) || body, matching the BIP-143 "
         "preimage's CompactSize-prefixed scriptCode encoding"
+    )
+
+
+def test_script_code_intent_equals_signed_preimage_script_code(monkeypatch):
+    """N-189: the ``scriptCode`` intent ``prepare_call`` hands the ANF
+    interpreter (what ``extractScriptCode(txPreimage)`` returns while the SDK
+    predicts the post-state) must equal the scriptCode field of the BIP-143
+    preimage the call actually signs. That field is the SPENT UTXO's locking
+    script after the OP_CODESEPARATOR -- code AND the ``OP_RETURN <state>``
+    tail. R67 built it from the bare template codePart (734 vs 743 bytes for
+    SigCounter's count+owner state), so a method whose post-state depends on
+    its own scriptCode committed a continuation the covenant rejects (shown on
+    @bsv/sdk Spend by
+    ``packages/runar-sdk/src/__tests__/n189-scriptcode-intent-includes-state.test.ts``).
+
+    What this proves: byte equality between the intent and
+    ``preimage[104:-52]`` (version 4 + hashPrevouts 32 + hashSequence 32 +
+    outpoint 36 before; amount 8 + nSequence 4 + hashOutputs 32 + locktime 4
+    + sighash type 4 after) for a contract with non-empty state.
+    What it does not prove: that the preimage itself is what a node computes
+    (covered by the C19 tests above); extra contract inputs of a multi-input
+    call (each is spent by its own preimage, not by this prediction).
+    """
+    import runar.sdk.contract as contract_mod
+
+    contract, provider, signer = _deploy()
+
+    captured: dict = {}
+    original = contract_mod.compute_new_state_and_data_outputs
+
+    def _spy(*args, **kwargs):
+        captured["intent"] = kwargs.get("intent")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(contract_mod, "compute_new_state_and_data_outputs", _spy)
+
+    prepared = contract.prepare_call("inc", [None], provider, signer)
+    preimage = bytes.fromhex(prepared.preimage)
+    signed_script_code = preimage[104:-52]
+
+    intent = captured.get("intent")
+    assert intent is not None, "prepare_call must pass an intent to the ANF interpreter"
+    assert intent.mock_preimage_bytes["scriptCode"] == signed_script_code, (
+        f"scriptCode intent ({len(intent.mock_preimage_bytes['scriptCode'])} bytes) differs "
+        f"from the signed preimage's scriptCode field ({len(signed_script_code)} bytes)"
     )

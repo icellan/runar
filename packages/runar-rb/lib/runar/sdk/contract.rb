@@ -527,9 +527,12 @@ module Runar
           # bytes rather than aborting substr on an empty value.
           # get_code_sep_index is the SAME call every other signing path
           # uses to trim the codePart to the post-separator subscript.
-          code_part_hex = get_code_part_hex
+          # N-189: trim the SPENT UTXO's locking script (the subscript the
+          # primary input's preimage signs), not the bare codePart --
+          # BIP-143's scriptCode carries the +OP_RETURN <state>+ tail too.
+          utxo_script_hex = contract_utxo.script
           code_sep_idx = get_code_sep_index(find_method_index(method_name))
-          script_code_body = code_sep_idx >= 0 ? code_part_hex[(code_sep_idx + 1) * 2..] : code_part_hex
+          script_code_body = code_sep_idx >= 0 ? utxo_script_hex[(code_sep_idx + 1) * 2..] : utxo_script_hex
           Thread.current[:runar_mock_preimage_bytes] = {
             'scriptCode' => compact_size_hex(script_code_body.length / 2) + script_code_body
           }

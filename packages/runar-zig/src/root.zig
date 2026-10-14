@@ -284,6 +284,7 @@ test {
     _ = @import("sdk_n051_codepart_len_slots_test.zig");
     _ = @import("sdk_satcounter_continuation_test.zig");
     _ = @import("sdk_f024_continuation_amount_test.zig");
+    _ = @import("sdk_n189_scriptcode_intent_test.zig");
     _ = @import("sdk_n227_zero_mutable_field_fee_floor_test.zig");
     _ = @import("sdk_n038_sighash_single_call_test.zig");
     _ = @import("sdk_mock_broadcast_validation_test.zig");

@@ -3138,8 +3138,10 @@ pub const RunarContract = struct {
         // rather than aborting substr on an empty value. getCodeSepIndex is
         // the SAME call every other signing path uses to trim the codePart
         // to the post-separator subscript.
-        const code_part_hex = try self.getCodePartHex();
-        defer self.allocator.free(code_part_hex);
+        // N-189: trim the SPENT UTXO's locking script (the subscript the
+        // primary input's preimage signs), not the bare codePart -- BIP-143's
+        // scriptCode carries the `OP_RETURN <state>` tail too.
+        const spent_script_hex = if (self.current_utxo) |u| u.script else return ContractError.NotDeployed;
         const public_methods_for_sep = try self.getPublicMethods();
         defer self.allocator.free(public_methods_for_sep);
         var method_index_for_sep: usize = 0;
@@ -3151,9 +3153,9 @@ pub const RunarContract = struct {
         }
         const code_sep_idx = try self.getCodeSepIndex(method_index_for_sep);
         const script_code_body = if (code_sep_idx) |idx|
-            code_part_hex[@as(usize, @intCast(idx + 1)) * 2 ..]
+            spent_script_hex[@as(usize, @intCast(idx + 1)) * 2 ..]
         else
-            code_part_hex;
+            spent_script_hex;
         const script_code_hex = try std.fmt.allocPrint(work, "{s}{s}", .{
             try writeVarIntHex(work, script_code_body.len / 2), script_code_body,
         });
@@ -3318,8 +3320,10 @@ pub const RunarContract = struct {
 
         // R67: extractScriptCode(txPreimage) gets the contract's OWN real
         // codePart -- see the matching note in autoComputeState.
-        const code_part_hex = try self.getCodePartHex();
-        defer self.allocator.free(code_part_hex);
+        // N-189: trim the SPENT UTXO's locking script (the subscript the
+        // primary input's preimage signs), not the bare codePart -- BIP-143's
+        // scriptCode carries the `OP_RETURN <state>` tail too.
+        const spent_script_hex = if (self.current_utxo) |u| u.script else return ContractError.NotDeployed;
         const public_methods_for_sep = try self.getPublicMethods();
         defer self.allocator.free(public_methods_for_sep);
         var method_index_for_sep: usize = 0;
@@ -3331,9 +3335,9 @@ pub const RunarContract = struct {
         }
         const code_sep_idx = try self.getCodeSepIndex(method_index_for_sep);
         const script_code_body = if (code_sep_idx) |idx|
-            code_part_hex[@as(usize, @intCast(idx + 1)) * 2 ..]
+            spent_script_hex[@as(usize, @intCast(idx + 1)) * 2 ..]
         else
-            code_part_hex;
+            spent_script_hex;
         const script_code_hex = try std.fmt.allocPrint(work, "{s}{s}", .{
             try writeVarIntHex(work, script_code_body.len / 2), script_code_body,
         });

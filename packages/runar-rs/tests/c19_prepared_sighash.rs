@@ -255,3 +255,84 @@ fn default_call_path_still_works() {
         "the call should have broadcast exactly one transaction"
     );
 }
+
+/// N-189: a contract whose new state is its own BIP-143 scriptCode length.
+const SC_LEN_SRC: &str = r#"
+    class ScLen extends StatefulSmartContract {
+      n: bigint;
+      constructor(n: bigint) {
+        super(n);
+        this.n = n;
+      }
+      public rec() {
+        this.n = len(extractScriptCode(this.txPreimage));
+      }
+    }
+"#;
+
+/// N-189: the off-chain scriptCode `prepare_call` hands the ANF interpreter
+/// (what `extractScriptCode(txPreimage)` returns while the SDK predicts the
+/// post-state) must be the scriptCode field of the BIP-143 preimage the call
+/// actually signs: the SPENT UTXO's locking script after the
+/// OP_CODESEPARATOR, code AND `OP_RETURN <state>` tail. R67 built it from the
+/// bare template codePart, so the committed `n` came out short by the state
+/// tail and the covenant's hashOutputs check would reject the spend (shown on
+/// @bsv/sdk Spend by the TS sibling
+/// `packages/runar-sdk/src/__tests__/n189-scriptcode-intent-includes-state.test.ts`;
+/// this tier's Spend cannot run push-tx covenants, see the module doc).
+///
+/// Proves: the committed state equals the length of `preimage[104..len-52]`
+/// (the CompactSize-prefixed scriptCode field) of the signed preimage.
+/// Does not prove: the preimage itself is what a node computes, or extra
+/// contract inputs of a multi-input call (each has its own preimage).
+#[test]
+fn script_code_intent_matches_signed_preimage_n189() {
+    let compiler_art = runar_compiler_rust::compile_from_source_str(SC_LEN_SRC, Some("ScLen.runar.ts"))
+        .expect("ScLen source should compile");
+    let artifact: RunarArtifact =
+        serde_json::from_str(&serde_json::to_string(&compiler_art).unwrap()).unwrap();
+
+    let signer = LocalSigner::new(SIGNER_KEY).unwrap();
+    let address = signer.get_address().unwrap();
+    let mut provider = MockProvider::testnet();
+    provider.add_utxo(
+        &address,
+        Utxo {
+            txid: "aa".repeat(32),
+            output_index: 0,
+            satoshis: 500_000,
+            script: build_p2pkh_script(&address),
+        },
+    );
+    let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
+    contract
+        .deploy(
+            &mut provider,
+            &signer,
+            &DeployOptions {
+                satoshis: 50_000,
+                change_address: None,
+                funding_signer: None,
+                acknowledge_unsound: vec![],
+            },
+        )
+        .expect("deploy should succeed");
+
+    let prepared = contract
+        .prepare_call("rec", &[], &mut provider, &signer, None)
+        .expect("prepare_call should succeed");
+    let preimage = hex_to_bytes(&prepared.preimage);
+    assert!(preimage.len() > 156, "a stateful call must carry a BIP-143 preimage");
+    let signed_script_code_len = (preimage.len() - 104 - 52) as i64;
+
+    contract
+        .finalize_call(&prepared, &std::collections::HashMap::new(), &mut provider)
+        .expect("finalize_call should succeed");
+    match contract.state().get("n") {
+        Some(SdkValue::Int(n)) => assert_eq!(
+            *n, signed_script_code_len,
+            "committed n must equal len(signed preimage scriptCode)"
+        ),
+        other => panic!("expected an Int state field n, got {:?}", other),
+    }
+}

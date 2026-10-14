@@ -671,12 +671,16 @@ public final class RunarContract {
                     // getCodeSepIndex/findPublicMethodIndex are the SAME
                     // calls every other signing path uses to trim the
                     // codePart to the post-separator subscript.
-                    String codePartHex = getCodePartHex();
+                    // N-189: trim the SPENT UTXO's locking script (the
+                    // subscript the primary input's preimage signs), not
+                    // the bare codePart — BIP-143's scriptCode carries the
+                    // `OP_RETURN <state>` tail too.
+                    String spentScriptHex = currentUtxo.scriptHex();
                     int methodIndexForScriptCode = findPublicMethodIndex(methodName);
                     int codeSepIdxForScriptCode = getCodeSepIndex(methodIndexForScriptCode);
                     String scriptCodeBody = codeSepIdxForScriptCode >= 0
-                        ? codePartHex.substring((codeSepIdxForScriptCode + 1) * 2)
-                        : codePartHex;
+                        ? subscriptAfterCodeSep(spentScriptHex, codeSepIdxForScriptCode)
+                        : spentScriptHex;
                     String scriptCodeHex = ScriptUtils.encodeVarInt(scriptCodeBody.length() / 2) + scriptCodeBody;
                     AnfInterpreter.WitnessContext scriptCodeWitness = new AnfInterpreter.WitnessContext()
                         .setMockPreimageBytes("scriptCode", ScriptUtils.hexToBytes(scriptCodeHex));
