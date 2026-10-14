@@ -245,3 +245,16 @@ pub fn raiseCodePartLengthPinViolated(
     last_codepart_pin_error = rec;
     return error.CodePartLengthPinViolated;
 }
+
+// ---------------------------------------------------------------------------
+// N-260 / R100 -- fail-closed refusal of WalletProvider's raw-broadcast gap
+// ---------------------------------------------------------------------------
+//
+// `WalletProvider.broadcast` (sdk_wallet.zig) has no BRC-100 primitive that
+// relays an already-built, already-signed raw transaction verbatim --
+// `createAction` builds and signs a NEW action from wallet-composed outputs.
+// Per user decision R100 it refuses rather than silently submit an unrelated
+// action, so there is no txid to carry forward -- the refusal message is the
+// only diagnostic. Zig errors carry no payload, so this is a message literal
+// pointer (not a formatted/owned buffer like the other side channels above).
+pub var last_broadcast_refusal: ?[]const u8 = null;

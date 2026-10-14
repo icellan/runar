@@ -5,6 +5,7 @@ const signer_mod = @import("sdk_signer.zig");
 const contract_mod = @import("sdk_contract.zig");
 const state_mod = @import("sdk_state.zig");
 const deploy_mod = @import("sdk_deploy.zig");
+const errors_mod = @import("sdk_errors.zig");
 
 // ---------------------------------------------------------------------------
 // BRC-100 Wallet Integration
@@ -276,55 +277,26 @@ pub const WalletProvider = struct {
         return provider_mod.ProviderError.NotFound;
     }
 
-    // N-040: reviewed against BRC-100. The `WalletClient` abstraction this SDK
-    // models (see `createAction` above) has no "broadcast this exact,
-    // already-built, already-signed raw transaction" primitive — BRC-100's
-    // `createAction` builds, signs AND submits a NEW action from a set of
-    // *outputs the wallet composes itself*; it does not accept an externally
-    // assembled transaction to relay verbatim. So the only data this call can
-    // carry about `tx_hex` is the free-text `description` field, which a real
-    // wallet treats as a human-readable label, not an instruction to broadcast
-    // those exact bytes.
+    // N-040 / N-260 / R100: reviewed against BRC-100. The `WalletClient`
+    // abstraction this SDK models (see `createAction` above) has no
+    // "broadcast this exact, already-built, already-signed raw transaction"
+    // primitive — BRC-100's `createAction` builds, signs AND submits a NEW
+    // action from a set of *outputs the wallet composes itself*; it does not
+    // accept an externally assembled transaction to relay verbatim. So the
+    // only data this call could carry about `tx_hex` was the free-text
+    // `description` field, which a real wallet treats as a human-readable
+    // label, not an instruction to broadcast those exact bytes.
     //
-    // Net effect: for every caller that reaches `broadcast()` through
-    // `WalletProvider` — `deployWithWallet` and the generic call paths in
-    // `sdk_contract.zig` alike — the transaction `sdk_contract.zig` actually
-    // built (inputs, outputs, signature(s)) is DISCARDED here. What goes on
-    // the wire (against a real wallet) is a brand new, wallet-composed action
-    // with ZERO outputs and `tx_hex` stuffed into its description string. A
-    // caller gets back a txid and believes their transaction was broadcast;
-    // it was not.
-    //
-    // This is fail-open in the same class of bug F-042 fixed for the ARC
-    // path, and the project's standing rule is fail-closed. It is NOT fixed
-    // here: `sdk_r062_wallet_deploy_gate_test.zig`'s two CONTROL tests ("an
-    // ordinary artifact still funds through the wallet path" /
-    // "an acknowledged unsound artifact still funds through the wallet path")
-    // drive a full `deployWithWallet` round-trip through this exact function
-    // and assert it returns a non-empty txid; MockWalletClient.createActionImpl
-    // ignores both `outputs` and the semantic content of `description`, so
-    // those tests pass today regardless of what the real argument carries.
-    // Making this fail-closed (returning an error, since there is no raw-
-    // broadcast primitive to delegate to) would remove that pinned, passing
-    // behavior — a real design choice (stub-that-returns-success vs.
-    // refuse-until-a-real-primitive-exists) rather than a bug with one
-    // correct fix. Escalated; not changed in this pass. See N-040.
-    fn broadcastImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) provider_mod.ProviderError![]u8 {
-        const self: *WalletProvider = @ptrCast(@alignCast(ctx));
+    // This used to be fail-open (N-040): it called `createAction` anyway,
+    // discarding the transaction `sdk_contract.zig` actually built and
+    // returning the txid of an unrelated, wallet-composed, zero-output
+    // action as if the caller's tx had gone out. Per user decision R100 the
+    // project fails closed instead: refuse, and never touch the wallet, so a
+    // caller can never mistake this for a broadcast that happened.
+    pub const RAW_BROADCAST_UNSUPPORTED_MSG = "raw broadcast unsupported by BRC-100; use an ARC/WhatsOnChain provider";
 
-        var result = self.wallet.createAction(allocator, tx_hex, &.{}) catch return provider_mod.ProviderError.BroadcastFailed;
-
-        // Copy txid before deinit
-        const txid_copy = if (result.txid.len > 0)
-            allocator.dupe(u8, result.txid) catch return provider_mod.ProviderError.OutOfMemory
-        else
-            null;
-
-        result.deinit(allocator);
-
-        if (txid_copy) |txid| {
-            return txid;
-        }
+    fn broadcastImpl(_: *anyopaque, _: std.mem.Allocator, _: []const u8) provider_mod.ProviderError![]u8 {
+        errors_mod.last_broadcast_refusal = RAW_BROADCAST_UNSUPPORTED_MSG;
         return provider_mod.ProviderError.BroadcastFailed;
     }
 
@@ -525,7 +497,12 @@ pub const WalletSigner = struct {
 /// function that creates a WalletProvider and WalletSigner from the given
 /// wallet client, then calls deploy on the contract.
 ///
-/// Returns the broadcast txid (caller owns).
+/// N-260 / R100: `WalletProvider`'s broadcast step fails closed (BRC-100's
+/// `createAction` has no primitive to relay an already-signed raw
+/// transaction) — never a txid: a deploy that clears the unsound-primitive
+/// gate and the funding/UTXO steps still fails at broadcast with
+/// `error.DeployFailed`, until a raw-broadcast-capable provider path exists
+/// for the wallet tier.
 pub fn deployWithWallet(
     contract: *contract_mod.RunarContract,
     wallet: WalletClient,
@@ -705,6 +682,41 @@ test "WalletProvider returns UTXOs from wallet outputs" {
     try std.testing.expectEqual(@as(usize, 1), utxos.len);
     try std.testing.expectEqual(@as(i64, 5000), utxos[0].satoshis);
     try std.testing.expectEqual(@as(i32, 0), utxos[0].output_index);
+}
+
+// N-260 / R100: WalletProvider.broadcast used to discard the signed tx and
+// call wallet.createAction(tx_hex as description, zero outputs), returning
+// that unrelated action's txid as if the caller's tx had been broadcast
+// (N-040). Proves the fail-closed replacement: broadcast refuses with
+// BroadcastFailed + the explicit side-channel message, and the wallet is
+// never touched (action_count stays 0, no description is recorded) — so a
+// caller can never mistake this for a broadcast that happened.
+// Does not prove: that a raw-broadcast-capable provider (ARC/WhatsOnChain)
+// exists or works; only that this path no longer fakes success.
+test "N-260 WalletProvider.broadcast fails closed instead of faking success via createAction" {
+    const allocator = std.testing.allocator;
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+    errors_mod.last_broadcast_refusal = null;
+
+    const wc = mock.walletClient();
+    var wp = WalletProvider.init(allocator, wc, "test-basket", .{});
+    defer wp.deinit();
+
+    var prov = wp.provider();
+    if (prov.broadcast(allocator, "0100000000")) |txid| {
+        allocator.free(txid);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(provider_mod.ProviderError.BroadcastFailed, err);
+    }
+
+    // The wallet must never have been asked to create an action.
+    try std.testing.expectEqual(@as(u32, 0), mock.action_count);
+    try std.testing.expectEqual(@as(usize, 0), mock.last_action_description.len);
+
+    const msg = errors_mod.last_broadcast_refusal orelse return error.TestExpectedRecordedContext;
+    try std.testing.expectEqualStrings(WalletProvider.RAW_BROADCAST_UNSUPPORTED_MSG, msg);
 }
 
 test "WalletProvider getNetwork and getFeeRate return configured values" {
