@@ -12,11 +12,11 @@ pipeline. The package is useful in two roles:
 
 | Area | Status |
 |---|---:|
-| Conformance fixtures discovered (Lean-recognised) | 88/88 (dynamic readDir) |
-| ANF parse + well-formedness | 88/88 |
+| Conformance fixtures discovered (Lean-recognised) | 91/91 (dynamic readDir) |
+| ANF parse + well-formedness | 91/91 |
 | ANF JSON round-trip | 64/64 |
-| Default byte-exact gate (`pipelineGolden`) | 69/88 byte-exact (66 baseline + 3 live-regenerated crypto anchors; see note) |
-| Formal-evidence gate (`pipelineConformance`) | **0/88 VERIFIED-direct**, **88/88 VERIFIED-modulo-codegen-axioms** (33 crypto-call + 17 dispatch + 38 stateful; Phase D harness omnibus tier; soundness conditional on the codegen-soundness axioms documented in `TRUST_MANIFEST.md`) |
+| Default byte-exact gate (`pipelineGolden`) | 72/91 byte-exact (69 baseline + 3 live-regenerated crypto anchors; see note) |
+| Formal-evidence gate (`pipelineConformance`) | **0/91 VERIFIED-direct**, **91/91 VERIFIED-modulo-codegen-axioms** (34 crypto-call + 18 dispatch + 39 stateful; Phase D harness omnibus tier; soundness conditional on the codegen-soundness axioms documented in `TRUST_MANIFEST.md`) |
 | Crypto-heavy fixtures | 22 `cryptoAxiomPending` (3 byte-exact via live-regenerated anchors; 19 inert) |
 | Full/sharded byte-exact target | live `cryptoAxiomPending` bucket regeneration |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
@@ -29,8 +29,8 @@ pipeline. The package is useful in two roles:
 | End-to-end capstone — multi-method dispatch | `Pipeline.compileSafe_multi_public_observational_correct` (Phase D) |
 | Crypto codegen-to-spec links | 13 primitive families (SHA-256 / RIPEMD-160 / hash160 / hash256 / BLAKE3 / secp256k1 / P-256 / P-384 / ECDSA / BabyBear / Merkle / WOTS+ / SLH-DSA × 6 / Rabin) |
 
-Default `pipelineGolden` is the fast gate and currently reports 69/88
-fixtures byte-exact (66 baseline + 3 live-regenerated crypto anchors).
+Default `pipelineGolden` is the fast gate and currently reports 72/91
+fixtures byte-exact (69 baseline + 3 live-regenerated crypto anchors).
 Three fixtures — `shift-ops`, `bitwise-ops` and `oversize-bigint-shift` —
 sit in `lowerDivergencePending`: the real compilers emit a minimality
 normalisation (OP_BIN2NUM at numeric reads of byte-array results) that this
@@ -159,14 +159,14 @@ be widened to `SupportedANFBody`. Wrapper widening alone in
 checks `structuralRefBodyBool`. See `PATH2_PLAN.md` and `TODO.md`
 for the tiered execution plan.
 
-`conformance/tests/` contains 88 fixtures, all of which `goldenLoad`
+`conformance/tests/` contains 91 fixtures, all of which `goldenLoad`
 and `roundtrip` recognise — both walk the tree with `readDir` and have
 no hardcoded allowlist, so the count is discovered dynamically and
 auto-tracks new fixtures (the `goldenLoad` binary prints `found N
 expected-ir.json files` and asserts all N parse + satisfy WF; the
 `asm-raw-script` fixture parses cleanly after the `raw_script` ANF kind
 landed; only its codegen-to-Stack-IR simulation discharge is deferred).
-`pipelineGolden` reports 69/88 byte-exact across its tracked
+`pipelineGolden` reports 72/91 byte-exact across its tracked
 inventory (see the note above); the crypto stored-constant fixtures whose
 emit hex is regenerated rather than compared live in the
 `cryptoAxiomPending` bucket.
