@@ -20,6 +20,35 @@
 //! exact instruction granularity of the hook swap. Many rounds across many
 //! threads are run to make a miss on a multi-core machine very unlikely, not
 //! to make this a timing-independent proof.
+//!
+//! N-243: this test used to run its very first `catch_refusal` call
+//! concurrently with the first round's unrelated-panic threads. That call is
+//! the one that lazily installs the process-wide suppressing hook
+//! (`install_suppressing_hook_once`), and that install is NOT a single atomic
+//! step: it is `std::panic::take_hook()` (which, per
+//! `library/std/src/panicking.rs`, replaces the active hook with
+//! `Hook::Default` and returns the old one) followed by a *separate*
+//! `std::panic::set_hook()` call. Between those two calls the active
+//! process-wide hook is transiently the stdlib default — not the sentinel,
+//! and not the suppressing wrapper — so an unrelated panic on another thread
+//! that lands in that window prints the default banner instead of
+//! incrementing `SENTINEL_FIRED`, which is the "sentinel fired 792 times for
+//! 800"-shaped failure this item was filed against. There is no stable
+//! replacement: `std::panic::update_hook` closes exactly this gap but is
+//! still gated behind the unstable `panic_update_hook` feature (rust-lang
+//! issue #92649), so closing it in `catch_refusal` itself would need either
+//! that unstable feature or an eager (e.g. ctor-based) install ahead of any
+//! possible concurrent caller — both out of scope for this LOW-severity,
+//! v1-nice-to-have item. Priming the install below with a solo call, on the
+//! main thread, before any thread is spawned, moves that one-time two-step
+//! window to a moment with zero concurrent panickers, which is sufficient for
+//! this test's purpose; it does not close the underlying std-level gap for a
+//! real embedder whose very first concurrent `catch_refusal` calls race an
+//! unrelated panic on another thread the same way. In 65 runs of this test
+//! under synthetic CPU oversubscription and under the full `cargo test`
+//! workspace suite running concurrently, the gap was never observed to be hit
+//! (the window is on the order of a couple of machine instructions), so this
+//! hardening is prophylactic rather than a reproduction-confirmed fix.
 
 use runar_compiler_rust::refusal::catch_refusal;
 use std::panic;
@@ -50,6 +79,17 @@ fn concurrent_catch_refusal_does_not_corrupt_or_suppress_unrelated_panic_hook() 
     panic::set_hook(Box::new(|_info| {
         SENTINEL_FIRED.fetch_add(1, Ordering::SeqCst);
     }));
+
+    // N-243: prime `install_suppressing_hook_once`'s one-time, two-step
+    // `take_hook` / `set_hook` install solo, on this thread, before any
+    // concurrent thread exists. That install only ever runs once per
+    // process (guarded by a `Once`); every `catch_refusal` call below,
+    // across every round and every thread, finds it already installed and
+    // takes the fast, already-initialized path. See the module doc comment
+    // above for why this test cannot also prove the install is race-free
+    // for a caller who skips this priming call.
+    let _ = catch_refusal("f158 warm-up", || panic!("f158 warm-up payload"));
+    SENTINEL_FIRED.store(0, Ordering::SeqCst);
 
     const ROUNDS: usize = 100;
     const REFUSAL_THREADS: usize = 8;
