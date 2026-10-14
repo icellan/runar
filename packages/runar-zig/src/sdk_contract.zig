@@ -845,8 +845,26 @@ pub const RunarContract = struct {
             // terminal funding-input path as funding_utxos.
             if (options) |o| if (o.fee_utxo) |fee| try additional_utxos.append(self.allocator, fee);
         } else {
+            // N-295: never fund with an outpoint this tx already spends as a
+            // contract input — the primary (contract_utxo), or any
+            // additional_contract_inputs entry. An indexer that also lists a
+            // merge's extra contract UTXO at the signer's P2PKH address made
+            // it look like a legitimate funding candidate too; largest-first
+            // selection could then pick it AGAIN as funding, spending the
+            // same outpoint twice in one transaction. Mirrors TS (F-045),
+            // Go, Rust, Python, Ruby and Java (N-294).
+            const extra_inputs_for_funding_filter: []const types.UTXO =
+                if (options) |o| (if (o.additional_contract_inputs) |aci| aci else &.{}) else &.{};
             for (all_utxos) |u| {
-                if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                const is_primary = std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index;
+                var is_extra = false;
+                for (extra_inputs_for_funding_filter) |eci| {
+                    if (std.mem.eql(u8, u.txid, eci.txid) and u.output_index == eci.output_index) {
+                        is_extra = true;
+                        break;
+                    }
+                }
+                if (!is_primary and !is_extra) {
                     try additional_utxos.append(self.allocator, u);
                 }
             }
