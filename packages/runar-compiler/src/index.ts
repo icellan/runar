@@ -484,8 +484,8 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       ) {
         diagnostics.push({
           message:
-            `readonly field '${prop.name}' is not referenced in any method body and was ` +
-            `eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the ` +
+            `readonly field '${prop.name}' is not referenced in any method body and may ` +
+            `be eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the ` +
             `on-chain script`,
           severity: 'warning',
           loc: prop.sourceLocation,

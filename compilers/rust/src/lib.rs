@@ -1102,8 +1102,8 @@ fn embed_always_dce_warnings(
         .map(|prop| {
             frontend::diagnostic::Diagnostic::warning(
                 format!(
-                    "readonly field '{}' is not referenced in any method body and was \
-                     eliminated by DCE; annotate it /** @embedAlways */ to preserve it in \
+                    "readonly field '{}' is not referenced in any method body and may \
+                     be eliminated by DCE; annotate it /** @embedAlways */ to preserve it in \
                      the on-chain script",
                     prop.name
                 ),

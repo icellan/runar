@@ -44,8 +44,8 @@ pub fn collectDceWarnings(
         if (prop.readonly and !prop.embed_always and prop.initializer == null and !referenced.contains(prop.name)) {
             const msg = try std.fmt.allocPrint(
                 allocator,
-                "readonly field '{s}' is not referenced in any method body and was " ++
-                    "eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the " ++
+                "readonly field '{s}' is not referenced in any method body and may " ++
+                    "be eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the " ++
                     "on-chain script",
                 .{prop.name},
             );

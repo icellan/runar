@@ -498,7 +498,7 @@ def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -
                 Diagnostic(
                     message=(
                         f"readonly field '{prop.name}' is not referenced in any "
-                        f"method body and was eliminated by DCE; annotate it "
+                        f"method body and may be eliminated by DCE; annotate it "
                         f"/** @embedAlways */ to preserve it in the on-chain script"
                     ),
                     severity=Severity.WARNING,
@@ -656,7 +656,7 @@ def _dropped_readonly_field_warnings(contract: Any, program: ANFProgram) -> list
     return [
         (
             f"readonly field '{prop.name}' is not referenced in any method body "
-            f"and was eliminated by DCE; annotate it /** @embedAlways */ to "
+            f"and may be eliminated by DCE; annotate it /** @embedAlways */ to "
             f"preserve it in the on-chain script"
         )
         for prop in contract.properties

@@ -1236,7 +1236,7 @@ public final class Validate {
                         && !referenced.contains(prop.name())) {
                     warn(
                         "readonly field '" + prop.name() + "' is not referenced in any method body "
-                            + "and was eliminated by DCE; annotate it /** @embedAlways */ to preserve "
+                            + "and may be eliminated by DCE; annotate it /** @embedAlways */ to preserve "
                             + "it in the on-chain script",
                         prop.sourceLocation());
                 }

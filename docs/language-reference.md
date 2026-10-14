@@ -833,7 +833,7 @@ Without the directive the compiler emits a warning naming it:
 
 ```
 warning: readonly field 'deployTag' is not referenced in any method body
-and was eliminated by DCE; annotate it /** @embedAlways */ to preserve it
+and may be eliminated by DCE; annotate it /** @embedAlways */ to preserve it
 in the on-chain script
 ```
 
