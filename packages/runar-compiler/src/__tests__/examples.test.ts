@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync } from 'fs';
+import { readdirSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
+import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import { compile } from '../index.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
@@ -22,28 +23,36 @@ interface ExampleContract {
   source: string;
 }
 
-function findExampleContracts(): ExampleContract[] {
+function findExampleContracts(baseDir: string = EXAMPLES_DIR): ExampleContract[] {
   const contracts: ExampleContract[] = [];
 
+  let dirs;
   try {
-    const dirs = readdirSync(EXAMPLES_DIR, { withFileTypes: true });
-    for (const dir of dirs) {
-      if (!dir.isDirectory()) continue;
-      const dirPath = join(EXAMPLES_DIR, dir.name);
-      const files = readdirSync(dirPath);
-      for (const file of files) {
-        if (file.endsWith('.runar.ts')) {
-          const source = readFileSync(join(dirPath, file), 'utf-8');
-          contracts.push({
-            name: file.replace('.runar.ts', ''),
-            fileName: file,
-            source,
-          });
-        }
+    dirs = readdirSync(baseDir, { withFileTypes: true });
+  } catch (err) {
+    // examples directory may not exist — that's the only failure this scan
+    // tolerates. Anything else (e.g. a subdirectory read failing mid-scan)
+    // must propagate instead of silently dropping contracts.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return contracts;
+    }
+    throw err;
+  }
+
+  for (const dir of dirs) {
+    if (!dir.isDirectory()) continue;
+    const dirPath = join(baseDir, dir.name);
+    const files = readdirSync(dirPath);
+    for (const file of files) {
+      if (file.endsWith('.runar.ts')) {
+        const source = readFileSync(join(dirPath, file), 'utf-8');
+        contracts.push({
+          name: file.replace('.runar.ts', ''),
+          fileName: file,
+          source,
+        });
       }
     }
-  } catch {
-    // examples directory may not exist
   }
 
   return contracts;
@@ -91,6 +100,47 @@ function requireCompiled(result: ReturnType<typeof compile>, fileName: string) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('findExampleContracts', () => {
+  // N-126: the scan used to wrap the ENTIRE directory walk (outer
+  // readdirSync, inner readdirSync, and readFileSync) in one try/catch meant
+  // only to tolerate a missing EXAMPLES_DIR. Any OTHER failure while
+  // scanning a subdirectory (e.g. an unreadable entry) was caught by that
+  // same catch-all and silently swallowed: the function returned whatever
+  // contracts it had collected so far, with no sign anything had gone
+  // wrong.
+  //
+  // This test proves: a non-ENOENT failure encountered mid-scan now
+  // propagates (fails closed) instead of being swallowed into a quietly
+  // incomplete result.
+  // This test does NOT prove: that every possible fs error code is
+  // correctly classified, or that the fix covers filesystems where
+  // directory-as-file reads fail with something other than EISDIR.
+  it('fails closed when a subdirectory read fails mid-scan, instead of silently dropping it', () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), 'runar-examples-test-'));
+    try {
+      const subDir = join(tmpBase, 'broken-example');
+      mkdirSync(subDir);
+      // A directory named like a contract file: `file.endsWith('.runar.ts')`
+      // matches it, so the scan attempts `readFileSync` on a directory,
+      // which throws EISDIR. This reproduces "a subdirectory whose read
+      // fails mid-scan" deterministically, without relying on chmod/EACCES
+      // (which no-ops when the test runs as root).
+      mkdirSync(join(subDir, 'Broken.runar.ts'));
+
+      expect(() => findExampleContracts(tmpBase)).toThrow(/EISDIR/);
+    } finally {
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  // The ENOENT case is the one the original comment ("examples directory may
+  // not exist") actually named, and the fix must keep tolerating it.
+  it('still returns an empty list when the base directory does not exist', () => {
+    const missing = join(tmpdir(), `runar-examples-test-missing-${Date.now()}`);
+    expect(findExampleContracts(missing)).toEqual([]);
+  });
+});
 
 describe('Example contracts: end-to-end compilation', () => {
   it('found at least one example contract', () => {
