@@ -1571,6 +1571,11 @@ const Parser = struct {
                 }
             }
         } else {
+            // N-306: the TS reference's parseForStatement refuses a
+            // non-declaration for-initializer with this diagnostic. This
+            // branch used to just skip tokens, leaving `var_name` at its
+            // synthetic default `_i` with no diagnostic at all.
+            self.addErrorAt(for_tok, "For loop must have a variable declaration initializer");
             // Skip non-standard initializer
             while (self.current.kind != .semicolon and self.current.kind != .eof) _ = self.bump();
         }

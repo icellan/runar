@@ -287,4 +287,64 @@ class TestLoopUpdateClause < Minitest::Test
     refute ok, "a shifted for-header must not compile (#{hex.length} hex chars emitted)"
     assert_includes msg, "For loop must have a condition"
   end
+
+  # ---------------------------------------------------------------------------
+  # N-306: a non-declaration for-initializer on the C-style `.runar.ts` header
+  # ---------------------------------------------------------------------------
+
+  NON_DECLARATION_INITIALIZER_DIAGNOSTIC = "For loop must have a variable declaration initializer"
+
+  # A stateful contract parameterised on the for-loop HEADER, with a body that
+  # never references the loop variable by name -- unlike `ts_with_update`'s
+  # body (`acc = acc + i`), so a substituted `_i = 0` iterator can't be caught
+  # by an accidental "undefined variable 'i'" typecheck error instead of the
+  # parser's own diagnostic.
+  def ts_for_initializer(init)
+    <<~TS
+      import { StatefulSmartContract, assert } from 'runar-lang';
+
+      class InitProbe extends StatefulSmartContract {
+        count: bigint;
+
+        constructor(count: bigint) { super(count); this.count = count; }
+
+        public unlock(expected: bigint): void {
+          let acc: bigint = 0n;
+          for (#{init}; _i < 3n; _i++) {
+            acc = acc + 1n;
+          }
+          assert(acc === expected);
+        }
+      }
+    TS
+  end
+
+  # N-306: `for (i = 0n; _i < 3n; _i++)` has no `let`/`const` in the
+  # initializer slot. The TS reference refuses it in its parser with the text
+  # below. This tier's `parse_for` instead silently substituted the synthetic
+  # `_i = 0` iterator for the whole initializer, discarding `i = 0n` with no
+  # diagnostic at all -- invisible as long as the condition/update still
+  # reference the original name `i`, because an unrelated validator check (the
+  # unrolled loop's "condition must compare the loop variable" rule) then
+  # catches the name mismatch by accident and refuses the program anyway.
+  # Writing the condition/update against the substituted name `_i` instead --
+  # exactly what a developer who noticed the generated variable would do --
+  # defeats that accidental catch and the garbage initializer compiled clean.
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses a non-declaration
+  # for-initializer with the reference's text, even when the rest of the
+  # header is written against the substituted name. Does not prove: other
+  # surfaces or tiers (pinned by the conformance negatives N277-N279).
+  def test_n306_non_declaration_initializer_is_rejected
+    ok, hex, msg = compile_source(ts_for_initializer("i = 0n"), "InitProbe.runar.ts")
+    refute ok, "a non-declaration for-initializer must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, NON_DECLARATION_INITIALIZER_DIAGNOSTIC
+  end
+
+  # Control: a well-formed `let` initializer must keep compiling clean -- the
+  # fix narrows only the non-declaration branch of the initializer dispatch.
+  def test_n306_let_initializer_still_compiles
+    ok, _hex, msg = compile_source(ts_for_initializer("let _i: bigint = 0n"), "InitProbe.runar.ts")
+    assert ok, "a `let` for-initializer must still compile: #{msg}"
+  end
 end

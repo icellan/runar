@@ -1326,6 +1326,13 @@ func (p *parseContext) parseForStatement(node *sitter.Node) Statement {
 			if s != nil {
 				initStmt = *s
 			} else {
+				// N-306: the TS reference's parseForStatement refuses a
+				// non-declaration for-initializer with this diagnostic.
+				// This branch used to silently substitute a synthetic
+				// `_i = 0` for the real initializer expression, discarding
+				// it with no error.
+				initErrLoc := loc
+				p.errors = append(p.errors, MakeDiagnostic("For loop must have a variable declaration initializer", SeverityError, &initErrLoc))
 				initStmt = VariableDeclStmt{
 					Name:           "_i",
 					Mutable:        true,

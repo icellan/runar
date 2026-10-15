@@ -648,3 +648,77 @@ test "N-135: a shifted .runar.ts for-header (;; cond; update) is rejected with t
     const src = try std.mem.replaceOwned(u8, alloc, base, "0n; i < 3n; i++)", "0n;; i < 3n; i++)");
     try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have a condition");
 }
+
+// ---------------------------------------------------------------------------
+// N-306: a non-declaration for-initializer on the C-style .runar.ts header
+// ---------------------------------------------------------------------------
+//
+// `for (i = 0n; _i < 3n; _i++)` has no `let`/`const` in the initializer slot.
+// The TS reference refuses it in its parser with "For loop must have a
+// variable declaration initializer". This parser's non-`let`/`const` branch
+// (the `else` in `parseForStmt`) instead just skips tokens to the next `;`,
+// leaving `var_name` at its synthetic default `_i` with no diagnostic at
+// all. That substitution is invisible when the condition/update still
+// reference the original name `i`, because `cond_tests_iter` then compares
+// `i` against the default `_i`, mismatches, and the validator's "condition
+// must compare the loop variable" rule refuses the program anyway, for an
+// unrelated reason. Writing the condition/update against the substituted
+// name `_i` instead -- exactly what a developer who noticed the generated
+// variable would do -- makes `cond_tests_iter` true and the garbage
+// initializer compiles clean.
+//
+// What this test proves: the .runar.ts parser refuses a non-declaration
+// for-initializer with the reference's diagnostic, even when the rest of the
+// header is written against the substituted name. What it does not prove:
+// other surfaces or tiers (pinned by the conformance negatives N277-N279).
+
+/// A stateful contract parameterised on the for-loop HEADER, with a body
+/// that never references the loop variable by name -- unlike
+/// `tsWithUpdate`'s body (`acc = acc + i`), so a substituted `_i = 0`
+/// iterator can't be caught by an accidental "condition must compare the
+/// loop variable" validation error instead of the parser's own diagnostic.
+fn tsForInitializer(alloc: Allocator, init: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc,
+        \\import {{ StatefulSmartContract, assert }} from 'runar-lang';
+        \\
+        \\class InitProbe extends StatefulSmartContract {{
+        \\  count: bigint;
+        \\
+        \\  constructor(count: bigint) {{ super(count); this.count = count; }}
+        \\
+        \\  public unlock(expected: bigint): void {{
+        \\    let acc: bigint = 0n;
+        \\    for ({s}; _i < 3n; _i++) {{
+        \\      acc = acc + 1n;
+        \\    }}
+        \\    assert(acc === expected);
+        \\  }}
+        \\}}
+    , .{init});
+}
+
+test "N-306: a non-declaration .runar.ts for-initializer is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try tsForInitializer(alloc, "i = 0n");
+    try expectRejectedWithDiagnostic(
+        alloc,
+        src,
+        "InitProbe.runar.ts",
+        "For loop must have a variable declaration initializer",
+    );
+}
+
+// Control: a well-formed `let` initializer must keep compiling clean -- the
+// fix narrows only the non-declaration branch of the initializer dispatch.
+test "N-306: a let .runar.ts for-initializer still compiles clean" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try tsForInitializer(alloc, "let _i: bigint = 0n");
+    if (compileHex(alloc, src, "InitProbe.runar.ts") == null) {
+        std.debug.print("a `let` for-initializer must still compile\n", .{});
+        return error.LetInitializerRejected;
+    }
+}

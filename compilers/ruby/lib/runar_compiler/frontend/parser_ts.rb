@@ -1323,7 +1323,15 @@ module RunarCompiler
             )
           end
         else
-          # Expression initializer -- not standard for Runar for-loops
+          # N-306: the TS reference's parseForStatement refuses a
+          # non-declaration for-initializer with this diagnostic. This
+          # branch used to silently substitute a synthetic `_i = 0` for the
+          # real initializer expression, discarding it with no error.
+          @errors << Diagnostic.new(
+            message: "For loop must have a variable declaration initializer",
+            severity: Severity::ERROR,
+            loc: location
+          )
           init_stmt = VariableDeclStmt.new(
             name: "_i",
             mutable: true,

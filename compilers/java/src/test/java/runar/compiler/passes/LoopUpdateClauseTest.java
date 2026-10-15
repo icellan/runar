@@ -333,4 +333,75 @@ class LoopUpdateClauseTest {
         assertTrue(err.contains("For loop must have a condition"),
             "rejection must carry the TS reference diagnostic, got: " + err);
     }
+
+    // -----------------------------------------------------------------------
+    // N-306: a non-declaration for-initializer on the C-style `.runar.ts` header
+    // -----------------------------------------------------------------------
+
+    private static final String NON_DECLARATION_INITIALIZER_DIAGNOSTIC =
+        "For loop must have a variable declaration initializer";
+
+    /**
+     * A stateful contract parameterised on the for-loop HEADER, with a body that never
+     * references the loop variable by name -- unlike {@link #tsWithUpdate}'s body ({@code acc =
+     * acc + i}), so a substituted {@code _i = 0} iterator can't be caught by an accidental
+     * "undefined variable 'i'" typecheck error instead of the parser's own diagnostic.
+     */
+    private static String tsForInitializer(String init) {
+        return """
+            import { StatefulSmartContract, assert } from 'runar-lang';
+
+            class InitProbe extends StatefulSmartContract {
+              count: bigint;
+
+              constructor(count: bigint) { super(count); this.count = count; }
+
+              public unlock(expected: bigint): void {
+                let acc: bigint = 0n;
+                for (INIT; _i < 3n; _i++) {
+                  acc = acc + 1n;
+                }
+                assert(acc === expected);
+              }
+            }"""
+            .replace("INIT", init);
+    }
+
+    /**
+     * N-306: {@code for (i = 0n; _i < 3n; _i++)} has no {@code let}/{@code const} in the
+     * initializer slot. The TS reference refuses it in its parser with the text asserted below.
+     * This tier's {@code parseFor} instead silently substituted the synthetic {@code _i = 0}
+     * iterator for the whole initializer, discarding {@code i = 0n} with no diagnostic at all --
+     * invisible as long as the condition/update still reference the original name {@code i},
+     * because an unrelated validator check (the unrolled loop's "condition must compare the loop
+     * variable" rule) then catches the name mismatch by accident and refuses the program anyway.
+     * Writing the condition/update against the substituted name {@code _i} instead -- exactly
+     * what a developer who noticed the generated variable would do -- defeats that accidental
+     * catch and the garbage initializer compiled clean.
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses a non-declaration
+     * for-initializer with the reference's text, even when the rest of the header is written
+     * against the substituted name. Does not prove: other surfaces or tiers (pinned by the
+     * conformance negatives N277-N279).
+     */
+    @Test
+    void n306NonDeclarationInitializerIsRejected() {
+        String src = tsForInitializer("i = 0n");
+        String err = compileError(src, "InitProbe.runar.ts");
+        if (err == null) {
+            fail("a non-declaration for-initializer must not compile");
+        }
+        assertTrue(err.contains(NON_DECLARATION_INITIALIZER_DIAGNOSTIC),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
+
+    /**
+     * Control: a well-formed {@code let} initializer must keep compiling clean -- the fix
+     * narrows only the non-declaration branch of the initializer dispatch.
+     */
+    @Test
+    void n306LetInitializerStillCompiles() throws Exception {
+        String src = tsForInitializer("let _i: bigint = 0n");
+        PipelineTestSupport.hex(src, "InitProbe.runar.ts");
+    }
 }

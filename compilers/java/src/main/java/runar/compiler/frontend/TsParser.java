@@ -1445,6 +1445,13 @@ public final class TsParser {
                         "_i", null, new BigIntLiteral(BigInteger.ZERO), initLoc);
                 }
             } else {
+                // N-306: the TS reference's parseForStatement refuses a
+                // non-declaration for-initializer with this diagnostic. This
+                // branch used to silently substitute a synthetic `_i = 0`
+                // for the real initializer expression, discarding it with
+                // no error.
+                addError(LexDiag.at(fileName, locArg.line(), locArg.column(),
+                    "For loop must have a variable declaration initializer"));
                 initStmt = new VariableDeclStatement(
                     "_i", null, new BigIntLiteral(BigInteger.ZERO), initLoc);
                 while (!check(TOK_SEMICOLON) && !check(TOK_EOF)) {
