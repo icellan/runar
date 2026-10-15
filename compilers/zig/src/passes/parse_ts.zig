@@ -1225,6 +1225,14 @@ const Parser = struct {
                 const elem_type = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parseTypeAnnotation, .{});
                 _ = self.expect(.comma);
                 const size_tok = self.expect(.number) orelse return .{ .custom_type = "FixedArray" };
+                // N-120: the TS reference reads the size with
+                // parseInt(text, 10), which refuses a 0x/0o/0b spelling.
+                const raw = size_tok.raw;
+                if (raw.len > 1 and raw[0] == '0' and std.mem.indexOfScalar(u8, "xXoObB", raw[1]) != null) {
+                    self.addErrorFmt("FixedArray size must be a positive integer literal, got '{s}'", .{raw});
+                    _ = self.expect(.gt);
+                    return .{ .custom_type = "FixedArray" };
+                }
                 const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
                 _ = self.expect(.gt);
                 const elem_ptr = self.allocator.create(TypeNode) catch return .{ .custom_type = "FixedArray" };

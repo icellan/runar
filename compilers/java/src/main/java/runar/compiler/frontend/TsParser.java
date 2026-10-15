@@ -1194,6 +1194,19 @@ public final class TsParser {
                     TypeNode elem = nest.nested(this::parseType);
                     expect(TOK_COMMA);
                     Token sizeTok = expect(TOK_NUMBER);
+                    // N-120: the TS reference reads the size with
+                    // parseInt(text, 10), which refuses a 0x/0o/0b spelling.
+                    if (sizeTok.kind == TOK_NUMBER) {
+                        int off = offsetOf(sizeTok.line, sizeTok.col);
+                        String raw = source.substring(off, IntLiteral.scanEnd(source, off));
+                        if (raw.matches("0[xXoObB].*")) {
+                            addError(String.format(
+                                "line %d: FixedArray size must be a positive integer literal, got '%s'",
+                                sizeTok.line, raw));
+                            expect(TOK_GT);
+                            return new CustomType(name);
+                        }
+                    }
                     int size;
                     try {
                         size = Integer.parseInt(sizeTok.value);

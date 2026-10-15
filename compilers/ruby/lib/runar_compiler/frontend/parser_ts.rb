@@ -352,7 +352,7 @@ module RunarCompiler
           stop, num_str, = IntLiteral.lex_number("ts", source, i, lex, file_name, line, start_col)
           col += stop - i
           i = stop
-          tokens << Token.new(kind: TOK_NUMBER, value: num_str, line: line, col: start_col)
+          tokens << Token.new(kind: TOK_NUMBER, value: num_str, line: line, col: start_col, offset: start_off)
           next
         end
 
@@ -1043,6 +1043,18 @@ module RunarCompiler
             elem_type = nested { parse_type }
             expect(TOK_COMMA)
             size_tok = expect(TOK_NUMBER)
+            # N-120: the TS reference reads the size with parseInt(text, 10),
+            # which refuses a 0x/0o/0b spelling.
+            raw = if size_tok.kind == TOK_NUMBER && size_tok.offset
+                    @source[size_tok.offset...IntLiteral.scan_number_end(@source, size_tok.offset)]
+                  else
+                    ""
+                  end
+            if raw.match?(/\A0[xXoObB]/)
+              add_error("line #{size_tok.line}: FixedArray size must be a positive integer literal, got '#{raw}'")
+              expect(TOK_GT)
+              return CustomType.new(name: name)
+            end
             size = begin
               Integer(size_tok.value, 0)
             rescue ArgumentError

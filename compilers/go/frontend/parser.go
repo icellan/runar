@@ -901,7 +901,7 @@ func (p *parseContext) parseGenericType(node *sitter.Node) TypeNode {
 	sizeText := p.nodeText(typeArgs[1])
 	size, err := strconv.Atoi(sizeText)
 	if err != nil || size < 0 {
-		p.addError(fmt.Sprintf("FixedArray size must be a non-negative integer literal, got '%s'", sizeText))
+		p.addError(fmt.Sprintf("FixedArray size must be a positive integer literal, got '%s'", sizeText))
 		return CustomType{Name: typeName}
 	}
 

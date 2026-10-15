@@ -20,7 +20,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
-from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number, scan_number_end  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     OPTIONAL_CHAINING,
@@ -998,6 +998,17 @@ class _TsParser:
                     elem_type = self._parse_type()
                 self.expect(TOK_COMMA)
                 size_tok = self.expect(TOK_NUMBER)
+                # N-120: the TS reference reads the size with
+                # parseInt(text, 10), which refuses a 0x/0o/0b spelling.
+                raw = (
+                    self.source[size_tok.offset:scan_number_end(self.source, size_tok.offset)]
+                    if size_tok.kind == TOK_NUMBER and size_tok.offset >= 0
+                    else ""
+                )
+                if raw[:2] in ("0x", "0X", "0o", "0O", "0b", "0B"):
+                    self.add_error(f"line {size_tok.line}: FixedArray size must be a positive integer literal, got '{raw}'")
+                    self.expect(TOK_GT)
+                    return CustomType(name=name)
                 try:
                     size = int(size_tok.value)
                 except ValueError:
