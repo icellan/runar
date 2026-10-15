@@ -256,4 +256,35 @@ class TestLoopUpdateClause < Minitest::Test
       assert_includes msg, LOOP_UPDATE_DIAGNOSTIC, name
     end
   end
+
+  # N-135: `for (let i = 0n; ; i++)` has no exit test in the source. The TS
+  # reference refuses it in its parser with the text below; this tier refused
+  # it only by accident (the `let` declaration consumed its own `;`, a second
+  # `match(;)` swallowed the empty slot's `;`, and `i++` was misparsed as the
+  # condition).
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses an empty condition slot with
+  # the reference's text. Does not prove: other surfaces or tiers (pinned by
+  # the conformance negatives N274/N275).
+  def test_n135_empty_ts_condition_is_rejected
+    src = ts_with_update("i++").sub("0n; i < 3n; i++)", "0n; ; i++)")
+    ok, hex, msg = compile_source(src, "UpdateProbe.runar.ts")
+    refute ok, "an empty for-condition must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, "For loop must have a condition"
+  end
+
+  # N-135: `for (let i = 0n;; i < 3n; i++)` is not valid TypeScript (empty
+  # condition slot, last two clauses shifted left). The second `match(;)` after
+  # the initializer swallowed the empty slot's `;` and this tier compiled it
+  # exactly like `for (let i = 0n; i < 3n; i++)`.
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses the shifted header with the
+  # reference's condition diagnostic. Does not prove: other surfaces or tiers
+  # (pinned by the conformance negative N275).
+  def test_n135_shifted_ts_header_is_rejected
+    src = ts_with_update("i++").sub("0n; i < 3n; i++)", "0n;; i < 3n; i++)")
+    ok, hex, msg = compile_source(src, "UpdateProbe.runar.ts")
+    refute ok, "a shifted for-header must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, "For loop must have a condition"
+  end
 end

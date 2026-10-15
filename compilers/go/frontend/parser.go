@@ -1345,7 +1345,13 @@ func (p *parseContext) parseForStatement(node *sitter.Node) Statement {
 
 	// Parse condition
 	var condition Expression
-	if condNode != nil {
+	if condNode == nil || condNode.Type() == "empty_statement" {
+		// N-135: the TS reference refuses an empty condition slot (which
+		// tree-sitter hands over as an `empty_statement` node); the `false`
+		// placeholder below only keeps the AST well-formed.
+		condLoc := loc
+		p.errors = append(p.errors, MakeDiagnostic("For loop must have a condition", SeverityError, &condLoc))
+	} else {
 		// The condition might be wrapped in an expression_statement node
 		if condNode.Type() == "expression_statement" && condNode.ChildCount() > 0 {
 			condition = p.parseExpression(condNode.Child(0))

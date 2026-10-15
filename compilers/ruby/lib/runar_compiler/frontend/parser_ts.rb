@@ -1322,14 +1322,21 @@ module RunarCompiler
           while !check(TOK_SEMICOLON) && !check(TOK_EOF)
             advance
           end
+          # N-135: only this branch stops ON the `;`; the variable_decl
+          # above already consumed its own, so matching again there
+          # swallowed an empty condition slot's `;`.
+          match(TOK_SEMICOLON)
         end
-
-        # The variable_decl already consumed the semicolon if it was there,
-        # but we need to make sure we're past it.
-        match(TOK_SEMICOLON)
 
         # Condition
         if check(TOK_SEMICOLON)
+          # N-135: the TS reference refuses an empty condition slot; the
+          # placeholder below only keeps the AST well-formed.
+          @errors << Diagnostic.new(
+            message: "For loop must have a condition",
+            severity: Severity::ERROR,
+            loc: location
+          )
           condition = BoolLiteral.new(value: false)
         else
           condition = parse_expression

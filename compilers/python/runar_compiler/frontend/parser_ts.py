@@ -1244,14 +1244,21 @@ class _TsParser:
             # Skip to the semicolon
             while not self.check(TOK_SEMICOLON) and not self.check(TOK_EOF):
                 self.advance()
-
-        # The variable_decl already consumed the semicolon if it was there,
-        # but we need to make sure we're past it
-        self.match(TOK_SEMICOLON)
+            # N-135: only this branch stops ON the `;`; the variable_decl
+            # above already consumed its own, so matching again there
+            # swallowed an empty condition slot's `;`.
+            self.match(TOK_SEMICOLON)
 
         # Condition
         condition: Expression
         if self.check(TOK_SEMICOLON):
+            # N-135: the TS reference refuses an empty condition slot; the
+            # placeholder below only keeps the AST well-formed.
+            self.errors.append(Diagnostic(
+                message="For loop must have a condition",
+                severity=Severity.ERROR,
+                loc=loc,
+            ))
             condition = BoolLiteral(value=False)
         else:
             condition = self._parse_expression()

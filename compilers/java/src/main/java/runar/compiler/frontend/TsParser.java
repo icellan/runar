@@ -1437,12 +1437,18 @@ public final class TsParser {
                 while (!check(TOK_SEMICOLON) && !check(TOK_EOF)) {
                     advance();
                 }
+                // N-135: only this branch stops ON the `;`; the variable decl
+                // above already consumed its own, so matching again there
+                // swallowed an empty condition slot's `;`.
+                match(TOK_SEMICOLON);
             }
-
-            match(TOK_SEMICOLON);
 
             Expression condition;
             if (check(TOK_SEMICOLON)) {
+                // N-135: the TS reference refuses an empty condition slot; the
+                // placeholder below only keeps the AST well-formed.
+                addError(LexDiag.at(fileName, locArg.line(), locArg.column(),
+                    "For loop must have a condition"));
                 condition = new BoolLiteral(false);
             } else {
                 condition = parseExpression();

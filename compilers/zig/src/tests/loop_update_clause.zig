@@ -614,3 +614,37 @@ test "N-116: a .runar.ts literal for-update is rejected" {
     const alloc = arena.allocator();
     try expectRejectedWithSharedDiagnostic(alloc, try tsWithUpdate(alloc, "0n"), "UpdateProbe.runar.ts");
 }
+
+// ---------------------------------------------------------------------------
+// N-135: an EMPTY condition slot on the C-style .runar.ts header
+// ---------------------------------------------------------------------------
+//
+// `for (let i = 0n; ; i++)` has no exit test in the source. The TS reference
+// refuses it in its parser with "For loop must have a condition". This parser
+// ran `skipSemicolons()` after the initializer, which ate BOTH `;`s: the bare
+// empty condition was refused only by accident (`i++` misparsed as the
+// condition, then "For loop must have an update expression"), and the shifted
+// header `for (let i = 0n;; i < 3n; i++)` - not valid TypeScript - compiled
+// exactly like `for (let i = 0n; i < 3n; i++)`.
+//
+// What these tests prove: the .runar.ts parser refuses both shapes with the
+// reference's condition diagnostic. What they do not prove: other surfaces or
+// tiers (pinned by the conformance negatives N274/N275).
+
+test "N-135: an empty .runar.ts for-condition is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const base = try tsWithUpdate(alloc, "i++");
+    const src = try std.mem.replaceOwned(u8, alloc, base, "0n; i < 3n; i++)", "0n; ; i++)");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have a condition");
+}
+
+test "N-135: a shifted .runar.ts for-header (;; cond; update) is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const base = try tsWithUpdate(alloc, "i++");
+    const src = try std.mem.replaceOwned(u8, alloc, base, "0n; i < 3n; i++)", "0n;; i < 3n; i++)");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have a condition");
+}

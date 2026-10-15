@@ -284,3 +284,46 @@ def test_n116_non_advancing_update_is_rejected(source_fn, file_name):
     ok, hex_out, diags = compile_source(source_fn(), file_name)
     assert not ok, f"a non-advancing update must not compile; got {hex_out}"
     assert LOOP_UPDATE_DIAGNOSTIC in diags, diags
+
+
+# ---------------------------------------------------------------------------
+# N-135: an EMPTY condition slot on the C-style `.runar.ts` header
+# ---------------------------------------------------------------------------
+
+
+EMPTY_CONDITION_DIAGNOSTIC = "For loop must have a condition"
+
+
+def test_n135_empty_ts_condition_is_rejected():
+    """N-135: ``for (let i = 0n; ; i++)`` has no exit test in the source. The TS
+    reference refuses it in its parser with the diagnostic below; this tier
+    refused it only by accident (the ``let`` declaration consumed its own
+    ``;``, a second ``match(;)`` swallowed the empty slot's ``;``, and ``i++``
+    was misparsed as the condition).
+
+    Proves: the Python ``.runar.ts`` parser refuses an empty condition slot with
+    the reference's text. Does not prove: other surfaces or tiers (pinned by
+    the conformance negatives N274/N275)."""
+    src = ts_with_update("i++").replace("0n; i < 3n; i++)", "0n; ; i++)")
+    ok, hex_out, diags = compile_source(src, "UpdateProbe.runar.ts")
+    assert not ok, (
+        f"an empty for-condition must not compile ({len(hex_out)} hex chars emitted)"
+    )
+    assert EMPTY_CONDITION_DIAGNOSTIC in diags, diags
+
+
+def test_n135_shifted_ts_header_is_rejected():
+    """N-135: ``for (let i = 0n;; i < 3n; i++)`` is not valid TypeScript (its
+    condition slot is empty and the last two clauses shift left). The second
+    ``match(;)`` after the initializer swallowed the empty slot's ``;`` and this
+    tier compiled it exactly like ``for (let i = 0n; i < 3n; i++)``.
+
+    Proves: the Python ``.runar.ts`` parser refuses the shifted header with the
+    reference's condition diagnostic. Does not prove: other surfaces or tiers
+    (pinned by the conformance negative N275)."""
+    src = ts_with_update("i++").replace("0n; i < 3n; i++)", "0n;; i < 3n; i++)")
+    ok, hex_out, diags = compile_source(src, "UpdateProbe.runar.ts")
+    assert not ok, (
+        f"a shifted for-header must not compile ({len(hex_out)} hex chars emitted)"
+    )
+    assert EMPTY_CONDITION_DIAGNOSTIC in diags, diags

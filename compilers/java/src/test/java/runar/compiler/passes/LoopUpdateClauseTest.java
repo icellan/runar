@@ -287,4 +287,50 @@ class LoopUpdateClauseTest {
         assertRejectedWithSharedDiagnostic(tsWithUpdate("0n"), "UpdateProbe.runar.ts",
             "`for (...; 0n)` does not advance i");
     }
+
+    // -----------------------------------------------------------------------
+    // N-135: an EMPTY condition slot on the C-style `.runar.ts` header
+    // -----------------------------------------------------------------------
+
+    /**
+     * N-135: {@code for (let i = 0n; ; i++)} has no exit test in the source. The TS reference
+     * refuses it in its parser with the text asserted below; this tier refused it only by accident
+     * (the {@code let} declaration consumed its own {@code ;}, a second {@code match(;)} swallowed
+     * the empty slot's {@code ;}, and {@code i++} was misparsed as the condition).
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses an empty condition slot with the
+     * reference's text. Does not prove: other surfaces or tiers (pinned by the conformance
+     * negatives N274/N275).
+     */
+    @Test
+    void n135EmptyTsConditionIsRejected() {
+        String src = tsWithUpdate("i++").replace("0n; i < 3n; i++)", "0n; ; i++)");
+        String err = compileError(src, "UpdateProbe.runar.ts");
+        if (err == null) {
+            fail("an empty for-condition must not compile");
+        }
+        assertTrue(err.contains("For loop must have a condition"),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
+
+    /**
+     * N-135: {@code for (let i = 0n;; i < 3n; i++)} is not valid TypeScript (empty condition slot,
+     * last two clauses shifted left). The second {@code match(;)} after the initializer swallowed
+     * the empty slot's {@code ;} and this tier compiled it exactly like
+     * {@code for (let i = 0n; i < 3n; i++)}.
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses the shifted header with the
+     * reference's condition diagnostic. Does not prove: other surfaces or tiers (pinned by the
+     * conformance negative N275).
+     */
+    @Test
+    void n135ShiftedTsHeaderIsRejected() {
+        String src = tsWithUpdate("i++").replace("0n; i < 3n; i++)", "0n;; i < 3n; i++)");
+        String err = compileError(src, "UpdateProbe.runar.ts");
+        if (err == null) {
+            fail("a shifted for-header must not compile");
+        }
+        assertTrue(err.contains("For loop must have a condition"),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
 }

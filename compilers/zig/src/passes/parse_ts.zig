@@ -1566,7 +1566,14 @@ const Parser = struct {
             // Skip non-standard initializer
             while (self.current.kind != .semicolon and self.current.kind != .eof) _ = self.bump();
         }
-        self.skipSemicolons();
+        // N-135: exactly ONE `;` ends the initializer. `skipSemicolons()` here
+        // also ate an empty condition slot's `;`, so `for (let i = 0n;; i < 3n;
+        // i++)` compiled like `for (let i = 0n; i < 3n; i++)`.
+        if (self.expect(.semicolon) == null) return null;
+        if (self.current.kind == .semicolon) {
+            // N-135: the TS reference refuses an empty condition slot in its parser.
+            self.addErrorAt(for_tok, "For loop must have a condition");
+        }
 
         // Condition: i < N
         if (self.current.kind != .semicolon) {
@@ -1603,7 +1610,7 @@ const Parser = struct {
                 }
             }
         }
-        self.skipSemicolons();
+        if (self.expect(.semicolon) == null) return null;
 
         // Update: `i++`, `i--`, … N-061: the clause used to be parsed and
         // discarded, so a non-unit step, a call to an undefined function and a
