@@ -1042,7 +1042,9 @@ jobs:
         # sdk-call (N-038) and sdk-output/runner/sdk-runner-refusal-build-
         # isolation.test.ts (N-091) are the same shape: their CI steps below
         # invoke the sdk-output/sdk-vertical runners directly, which never
-        # collects either test file as vitest.
+        # collects either test file as vitest. sdk-output/runner/
+        # sdk-output-coverage-audit.test.ts (CK21-FU2 / PL27-FU1) is the same
+        # shape again, landed next to sdk-runner-refusal-build-isolation.test.ts.
         #
         # wire-primitives.test.ts (F-279) is the same shape again, but via a
         # dead package.json script: `conformance:wire-primitives` was defined
@@ -1067,6 +1069,7 @@ jobs:
           conformance/sdk-vertical
           conformance/sdk-call
           conformance/sdk-output/runner/sdk-runner-refusal-build-isolation.test.ts
+          conformance/sdk-output/runner/sdk-output-coverage-audit.test.ts
           conformance/runner/__tests__
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
           conformance/anf-interpreter/driver-gate.test.ts
