@@ -430,6 +430,10 @@ pub fn compile_from_source_str_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<RunarArtifact, String> {
+    // N-285: prime the catch_refusal install here too, so a single-threaded
+    // caller who never read refusal::init's doc still gets the one-time
+    // install done before the first guarded pass runs below.
+    refusal::init();
     reject_unsupported_stop_after_pass_options(opts)?;
 
     // Pass 1: Parse (auto-selects parser based on file extension)
@@ -569,6 +573,8 @@ pub fn compile_source_str_to_ir_collecting_warnings(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<(ir::ANFProgram, Vec<frontend::diagnostic::Diagnostic>), String> {
+    // N-285: see compile_from_source_str_with_options.
+    refusal::init();
     reject_unsupported_stop_after_pass_options(opts)?;
 
     let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
@@ -988,6 +994,8 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
+    // N-285: see compile_from_source_str_with_options.
+    refusal::init();
     reject_unsupported_stop_after_pass_options(opts)?;
 
     // N-265: the source validator's `check_no_recursion` (cycle rule + N-180's
@@ -1124,6 +1132,9 @@ pub fn compile_from_source_str_with_result(
     opts: &CompileOptions,
 ) -> CompileResult {
     use frontend::diagnostic::Diagnostic;
+
+    // N-285: see compile_from_source_str_with_options.
+    refusal::init();
 
     let mut result = CompileResult::new();
 

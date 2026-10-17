@@ -86,6 +86,12 @@ struct Args {
 }
 
 fn main() {
+    // N-285: install the catch_refusal panic-suppressing hook now, on this
+    // (the only) thread, before any subcommand or compile pass runs — the
+    // one install this process will ever do, done at a moment with no
+    // concurrency to race it. See runar_compiler_rust::refusal::init.
+    runar_compiler_rust::refusal::init();
+
     // Subcommand dispatch: if the first positional looks like a subcommand
     // (not a flag), route it to its handler. Mirrors the Go compiler's
     // approach so adding modes like `debug` does not require restructuring
