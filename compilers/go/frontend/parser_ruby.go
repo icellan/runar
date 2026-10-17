@@ -241,11 +241,11 @@ func (p *rbParser) tokenize(source string) []rbToken {
 			// Instance variable: @name
 			if ch == '@' {
 				pos++
-				name := ""
+				start := pos
 				for pos < len(line) && rbIsIdentPart(line[pos]) {
-					name += string(line[pos])
 					pos++
 				}
+				name := line[start:pos]
 				if len(name) > 0 {
 					tokens = append(tokens, rbToken{kind: rbTokIvar, value: name, line: lineNum, col: col})
 				}
@@ -345,11 +345,11 @@ func (p *rbParser) tokenize(source string) []rbToken {
 			// Symbol: :name (but not ::)
 			if ch == ':' && pos+1 < len(line) && rbIsIdentStart(line[pos+1]) {
 				pos++ // skip ':'
-				name := ""
+				start := pos
 				for pos < len(line) && rbIsIdentPart(line[pos]) {
-					name += string(line[pos])
 					pos++
 				}
+				name := line[start:pos]
 				tokens = append(tokens, rbToken{kind: rbTokSymbol, value: name, line: lineNum, col: col})
 				continue
 			}
@@ -357,14 +357,17 @@ func (p *rbParser) tokenize(source string) []rbToken {
 			// Single-quoted string literals: hex ByteStrings
 			if ch == '\'' {
 				pos++
-				val := ""
+				// N-181: a Builder, not `val += …`, which copied the whole
+				// literal per byte (quadratic on a 4 MiB unterminated string).
+				// WriteRune(rune(b)) is exactly what string(b) appended before.
+				var val strings.Builder
 				for pos < len(line) && line[pos] != '\'' {
 					if line[pos] == '\\' && pos+1 < len(line) {
 						pos++ // skip backslash
-						val += string(line[pos])
+						val.WriteRune(rune(line[pos]))
 						pos++
 					} else {
-						val += string(line[pos])
+						val.WriteRune(rune(line[pos]))
 						pos++
 					}
 				}
@@ -375,21 +378,21 @@ func (p *rbParser) tokenize(source string) []rbToken {
 					// literal is unterminated; refuse it, never end it silently.
 					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, lineNum, col))
 				}
-				tokens = append(tokens, rbToken{kind: rbTokHexString, value: val, line: lineNum, col: col})
+				tokens = append(tokens, rbToken{kind: rbTokHexString, value: val.String(), line: lineNum, col: col})
 				continue
 			}
 
 			// Double-quoted string literals
 			if ch == '"' {
 				pos++
-				val := ""
+				var val strings.Builder
 				for pos < len(line) && line[pos] != '"' {
 					if line[pos] == '\\' && pos+1 < len(line) {
 						pos++ // skip backslash
-						val += string(line[pos])
+						val.WriteRune(rune(line[pos]))
 						pos++
 					} else {
-						val += string(line[pos])
+						val.WriteRune(rune(line[pos]))
 						pos++
 					}
 				}
@@ -400,7 +403,7 @@ func (p *rbParser) tokenize(source string) []rbToken {
 					// literal is unterminated; refuse it, never end it silently.
 					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, lineNum, col))
 				}
-				tokens = append(tokens, rbToken{kind: rbTokString, value: val, line: lineNum, col: col})
+				tokens = append(tokens, rbToken{kind: rbTokString, value: val.String(), line: lineNum, col: col})
 				continue
 			}
 
@@ -421,16 +424,15 @@ func (p *rbParser) tokenize(source string) []rbToken {
 
 			// Identifiers and keywords
 			if rbIsIdentStart(ch) {
-				val := ""
+				start := pos
 				for pos < len(line) && rbIsIdentPart(line[pos]) {
-					val += string(line[pos])
 					pos++
 				}
 				// Check for trailing ? or ! (Ruby convention)
 				if pos < len(line) && (line[pos] == '?' || line[pos] == '!') {
-					val += string(line[pos])
 					pos++
 				}
+				val := line[start:pos]
 				if kw, ok := rbKeywords[val]; ok {
 					tokens = append(tokens, rbToken{kind: kw, value: val, line: lineNum, col: col})
 				} else {

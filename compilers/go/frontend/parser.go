@@ -248,10 +248,7 @@ type parseContext struct {
 // walk overflowed the 1 GB goroutine stack (F-213 refuter, ref_type_rs).
 func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 	coveredTo := -1
-	stack := []*sitter.Node{root}
-	for len(stack) > 0 {
-		n := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
+	tsWalk(root, func(n *sitter.Node) bool {
 		if n.Type() == "number" && int(n.StartByte()) >= coveredTo {
 			start, end := int(n.StartByte()), int(n.EndByte())
 			for end < len(p.source) && isNumberContinue(p.source[end]) {
@@ -263,10 +260,8 @@ func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
 			}
 		}
-		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
-			stack = append(stack, n.Child(i))
-		}
-	}
+		return true
+	})
 }
 
 // checkOptionalChaining refuses the first .runar.ts `?.`, located at its `?`
@@ -275,16 +270,36 @@ func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 // an optional call's `?.` as a bare anonymous token, so both are matched.
 // Iterative and in source order, like checkNumericLiterals.
 func (p *parseContext) checkOptionalChaining(root *sitter.Node) {
-	stack := []*sitter.Node{root}
-	for len(stack) > 0 {
-		n := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
+	tsWalk(root, func(n *sitter.Node) bool {
 		if n.Type() == "optional_chain" || n.Type() == "?." {
 			p.errors = append(p.errors, lexDiag(OptionalChainingMsg, p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
+			return false
+		}
+		return true
+	})
+}
+
+// tsWalk visits root and every node below it in pre-order (source order),
+// iteratively, with one TreeCursor, until visit returns false. It replaces
+// stack walks that pushed n.Child(i) for each i: n.Child(i) is not O(1) —
+// tree-sitter iterates from the first child on every call — so those walks
+// were quadratic in a node's child count, and error recovery on n unbalanced
+// openers leaves a node with ~n children (N-181: a 4 MiB `[[[…` ran for hours
+// before the syntax error was reported).
+func tsWalk(root *sitter.Node, visit func(*sitter.Node) bool) {
+	cur := sitter.NewTreeCursor(root)
+	defer cur.Close()
+	for {
+		if !visit(cur.CurrentNode()) {
 			return
 		}
-		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
-			stack = append(stack, n.Child(i))
+		if cur.GoToFirstChild() {
+			continue
+		}
+		for !cur.GoToNextSibling() {
+			if !cur.GoToParent() {
+				return
+			}
 		}
 	}
 }
@@ -294,18 +309,15 @@ func (p *parseContext) checkOptionalChaining(root *sitter.Node) {
 // the whole file. Iterative for the same reason as checkNumericLiterals:
 // tree-sitter error recovery can leave an arbitrarily deep subtree.
 func firstBadNode(root *sitter.Node) *sitter.Node {
-	stack := []*sitter.Node{root}
-	for len(stack) > 0 {
-		n := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
+	var bad *sitter.Node
+	tsWalk(root, func(n *sitter.Node) bool {
 		if n.IsError() || n.IsMissing() {
-			return n
+			bad = n
+			return false
 		}
-		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
-			stack = append(stack, n.Child(i))
-		}
-	}
-	return nil
+		return true
+	})
+	return bad
 }
 
 // snippet renders a short, single-line excerpt of the node's source span for

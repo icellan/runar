@@ -744,6 +744,11 @@ struct GoParser<'a> {
     /// which of them a func declaration consumed.
     directives: Vec<GoDirective>,
     consumed: Vec<bool>,
+    /// N-181: token range `[start, end)` of the last `[N]…[N]` dimension
+    /// chain whose composite-literal lookahead failed. Every `[` inside it
+    /// starts a dimension group whose lookahead would scan the same tail and
+    /// fail the same way, so it is not re-run (it made `int[][]…[]` quadratic).
+    composite_miss: Option<(usize, usize)>,
 }
 
 impl<'a> GoParser<'a> {
@@ -759,6 +764,7 @@ impl<'a> GoParser<'a> {
             nest: NestingCounter::new(),
             directives: Vec::new(),
             consumed: Vec::new(),
+            composite_miss: None,
         }
     }
 
@@ -2318,7 +2324,8 @@ impl<'a> GoParser<'a> {
                 self.advance(); // consume '['
                 // Try to detect composite literal: `[ <number>? ] <type>+ {`.
                 let mut composite = false;
-                if matches!(self.current().typ, TokenType::Number(_) | TokenType::RBracket) {
+                let known_miss = matches!(self.composite_miss, Some((start, end)) if saved >= start && saved < end);
+                if !known_miss && matches!(self.current().typ, TokenType::Number(_) | TokenType::RBracket) {
                     if matches!(self.current().typ, TokenType::Number(_)) {
                         self.advance();
                     }
@@ -2337,6 +2344,7 @@ impl<'a> GoParser<'a> {
                             }
                             self.advance();
                         }
+                        let dims_end = self.pos;
                         // Consume the element type: `runar.Foo`, `Foo`, or `*Foo`.
                         if matches!(self.current().typ, TokenType::Star) {
                             self.advance();
@@ -2356,6 +2364,7 @@ impl<'a> GoParser<'a> {
                             composite = true;
                             return Some(self.parse_go_brace_literal());
                         }
+                        self.composite_miss = Some((saved, dims_end));
                     }
                 }
                 if !composite {

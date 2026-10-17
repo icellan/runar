@@ -357,7 +357,10 @@ func (p *zigParser) tokenize(source string) []zigToken {
 		// String literals: "..."
 		if ch == '"' {
 			advance() // skip opening quote
-			val := ""
+			// N-181: a Builder, not `val += …`, which copied the whole
+			// literal per byte (quadratic on a 4 MiB unterminated string).
+			// WriteRune(rune(b)) is exactly what string(b) appended before.
+			var val strings.Builder
 			// F-011: a Zig string literal cannot span lines; one that reaches
 			// a line break (escaped or not) or end of file is unterminated.
 			for pos < len(source) && peek() != '"' && peek() != '\n' && peek() != '\r' {
@@ -366,9 +369,9 @@ func (p *zigParser) tokenize(source string) []zigToken {
 					if pos >= len(source) || peek() == '\n' || peek() == '\r' {
 						break
 					}
-					val += string(advance())
+					val.WriteRune(rune(advance()))
 				} else {
-					val += string(advance())
+					val.WriteRune(rune(advance()))
 				}
 			}
 			if peek() == '"' {
@@ -376,7 +379,7 @@ func (p *zigParser) tokenize(source string) []zigToken {
 			} else {
 				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, tokenLine, tokenCol))
 			}
-			add(zigTokString, val, tokenLine, tokenCol)
+			add(zigTokString, val.String(), tokenLine, tokenCol)
 			continue
 		}
 
@@ -400,10 +403,11 @@ func (p *zigParser) tokenize(source string) []zigToken {
 
 		// Identifiers and keywords
 		if zigIsIdentStart(ch) {
-			val := ""
+			start := pos
 			for pos < len(source) && zigIsIdentPart(peek()) {
-				val += string(advance())
+				advance()
 			}
+			val := source[start:pos]
 			if kw, ok := zigKeywords[val]; ok {
 				add(kw, val, tokenLine, tokenCol)
 			} else {
