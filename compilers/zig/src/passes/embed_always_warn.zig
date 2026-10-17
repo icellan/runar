@@ -45,7 +45,7 @@ pub fn collectDceWarnings(
             const msg = try std.fmt.allocPrint(
                 allocator,
                 "readonly field '{s}' is not referenced in any method body and may " ++
-                    "be eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the " ++
+                    "be eliminated by DCE; mark it with the embedAlways directive to preserve it in the " ++
                     "on-chain script",
                 .{prop.name},
             );

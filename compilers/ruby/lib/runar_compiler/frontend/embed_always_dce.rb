@@ -31,7 +31,7 @@ module RunarCompiler
           next if referenced.include?(prop.name)
 
           "readonly field '#{prop.name}' is not referenced in any method body and may " \
-            "be eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the " \
+            "be eliminated by DCE; mark it with the embedAlways directive to preserve it in the " \
             "on-chain script"
         end
       end

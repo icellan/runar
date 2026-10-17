@@ -76,7 +76,7 @@ class Meta extends SmartContract {
 // ("may be") wording, so the same regex extracts the comparable text no
 // matter which side of the fix a given tier's binary is on.
 const MESSAGE_RE =
-  /readonly field 'metadataId' is not referenced in any method body and (?:was|may be) eliminated by DCE; annotate it \/\*\* @embedAlways \*\/ to preserve it in the on-chain script/;
+  /readonly field 'metadataId' is not referenced in any method body and (?:was|may be) eliminated by DCE; mark it with the embedAlways directive to preserve it in the on-chain script/;
 
 function extract(text: string): string | null {
   const m = MESSAGE_RE.exec(text);

@@ -854,9 +854,12 @@ Without the directive the compiler emits a warning naming it:
 
 ```
 warning: readonly field 'deployTag' is not referenced in any method body
-and may be eliminated by DCE; annotate it /** @embedAlways */ to preserve it
-in the on-chain script
+and may be eliminated by DCE; mark it with the embedAlways directive to preserve
+it in the on-chain script
 ```
+
+The wording is the same on every surface; use that surface's native spelling
+from the table above.
 
 The effect is visible in the artifact's `constructorSlots` — the byte offsets
 deploy-time values are spliced into — and **not** in `abi.constructor.params`,
