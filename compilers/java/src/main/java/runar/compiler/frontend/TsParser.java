@@ -1199,7 +1199,8 @@ public final class TsParser {
                     if (sizeTok.kind == TOK_NUMBER) {
                         int off = offsetOf(sizeTok.line, sizeTok.col);
                         String raw = source.substring(off, IntLiteral.scanEnd(source, off));
-                        if (raw.matches("0[xXoObB].*")) {
+                        // N-307: so is a bigint suffix (`2n`) or a separator (`1_0`).
+                        if (raw.matches("0[xXoObB].*") || raw.contains("_") || raw.endsWith("n")) {
                             addError(String.format(
                                 "line %d: FixedArray size must be a positive integer literal, got '%s'",
                                 sizeTok.line, raw));

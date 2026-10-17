@@ -716,7 +716,10 @@ function parseTypeNode(
       const sizeText = typeArgs[1]!.getText().trim();
       const size = parseInt(sizeText, 10);
 
-      if (isNaN(size) || size <= 0) {
+      // N-307: a bigint suffix (`2n`) or a numeric separator (`1_0`) is
+      // refused outright; parseInt would read `1_0` as 1 while every other
+      // tier reads 10.
+      if (isNaN(size) || size <= 0 || /[n_]/.test(sizeText)) {
         errors.push(makeDiagnostic(
           `FixedArray size must be a positive integer literal, got '${sizeText}'`,
           'error',

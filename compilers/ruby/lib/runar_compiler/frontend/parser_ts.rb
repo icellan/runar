@@ -1050,7 +1050,8 @@ module RunarCompiler
                   else
                     ""
                   end
-            if raw.match?(/\A0[xXoObB]/)
+            # N-307: so is a bigint suffix (`2n`) or a separator (`1_0`).
+            if raw.match?(/\A0[xXoObB]/) || raw.include?("_") || raw.end_with?("n")
               add_error("line #{size_tok.line}: FixedArray size must be a positive integer literal, got '#{raw}'")
               expect(TOK_GT)
               return CustomType.new(name: name)

@@ -1005,7 +1005,8 @@ class _TsParser:
                     if size_tok.kind == TOK_NUMBER and size_tok.offset >= 0
                     else ""
                 )
-                if raw[:2] in ("0x", "0X", "0o", "0O", "0b", "0B"):
+                # N-307: so is a bigint suffix (`2n`) or a separator (`1_0`).
+                if raw[:2] in ("0x", "0X", "0o", "0O", "0b", "0B") or "_" in raw or raw.endswith("n"):
                     self.add_error(f"line {size_tok.line}: FixedArray size must be a positive integer literal, got '{raw}'")
                     self.expect(TOK_GT)
                     return CustomType(name=name)

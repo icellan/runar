@@ -991,14 +991,18 @@ fn ts_entity_name_to_string(entity: &TsEntityName) -> String {
 
 /// Try to extract a literal number from a type node (e.g. `10` in `FixedArray<bigint, 10>`).
 /// N-120: the number literal type's text as written, when it carries a
-/// `0x` / `0o` / `0b` radix prefix (either case).
+/// `0x` / `0o` / `0b` radix prefix (either case); N-307: or a `_` separator,
+/// or is a bigint literal (`2n`).
 fn radix_prefixed_type_literal(ts_type: &TsType) -> Option<String> {
     match ts_type {
         TsType::TsLitType(lit) => match &lit.lit {
             TsLit::Number(n) => n.raw.as_ref().map(|r| r.to_string()).filter(|r| {
                 let b = r.as_bytes();
-                b.len() > 1 && b[0] == b'0' && matches!(b[1], b'x' | b'X' | b'o' | b'O' | b'b' | b'B')
+                (b.len() > 1 && b[0] == b'0' && matches!(b[1], b'x' | b'X' | b'o' | b'O' | b'b' | b'B'))
+                    || r.contains('_') // N-307: a numeric separator (`1_0`)
             }),
+            // N-307: a bigint suffix (`2n`).
+            TsLit::BigInt(n) => n.raw.as_ref().map(|r| r.to_string()),
             _ => None,
         },
         _ => None,

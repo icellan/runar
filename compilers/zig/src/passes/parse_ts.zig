@@ -1228,7 +1228,10 @@ const Parser = struct {
                 // N-120: the TS reference reads the size with
                 // parseInt(text, 10), which refuses a 0x/0o/0b spelling.
                 const raw = size_tok.raw;
-                if (raw.len > 1 and raw[0] == '0' and std.mem.indexOfScalar(u8, "xXoObB", raw[1]) != null) {
+                // N-307: so is a bigint suffix (`2n`) or a separator (`1_0`).
+                if ((raw.len > 1 and raw[0] == '0' and std.mem.indexOfScalar(u8, "xXoObB", raw[1]) != null) or
+                    std.mem.indexOfScalar(u8, raw, '_') != null or std.mem.endsWith(u8, raw, "n"))
+                {
                     self.addErrorFmt("FixedArray size must be a positive integer literal, got '{s}'", .{raw});
                     _ = self.expect(.gt);
                     return .{ .custom_type = "FixedArray" };

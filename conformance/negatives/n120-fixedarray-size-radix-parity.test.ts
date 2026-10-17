@@ -24,8 +24,8 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * What it does NOT prove:
  *   - the location of the diagnostic: Go reports this parse error with no
  *     file:line:col, and the others with differing prefixes;
- *   - any other size spelling. `2n` and `1_0` still diverge across tiers
- *     (reported separately, not this item's rule);
+ *   - any other size spelling. `2n` and `1_0` are gated by the sibling
+ *     n307-fixedarray-size-suffix-separator-parity.test.ts (N-307);
  *   - FixedArray sizes on any surface other than `.runar.ts`.
  */
 
