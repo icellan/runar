@@ -244,6 +244,10 @@ jobs:
         # lands. A gate whose globs match nothing is worse than no gate — it
         # reports green forever.
         run: pnpm run wire-format-audit:self-test
+      - name: BIP-143 fixture nLockTime check (F-299)
+        # conformance/ is not a pnpm workspace member, so turbo never runs the
+        # vitest files under conformance/scripts/__tests__/; name the path.
+        run: npx vitest run conformance/scripts/__tests__/bip143-fixture-locktime.test.ts
       - name: Wire-format audit (changed set vs merge-base)
         # Fail mode (the plan allows a one-PR warn phase via `--warn-only`; the
         # flag exists on the script but CI is wired to fail).
