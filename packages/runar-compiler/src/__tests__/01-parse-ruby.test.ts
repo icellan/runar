@@ -1328,6 +1328,15 @@ end
       expect(threw).toBe(false);
       // The lambda syntax should not panic.  Errors in the result are expected.
       expect(result).not.toBeNull();
+      // N-242: and the errors must actually be there. Proves: the tokenizer
+      // names the unsupported '{' and '}' and the parser flags the dangling
+      // '>' left over from '->', so a lambda cannot be silently accepted.
+      // Does NOT prove: anything about the shape of the AST for `bar`, nor
+      // that lambdas will ever be supported.
+      const errors = result!.errors.filter(e => e.severity === 'error');
+      expect(errors.some(e => e.message.includes("'{'"))).toBe(true);
+      expect(errors.some(e => e.message.includes("'}'"))).toBe(true);
+      expect(errors.some(e => e.message.includes("'>'"))).toBe(true);
     });
 
     it('does not throw on duplicate method names', () => {
