@@ -146,7 +146,6 @@ _GO_BIGINTBIG_OPS = {
 # Native Go types that map to Runar types
 _GO_NATIVE_TYPE_MAP: dict[str, str] = {
     "int64": "bigint",
-    "int": "bigint",
     "bool": "boolean",
 }
 

@@ -80,7 +80,6 @@ module RunarCompiler
       "BigintBig"       => "bigint",
       "Bool"            => "boolean",
       "bool"            => "boolean",
-      "int"             => "bigint",
       "int64"           => "bigint",
       "ByteString"      => "ByteString",
       "PubKey"          => "PubKey",

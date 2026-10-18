@@ -543,7 +543,6 @@ fn mapGoType(name: []const u8) RunarType {
         .{ "Bigint", .bigint },
         .{ "BigintBig", .bigint },
         .{ "int64", .bigint },
-        .{ "int", .bigint },
         .{ "Bool", .boolean },
         .{ "bool", .boolean },
         .{ "ByteString", .byte_string },
@@ -1354,11 +1353,12 @@ const Parser = struct {
         if (self.current.kind == .lbracket) {
             _ = self.bump(); // consume '['
             if (self.current.kind == .rbracket) {
-                // []byte -> ByteString
+                // N-338: `[]byte` is not a documented Go-surface spelling
+                // (docs/formats/go.md); it stays unresolved so the validator refuses it.
                 _ = self.bump(); // consume ']'
                 if (self.checkIdent("byte")) {
                     _ = self.bump();
-                    return .{ .type_info = .byte_string };
+                    return .{ .type_info = .unknown, .type_name = "[]byte" };
                 }
                 return .{ .type_info = .unknown };
             }
@@ -1422,14 +1422,15 @@ const Parser = struct {
             return .unknown;
         }
 
-        // []byte -> ByteString
+        // N-338: `[]byte` is not a documented Go-surface spelling; it stays unresolved.
         if (self.current.kind == .lbracket) {
             _ = self.bump(); // consume '['
             if (self.current.kind == .rbracket) {
                 _ = self.bump(); // consume ']'
                 if (self.checkIdent("byte")) {
                     _ = self.bump();
-                    return .byte_string;
+                    out_name.* = "[]byte";
+                    return .unknown;
                 }
             } else {
                 // Fixed-length array nested via parseGoType (legacy path) -- skip
@@ -1444,7 +1445,7 @@ const Parser = struct {
         if (self.current.kind == .ident) {
             const type_name = self.bump().text;
             out_name.* = type_name;
-            if (std.mem.eql(u8, type_name, "int64") or std.mem.eql(u8, type_name, "int")) return .bigint;
+            if (std.mem.eql(u8, type_name, "int64")) return .bigint;
             if (std.mem.eql(u8, type_name, "bool")) return .boolean;
             return mapGoType(type_name);
         }

@@ -238,7 +238,6 @@ public final class GoParser {
         GO_TYPE_MAP.put("P384Point", "P384Point");
 
         GO_NATIVE_TYPE_MAP.put("int64", "bigint");
-        GO_NATIVE_TYPE_MAP.put("int", "bigint");
         GO_NATIVE_TYPE_MAP.put("bool", "boolean");
 
         GO_BUILTIN_MAP.put("Assert", "assert");

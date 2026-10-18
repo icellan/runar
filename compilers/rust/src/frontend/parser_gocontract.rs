@@ -116,11 +116,11 @@ fn go_to_camel(name: &str) -> String {
 /// Map Go/runar type names to Rúnar AST type nodes.
 fn map_go_type(name: &str) -> TypeNode {
     match name {
-        "Int" | "Bigint" | "BigintBig" | "int64" | "uint64" | "int" | "uint" => {
+        "Int" | "Bigint" | "BigintBig" | "int64" => {
             TypeNode::Primitive(PrimitiveTypeName::Bigint)
         }
         "Bool" | "bool" => TypeNode::Primitive(PrimitiveTypeName::Boolean),
-        "ByteString" | "[]byte" | "string" => TypeNode::Primitive(PrimitiveTypeName::ByteString),
+        "ByteString" => TypeNode::Primitive(PrimitiveTypeName::ByteString),
         "PubKey" => TypeNode::Primitive(PrimitiveTypeName::PubKey),
         "Sig" => TypeNode::Primitive(PrimitiveTypeName::Sig),
         "Sha256" | "Sha256Digest" => TypeNode::Primitive(PrimitiveTypeName::Sha256),
@@ -1269,11 +1269,14 @@ impl<'a> GoParser<'a> {
                     self.advance();
                 }
                 let inner = self.parse_type();
-                // []byte -> ByteString
-                if let TypeNode::Primitive(PrimitiveTypeName::Bigint) = &inner {
-                    // byte is not bigint, but we mapped it via map_go_type; for []byte just return ByteString
-                }
-                return TypeNode::Primitive(PrimitiveTypeName::ByteString);
+                // N-338: a slice type (`[]byte` included) is not a documented
+                // Go-surface spelling (docs/formats/go.md); it stays an unknown
+                // type name so the validator refuses it, quoting the spelling.
+                let elem = match &inner {
+                    TypeNode::Custom(n) => n.clone(),
+                    _ => "T".to_string(),
+                };
+                return TypeNode::Custom(format!("[]{}", elem));
             }
             // Fixed-size array [N]T
             let size = if let TokenType::Number(n) = self.current().typ.clone() {
