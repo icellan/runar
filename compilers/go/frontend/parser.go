@@ -1024,7 +1024,9 @@ func (p *parseContext) parseStatement(node *sitter.Node) Statement {
 	errsBefore := len(p.errors)
 	var stmt Statement
 	switch node.Type() {
-	case "lexical_declaration":
+	case "lexical_declaration", "variable_declaration":
+		// N-054: tree-sitter parses `const`/`let` as lexical_declaration and
+		// `var` as variable_declaration. `var` is a mutable `let` here.
 		stmt = p.parseVariableDecl(node)
 
 	case "expression_statement":
@@ -1098,6 +1100,7 @@ func (p *parseContext) tsStatementKindName(node *sitter.Node) string {
 
 func (p *parseContext) parseVariableDecl(node *sitter.Node) Statement {
 	// lexical_declaration: (const|let) variable_declarator
+	// variable_declaration: var variable_declarator (N-054: mutable, as `let`)
 	isConst := false
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)

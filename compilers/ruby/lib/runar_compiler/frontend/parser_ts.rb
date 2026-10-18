@@ -1169,8 +1169,8 @@ module RunarCompiler
           return nil
         end
 
-        # Variable declarations: const, let
-        if tok.kind == TOK_IDENT && (tok.value == "const" || tok.value == "let")
+        # Variable declarations: const, let, var (N-054: `var` is a mutable `let`)
+        if tok.kind == TOK_IDENT && (tok.value == "const" || tok.value == "let" || tok.value == "var")
           return parse_variable_decl(location)
         end
 
@@ -1240,8 +1240,8 @@ module RunarCompiler
       end
 
       def parse_variable_decl(location)
-        keyword = advance # const or let
-        is_mutable = keyword.value == "let"
+        keyword = advance # const, let or var
+        is_mutable = keyword.value != "const" # N-054: `var` is a mutable `let`
 
         name_tok = expect(TOK_IDENT)
         var_name = name_tok.value
@@ -1314,7 +1314,7 @@ module RunarCompiler
 
         # Initializer: let i: bigint = 0n  or  let i = 0n
         init_loc = loc
-        if check_ident("let") || check_ident("const")
+        if check_ident("let") || check_ident("const") || check_ident("var")
           init_stmt = parse_variable_decl(init_loc)
           unless init_stmt.is_a?(VariableDeclStmt)
             init_stmt = VariableDeclStmt.new(

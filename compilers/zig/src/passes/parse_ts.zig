@@ -1366,9 +1366,9 @@ const Parser = struct {
             return null;
         }
 
-        // Variable declarations: const, let
+        // Variable declarations: const, let, var (N-054: `var` is a mutable `let`)
         if (self.checkIdent("const")) return self.parseVarDecl(false);
-        if (self.checkIdent("let")) return self.parseVarDecl(true);
+        if (self.checkIdent("let") or self.checkIdent("var")) return self.parseVarDecl(true);
 
         // If statement
         if (self.checkIdent("if")) return self.parseIfStmt();
@@ -1453,7 +1453,7 @@ const Parser = struct {
 
     fn parseVarDecl(self: *Parser, mutable: bool) ?Statement {
         const loc = self.currentSourceLoc();
-        _ = self.bump(); // consume 'const' or 'let'
+        _ = self.bump(); // consume 'const', 'let' or 'var'
 
         if (self.current.kind != .ident) {
             self.addError("expected variable name");
@@ -1553,7 +1553,7 @@ const Parser = struct {
         var cond_tests_iter: bool = true;
 
         // Initializer: let/const varname = expr
-        if (self.checkIdent("let") or self.checkIdent("const")) {
+        if (self.checkIdent("let") or self.checkIdent("const") or self.checkIdent("var")) {
             _ = self.bump();
             if (self.current.kind == .ident) {
                 var_name = self.bump().text;

@@ -1103,8 +1103,8 @@ class _TsParser:
             self._skip_unsupported_statement()
             return None
 
-        # Variable declarations: const, let
-        if tok.kind == TOK_IDENT and tok.value in ("const", "let"):
+        # Variable declarations: const, let, var (N-054: `var` is a mutable `let`)
+        if tok.kind == TOK_IDENT and tok.value in ("const", "let", "var"):
             return self._parse_variable_decl(location)
 
         # If statement
@@ -1167,8 +1167,8 @@ class _TsParser:
             self.advance()
 
     def _parse_variable_decl(self, loc: SourceLocation) -> Statement:
-        keyword = self.advance()  # const or let
-        is_mutable = keyword.value == "let"
+        keyword = self.advance()  # const, let or var
+        is_mutable = keyword.value != "const"  # N-054: `var` is a mutable `let`
 
         name_tok = self.expect(TOK_IDENT)
         var_name = name_tok.value
@@ -1236,7 +1236,7 @@ class _TsParser:
         # Initializer: let i: bigint = 0n  or  let i = 0n
         init_loc = self.loc()
         init_stmt: VariableDeclStmt
-        if self.check_ident("let") or self.check_ident("const"):
+        if self.check_ident("let") or self.check_ident("const") or self.check_ident("var"):
             stmt = self._parse_variable_decl(init_loc)
             if isinstance(stmt, VariableDeclStmt):
                 init_stmt = stmt

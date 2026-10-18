@@ -1304,7 +1304,8 @@ public final class TsParser {
                 return null;
             }
 
-            if (tok.kind == TOK_IDENT && (tok.value.equals("const") || tok.value.equals("let"))) {
+            // N-054: `var` is a mutable `let`.
+            if (tok.kind == TOK_IDENT && (tok.value.equals("const") || tok.value.equals("let") || tok.value.equals("var"))) {
                 return parseVariableDecl(location);
             }
             if (tok.kind == TOK_IDENT && tok.value.equals("if")) {
@@ -1439,7 +1440,7 @@ public final class TsParser {
 
             SourceLocation initLoc = loc();
             VariableDeclStatement initStmt;
-            if (checkIdent("let") || checkIdent("const")) {
+            if (checkIdent("let") || checkIdent("const") || checkIdent("var")) {
                 Statement stmt = parseVariableDecl(initLoc);
                 if (stmt instanceof VariableDeclStatement vds) {
                     initStmt = vds;
