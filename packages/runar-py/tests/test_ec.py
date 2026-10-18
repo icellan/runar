@@ -177,5 +177,7 @@ class TestOnCurve:
         """
         y0 = 0x4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee
         noncanonical_x = EC_P + 1
-        alias_point = ec_make_point(noncanonical_x, y0)
+        # N-183: ec_make_point now refuses x >= p, as the script does, so the
+        # alias is written out as raw bytes (it is still a 64-byte Point).
+        alias_point = noncanonical_x.to_bytes(32, 'big') + y0.to_bytes(32, 'big')
         assert ec_on_curve(alias_point) is False

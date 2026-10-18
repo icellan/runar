@@ -615,6 +615,10 @@ export function ecEncodeCompressed(p: Point): ByteString {
 }
 
 export function ecMakePoint(x: bigint, y: bigint): Point {
+  // N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+  if (x < 0n || x >= EC_P || y < 0n || y >= EC_P) {
+    throw new Error('ecMakePoint: coordinate is not a field element (0 <= v < p)');
+  }
   const xHex = x.toString(16).padStart(64, '0');
   const yHex = y.toString(16).padStart(64, '0');
   return (xHex + yHex) as unknown as Point;

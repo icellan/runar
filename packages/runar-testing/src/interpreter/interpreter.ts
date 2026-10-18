@@ -2351,6 +2351,11 @@ function ecEncodeCompressedImpl(pt: Uint8Array): Uint8Array {
 }
 
 function ecMakePointImpl(x: bigint, y: bigint): Uint8Array {
+  // N-183 / R-156: the script requires each coordinate to be a field element
+  // (0 <= v < p, OP_WITHIN + OP_VERIFY) before it builds the Point.
+  if (x < 0n || x >= EC_P || y < 0n || y >= EC_P) {
+    throw new Error('ecMakePoint: coordinate is not a field element (0 <= v < p)');
+  }
   return ecEncodePoint(x, y);
 }
 

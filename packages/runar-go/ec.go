@@ -253,6 +253,11 @@ func EcMakePoint(x, y BigintBig) Point {
 		panic(fmt.Sprintf("runar: EcMakePoint coordinate wider than 32 bytes (x %d bits, y %d bits) — "+
 			"it would not fit the Point encoding the script builds", x.BitLen(), y.BitLen()))
 	}
+	// N-183 / R-156: the script requires each coordinate to be a field
+	// element, 0 <= v < p (OP_WITHIN + OP_VERIFY), not merely to fit 32 bytes.
+	if x.Cmp(ecP) >= 0 || y.Cmp(ecP) >= 0 {
+		panic(fmt.Sprintf("runar: EcMakePoint coordinate is not a field element (0 <= v < p), got (%s, %s)", x, y))
+	}
 	return coordsToPoint(x, y)
 }
 

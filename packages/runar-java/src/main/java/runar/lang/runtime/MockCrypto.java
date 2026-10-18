@@ -1027,6 +1027,11 @@ public final class MockCrypto {
     }
 
     public static Point ecMakePoint(BigInteger x, BigInteger y) {
+        // N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+        if (x.signum() < 0 || x.compareTo(EC_P) >= 0 || y.signum() < 0 || y.compareTo(EC_P) >= 0) {
+            throw new IllegalArgumentException(
+                "ecMakePoint: coordinate is not a field element (0 <= v < p)");
+        }
         return new Point(x, y);
     }
 

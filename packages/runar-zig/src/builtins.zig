@@ -1225,11 +1225,20 @@ fn slhForsPkFromSig(comptime params: SlhParams, fors_sig: []const u8, md: []cons
     return slhT(params, pk_seed, &fors_pk_adrs, &roots);
 }
 
-pub fn ecMakePoint(x: base.BigintBig, y: base.BigintBig) base.Point {
+/// N-183 / R-156: the script requires each coordinate to be a field element,
+/// 0 <= v < p (OP_WITHIN + OP_VERIFY). u256 already excludes negatives and
+/// anything wider than 32 bytes; this refuses [p, 2^256).
+pub fn ecMakePointChecked(x: base.BigintBig, y: base.BigintBig) EcBuiltinError!base.Point {
     var point: [64]u8 = undefined;
     std.mem.writeInt(u256, point[0..32], x, .big);
     std.mem.writeInt(u256, point[32..64], y, .big);
+    _ = try ecDecodeCanonical(&point);
     return dupeBytes(&point);
+}
+
+pub fn ecMakePoint(x: base.BigintBig, y: base.BigintBig) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; a non-field-element coordinate = script-abort.
+    return ecMakePointChecked(x, y) catch @panic("ecMakePoint: coordinate is not a field element (0 <= v < p)");
 }
 
 pub fn ecPointX(point: base.Point) base.BigintBig {

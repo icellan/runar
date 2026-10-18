@@ -208,6 +208,17 @@ pub fn ec_make_point(x: BigintBig, y: BigintBig) -> Point {
         x.bits(),
         y.bits()
     );
+    // N-183 / R-156: the script requires each coordinate to be a field
+    // element, 0 <= v < p (OP_WITHIN + OP_VERIFY), not merely to fit 32 bytes.
+    let field_p = BigintBig::parse_bytes(
+        b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
+        16,
+    )
+    .expect("secp256k1 p");
+    assert!(
+        x < field_p && y < field_p,
+        "runar: ec_make_point coordinate is not a field element (0 <= v < p), got ({x}, {y})"
+    );
     let mut buf = vec![0u8; 64];
     for (dst, src) in [(0usize, &x), (32usize, &y)] {
         let (_, mag) = src.clone().into_parts();

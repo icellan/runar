@@ -52,7 +52,9 @@ RSpec.describe Runar::EC do
       # ("the predicate stays TOTAL: onCurve(alias) is false").
       y0 = 0x4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee
       noncanonical_x = EC_P + 1
-      alias_point = ec_make_point(noncanonical_x, y0)
+      # N-183: ec_make_point now refuses x >= p, as the script does, so the
+      # alias is written out as raw hex (it is still a 64-byte Point).
+      alias_point = format('%064x', noncanonical_x) + format('%064x', y0)
       expect(ec_on_curve(alias_point)).to be false
     end
   end

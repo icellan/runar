@@ -185,7 +185,13 @@ def ec_mul_gen(k: int) -> bytes:
 
 
 def ec_make_point(x: int, y: int) -> bytes:
-    """Create a Point from x, y coordinates."""
+    """Create a Point from x, y coordinates.
+
+    N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+    """
+    if not (0 <= x < EC_P and 0 <= y < EC_P):
+        raise ValueError(
+            "ec_make_point: coordinate is not a field element (0 <= v < p)")
     return _encode_point(x, y)
 
 

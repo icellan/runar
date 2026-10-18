@@ -191,6 +191,11 @@ module Runar
 
       # Create a Point from x, y integer coordinates.
       def ec_make_point(x, y)
+        # N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+        unless x >= 0 && x < EC_P && y >= 0 && y < EC_P
+          raise ArgumentError, 'ec_make_point: coordinate is not a field element (0 <= v < p)'
+        end
+
         encode_point(x, y)
       end
 
