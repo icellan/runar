@@ -7,7 +7,8 @@ import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { UTXO } from './types.js';
 import { RunarContract } from './contract.js';
-import { buildP2PKHScript } from './script-utils.js';
+import { buildP2PKHScript, matchesArtifact } from './script-utils.js';
+import { findLastOpReturn } from './state.js';
 
 // N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
 // be made sound, so they are deprecated rather than redesigned or removed.
@@ -203,34 +204,38 @@ export class TokenWallet {
     const address = await this.signer.getAddress();
     const allUtxos = await this.provider.getUtxos(address);
 
-    // Filter to UTXOs whose script begins like this token contract's.
+    // Filter to UTXOs whose script was produced from this token contract.
     //
-    // R-274: this used to compare against `this.artifact.script` whole. That
-    // is the TEMPLATE — each constructor slot holds a one-byte OP_0 that
-    // deployment replaces with the encoded argument — so for any contract with
-    // a constructorSlot inside its code part, no deployed instance starts with
-    // it and this returned EMPTY. Silently: getBalance() answered 0n for a
-    // wallet holding tokens, and transfer() reported "no token UTXOs found".
-    //
-    // The comparison cannot run past the first slot: the substituted argument
-    // is variable-length, so every byte after it sits at a shifted offset.
-    // Matching the template up to the first slot is what every deployed
-    // instance of this contract genuinely shares. It is a FILTER, not proof of
-    // identity — callers that need certainty read the artifact's slot layout.
-    const firstSlotByteOffset = (this.artifact.constructorSlots ?? [])
-      .map((slot) => slot.byteOffset)
-      .reduce((lowest, offset) => Math.min(lowest, offset), Number.POSITIVE_INFINITY);
-    const scriptPrefix = Number.isFinite(firstSlotByteOffset)
-      ? this.artifact.script.slice(0, firstSlotByteOffset * 2)
-      : this.artifact.script;
+    // R-274: comparing against `this.artifact.script` whole is wrong — that is
+    // the TEMPLATE, and every slot (constructor arg, codeSepIndex, code-part
+    // length) holds a placeholder that deployment replaces. N-076: the R-274
+    // fix matched only up to the first CONSTRUCTOR slot, which still missed
+    // honest deployments whose template has a codeSepIndex slot earlier, and
+    // accepted any script sharing those leading bytes. When the artifact has
+    // slots, use the slot-aware matcher `matchesArtifact`; a template with no
+    // slots is deployed verbatim, so its literal prefix is exact.
+    const slotted = (this.artifact.constructorSlots ?? []).length > 0;
 
     return allUtxos.filter((utxo) => {
-      // With no script to compare, or a template that is all slot from byte 0,
-      // include everything and let the caller filter further.
-      if (utxo.script && scriptPrefix) {
-        return utxo.script.startsWith(scriptPrefix);
+      // With no script to compare, include everything and let the caller
+      // filter further.
+      if (!utxo.script || !this.artifact.script) return true;
+      if (!slotted) return utxo.script.startsWith(this.artifact.script);
+      // matchesArtifact strips the state section only for artifacts that
+      // declare stateFields; cut it here for the rest so the code part is
+      // what gets matched.
+      let codeHex = utxo.script;
+      if (!(this.artifact.stateFields && this.artifact.stateFields.length > 0)) {
+        const opReturnPos = findLastOpReturn(codeHex);
+        if (opReturnPos !== -1) codeHex = codeHex.slice(0, opReturnPos);
       }
-      return true;
+      try {
+        return matchesArtifact(this.artifact, codeHex);
+      } catch {
+        // A script that is not well-formed at the artifact's slot offsets
+        // (F-238) is not an instance of this contract.
+        return false;
+      }
     });
   }
 }

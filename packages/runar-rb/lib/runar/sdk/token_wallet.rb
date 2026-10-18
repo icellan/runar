@@ -6,6 +6,8 @@ require_relative 'signer'
 require_relative 'contract'
 require_relative 'calling'
 require_relative 'deployment'
+require_relative 'script_utils'
+require_relative 'state'
 
 # TokenWallet — manages token UTXOs for a fungible token contract.
 #
@@ -169,13 +171,36 @@ module Runar
         address = @signer.get_address
         all_utxos = @provider.get_utxos(address)
 
-        script_prefix = @artifact.script
+        # N-076: the artifact script is the TEMPLATE; every slot (constructor
+        # arg, codeSepIndex, code-part length) is a placeholder that deployment
+        # replaces, so a raw prefix of it never matches a slotted deployment.
+        # With constructor slots, use the slot-aware +matches_artifact+; a
+        # template with none is deployed verbatim, so its literal prefix is
+        # exact.
+        template = @artifact.script
+        slotted = !@artifact.constructor_slots.nil? && !@artifact.constructor_slots.empty?
+        declares_state = !@artifact.state_fields.nil? && !@artifact.state_fields.empty?
 
         all_utxos.select do |utxo|
-          if utxo.script && !utxo.script.empty? && script_prefix && !script_prefix.empty?
-            utxo.script.start_with?(script_prefix)
-          else
+          if utxo.script.nil? || utxo.script.empty? || template.nil? || template.empty?
             true
+          elsif !slotted
+            utxo.script.start_with?(template)
+          else
+            # matches_artifact strips the state section only for artifacts
+            # that declare state fields; cut it here for the rest.
+            code_hex = utxo.script
+            unless declares_state
+              pos = State.find_last_op_return(code_hex)
+              code_hex = code_hex[0, pos] if pos != -1
+            end
+            begin
+              ScriptUtils.matches_artifact(@artifact, code_hex)
+            rescue MalformedScriptError
+              # Not well-formed at the artifact's slot offsets (F-238): not an
+              # instance of this contract.
+              false
+            end
           end
         end
       end

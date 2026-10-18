@@ -18,6 +18,9 @@ from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.contract import RunarContract
 from runar.sdk.deployment import build_p2pkh_script
+from runar.sdk.errors import MalformedScriptError
+from runar.sdk.script_utils import matches_artifact
+from runar.sdk.state import find_last_op_return
 
 
 # N-239 (user decision R92): ``merge`` and ``transfer`` drive an ABI that
@@ -217,16 +220,38 @@ class TokenWallet:
         address = self.signer.get_address()
         all_utxos = self.provider.get_utxos(address)
 
-        script_prefix = self.artifact.script
+        # N-076: the artifact script is the TEMPLATE; every slot (constructor
+        # arg, codeSepIndex, code-part length) is a placeholder that
+        # deployment replaces, so a raw prefix of it never matches a slotted
+        # deployment. With constructor slots, use the slot-aware
+        # ``matches_artifact``; a template with none is deployed verbatim, so
+        # its literal prefix is exact.
+        template = self.artifact.script
+        slotted = bool(self.artifact.constructor_slots)
 
         result: list[Utxo] = []
         for utxo in all_utxos:
-            # If we have the script, check it starts with the contract code.
+            # If we have the script, compare it with the contract code.
             # Otherwise, include all UTXOs (caller can filter further).
-            if utxo.script and script_prefix:
-                if utxo.script.startswith(script_prefix):
+            if not utxo.script or not template:
+                result.append(utxo)
+            elif not slotted:
+                if utxo.script.startswith(template):
                     result.append(utxo)
             else:
-                result.append(utxo)
+                code_hex = utxo.script
+                # matches_artifact strips the state section only for
+                # artifacts that declare state fields; cut it here for the rest.
+                if not self.artifact.state_fields:
+                    pos = find_last_op_return(code_hex)
+                    if pos != -1:
+                        code_hex = code_hex[:pos]
+                try:
+                    if matches_artifact(self.artifact, code_hex):
+                        result.append(utxo)
+                except MalformedScriptError:
+                    # Not well-formed at the artifact's slot offsets (F-238):
+                    # not an instance of this contract.
+                    pass
 
         return result

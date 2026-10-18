@@ -220,15 +220,37 @@ func (tw *TokenWallet) GetUtxos() ([]UTXO, error) {
 		return nil, fmt.Errorf("TokenWallet.getUtxos: %w", err)
 	}
 
-	scriptPrefix := tw.artifact.Script
+	// N-076: the artifact script is the TEMPLATE; every slot (constructor
+	// arg, codeSepIndex, code-part length) is a placeholder that deployment
+	// replaces, so a raw prefix of it never matches a slotted deployment. With
+	// constructor slots, use the slot-aware MatchesArtifact; a template with
+	// none is deployed verbatim, so its literal prefix is exact.
+	template := tw.artifact.Script
+	slotted := len(tw.artifact.ConstructorSlots) > 0
 
 	var filtered []UTXO
 	for _, utxo := range allUtxos {
-		if utxo.Script != "" && scriptPrefix != "" {
-			if strings.HasPrefix(utxo.Script, scriptPrefix) {
+		if utxo.Script == "" || template == "" {
+			filtered = append(filtered, utxo)
+			continue
+		}
+		if !slotted {
+			if strings.HasPrefix(utxo.Script, template) {
 				filtered = append(filtered, utxo)
 			}
-		} else {
+			continue
+		}
+		// MatchesArtifact strips the state section only for artifacts that
+		// declare StateFields; cut it here for the rest.
+		codeHex := utxo.Script
+		if len(tw.artifact.StateFields) == 0 {
+			if pos := FindLastOpReturn(codeHex); pos != -1 {
+				codeHex = codeHex[:pos]
+			}
+		}
+		// A script that is not well-formed at the artifact's slot offsets
+		// (F-238) returns an error and is not an instance of this contract.
+		if ok, err := MatchesArtifact(tw.artifact, codeHex); err == nil && ok {
 			filtered = append(filtered, utxo)
 		}
 	}

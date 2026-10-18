@@ -7,6 +7,7 @@ import java.util.Objects;
 
 import runar.lang.sdk.Provider;
 import runar.lang.sdk.RunarArtifact;
+import runar.lang.sdk.ScriptUtils;
 import runar.lang.sdk.Signer;
 import runar.lang.sdk.UTXO;
 
@@ -63,12 +64,33 @@ public final class TokenWallet {
             return new ArrayList<>(all);
         }
 
+        // N-076: the artifact script is the TEMPLATE; every slot (constructor
+        // arg, codeSepIndex, code-part length) is a placeholder that
+        // deployment replaces, so a raw prefix of it never matches a slotted
+        // deployment. With constructor slots, use the slot-aware
+        // ScriptUtils.matchesArtifact; a template with none is deployed
+        // verbatim, so its literal prefix is exact.
+        boolean slotted = !artifact.constructorSlots().isEmpty();
         List<UTXO> out = new ArrayList<>();
         for (UTXO u : all) {
             String script = u.scriptHex();
             if (script == null) continue;
-            if (script.length() >= prefix.length() && script.startsWith(prefix)) {
-                out.add(u);
+            if (!slotted) {
+                if (script.length() >= prefix.length() && script.startsWith(prefix)) out.add(u);
+                continue;
+            }
+            // matchesArtifact strips the state section only for artifacts
+            // that declare state fields; cut it here for the rest.
+            try {
+                String codeHex = script;
+                if (!artifact.isStateful()) {
+                    int pos = ScriptUtils.findLastOpReturn(codeHex);
+                    if (pos != -1) codeHex = codeHex.substring(0, pos);
+                }
+                if (ScriptUtils.matchesArtifact(artifact, codeHex)) out.add(u);
+            } catch (IllegalArgumentException malformed) {
+                // Not well-formed at the artifact's slot offsets (F-238): not
+                // an instance of this contract.
             }
         }
         return out;

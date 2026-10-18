@@ -335,6 +335,74 @@ public final class ScriptUtils {
     }
 
     /**
+     * Determines whether {@code scriptHex} was produced from {@code artifact}
+     * regardless of the constructor args used (port of TS
+     * {@code matchesArtifact}). Every constructor slot and codeSepIndex slot is
+     * one variable script element; a {@code codePartLenSlots} field must equal
+     * the little-endian length of the code part being matched (everything
+     * before the state section, inscription envelope included).
+     *
+     * @throws IllegalArgumentException if {@code scriptHex} is not a
+     *     well-formed sequence of push elements at the offsets the artifact
+     *     expects (F-238)
+     */
+    public static boolean matchesArtifact(RunarArtifact artifact, String scriptHex) {
+        String codeHex = scriptHex;
+        if (artifact.stateFields() != null && !artifact.stateFields().isEmpty()) {
+            int opReturnPos = findLastOpReturn(scriptHex);
+            if (opReturnPos != -1) codeHex = scriptHex.substring(0, opReturnPos);
+        }
+
+        String template = artifact.scriptHex();
+        if (artifact.constructorSlots().isEmpty()) return codeHex.equals(template);
+
+        java.util.TreeSet<Integer> offsets = new java.util.TreeSet<>();
+        for (RunarArtifact.ConstructorSlot s : artifact.constructorSlots()) offsets.add(s.byteOffset());
+        for (RunarArtifact.CodeSepIndexSlot s : artifact.codeSepIndexSlots()) offsets.add(s.byteOffset());
+
+        java.util.Set<Integer> lenFields = new java.util.HashSet<>();
+        for (RunarArtifact.CodePartLenSlot s : artifact.codePartLenSlots()) lenFields.add(s.byteOffset() * 2);
+        String deployedLen = toLittleEndian32(codeHex.length() / 2);
+        final String code = codeHex;
+
+        int templatePos = 0;
+        int codePos = 0;
+        for (int byteOffset : offsets) {
+            int slotHexOffset = byteOffset * 2;
+            int segLen = slotHexOffset - templatePos;
+            if (codePos + segLen > code.length()) return false;
+            if (!segmentMatches(template, code, lenFields, deployedLen, templatePos, slotHexOffset, codePos)) {
+                return false;
+            }
+            templatePos = slotHexOffset + 2;
+            int elemOffset = codePos + segLen;
+            codePos = elemOffset + decodePushData(code, elemOffset).hexCharsConsumed();
+        }
+        return code.length() - codePos == template.length() - templatePos
+            && segmentMatches(template, code, lenFields, deployedLen, templatePos, template.length(), codePos);
+    }
+
+    private static boolean segmentMatches(
+        String template, String code, java.util.Set<Integer> lenFields, String deployedLen,
+        int tStart, int tEnd, int cStart
+    ) {
+        int t = tStart;
+        int c = cStart;
+        while (t < tEnd) {
+            if (lenFields.contains(t)) {
+                if (c + 8 > code.length() || !code.startsWith(deployedLen, c)) return false;
+                t += 8;
+                c += 8;
+                continue;
+            }
+            if (c >= code.length() || template.charAt(t) != code.charAt(c)) return false;
+            t++;
+            c++;
+        }
+        return true;
+    }
+
+    /**
      * Builds a standard P2PKH locking script from an address, pubkey
      * hash, or public key — parity with Go {@code BuildP2PKHScript}.
      * <ul>

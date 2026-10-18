@@ -4,7 +4,8 @@ use super::types::{RunarArtifact, Utxo, SdkValue, CallOptions};
 use super::provider::Provider;
 use super::signer::Signer;
 use super::contract::RunarContract;
-use super::script_utils::build_p2pkh_script;
+use super::script_utils::{build_p2pkh_script, matches_artifact};
+use super::state::find_last_op_return;
 use std::sync::Once;
 
 // N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
@@ -219,16 +220,44 @@ impl TokenWallet {
         let address = self.signer.get_address()?;
         let all_utxos = self.provider.get_utxos(&address)?;
 
-        let script_prefix = &self.artifact.script;
+        // N-076: the artifact script is the TEMPLATE; every slot (constructor
+        // arg, codeSepIndex, code-part length) is a placeholder that
+        // deployment replaces, so a raw prefix of it never matches a slotted
+        // deployment. With constructor slots, use the slot-aware
+        // `matches_artifact`; a template with none is deployed verbatim, so
+        // its literal prefix is exact.
+        let template = &self.artifact.script;
+        let slotted = self
+            .artifact
+            .constructor_slots
+            .as_ref()
+            .map_or(false, |s| !s.is_empty());
+        let declares_state = self
+            .artifact
+            .state_fields
+            .as_ref()
+            .map_or(false, |s| !s.is_empty());
 
         Ok(all_utxos
             .into_iter()
             .filter(|utxo| {
-                if !utxo.script.is_empty() && !script_prefix.is_empty() {
-                    utxo.script.starts_with(script_prefix)
-                } else {
-                    true
+                if utxo.script.is_empty() || template.is_empty() {
+                    return true;
                 }
+                if !slotted {
+                    return utxo.script.starts_with(template.as_str());
+                }
+                // `matches_artifact` strips the state section only for
+                // artifacts that declare state fields; cut it here for the rest.
+                let mut code_hex = utxo.script.as_str();
+                if !declares_state {
+                    if let Some(pos) = find_last_op_return(code_hex) {
+                        code_hex = &code_hex[..pos];
+                    }
+                }
+                // A script that is not well-formed at the artifact's slot
+                // offsets (F-238) is an Err and not an instance of this contract.
+                matches_artifact(&self.artifact, code_hex).unwrap_or(false)
             })
             .collect())
     }
