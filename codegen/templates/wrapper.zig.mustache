@@ -3,12 +3,17 @@
 // Do not edit manually.
 
 const runar = @import("runar");
+const std = @import("std");
+const sdk = @import("runar-zig");
 
 /// Typed wrapper for the {{contractName}} contract.
 ///
 /// This module re-exports the contract's types and provides
 /// compile-time constructor and method signatures for tooling.
 pub const {{contractName}}Wrapper = struct {
+    allocator: std.mem.Allocator,
+    inner: *sdk.RunarContract,
+
     /// Constructor parameters
     pub const ConstructorParams = struct {
 {{#constructorParams}}
@@ -25,6 +30,26 @@ pub const {{contractName}}Wrapper = struct {
     };
 
 {{/methods}}
+    /// Re-attach to an existing on-chain UTXO.
+    pub fn fromUtxo(
+        allocator: std.mem.Allocator,
+        artifact: *sdk.RunarArtifact,
+        utxo: sdk.UTXO,
+    ) !{{contractName}}Wrapper {
+        const inner = try allocator.create(sdk.RunarContract);
+        inner.* = try sdk.RunarContract.fromUtxo(allocator, artifact, utxo);
+        return .{ .allocator = allocator, .inner = inner };
+    }
+
+    pub fn deinit(self: *{{contractName}}Wrapper) void {
+        self.inner.deinit();
+        self.allocator.destroy(self.inner);
+    }
+
+    pub fn attachInscription(self: *{{contractName}}Wrapper, insc: sdk.Inscription) !void {
+        try self.inner.withInscription(insc);
+    }
+
     pub const contract_name = "{{contractName}}";
     pub const is_stateful = {{#isStateful}}true{{/isStateful}}{{^isStateful}}false{{/isStateful}};
 };

@@ -72,7 +72,7 @@ import ts from 'typescript';
 import type { RunarArtifact } from 'runar-ir-schema';
 import { RunarContract } from '../contract.js';
 import { buildP2PKHScript } from '../script-utils.js';
-import { generateTypescript, generateRust, generatePython, generateGo } from '../codegen/index.js';
+import { generateTypescript, generateRust, generatePython, generateGo, generateZig } from '../codegen/index.js';
 
 function fixturesDir(rel: string): string {
   return fileURLToPath(new URL(`../../../../conformance/sdk-codegen/fixtures/${rel}`, import.meta.url));
@@ -269,6 +269,35 @@ describe('F-297 — cross-SDK codegen conformance (TypeScript runner)', () => {
       expect(py).toContain('def from_utxo(');
       expect(py).toContain('def attach_inscription(self, insc: Inscription)');
     });
+  });
+
+  // N-340: the TS SDK's generateZig renders codegen/templates/wrapper.zig.mustache,
+  // a different shape from the Zig SDK's own generator (packages/runar-zig/src/
+  // sdk_codegen.zig). The member names and signatures asserted here are the ones
+  // that generator emits and its runner (sdk_codegen_conformance_test.zig) asserts.
+  // Structural only: the template output is not compiled here (no Zig toolchain in
+  // vitest), so this proves presence and shape, not that the Zig compiles.
+  describe('generateZig carries the fromUtxo / attachInscription members (N-340)', () => {
+    for (const [fixture, name] of [
+      ['p2pkh.json', 'P2PKH'],
+      ['counter.json', 'Counter'],
+      ['simple.json', 'Simple'],
+      ['stateful-escrow.json', 'Escrow'],
+      ['inscribed.json', 'InscribedHolder'],
+    ] as const) {
+      it(`${fixture}`, () => {
+        const src = generateZig(loadFixture(fixture));
+        expect(src).toContain(`pub const ${name}Wrapper = struct`);
+        expect(src).toContain('const sdk = @import("runar-zig");');
+        expect(src).toContain('inner: *sdk.RunarContract,');
+        expect(src).toContain('pub fn fromUtxo(');
+        expect(src).toContain('utxo: sdk.UTXO,');
+        expect(src).toContain('inner.* = try sdk.RunarContract.fromUtxo(allocator, artifact, utxo);');
+        expect(src).toContain(`pub fn attachInscription(self: *${name}Wrapper, insc: sdk.Inscription) !void`);
+        expect(src).toContain('try self.inner.withInscription(insc);');
+        expect(src).not.toContain('{{');
+      });
+    }
   });
 
   it('regression proof: loadWrapper rejects an out-of-scope identifier reference', () => {
