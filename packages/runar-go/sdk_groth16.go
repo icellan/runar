@@ -64,7 +64,9 @@ func NewGroth16WAContract(artifact *RunarArtifact) *Groth16WAContract {
 	// The owner public key is not known until Deploy (F-233). Until then
 	// every constructor slot holds an empty push, i.e. the template's own
 	// OP_0 placeholder, so LockingScript() before Deploy is the template.
-	inner := NewRunarContract(artifact, groth16WAPlaceholderArgs(artifact))
+	// N-073: the empty-push placeholders are internal template values, not
+	// user input, so the fixed-width constructor-arg check is skipped.
+	inner := newRunarContract(artifact, groth16WAPlaceholderArgs(artifact), false)
 	return &Groth16WAContract{
 		artifact: artifact,
 		contract: inner,

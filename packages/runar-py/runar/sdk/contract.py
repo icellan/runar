@@ -2499,11 +2499,19 @@ def _check_byte_string_ctor_args(artifact: RunarArtifact, args: list) -> list:
                 f"of {artifact.contract_name} must be an even-length hex string"
             )
 
+        def width(h):
+            # N-073: a fixed-width type must have its declared width (N-045).
+            try:
+                check_fixed_width_value(h, leaf_type, f"RunarContract: constructor arg '{param.name}'")
+            except ValueError as e:
+                raise InvalidConstructorArgError(str(e)) from None
+            return h
+
         def norm(v):
             if isinstance(v, str):
-                return v if is_hex_bytes(v) else refuse()
+                return width(v) if is_hex_bytes(v) else refuse()
             if isinstance(v, (bytes, bytearray)):
-                return bytes(v).hex()
+                return width(bytes(v).hex())
             if is_fixed_array and isinstance(v, (list, tuple)):
                 return [norm(x) for x in v]
             return refuse()

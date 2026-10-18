@@ -3115,28 +3115,42 @@ fn check_byte_string_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
     // N-330: only `Bytes` (hex) is a ByteString-family value, and an `Array`
     // only for a FixedArray param. Int / BigInt / Bool would be encoded as a
     // script number or OP_0/OP_1; Auto / EmptySig are call-arg markers.
-    fn visit(v: &SdkValue, fixed_array: bool, bad: &mut bool) {
+    // N-073: a hex leaf of a fixed-width type must also have its declared
+    // width; the N-045 message is returned in `width_err`.
+    fn visit(v: &SdkValue, fixed_array: bool, bad: &mut bool, leaf: &str, what: &str, width_err: &mut Option<String>) {
         match v {
             SdkValue::Bytes(hex) => {
                 if !super::script_utils::is_hex_bytes(hex) {
                     *bad = true;
+                } else if width_err.is_none() {
+                    if let Err(e) = super::state::check_fixed_width_value(v, leaf, what) {
+                        *width_err = Some(e);
+                    }
                 }
             }
-            SdkValue::Array(items) if fixed_array => items.iter().for_each(|i| visit(i, true, bad)),
+            SdkValue::Array(items) if fixed_array => {
+                items.iter().for_each(|i| visit(i, true, bad, leaf, what, width_err))
+            }
             _ => *bad = true,
         }
     }
     for (param, arg) in artifact.abi.constructor.params.iter().zip(args) {
-        if !BYTE_STRING_CTOR_TYPES.contains(&leaf_type(&param.param_type)) {
+        let leaf = leaf_type(&param.param_type);
+        if !BYTE_STRING_CTOR_TYPES.contains(&leaf) {
             continue;
         }
         let mut bad = false;
-        visit(arg, param.param_type.trim().starts_with("FixedArray<"), &mut bad);
+        let mut width_err = None;
+        let what = format!("RunarContract: constructor arg '{}'", param.name);
+        visit(arg, param.param_type.trim().starts_with("FixedArray<"), &mut bad, leaf, &what, &mut width_err);
         if bad {
             panic!(
                 "RunarContract: constructor arg '{}' ({}) of {} must be an even-length hex string",
                 param.name, param.param_type, artifact.contract_name
             );
+        }
+        if let Some(e) = width_err {
+            panic!("{}", e);
         }
     }
 }

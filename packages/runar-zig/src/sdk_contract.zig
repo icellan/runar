@@ -295,6 +295,25 @@ fn isHexBytesValue(v: types.StateValue, fixed_array: bool) bool {
     };
 }
 
+/// N-073: every hex leaf of a fixed-width type (N-045 widths) must have its
+/// declared width. Called only after `isHexBytesValue` has accepted the arg, so
+/// every leaf is `.bytes` hex; `checkFixedWidthValue` is a no-op for the
+/// width-less types (ByteString, Sig, SigHashPreimage).
+fn ctorLeafWidthOk(v: types.StateValue, leaf_type: []const u8) bool {
+    switch (v) {
+        .array_value => |items| {
+            for (items) |i| {
+                if (!ctorLeafWidthOk(i, leaf_type)) return false;
+            }
+            return true;
+        },
+        else => {
+            state_mod.checkFixedWidthValue(v, leaf_type) catch return false;
+            return true;
+        },
+    }
+}
+
 /// N-329: refuse a ByteString-family constructor arg that is `.bytes` but not
 /// an even-length hex string. `encodeArg` treats every `.bytes` as hex, so raw
 /// bytes (e.g. 20 raw Addr bytes) were emitted as a push header followed by
@@ -312,6 +331,7 @@ fn checkByteStringCtorArgs(params: []const types.ABIParam, args: []const types.S
         if (!is_bytes_type) continue;
         const is_fixed_array = std.mem.startsWith(u8, std.mem.trim(u8, p.type_name, " "), "FixedArray<");
         if (!isHexBytesValue(a, is_fixed_array)) return ContractError.InvalidConstructorArg;
+        if (!ctorLeafWidthOk(a, leaf)) return ContractError.InvalidConstructorArg;
     }
 }
 
@@ -4429,7 +4449,7 @@ test "RunarContract.init and getLockingScript for stateless contract" {
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
 
-    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "aabbccdd" }});
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "aabbccddaabbccddaabbccddaabbccddaabbccdd" }}); // N-073: Addr is 20 bytes
     defer contract.deinit();
 
     const ls = try contract.getLockingScript();
@@ -4598,7 +4618,7 @@ test "RunarContract.withInscription injects envelope into locking script" {
     var artifact = try types.RunarArtifact.fromJson(allocator, json);
     defer artifact.deinit();
 
-    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "aabbccdd" }});
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "aabbccddaabbccddaabbccddaabbccddaabbccdd" }}); // N-073: Addr is 20 bytes
     defer contract.deinit();
 
     // Attach an inscription

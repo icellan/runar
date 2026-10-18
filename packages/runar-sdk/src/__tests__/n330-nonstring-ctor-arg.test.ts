@@ -42,16 +42,22 @@ describe('N-330 non-string ByteString constructor arg', () => {
   });
 
   it('encodes a Buffer as its raw bytes', () => {
-    const viaBuf = new RunarContract(makeArtifact('PubKey'), [Buffer.from(bytes)]).getLockingScript();
-    const viaHex = new RunarContract(makeArtifact('PubKey'), [hex]).getLockingScript();
+    // N-073: PubKey is fixed-width (33 bytes), so use a full-width value.
+    const pk = Array.from({ length: 33 }, (_, i) => i + 1);
+    const pkHex = pk.map((b) => b.toString(16).padStart(2, '0')).join('');
+    const viaBuf = new RunarContract(makeArtifact('PubKey'), [Buffer.from(pk)]).getLockingScript();
+    const viaHex = new RunarContract(makeArtifact('PubKey'), [pkHex]).getLockingScript();
     expect(viaBuf).toBe(viaHex);
   });
 
   it('encodes a Uint8Array FixedArray<Addr, 2> leaf as its raw bytes', () => {
     const fa = { elementType: 'Addr', length: 2, syntheticNames: ['owner__0', 'owner__1'] };
     const a = makeArtifact('FixedArray<Addr, 2>', fa);
-    const viaBytes = new RunarContract(a, [[new Uint8Array(bytes), hex]]).getLockingScript();
-    const viaHex = new RunarContract(a, [[hex, hex]]).getLockingScript();
+    // N-073: Addr is fixed-width (20 bytes), so use a full-width value.
+    const addr = Array.from({ length: 20 }, (_, i) => i + 1);
+    const addrHex = addr.map((b) => b.toString(16).padStart(2, '0')).join('');
+    const viaBytes = new RunarContract(a, [[new Uint8Array(addr), addrHex]]).getLockingScript();
+    const viaHex = new RunarContract(a, [[addrHex, addrHex]]).getLockingScript();
     expect(viaBytes).toBe(viaHex);
   });
 

@@ -254,7 +254,7 @@ func checkByteStringCtorArgs(artifact *RunarArtifact, args []interface{}) {
 			case ByteString:
 				s = string(t)
 			case []byte:
-				continue
+				s = hex.EncodeToString(t)
 			default:
 				// N-330: nil, numbers, bools, structs ... would reach
 				// encodeArg's fmt.Sprintf("%v") arm and be spliced in as text.
@@ -266,6 +266,10 @@ func checkByteStringCtorArgs(artifact *RunarArtifact, args []interface{}) {
 				panic(&InvalidConstructorArgError{Message: fmt.Sprintf(
 					"RunarContract: constructor arg '%s' (%s) of %s must be an even-length hex string",
 					param.Name, param.Type, artifact.ContractName)})
+			}
+			// N-073: a fixed-width type must have its declared width (N-045).
+			if err := checkFixedWidthValue(s, typ, fmt.Sprintf("RunarContract: constructor arg '%s'", param.Name)); err != nil {
+				panic(&InvalidConstructorArgError{Message: err.Error()})
 			}
 		}
 	}

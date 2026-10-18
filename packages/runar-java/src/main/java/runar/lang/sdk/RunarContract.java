@@ -124,9 +124,23 @@ public final class RunarContract {
                     "RunarContract: constructor arg '" + param.name() + "' (" + param.type()
                         + ") of " + artifact.contractName() + " must be an even-length hex string");
             }
+            // N-073: a fixed-width type must have its declared width (N-045).
+            checkCtorArgWidth(norm, leaf, "RunarContract: constructor arg '" + param.name() + "'");
             out.set(i, norm);
         }
         return out;
+    }
+
+    private static void checkCtorArgWidth(Object norm, String leafType, String what) {
+        if (norm instanceof List<?> l) {
+            for (Object o : l) checkCtorArgWidth(o, leafType, what);
+            return;
+        }
+        try {
+            StateSerializer.checkFixedWidthValue(norm, leafType, what);
+        } catch (IllegalArgumentException e) {
+            throw new InvalidConstructorArgException(e.getMessage());
+        }
     }
 
     private static final Object REFUSED = new Object();

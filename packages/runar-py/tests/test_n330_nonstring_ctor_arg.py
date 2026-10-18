@@ -42,8 +42,10 @@ def test_raw_bytes_encode_as_those_bytes(arg):
 def test_raw_bytes_fixed_array_leaf_encodes_as_those_bytes():
     fa = {'elementType': 'Addr', 'length': 2, 'syntheticNames': ['owner__0', 'owner__1']}
     a = _artifact('FixedArray<Addr, 2>', fa)
-    via_bytes = RunarContract(a, [[bytearray(RAW), RAW.hex()]]).get_locking_script()
-    via_hex = RunarContract(a, [[RAW.hex(), RAW.hex()]]).get_locking_script()
+    # N-073: Addr is fixed-width (20 bytes), so use a full-width value.
+    addr = bytes(range(1, 21))
+    via_bytes = RunarContract(a, [[bytearray(addr), addr.hex()]]).get_locking_script()
+    via_hex = RunarContract(a, [[addr.hex(), addr.hex()]]).get_locking_script()
     assert via_bytes == via_hex
 
 

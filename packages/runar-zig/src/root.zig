@@ -290,6 +290,7 @@ test {
     _ = @import("sdk_n320_hostile_state_paths_test.zig");
     _ = @import("sdk_n329_nonhex_ctor_arg_test.zig");
     _ = @import("sdk_n330_nonstring_ctor_arg_test.zig");
+    _ = @import("sdk_n073_ctor_arg_width_test.zig");
     _ = @import("sdk_satcounter_continuation_test.zig");
     _ = @import("sdk_f024_continuation_amount_test.zig");
     _ = @import("sdk_n189_scriptcode_intent_test.zig");

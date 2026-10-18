@@ -2571,14 +2571,22 @@ module Runar
       def check_byte_string_ctor_args(artifact, args)
         artifact.abi.constructor_params.zip(args).each do |param, arg|
           next if param.nil?
-          next unless BYTE_STRING_CTOR_TYPES.include?(State.unwrap_fixed_array_leaf(param.type))
+          leaf_type = State.unwrap_fixed_array_leaf(param.type)
+          next unless BYTE_STRING_CTOR_TYPES.include?(leaf_type)
 
           leaves = param.type.to_s.start_with?('FixedArray<') && arg.is_a?(Array) ? arg.flatten : [arg]
-          next if leaves.all? { |v| v.is_a?(String) && ScriptUtils.hex_bytes?(v.b) }
+          unless leaves.all? { |v| v.is_a?(String) && ScriptUtils.hex_bytes?(v.b) }
+            raise InvalidConstructorArgError,
+                  "RunarContract: constructor arg '#{param.name}' (#{param.type}) " \
+                  "of #{artifact.contract_name} must be an even-length hex string"
+          end
 
-          raise InvalidConstructorArgError,
-                "RunarContract: constructor arg '#{param.name}' (#{param.type}) " \
-                "of #{artifact.contract_name} must be an even-length hex string"
+          # N-073: a fixed-width type must have its declared width (N-045).
+          leaves.each do |v|
+            State.check_fixed_width_value(v, leaf_type, "RunarContract: constructor arg '#{param.name}'")
+          rescue ArgumentError => e
+            raise InvalidConstructorArgError, e.message
+          end
         end
       end
 

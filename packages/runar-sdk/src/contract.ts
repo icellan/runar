@@ -3149,9 +3149,19 @@ function checkByteStringCtorArgs(
         `RunarContract: constructor arg '${param.name}' (${param.type}) of ${artifact.contractName} must be an even-length hex string`,
       );
     };
+    // N-073: a fixed-width type must have its declared width (N-045's check
+    // and message, re-thrown as the constructor-arg error type).
+    const width = (hex: string): string => {
+      try {
+        assertFixedWidthValue(hex, leafType, `RunarContract: constructor arg '${param.name}'`);
+      } catch (e) {
+        throw new InvalidConstructorArgError((e as Error).message);
+      }
+      return hex;
+    };
     const norm = (v: unknown): unknown => {
-      if (typeof v === 'string') return isHexBytes(v) ? v : refuse();
-      if (v instanceof Uint8Array) return Array.from(v, (b) => b.toString(16).padStart(2, '0')).join('');
+      if (typeof v === 'string') return isHexBytes(v) ? width(v) : refuse();
+      if (v instanceof Uint8Array) return width(Array.from(v, (b) => b.toString(16).padStart(2, '0')).join(''));
       if (param.fixedArray && Array.isArray(v)) return v.map(norm);
       return refuse();
     };

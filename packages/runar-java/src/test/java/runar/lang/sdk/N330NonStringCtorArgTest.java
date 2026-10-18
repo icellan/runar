@@ -54,11 +54,14 @@ class N330NonStringCtorArgTest {
 
     @Test
     void rawBytesFixedArrayLeafEncodesAsThoseBytes() {
-        byte[] raw = {(byte) 0x9a, 0x1c, 0x78, (byte) 0xa5};
+        // N-073: Addr is fixed-width (20 bytes), so use a full-width value.
+        byte[] raw = new byte[20];
+        for (int i = 0; i < raw.length; i++) raw[i] = (byte) (i + 1);
+        String rawHex = ScriptUtils.bytesToHex(raw);
         String viaBytes = new RunarContract(artifact("FixedArray<Addr, 2>", FA),
-            one(Arrays.asList(raw, "9a1c78a5"))).lockingScript();
+            one(Arrays.asList(raw, rawHex))).lockingScript();
         String viaHex = new RunarContract(artifact("FixedArray<Addr, 2>", FA),
-            one(List.of("9a1c78a5", "9a1c78a5"))).lockingScript();
+            one(List.of(rawHex, rawHex))).lockingScript();
         assertEquals(viaHex, viaBytes);
     }
 
