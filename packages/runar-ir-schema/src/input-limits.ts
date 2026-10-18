@@ -77,8 +77,15 @@
  *         entry into the full-expression parser (statement expressions,
  *         conditions, initializers, parenthesised groups, call arguments,
  *         index expressions, array elements, ternary arms), +1 per prefix
- *         unary operand, +1 per nested type argument. Binary operands parsed
- *         by the precedence loops and postfix chains add nothing.
+ *         unary operand, +1 per nested type argument, +1 per operand of an
+ *         intersection (`&`) or union (`|`) type (N-311; the operands of one
+ *         flat `A & B & C` list share a level, so only operator nesting
+ *         deepens it). Binary operands parsed by the precedence loops and
+ *         postfix chains add nothing. Type operators exist only where a
+ *         tier's `.runar.ts` grammar has them — ts, go (tree-sitter) and rust
+ *         (swc); the python, zig, ruby and java `.runar.ts` parsers have no
+ *         `&`, `|` or `(` in type position and refuse the first one, with
+ *         nothing to bound.
  *     (B) AST nesting: statement level (body top level = 1, +1 per if / else
  *         / for body, for init/update at +1) plus expression-tree depth
  *         (leaf = 1); a property initializer is at level 0.

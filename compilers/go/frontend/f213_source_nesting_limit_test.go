@@ -173,13 +173,14 @@ func TestF213_DeepShapesRefused(t *testing.T) {
 }
 
 // A `.runar.ts` type annotation of ~4M `&` (`let q: &&…&Int = a;`) is a VALID
-// ~4M-deep tree-sitter intersection_type chain that measure (A) does not
-// count, because the converter reads a type annotation as text and never
-// recurses into it. The F-026 numeric-literal walk used to recurse over the raw
-// tree and died with `fatal error: stack overflow` (the F-213 refuter's
-// ref_type_rs shape). This proves the parse now returns: the annotation is an
-// unknown custom type, which TypeCheck refuses. A crash here kills the test
-// binary rather than failing one test.
+// ~4M-deep tree-sitter intersection_type chain that measure (A) did not count
+// before N-311 (it now refuses it with the shared diagnostic), because the
+// converter reads a type annotation as text and never recurses into it. The
+// F-026 numeric-literal walk used to recurse over the raw tree and died with
+// `fatal error: stack overflow` (the F-213 refuter's ref_type_rs shape). This
+// proves the parse returns: either a diagnostic, or an unknown custom type,
+// which TypeCheck refuses. A crash here kills the test binary rather than
+// failing one test.
 func TestF213_DeepTsIntersectionTypeDoesNotOverflow(t *testing.T) {
 	head := "import { SmartContract, assert } from 'runar-lang';\nclass P extends SmartContract {\n readonly t: bigint;\n constructor(t: bigint) { super(t); this.t = t; }\n public verify(a: bigint, b: bigint) {\n let q: "
 	tail := "Int = a;\n assert(q > 0n);\n }\n}\n"

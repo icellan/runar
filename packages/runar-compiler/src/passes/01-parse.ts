@@ -2134,8 +2134,9 @@ function isStatementKind(k: ts.SyntaxKind): boolean {
  * body (+1; a block is free unless it is itself a nested statement), each
  * expression slot of a statement / declaration, a parenthesised group, a call
  * or `new` argument, an element-access index, an array element, a ternary arm,
- * a prefix-unary operand, a nested type argument. Binary operands, member
- * objects and callees add nothing.
+ * a prefix-unary operand, a nested type argument, an operand of an
+ * intersection / union type. Binary operands, member objects and callees add
+ * nothing.
  */
 function tsChildNesting(parent: ts.Node, child: ts.Node, level: number): number {
   const pk = parent.kind;
@@ -2179,6 +2180,11 @@ function tsChildNesting(parent: ts.Node, child: ts.Node, level: number): number 
       const typeArgs = (parent as ts.TypeReferenceNode).typeArguments;
       return typeArgs !== undefined && typeArgs.includes(child as ts.TypeNode) ? level + 1 : level;
     }
+    // N-311: each operand of an intersection / union type. TypeScript keeps
+    // `A & B & C` as one flat list, so its operands share a level.
+    case ts.SyntaxKind.IntersectionType:
+    case ts.SyntaxKind.UnionType:
+      return level + 1;
     default:
       return level;
   }

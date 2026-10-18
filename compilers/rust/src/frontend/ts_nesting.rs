@@ -1147,7 +1147,9 @@ impl Walk {
         guard!(self, level, t.span());
         self.enter();
         let stop = match t {
-            // The one counted type position: a type reference's arguments.
+            // The counted type positions: a type reference's arguments, and
+            // (N-311) each operand of an intersection / union type -- one flat
+            // list in swc, as in the TS reference, so its operands share a level.
             swc::TsType::TsTypeRef(r) => {
                 r.type_params.as_ref().is_some_and(|tp| tp.params.iter().any(|p| self.ty(p, level + 1)))
             }
@@ -1156,8 +1158,8 @@ impl Walk {
             swc::TsType::TsOptionalType(o) => self.ty(&o.type_ann, level),
             swc::TsType::TsRestType(r) => self.ty(&r.type_ann, level),
             swc::TsType::TsUnionOrIntersectionType(u) => match u {
-                swc::TsUnionOrIntersectionType::TsUnionType(x) => x.types.iter().any(|y| self.ty(y, level)),
-                swc::TsUnionOrIntersectionType::TsIntersectionType(x) => x.types.iter().any(|y| self.ty(y, level)),
+                swc::TsUnionOrIntersectionType::TsUnionType(x) => x.types.iter().any(|y| self.ty(y, level + 1)),
+                swc::TsUnionOrIntersectionType::TsIntersectionType(x) => x.types.iter().any(|y| self.ty(y, level + 1)),
             },
             swc::TsType::TsConditionalType(c) => {
                 self.ty(&c.check_type, level)

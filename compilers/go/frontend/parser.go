@@ -268,9 +268,10 @@ type parseContext struct {
 // (F-026, the TS reference's reportInvalidNumericLiterals).
 //
 // Iterative, in source order: it runs over the raw tree-sitter tree, and
-// measure (A) does not bound every node kind (a 4 MiB `&&&…&Int` type
-// annotation is a valid ~4M-deep intersection_type chain), so a recursive
-// walk overflowed the 1 GB goroutine stack (F-213 refuter, ref_type_rs).
+// measure (A) did not always bound every node kind (a 4 MiB `&&&…&Int` type
+// annotation is a valid ~4M-deep intersection_type chain, which (A) counts
+// only since N-311), so a recursive walk overflowed the 1 GB goroutine stack
+// (F-213 refuter, ref_type_rs).
 func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 	coveredTo := -1
 	tsWalk(root, func(n *sitter.Node) bool {
@@ -2419,8 +2420,8 @@ func tsIsStatementType(t string) bool {
 // unless it is itself a nested statement), each expression slot of a
 // statement / declaration, a parenthesised group, a call or `new` argument,
 // a subscript index, an array element, a ternary arm, a prefix-unary operand,
-// a nested type argument. Binary operands, member objects and callees add
-// nothing. tree-sitter's else_clause, an if's condition parentheses and a
+// a nested type argument, an operand of an intersection / union type. Binary
+// operands, member objects and callees add nothing. tree-sitter's else_clause, an if's condition parentheses and a
 // for's condition expression_statement have no TS AST node and are mapped
 // through.
 func tsChildNestFrame(parent tsNestFrame, child *sitter.Node, field string) tsNestFrame {
@@ -2500,6 +2501,14 @@ func tsChildNestFrame(parent tsNestFrame, child *sitter.Node, field string) tsNe
 		}
 	case "type_arguments":
 		if parent.genericArgs {
+			f.level++
+		}
+	case "intersection_type", "union_type":
+		// N-311: each operand of an intersection / union type. tree-sitter
+		// builds `A & B & C` left-deep, as intersection(intersection(A, B), C);
+		// the TS reference keeps it one flat list, so a same-operator left
+		// operand continues the list and adds nothing.
+		if !(ct == pk && child.PrevSibling() == nil) {
 			f.level++
 		}
 	}
