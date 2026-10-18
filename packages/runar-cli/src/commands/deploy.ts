@@ -235,7 +235,16 @@ export async function deployCommand(
     return;
   }
 
-  const contract = new RunarContract(artifact, constructorArgs);
+  // The SDK re-validates ByteString-family args (hex, fixed width) from the ABI
+  // type; surface its refusal as a CLI error rather than an unhandled throw.
+  let contract: RunarContract;
+  try {
+    contract = new RunarContract(artifact, constructorArgs);
+  } catch (err) {
+    console.error(`Invalid constructor arguments: ${(err as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   try {
     const address = await signer.getAddress();
