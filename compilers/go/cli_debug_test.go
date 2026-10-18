@@ -243,3 +243,29 @@ func TestCLI_Debug_Artifact_SourceMap(t *testing.T) {
 		t.Fatalf("expected step 2 to carry src=Foo.runar.ts:6:7, got:\n%s", out)
 	}
 }
+
+// TestCLI_Debug_PrintsErrorWhenNoOpcodesExecuted: a locking script whose first
+// push is truncated fails before any opcode runs. The trace is empty, so the
+// per-step "error:" line never prints; the interpreter error must still be
+// surfaced (N-098). Proves the error text reaches stdout; does not pin its
+// exact wording, which belongs to the go-sdk interpreter.
+func TestCLI_Debug_PrintsErrorWhenNoOpcodesExecuted(t *testing.T) {
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "runar-compiler-go")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Dir = "."
+	if buildOut, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, string(buildOut))
+	}
+
+	// 0x05 announces a 5-byte push with no data following.
+	cmd := exec.Command(binPath, "debug", "--script", "05")
+	out, _ := cmd.CombinedOutput()
+	s := string(out)
+	if !strings.Contains(s, "(no opcodes executed)") {
+		t.Fatalf("expected the no-opcodes marker, got:\n%s", s)
+	}
+	if !strings.Contains(s, "error:") {
+		t.Fatalf("expected the interpreter error to be printed when no opcodes executed, got:\n%s", s)
+	}
+}

@@ -123,3 +123,34 @@ def test_step_returns_none_when_nothing_loaded() -> None:
     vm = ScriptVM()
     assert vm.step() is None
     assert not vm.is_complete
+
+
+# ---------------------------------------------------------------------------
+# Cross-tier signature vector (N-098 / F-124)
+# ---------------------------------------------------------------------------
+
+# A P2PKH spend signed against the TS ScriptVM's synthetic spend context
+# (version 1, 100000 sats, null outpoint, sequence 0xffffffff, locktime 0;
+# key 1, SIGHASH_ALL|FORKID). The signature only verifies if this VM's
+# synthetic transaction carries the same source satoshis (part of the BIP-143
+# preimage). Proves the Python VM agrees with TS and Go on that context; it
+# does not independently pin the other preimage fields.
+TS_P2PKH_LOCKING = "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"
+TS_P2PKH_UNLOCKING = (
+    "4730440220459bb2da0b81e7a5b8aba3116a4ef6e2df9695b3d795af3ae30b5a928c1443ca0220"
+    "44a077326ac6221fb76ee4629bd014d65357786e3577601846db5188721bf3db41210279be667e"
+    "f9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+)
+
+
+def test_ts_signed_p2pkh_spend_succeeds() -> None:
+    res = ScriptVM().execute(bytes.fromhex(TS_P2PKH_UNLOCKING), bytes.fromhex(TS_P2PKH_LOCKING))
+    assert res.success, f"TS-signed P2PKH spend must verify, error: {res.error}"
+
+
+def test_corrupted_signature_p2pkh_spend_fails_at_checksig() -> None:
+    unlocking = bytearray(bytes.fromhex(TS_P2PKH_UNLOCKING))
+    unlocking[70] ^= 0x01  # last S byte, well-formed DER, wrong signature
+    res = ScriptVM().execute(bytes(unlocking), bytes.fromhex(TS_P2PKH_LOCKING))
+    assert not res.success
+    assert res.error is not None and "OP_CHECKSIG" in res.error

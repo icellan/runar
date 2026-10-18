@@ -157,6 +157,9 @@ func runDebug() error {
 		// An empty locking script with no unlocking script yields no trace;
 		// surface that explicitly rather than silently exiting.
 		fmt.Println("(no opcodes executed)")
+		if r := vm.Result(); r != nil && r.Error != "" {
+			fmt.Printf("  error: %s\n", r.Error)
+		}
 	}
 
 	status := "fail"
