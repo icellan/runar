@@ -1070,8 +1070,12 @@ impl<'a> LoweringContext<'a> {
         match summary.get(name) {
             // N-070: a helper that calls requireOutputP2PKH is inlined too,
             // so the _serialisedOutputs witness lands on the public method.
+            // N-315: the same for extractPrevOutputScript and _prevOutScript_<i>.
             Some(eff) => {
-                eff.has_state_output || eff.has_data_output || eff.calls_require_output_p2pkh
+                eff.has_state_output
+                    || eff.has_data_output
+                    || eff.calls_require_output_p2pkh
+                    || eff.calls_extract_prev_output_script
             }
             None => false,
         }

@@ -926,7 +926,9 @@ func (ctx *lowerCtx) shouldInlinePrivate(name string) bool {
 	}
 	// N-070: a helper that calls requireOutputP2PKH is inlined too, so the
 	// _serialisedOutputs witness it auto-injects lands on the public method.
-	return eff.HasStateOutput || eff.HasDataOutput || eff.CallsRequireOutputP2PKH
+	// N-315: the same for extractPrevOutputScript and _prevOutScript_<i>.
+	return eff.HasStateOutput || eff.HasDataOutput || eff.CallsRequireOutputP2PKH ||
+		eff.CallsExtractPrevOutputScript
 }
 
 // checkPrivateCallArity refuses a call to a private method whose argument

@@ -928,11 +928,13 @@ class _LowerCtx:
         if eff is None:
             return False
         # N-070: a helper that calls requireOutputP2PKH is inlined too, so
-        # the _serialisedOutputs witness lands on the public method.
+        # the _serialisedOutputs witness lands on the public method. N-315:
+        # the same for extractPrevOutputScript and _prevOutScript_<i>.
         return (
             eff.has_state_output
             or eff.has_data_output
             or eff.calls_require_output_p2pkh
+            or eff.calls_extract_prev_output_script
         )
 
     def get_private_method(self, name: str) -> MethodNode | None:

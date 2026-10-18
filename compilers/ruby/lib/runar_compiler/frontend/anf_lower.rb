@@ -902,10 +902,12 @@ module RunarCompiler
         m = get_private_method(name)
         return false if m.nil?
         # N-070: a helper that calls requireOutputP2PKH is inlined too, so the
-        # _serialisedOutputs witness lands on the public method.
+        # _serialisedOutputs witness lands on the public method. N-315: the
+        # same for extractPrevOutputScript and _prevOutScript_<i>.
         RunarCompiler::Frontend.send(:_method_has_add_output, m, @contract) ||
           RunarCompiler::Frontend.send(:_method_has_add_data_output, m, @contract) ||
-          RunarCompiler::Frontend.send(:_method_calls_require_output_p2pkh, m, @contract, false)
+          RunarCompiler::Frontend.send(:_method_calls_require_output_p2pkh, m, @contract, false) ||
+          RunarCompiler::Frontend.send(:_method_calls_extract_prev_output_script, m, @contract)
       end
 
       # Inline a private method's body directly into this context. Mirrors
@@ -3072,6 +3074,43 @@ module RunarCompiler
       _child_expressions(expr).any? { |e| _expr_calls_require_output_p2pkh(e, contract, zero_only, q) }
     end
     private_class_method :_expr_calls_require_output_p2pkh
+
+    # N-315: true if +method+ (or a private helper it reaches) calls
+    # extractPrevOutputScript(...). Consumed by should_inline_private? so the
+    # auto-injected _prevOutScript_<i> witness lands on the public method.
+    def self._method_calls_extract_prev_output_script(method, contract)
+      q = CalleeQueue.new([].to_set)
+      nxt = method.body
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_calls_extract_prev_output_script(stmt, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
+    end
+    private_class_method :_method_calls_extract_prev_output_script
+
+    # @return [Boolean]
+    def self._stmt_calls_extract_prev_output_script(stmt, contract, q)
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_calls_extract_prev_output_script(e, contract, q)
+      }
+      _child_statements(stmt).any? { |s| _stmt_calls_extract_prev_output_script(s, contract, q) }
+    end
+    private_class_method :_stmt_calls_extract_prev_output_script
+
+    # @return [Boolean]
+    def self._expr_calls_extract_prev_output_script(expr, contract, q)
+      return false if expr.nil?
+      if expr.is_a?(CallExpr)
+        callee = expr.callee
+        return true if callee.is_a?(Identifier) && callee.name == "extractPrevOutputScript"
+        target = _resolve_private_method(callee, contract)
+        q.enqueue(target)
+      end
+      _child_expressions(expr).any? { |e| _expr_calls_extract_prev_output_script(e, contract, q) }
+    end
+    private_class_method :_expr_calls_extract_prev_output_script
 
     # -------------------------------------------------------------------
     # Loop shape extraction (#121)

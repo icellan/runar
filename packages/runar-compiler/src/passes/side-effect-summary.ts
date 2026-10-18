@@ -43,6 +43,8 @@ export interface MethodEffects {
   callsRequireOutputP2PKH: boolean;
   /** Calls `requireOutputP2PKH(0n, ...)` (literal index 0). */
   requiresOutputP2PKHZero: boolean;
+  /** Calls `extractPrevOutputScript(...)` (N-315). */
+  callsExtractPrevOutputScript: boolean;
 }
 
 /** Map from method name to that method's effects. Includes the constructor under the key 'constructor'. */
@@ -59,6 +61,7 @@ function emptyEffects(): MethodEffects {
     usesPreimage: false,
     callsRequireOutputP2PKH: false,
     requiresOutputP2PKHZero: false,
+    callsExtractPrevOutputScript: false,
   };
 }
 
@@ -69,6 +72,7 @@ function unionInto(target: MethodEffects, source: MethodEffects): void {
   target.usesPreimage ||= source.usesPreimage;
   target.callsRequireOutputP2PKH ||= source.callsRequireOutputP2PKH;
   target.requiresOutputP2PKHZero ||= source.requiresOutputP2PKHZero;
+  target.callsExtractPrevOutputScript ||= source.callsExtractPrevOutputScript;
 }
 
 /** Raised by a body walk that needs a callee computed first (N-264). */
@@ -234,6 +238,7 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
               into.requiresOutputP2PKHZero = true;
             }
           }
+          if (callee.name === 'extractPrevOutputScript') into.callsExtractPrevOutputScript = true;
           const target = privateMethodsByName.get(callee.name);
           if (target) {
             unionInto(into, calleeEffects(target));

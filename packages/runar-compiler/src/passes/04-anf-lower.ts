@@ -328,7 +328,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // calls a private helper which mutates state or emits an output
       // must therefore inject the same continuation params as if the
       // public body did so directly.
-      const effects = sideEffects.get(method.name) ?? { mutatesState: false, hasStateOutput: false, hasDataOutput: false, usesPreimage: false, callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false };
+      const effects = sideEffects.get(method.name) ?? { mutatesState: false, hasStateOutput: false, hasDataOutput: false, usesPreimage: false, callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false, callsExtractPrevOutputScript: false };
       // N-038: under a SINGLE base the change output is not committed, so
       // the method takes no `_changePKH` / `_changeAmount`.
       const shape = continuationShape(effects, method.sighashType);
@@ -916,8 +916,14 @@ class LoweringContext {
     // `_serialisedOutputs` witness it auto-injects lands on the PUBLIC
     // method's params (and its hashOutputs commitment in the public body).
     // Left as a method_call, the param sat on the helper's own ANF method and
-    // stack lowering could not find it.
-    return effects.hasStateOutput || effects.hasDataOutput || effects.callsRequireOutputP2PKH;
+    // stack lowering could not find it. N-315: the same for
+    // extractPrevOutputScript and its `_prevOutScript_<i>` witness.
+    return (
+      effects.hasStateOutput ||
+      effects.hasDataOutput ||
+      effects.callsRequireOutputP2PKH ||
+      effects.callsExtractPrevOutputScript
+    );
   }
 
   /**

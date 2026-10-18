@@ -45,6 +45,8 @@ pub struct MethodEffects {
     pub calls_require_output_p2pkh: bool,
     /// Calls `requireOutputP2PKH(0, ...)` (literal index 0).
     pub requires_output_p2pkh_zero: bool,
+    /// Calls `extractPrevOutputScript(...)` (N-315).
+    pub calls_extract_prev_output_script: bool,
 }
 
 impl MethodEffects {
@@ -55,6 +57,7 @@ impl MethodEffects {
         self.uses_preimage |= other.uses_preimage;
         self.calls_require_output_p2pkh |= other.calls_require_output_p2pkh;
         self.requires_output_p2pkh_zero |= other.requires_output_p2pkh_zero;
+        self.calls_extract_prev_output_script |= other.calls_extract_prev_output_script;
     }
 }
 
@@ -337,6 +340,9 @@ fn collect_expr<'a>(
                             into.requires_output_p2pkh_zero = true;
                         }
                     }
+                }
+                if name == "extractPrevOutputScript" {
+                    into.calls_extract_prev_output_script = true;
                 }
                 if let Some(target) = private_by_name.get(name) {
                     let target_eff = callee_effects(target, summary, in_progress)?;

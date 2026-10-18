@@ -843,8 +843,10 @@ public final class AnfLower {
             if (m == null) return false;
             // N-070: a helper that calls requireOutputP2PKH is inlined too, so
             // the _serialisedOutputs witness lands on the public method.
+            // N-315: the same for extractPrevOutputScript and _prevOutScript_<i>.
             return methodHasAddOutput(m, contract) || methodHasAddDataOutput(m, contract)
-                || methodCallsRequireOutputP2PKH(m, contract, false);
+                || methodCallsRequireOutputP2PKH(m, contract, false)
+                || methodCallsExtractPrevOutputScript(m, contract);
         }
 
         // Inline a private method's body directly into this context. Used
@@ -2959,6 +2961,49 @@ public final class AnfLower {
         }
         for (Expression child : childExpressions(e)) {
             if (exprCallsRequireOutputP2PKH(child, contract, zeroOnly, q)) return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // extractPrevOutputScript detection (recursive across private calls)
+    // ------------------------------------------------------------------
+    // N-315: consumed by shouldInlinePrivate so the auto-injected
+    // _prevOutScript_<i> witness lands on the public method.
+
+    /** True if {@code m} (or a private helper it reaches) calls {@code extractPrevOutputScript(...)}. */
+    static boolean methodCallsExtractPrevOutputScript(MethodNode m, ContractNode contract) {
+        CalleeQueue q = new CalleeQueue(new HashSet<>());
+        for (List<Statement> next = m.body(); next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtCallsExtractPrevOutputScript(s, contract, q)) return true;
+        }
+        return false;
+    }
+
+    private static boolean stmtCallsExtractPrevOutputScript(
+            Statement s, ContractNode contract, CalleeQueue q) {
+        for (Expression e : statementExpressions(s)) {
+            if (exprCallsExtractPrevOutputScript(e, contract, q)) return true;
+        }
+        for (Statement inner : childStatements(s)) {
+            if (stmtCallsExtractPrevOutputScript(inner, contract, q)) return true;
+        }
+        return false;
+    }
+
+    private static boolean exprCallsExtractPrevOutputScript(
+            Expression e, ContractNode contract, CalleeQueue q) {
+        if (e == null) return false;
+        if (e instanceof CallExpr c) {
+            if (c.callee() instanceof Identifier id && "extractPrevOutputScript".equals(id.name())) {
+                return true;
+            }
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            q.enqueue(target);
+        }
+        for (Expression child : childExpressions(e)) {
+            if (exprCallsExtractPrevOutputScript(child, contract, q)) return true;
         }
         return false;
     }

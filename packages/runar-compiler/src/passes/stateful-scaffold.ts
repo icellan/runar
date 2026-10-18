@@ -247,6 +247,7 @@ function irMethodShape(program: ANFProgram, method: ANFMethod): ContinuationShap
   const effects = {
     mutatesState: false, hasStateOutput: false, hasDataOutput: false,
     usesPreimage: false, callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false,
+    callsExtractPrevOutputScript: false,
   };
   const privates = new Map(
     program.methods.filter((m) => !m.isPublic && m.name !== 'constructor').map((m) => [m.name, m]),

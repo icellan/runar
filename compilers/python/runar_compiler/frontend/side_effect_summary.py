@@ -72,6 +72,8 @@ class MethodEffects:
     calls_require_output_p2pkh: bool = False
     # Calls requireOutputP2PKH(0, ...) (literal index 0).
     requires_output_p2pkh_zero: bool = False
+    # Calls extractPrevOutputScript(...) (N-315).
+    calls_extract_prev_output_script: bool = False
 
     def union(self, other: "MethodEffects") -> None:
         self.mutates_state = self.mutates_state or other.mutates_state
@@ -83,6 +85,10 @@ class MethodEffects:
         )
         self.requires_output_p2pkh_zero = (
             self.requires_output_p2pkh_zero or other.requires_output_p2pkh_zero
+        )
+        self.calls_extract_prev_output_script = (
+            self.calls_extract_prev_output_script
+            or other.calls_extract_prev_output_script
         )
 
 
@@ -285,6 +291,8 @@ def _collect_expr(
                     idx = expr.args[0]
                     if isinstance(idx, BigIntLiteral) and idx.value == 0:
                         into.requires_output_p2pkh_zero = True
+            if callee.name == "extractPrevOutputScript":
+                into.calls_extract_prev_output_script = True
             target = private_by_name.get(callee.name)
             if target is not None:
                 into.union(classify(target))

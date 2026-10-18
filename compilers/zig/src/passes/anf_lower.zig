@@ -1269,9 +1269,11 @@ const LowerCtx = struct {
     fn shouldInlinePrivate(self: *const LowerCtx, name: []const u8) bool {
         const m = lookupPrivateMethod(self.contract, name) orelse return false;
         // N-070: a helper that calls requireOutputP2PKH is inlined too, so the
-        // _serialisedOutputs witness lands on the public method.
+        // _serialisedOutputs witness lands on the public method. N-315: the
+        // same for extractPrevOutputScript and _prevOutScript_<i>.
         return methodHasAddOutput(m, self.contract) or methodHasAddDataOutput(m, self.contract) or
-            methodCallsRequireOutputP2PKH(m, self.contract, false);
+            methodCallsRequireOutputP2PKH(m, self.contract, false) or
+            methodCallsExtractPrevOutputScript(m, self.contract);
     }
 
     /// Refuse a call to a private method whose argument count does not match
@@ -3448,6 +3450,14 @@ const RequireOutputP2PKHScan = struct {
     }
 };
 
+const ExtractPrevOutputScriptScan = struct {
+    contract: ContractNode,
+    fn scan(self: ExtractPrevOutputScriptScan, stmts: []const Statement, params: []const ParamNode, q: *CalleeQueue) bool {
+        _ = params;
+        return bodyCallsExtractPrevOutputScriptRec(stmts, self.contract, q);
+    }
+};
+
 pub fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
     var has_mutable = false;
     for (contract.properties) |p| {
@@ -3831,6 +3841,99 @@ fn exprCallsRequireOutputP2PKHRec(expr: Expression, contract: ContractNode, zero
         .array_literal => |elems| {
             for (elems) |el| {
                 if (exprCallsRequireOutputP2PKHRec(el, contract, zero_only, q)) return true;
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
+// ============================================================================
+// extractPrevOutputScript detection (recursive across private calls)
+// ============================================================================
+//
+// N-315: consumed by shouldInlinePrivate so the auto-injected
+// `_prevOutScript_<i>` witness lands on the public method.
+
+/// True if `method` (or a private helper it reaches) calls
+/// `extractPrevOutputScript(...)`.
+pub fn methodCallsExtractPrevOutputScript(method: MethodNode, contract: ContractNode) bool {
+    return anyReachableBody(contract, method.body, method.params, ExtractPrevOutputScriptScan{ .contract = contract });
+}
+
+fn bodyCallsExtractPrevOutputScriptRec(stmts: []const Statement, contract: ContractNode, q: *CalleeQueue) bool {
+    for (stmts) |stmt| {
+        if (stmtCallsExtractPrevOutputScriptRec(stmt, contract, q)) return true;
+    }
+    return false;
+}
+
+fn stmtCallsExtractPrevOutputScriptRec(stmt: Statement, contract: ContractNode, q: *CalleeQueue) bool {
+    switch (stmt) {
+        .expr_stmt => |expr| return exprCallsExtractPrevOutputScriptRec(expr.expr, contract, q),
+        .const_decl => |cd| return exprCallsExtractPrevOutputScriptRec(cd.value, contract, q),
+        .let_decl => |ld| {
+            if (ld.value) |v| return exprCallsExtractPrevOutputScriptRec(v, contract, q);
+            return false;
+        },
+        .assign => |assign| return exprCallsExtractPrevOutputScriptRec(assign.value, contract, q),
+        .assert_stmt => |as_s| return exprCallsExtractPrevOutputScriptRec(as_s.condition, contract, q),
+        .if_stmt => |if_s| {
+            if (exprCallsExtractPrevOutputScriptRec(if_s.condition, contract, q)) return true;
+            if (bodyCallsExtractPrevOutputScriptRec(if_s.then_body, contract, q)) return true;
+            if (if_s.else_body) |eb| {
+                if (bodyCallsExtractPrevOutputScriptRec(eb, contract, q)) return true;
+            }
+            return false;
+        },
+        .for_stmt => |for_s| return bodyCallsExtractPrevOutputScriptRec(for_s.body, contract, q),
+        .return_stmt => |maybe_expr| {
+            if (maybe_expr) |expr| return exprCallsExtractPrevOutputScriptRec(expr, contract, q);
+            return false;
+        },
+    }
+}
+
+fn exprCallsExtractPrevOutputScriptRec(expr: Expression, contract: ContractNode, q: *CalleeQueue) bool {
+    switch (expr) {
+        .call => |call| {
+            if (std.mem.eql(u8, call.callee, "extractPrevOutputScript")) return true;
+            if (lookupPrivateMethod(contract, call.callee)) |target| {
+                q.enqueue(target);
+            }
+            for (call.args) |arg| {
+                if (exprCallsExtractPrevOutputScriptRec(arg, contract, q)) return true;
+            }
+        },
+        .method_call => |mc| {
+            if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) {
+                if (lookupPrivateMethod(contract, mc.method)) |target| {
+                    q.enqueue(target);
+                }
+            }
+            for (mc.args) |arg| {
+                if (exprCallsExtractPrevOutputScriptRec(arg, contract, q)) return true;
+            }
+        },
+        .binary_op => |bin| {
+            if (exprCallsExtractPrevOutputScriptRec(bin.left, contract, q)) return true;
+            if (exprCallsExtractPrevOutputScriptRec(bin.right, contract, q)) return true;
+        },
+        .unary_op => |un| {
+            if (exprCallsExtractPrevOutputScriptRec(un.operand, contract, q)) return true;
+        },
+        .ternary => |tern| {
+            if (exprCallsExtractPrevOutputScriptRec(tern.condition, contract, q)) return true;
+            if (exprCallsExtractPrevOutputScriptRec(tern.then_expr, contract, q)) return true;
+            if (exprCallsExtractPrevOutputScriptRec(tern.else_expr, contract, q)) return true;
+        },
+        .index_access => |idx| {
+            if (exprCallsExtractPrevOutputScriptRec(idx.object, contract, q)) return true;
+            if (exprCallsExtractPrevOutputScriptRec(idx.index, contract, q)) return true;
+        },
+        .array_literal => |elems| {
+            for (elems) |el| {
+                if (exprCallsExtractPrevOutputScriptRec(el, contract, q)) return true;
             }
         },
         else => {},

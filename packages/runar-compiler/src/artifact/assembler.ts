@@ -596,6 +596,7 @@ function extractABI(contract: ContractNode): ABI {
         usesPreimage: false,
         callsRequireOutputP2PKH: false,
         requiresOutputP2PKHZero: false,
+        callsExtractPrevOutputScript: false,
       };
       const shape = continuationShape(effects, method.sighashType);
       needsChange = shape.needsChange;

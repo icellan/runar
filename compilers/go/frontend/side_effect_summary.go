@@ -37,6 +37,8 @@ type MethodEffects struct {
 	CallsRequireOutputP2PKH bool
 	// RequiresOutputP2PKHZero: calls requireOutputP2PKH(0, ...) (literal index 0).
 	RequiresOutputP2PKHZero bool
+	// CallsExtractPrevOutputScript: calls extractPrevOutputScript(...) (N-315).
+	CallsExtractPrevOutputScript bool
 }
 
 // SideEffectSummary maps method name -> that method's effects. Includes
@@ -115,6 +117,9 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 		}
 		if source.RequiresOutputP2PKHZero {
 			target.RequiresOutputP2PKHZero = true
+		}
+		if source.CallsExtractPrevOutputScript {
+			target.CallsExtractPrevOutputScript = true
 		}
 	}
 
@@ -203,6 +208,9 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 							into.RequiresOutputP2PKHZero = true
 						}
 					}
+				}
+				if id.Name == "extractPrevOutputScript" {
+					into.CallsExtractPrevOutputScript = true
 				}
 				if target, ok := privateByName[id.Name]; ok {
 					unionInto(into, effectsFor(target.Name, target.Body))
