@@ -49,7 +49,7 @@ class Meta extends SmartContract {{
 
 
 _WARN_RE = re.compile(
-    r"readonly field 'metadataId' is not referenced .* eliminated by DCE.*@embedAlways",
+    r"readonly field 'metadataId' is not referenced .* eliminated by DCE.*embedAlways directive",
     re.S,
 )
 

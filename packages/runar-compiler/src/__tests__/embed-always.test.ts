@@ -44,7 +44,7 @@ class Meta extends SmartContract {
 }
 
 const WARN_RE =
-  /readonly field 'metadataId' is not referenced .* eliminated by DCE.*@embedAlways/s;
+  /readonly field 'metadataId' is not referenced .* eliminated by DCE.*embedAlways directive/s;
 
 describe('#109 parser: @embedAlways directive', () => {
   it('sets embedAlways on a field with a /** @embedAlways */ JSDoc directive', () => {

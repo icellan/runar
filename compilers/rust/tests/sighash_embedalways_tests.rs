@@ -378,7 +378,7 @@ fn embed_always_warns_for_stripped_field_and_not_for_annotated() {
         off.iter().any(|w|
             w.contains("readonly field 'metadataId' is not referenced")
                 && w.contains("eliminated by DCE")
-                && w.contains("@embedAlways")),
+                && w.contains("embedAlways directive")),
         "expected DCE warning for stripped un-annotated field, got: {:?}",
         off
     );

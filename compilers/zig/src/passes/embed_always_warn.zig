@@ -115,6 +115,6 @@ test "collectDceWarnings warns on un-annotated unreferenced readonly field only"
     // @embedAlways (preserved), counted has an initializer.
     try std.testing.expectEqual(@as(usize, 1), diags.len);
     try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "metadataId") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "@embedAlways") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "embedAlways directive") != null);
     try std.testing.expect(diags[0].severity == .warning);
 }

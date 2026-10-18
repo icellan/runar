@@ -89,8 +89,8 @@ func TestEmbedAlways_WarnsOnStrippedUnannotatedField(t *testing.T) {
 	if !r.Success {
 		t.Fatalf("compile failed: %v", diagMessages(r))
 	}
-	if !anyWarnContains(r, "metadataId") || !anyWarnContains(r, "@embedAlways") {
-		t.Fatalf("expected DCE warning naming metadataId + @embedAlways; diags=%v", diagMessages(r))
+	if !anyWarnContains(r, "metadataId") || !anyWarnContains(r, "embedAlways directive") {
+		t.Fatalf("expected DCE warning naming metadataId + embedAlways directive; diags=%v", diagMessages(r))
 	}
 }
 

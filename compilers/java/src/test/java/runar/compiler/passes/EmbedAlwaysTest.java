@@ -89,7 +89,7 @@ class EmbedAlwaysTest {
     void warnsForEliminatedUnannotatedReadonlyField() throws Exception {
         var diags = PipelineTestSupport.diagnostics(source(""), "Meta.runar.ts");
         assertTrue(diags.warnings().stream().anyMatch(w ->
-            w.contains("metadataId") && w.contains("eliminated by DCE") && w.contains("@embedAlways")),
+            w.contains("metadataId") && w.contains("eliminated by DCE") && w.contains("embedAlways directive")),
             diags.warnings().toString());
     }
 
