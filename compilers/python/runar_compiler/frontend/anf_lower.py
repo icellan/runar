@@ -927,7 +927,13 @@ class _LowerCtx:
         eff = self._side_effects.get(name)
         if eff is None:
             return False
-        return eff.has_state_output or eff.has_data_output
+        # N-070: a helper that calls requireOutputP2PKH is inlined too, so
+        # the _serialisedOutputs witness lands on the public method.
+        return (
+            eff.has_state_output
+            or eff.has_data_output
+            or eff.calls_require_output_p2pkh
+        )
 
     def get_private_method(self, name: str) -> MethodNode | None:
         for m in self._contract.methods:

@@ -841,7 +841,10 @@ public final class AnfLower {
         boolean shouldInlinePrivate(String name) {
             MethodNode m = getPrivateMethod(name);
             if (m == null) return false;
-            return methodHasAddOutput(m, contract) || methodHasAddDataOutput(m, contract);
+            // N-070: a helper that calls requireOutputP2PKH is inlined too, so
+            // the _serialisedOutputs witness lands on the public method.
+            return methodHasAddOutput(m, contract) || methodHasAddDataOutput(m, contract)
+                || methodCallsRequireOutputP2PKH(m, contract, false);
         }
 
         // Inline a private method's body directly into this context. Used

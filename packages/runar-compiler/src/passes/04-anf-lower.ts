@@ -912,7 +912,12 @@ class LoweringContext {
     if (!method) return false;
     const effects = this.sideEffects.get(name);
     if (!effects) return false;
-    return effects.hasStateOutput || effects.hasDataOutput;
+    // N-070: a helper that calls requireOutputP2PKH is inlined too, so the
+    // `_serialisedOutputs` witness it auto-injects lands on the PUBLIC
+    // method's params (and its hashOutputs commitment in the public body).
+    // Left as a method_call, the param sat on the helper's own ANF method and
+    // stack lowering could not find it.
+    return effects.hasStateOutput || effects.hasDataOutput || effects.callsRequireOutputP2PKH;
   }
 
   /**

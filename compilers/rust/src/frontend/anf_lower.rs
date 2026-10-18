@@ -1068,7 +1068,11 @@ impl<'a> LoweringContext<'a> {
             return false;
         }
         match summary.get(name) {
-            Some(eff) => eff.has_state_output || eff.has_data_output,
+            // N-070: a helper that calls requireOutputP2PKH is inlined too,
+            // so the _serialisedOutputs witness lands on the public method.
+            Some(eff) => {
+                eff.has_state_output || eff.has_data_output || eff.calls_require_output_p2pkh
+            }
             None => false,
         }
     }

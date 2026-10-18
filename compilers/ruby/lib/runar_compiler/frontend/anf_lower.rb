@@ -901,8 +901,11 @@ module RunarCompiler
       def should_inline_private?(name)
         m = get_private_method(name)
         return false if m.nil?
+        # N-070: a helper that calls requireOutputP2PKH is inlined too, so the
+        # _serialisedOutputs witness lands on the public method.
         RunarCompiler::Frontend.send(:_method_has_add_output, m, @contract) ||
-          RunarCompiler::Frontend.send(:_method_has_add_data_output, m, @contract)
+          RunarCompiler::Frontend.send(:_method_has_add_data_output, m, @contract) ||
+          RunarCompiler::Frontend.send(:_method_calls_require_output_p2pkh, m, @contract, false)
       end
 
       # Inline a private method's body directly into this context. Mirrors

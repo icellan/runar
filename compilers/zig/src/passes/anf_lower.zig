@@ -1268,7 +1268,10 @@ const LowerCtx = struct {
     /// add_data_output refs register on the caller's continuation hash.
     fn shouldInlinePrivate(self: *const LowerCtx, name: []const u8) bool {
         const m = lookupPrivateMethod(self.contract, name) orelse return false;
-        return methodHasAddOutput(m, self.contract) or methodHasAddDataOutput(m, self.contract);
+        // N-070: a helper that calls requireOutputP2PKH is inlined too, so the
+        // _serialisedOutputs witness lands on the public method.
+        return methodHasAddOutput(m, self.contract) or methodHasAddDataOutput(m, self.contract) or
+            methodCallsRequireOutputP2PKH(m, self.contract, false);
     }
 
     /// Refuse a call to a private method whose argument count does not match
