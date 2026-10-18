@@ -128,3 +128,54 @@ class TestRPCCalls:
         """RPCProvider.get_contract_utxo always returns None (not supported via RPC)."""
         provider = RPCProvider('http://localhost:8332', 'user', 'pass')
         assert provider.get_contract_utxo('somehash') is None
+
+
+# ---------------------------------------------------------------------------
+# N-337: wrong-JSON-type node responses are refused even under python -O
+# ---------------------------------------------------------------------------
+
+def test_rpc_provider_refuses_wrong_type_node_response_under_python_O():
+    """N-337: node-response type checks must survive ``python -O``.
+
+    Proves: with assertions stripped (``-O``), each of get_transaction,
+    broadcast, get_utxos and get_raw_transaction raises RuntimeError naming the
+    RPC method and the unexpected type when the node returns the wrong JSON
+    type, and a well-typed response is still accepted.
+    Does not prove: anything about the HTTP layer (``_rpc_call`` is patched) or
+    about the field-level contents of well-typed responses.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pkg_root = Path(__file__).resolve().parent.parent
+    code = (
+        "from unittest.mock import patch\n"
+        "from runar.sdk.rpc_provider import RPCProvider\n"
+        "if __debug__:\n"
+        "    raise SystemExit('-O not in effect')\n"
+        "p = RPCProvider('http://localhost:1', 'u', 'p')\n"
+        "cases = [\n"
+        "    ('getrawtransaction', lambda: p.get_transaction('aa'), ['x']),\n"
+        "    ('sendrawtransaction', lambda: p.broadcast('00'), {'a': 1}),\n"
+        "    ('listunspent', lambda: p.get_utxos('addr'), {'a': 1}),\n"
+        "    ('getrawtransaction', lambda: p.get_raw_transaction('aa'), 5),\n"
+        "]\n"
+        "for method, fn, bad in cases:\n"
+        "    with patch.object(p, '_rpc_call', return_value=bad):\n"
+        "        try:\n"
+        "            fn()\n"
+        "        except RuntimeError as e:\n"
+        "            assert method in str(e) and type(bad).__name__ in str(e), str(e)\n"
+        "            continue\n"
+        "        except BaseException as e:\n"
+        "            raise SystemExit('%s: wrong error %r' % (method, e))\n"
+        "    raise SystemExit('%s accepted %r' % (method, bad))\n"
+        "with patch.object(p, '_rpc_call', return_value='abcd'):\n"
+        "    assert p.get_raw_transaction('aa') == 'abcd'\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-O", "-c", code],
+        cwd=pkg_root, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
