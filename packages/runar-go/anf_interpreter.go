@@ -1151,14 +1151,16 @@ func anfEvalBinOp(op string, left, right interface{}, resultType string) interfa
 		return new(big.Int).Sub(l, r)
 	case "*":
 		return new(big.Int).Mul(l, r)
+	// N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is
+	// no post-state to compute (same refusal as safediv / safemod).
 	case "/":
 		if r.Sign() == 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "OP_DIV", Message: "division by zero"})
 		}
 		return new(big.Int).Quo(l, r)
 	case "%":
 		if r.Sign() == 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "OP_MOD", Message: "modulo by zero"})
 		}
 		return new(big.Int).Rem(l, r)
 	case "==", "===":

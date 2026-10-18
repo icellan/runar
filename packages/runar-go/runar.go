@@ -1047,14 +1047,15 @@ func BigintBigMul(a, b *big.Int) *big.Int {
 
 // BigintBigMod returns a mod b using truncated semantics (Go's `%` on
 // signed integers), matching Script's OP_MOD. For the classical
-// non-negative remainder use Safemod's big variant. Returns 0 when b
-// is zero to mirror the int64 divmod helper's graceful path.
+// non-negative remainder use Safemod's big variant. Panics when b is
+// zero (nil counts as zero): OP_MOD aborts the script, so there is no
+// value to return (N-102; same as Safemod).
 func BigintBigMod(a, b *big.Int) *big.Int {
 	if a == nil {
 		a = new(big.Int)
 	}
 	if b == nil || b.Sign() == 0 {
-		return new(big.Int)
+		panic("BigintBigMod: modulo by zero")
 	}
 	q := new(big.Int).Quo(a, b) // truncated quotient
 	r := new(big.Int).Mul(q, b)
@@ -1062,14 +1063,15 @@ func BigintBigMod(a, b *big.Int) *big.Int {
 }
 
 // BigintBigDiv returns a / b using truncated semantics (Go's integer
-// division), matching Script's OP_DIV. Returns 0 when b is zero to
-// mirror safediv's graceful path rather than panicking.
+// division), matching Script's OP_DIV. Panics when b is zero (nil counts
+// as zero): OP_DIV aborts the script, so there is no value to return
+// (N-102; same as Safediv).
 func BigintBigDiv(a, b *big.Int) *big.Int {
 	if a == nil {
 		a = new(big.Int)
 	}
 	if b == nil || b.Sign() == 0 {
-		return new(big.Int)
+		panic("BigintBigDiv: division by zero")
 	}
 	return new(big.Int).Quo(a, b)
 }

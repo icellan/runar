@@ -1202,10 +1202,14 @@ def _eval_bin_op(op: str, left: Any, right: Any, result_type: Optional[str] = No
         return l - r
     if op == '*':
         return l * r
+    # N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is no
+    # post-state to compute (same refusal as safediv / safemod / divmod).
     if op == '/':
-        return 0 if r == 0 else _truncate_div(l, r)
+        return _abort_div(l, r, 'OP_DIV')
     if op == '%':
-        return 0 if r == 0 else _truncate_mod(l, r)
+        if r == 0:
+            raise ValueError('OP_MOD: modulo by zero')
+        return _truncate_mod(l, r)
     if op in ('==', '==='):
         return l == r
     if op in ('!=', '!=='):

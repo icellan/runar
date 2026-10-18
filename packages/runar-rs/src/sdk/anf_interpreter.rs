@@ -1824,8 +1824,12 @@ fn eval_bin_op(op: &str, left: &Val, right: &Val, result_type: &str) -> Result<V
         "-" => return l.checked_sub(r).map(Val::Int).ok_or(()),
         // N-163: refuse a product outside i64 rather than wrap it.
         "*" => return l.checked_mul(r).map(Val::Int).ok_or(()),
-        "/" => Val::Int(if r == 0 { 0 } else { l / r }),
-        "%" => Val::Int(if r == 0 { 0 } else { l % r }),
+        // N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there
+        // is no post-state to compute. `i64::MIN / -1` (2^63) is outside i64:
+        // refuse it too. `i64::MIN % -1` is 0 on chain (`wrapping_rem`).
+        "/" => return l.checked_div(r).map(Val::Int).ok_or(()),
+        "%" if r == 0 => return Err(()),
+        "%" => Val::Int(l.wrapping_rem(r)),
         "==" | "===" => Val::Bool(l == r),
         "!=" | "!==" => Val::Bool(l != r),
         "<" => Val::Bool(l < r),

@@ -225,6 +225,8 @@ Constructors must call `super(...)` as their first statement, passing every prop
 
 Only Rúnar built-in functions and methods on `self` are callable from contract source. `print()`, `math.floor()`, third-party libraries — anything not in the Rúnar prelude — is rejected at typecheck. See Section 15 for the full intrinsic list.
 
+**Division and modulo.** In a native Python run of a contract (pytest), the operators `//` and `%` use Python's flooring semantics (`-7 // 2 == -4`), while the compiled script's `OP_DIV` / `OP_MOD` truncate toward zero (`-7 / 2 == -3`) and abort on a zero divisor. Python cannot change its operators, so for negative operands use the Rúnar builtins `safediv`, `safemod` and `divmod`, which truncate and refuse zero exactly like the script. The SDK ANF interpreter (`compute_new_state`) follows the script.
+
 ---
 
 ## Compiling

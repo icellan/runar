@@ -1207,8 +1207,14 @@ public final class AnfInterpreter {
             case "+":  return l.add(r);
             case "-":  return l.subtract(r);
             case "*":  return l.multiply(r);
-            case "/":  return r.signum() == 0 ? BigInteger.ZERO : l.divide(r);
-            case "%":  return r.signum() == 0 ? BigInteger.ZERO : l.remainder(r);
+            // N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so
+            // there is no post-state to compute (same refusal as safediv).
+            case "/":
+                if (r.signum() == 0) throw new InterpreterException("OP_DIV: division by zero (the script aborts here)");
+                return l.divide(r);
+            case "%":
+                if (r.signum() == 0) throw new InterpreterException("OP_MOD: modulo by zero (the script aborts here)");
+                return l.remainder(r);
             case "==": case "===": return l.compareTo(r) == 0;
             case "!=": case "!==": return l.compareTo(r) != 0;
             case "<":  return l.compareTo(r) < 0;

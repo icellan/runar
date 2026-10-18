@@ -832,8 +832,13 @@ module Runar
         when '+'  then l + r
         when '-'  then l - r
         when '*'  then l * r
-        when '/'  then r == 0 ? 0 : truncate_div(l, r)
-        when '%'  then r == 0 ? 0 : truncate_mod(l, r)
+        # N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is
+        # no post-state to compute (same refusal as safediv / safemod / divmod).
+        when '/'  then abort_div(l, r, 'OP_DIV')
+        when '%'
+          raise 'OP_MOD: modulo by zero' if r == 0
+
+          truncate_mod(l, r)
         when '==', '===' then l == r
         when '!=', '!==' then l != r
         when '<'  then l < r

@@ -108,8 +108,8 @@ func TestBigintBigArithmeticHelpers(t *testing.T) {
 		{x: big.NewInt(17), y: five, modWant: big.NewInt(2), divWant: big.NewInt(3)},
 		{x: neg, y: three, modWant: big.NewInt(-2), divWant: big.NewInt(-3)},
 		{x: big.NewInt(0), y: five, modWant: big.NewInt(0), divWant: big.NewInt(0)},
-		// Divide-by-zero returns 0 rather than panicking (mirrors safediv).
-		{x: big.NewInt(17), y: big.NewInt(0), modWant: big.NewInt(0), divWant: big.NewInt(0)},
+		// Divide-by-zero is covered by TestN102_BigintBigDivModZeroDivisorPanics:
+		// OP_DIV / OP_MOD abort the script, so the helpers panic (was: returned 0).
 	} {
 		if got := BigintBigMod(pair.x, pair.y); got.Cmp(pair.modWant) != 0 {
 			t.Errorf("Mod(%s,%s) = %s, want %s", pair.x, pair.y, got, pair.modWant)

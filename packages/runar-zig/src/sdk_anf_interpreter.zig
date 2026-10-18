@@ -1522,8 +1522,18 @@ fn evalBinOp(allocator: std.mem.Allocator, op: []const u8, left: ANFValue, right
     if (std.mem.eql(u8, op, "-")) return .{ .int = std.math.sub(i64, l, r) catch return error.ScriptNumberError };
     // N-163: refuse a product outside i64 rather than wrap it.
     if (std.mem.eql(u8, op, "*")) return .{ .int = std.math.mul(i64, l, r) catch return error.ScriptNumberError };
-    if (std.mem.eql(u8, op, "/")) return .{ .int = if (r == 0) 0 else @divTrunc(l, r) };
-    if (std.mem.eql(u8, op, "%")) return .{ .int = if (r == 0) 0 else @rem(l, r) };
+    // N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is no
+    // post-state to compute. `minInt(i64) / -1` (2^63) is outside i64: refuse
+    // it too. `minInt(i64) % -1` is 0 on chain.
+    if (std.mem.eql(u8, op, "/")) {
+        if (r == 0 or (l == std.math.minInt(i64) and r == -1)) return error.ScriptNumberError;
+        return .{ .int = @divTrunc(l, r) };
+    }
+    if (std.mem.eql(u8, op, "%")) {
+        if (r == 0) return error.ScriptNumberError;
+        if (r == -1) return .{ .int = 0 };
+        return .{ .int = @rem(l, r) };
+    }
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "===")) return .{ .boolean = l == r };
     if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "!==")) return .{ .boolean = l != r };
     if (std.mem.eql(u8, op, "<")) return .{ .boolean = l < r };
@@ -4657,6 +4667,47 @@ test "F-134 math builtins match the compiled script" {
                 std.debug.print("F-134: {s}{any} script aborts, interpreter did not\n", .{ v.func, v.args });
                 return e;
             };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N-102: binary `/` and `%` refuse a zero divisor and truncate toward zero.
+//
+// OP_DIV / OP_MOD abort the script on a zero divisor, so there is no
+// post-state; the interpreter used to return 0. `minInt(i64) / -1` (2^63) is
+// outside i64 and is refused too; `minInt(i64) % -1` is 0 on chain.
+//
+// Proves: evalBinOp-through-computeNewState refuses the zero divisor and the
+// i64 overflow, and truncates toward zero (-7/2 = -3, -7%2 = -1). Does not
+// prove: agreement with an executed script (the expected values are the
+// OP_DIV/OP_MOD semantics, not an execution).
+// ---------------------------------------------------------------------------
+
+test "N-102 binary / and % refuse a zero divisor and truncate toward zero" {
+    const V = struct { op: []const u8, a: i64, b: i64, want: ?i64 };
+    const vectors = [_]V{
+        .{ .op = "/", .a = -7, .b = 2, .want = -3 },
+        .{ .op = "%", .a = -7, .b = 2, .want = -1 },
+        .{ .op = "/", .a = 7, .b = -2, .want = -3 },
+        .{ .op = "%", .a = 7, .b = -2, .want = 1 },
+        .{ .op = "/", .a = 7, .b = 0, .want = null },
+        .{ .op = "%", .a = 7, .b = 0, .want = null },
+        .{ .op = "/", .a = std.math.minInt(i64), .b = -1, .want = null },
+        .{ .op = "%", .a = std.math.minInt(i64), .b = -1, .want = 0 },
+    };
+    for (vectors) |v| {
+        var body = [_]ANFBinding{
+            .{ .name = "a", .value = .{ .load_const = .{ .value = .{ .int = v.a } } } },
+            .{ .name = "b", .value = .{ .load_const = .{ .value = .{ .int = v.b } } } },
+            .{ .name = "r", .value = .{ .bin_op = .{ .op = v.op, .left = "a", .right = "b", .result_type = "int" } } },
+            .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } },
+        };
+        const got = runAliasBody(std.testing.allocator, &body);
+        if (v.want) |w| {
+            try std.testing.expectEqual(w, try got);
+        } else {
+            try std.testing.expectError(error.ScriptNumberError, got);
         }
     }
 }
