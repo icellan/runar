@@ -232,6 +232,10 @@ fn writeStdoutLn(io: std.Io, data: []const u8) !void {
 /// N-069: the required-field check leaves its field-path message beside the
 /// error name, because Zig errors carry no payload.
 fn printIrError(err: anyerror) void {
+    if (err == error.IROutputDelegation) {
+        std.debug.print("error: {s}\n", .{stack_lower.ir_output_delegation_error});
+        return;
+    }
     if (err == error.IRRequiredFieldMissing or err == error.IRFieldWrongType or err == error.PublicMethodMissingTerminalAssert or err == error.ReservedName or err == error.ParentClassRuleViolation or err == error.IllegalPropertyWrite or err == error.StatefulScaffoldMismatch or err == error.SyntheticArrayChainMalformed or err == error.RabinKeyProvenance or err == error.IRRecursionDetected or err == error.IRCallDepthExceeded) {
         if (json_parser.required_fields.lastDiagnostic()) |msg| {
             std.debug.print("error: {s}\n", .{msg});

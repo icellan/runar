@@ -2474,6 +2474,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): LowerTask {
+    if (containsOutputIntrinsic(method.body)) throw new Error(IR_OUTPUT_DELEGATION_ERROR);
+
     // Track shadowed names so we can restore them after the body runs.
     // When a param name already exists on the stack, temporarily rename
     // the existing entry to avoid duplicate names which break Set-based
@@ -6943,6 +6945,30 @@ function methodReadsVarLenState(
     privateMethods,
     (b) => b.value.kind === 'load_prop' && varLenProps.has(b.value.name),
   );
+}
+
+/**
+ * N-055: the one diagnostic all seven tiers give an `--ir` program whose
+ * `method_call` reaches a private method that holds an output intrinsic. The
+ * source frontend inlines such helpers before ANF, so the intrinsic always sits
+ * in the public method; `--ir` has no delegation support, and the scaffolding
+ * check (N-101) and `methodUsesCodePart` only look at the public method's own
+ * bindings, so the delegated output would be built and then silently left out
+ * of the committed continuation.
+ */
+const IR_OUTPUT_DELEGATION_ERROR =
+  'output intrinsics must be called from the public method or an inlined helper; ' +
+  '--ir method_call delegation is not supported';
+
+/** True if `bindings`, at any `if` / `loop` depth, hold an output intrinsic. */
+function containsOutputIntrinsic(bindings: ANFBinding[]): boolean {
+  return bindings.some((b) => {
+    const v = b.value;
+    if (v.kind === 'add_output' || v.kind === 'add_raw_output' || v.kind === 'add_data_output') return true;
+    if (v.kind === 'if') return containsOutputIntrinsic(v.then) || containsOutputIntrinsic(v.else);
+    if (v.kind === 'loop') return containsOutputIntrinsic(v.body);
+    return false;
+  });
 }
 
 function methodUsesCodePart(bindings: ANFBinding[]): boolean {

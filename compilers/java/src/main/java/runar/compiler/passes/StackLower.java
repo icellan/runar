@@ -1064,6 +1064,30 @@ public final class StackLower {
         return false;
     }
 
+    /**
+     * N-055: the one diagnostic all seven tiers give an {@code --ir} program
+     * whose {@code method_call} reaches a private method holding an output
+     * intrinsic. The source frontend inlines such helpers before ANF, so the
+     * intrinsic always sits in the public method; {@code --ir} has no
+     * delegation support.
+     */
+    static final String IR_OUTPUT_DELEGATION_ERROR =
+        "output intrinsics must be called from the public method or an inlined helper; "
+        + "--ir method_call delegation is not supported";
+
+    /** True if {@code body}, at any if / loop depth, holds an output intrinsic. */
+    private static boolean containsOutputIntrinsic(List<AnfBinding> body) {
+        for (AnfBinding b : body) {
+            AnfValue v = b.value();
+            if (v instanceof AddOutput || v instanceof AddRawOutput || v instanceof AddDataOutput) return true;
+            if (v instanceof If iv && (containsOutputIntrinsic(iv.thenBranch()) || containsOutputIntrinsic(iv.elseBranch()))) {
+                return true;
+            }
+            if (v instanceof Loop l && containsOutputIntrinsic(l.body())) return true;
+        }
+        return false;
+    }
+
     private static boolean methodUsesCodePart(List<AnfBinding> body) {
         for (AnfBinding b : body) {
             AnfValue v = b.value();
@@ -2964,6 +2988,11 @@ public final class StackLower {
         void inlineMethodCallHead(String bindingName, AnfMethod m, List<String> args,
                                   int idx, Map<String, Integer> lastUses,
                                   List<Map<String, String>> shadowed) {
+
+            // N-055: see IR_OUTPUT_DELEGATION_ERROR.
+            if (containsOutputIntrinsic(m.body())) {
+                throw new RuntimeException(IR_OUTPUT_DELEGATION_ERROR);
+            }
 
             // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
             // checks its own -- checking in the lowerer rather than the typechecker also

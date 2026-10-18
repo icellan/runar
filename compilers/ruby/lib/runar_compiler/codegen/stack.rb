@@ -668,6 +668,28 @@ module RunarCompiler::Codegen
     false
   end
 
+  # N-055: the one diagnostic all seven tiers give an --ir program whose
+  # method_call reaches a private method holding an output intrinsic. The source
+  # frontend inlines such helpers before ANF, so the intrinsic always sits in the
+  # public method; --ir has no delegation support.
+  IR_OUTPUT_DELEGATION_ERROR = "output intrinsics must be called from the public method or an inlined helper; " \
+                               "--ir method_call delegation is not supported"
+
+  # True if bindings, at any if / loop depth, hold an output intrinsic.
+  #
+  # @param bindings [Array<IR::ANFBinding>]
+  # @return [Boolean]
+  def self.contains_output_intrinsic?(bindings)
+    bindings.any? do |b|
+      case b.value.kind
+      when "add_output", "add_raw_output", "add_data_output" then true
+      when "if" then contains_output_intrinsic?(b.value.then || []) || contains_output_intrinsic?(b.value.else_ || [])
+      when "loop" then contains_output_intrinsic?(b.value.body || [])
+      else false
+      end
+    end
+  end
+
   # Check whether a method has add_output, add_raw_output, add_data_output,
   # or computeStateOutput/computeStateOutputHash calls (recursively).
   #
@@ -2375,6 +2397,9 @@ module RunarCompiler::Codegen
     # the body is lowered in THIS context as a child task, then the shadowed
     # names are restored and the result renamed.
     def _inline_method_call_task(binding_name, method, args, binding_index, last_uses)
+      # N-055: see Codegen::IR_OUTPUT_DELEGATION_ERROR.
+      raise RunarCompiler::Codegen::IR_OUTPUT_DELEGATION_ERROR if RunarCompiler::Codegen.contains_output_intrinsic?(method.body)
+
       # Track shadowed names so we can restore them after the body runs.
       shadowed = []
 

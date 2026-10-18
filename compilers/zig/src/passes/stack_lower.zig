@@ -267,6 +267,12 @@ const LowerError = error{
     /// tiers at once. Zig's lowerer is an error-enum channel, so the name is
     /// the diagnostic.
     MethodCallArityMismatch,
+    /// N-055: a `method_call` from an `--ir` program reaches a private method
+    /// holding an output intrinsic. The source frontend inlines such helpers
+    /// before ANF, so the intrinsic always sits in the public method; `--ir`
+    /// has no delegation support. `main.zig` prints `ir_output_delegation_error`
+    /// for this error: the one sentence all seven tiers share.
+    IROutputDelegation,
     /// R-054: `checkMultiSig` with a degenerate threshold. An empty signature
     /// array lowers to a 0-of-N check, which OP_CHECKMULTISIG accepts
     /// unconditionally — an anyone-can-spend output produced from source that
@@ -1707,6 +1713,8 @@ const LowerCtx = struct {
     /// returns the task that lowers the body in THIS context, then restores
     /// shadowed names and renames the result (`inlineMethodCallTail`).
     fn startInlineTask(self: *LowerCtx, bind_name: []const u8, method: types.ANFMethod, args: []const []const u8) LowerError!LowerTask {
+        if (containsOutputIntrinsic(method.body)) return LowerError.IROutputDelegation;
+
         const t = try self.allocator.create(InlineTask);
         t.* = .{ .ctx = self, .bind_name = bind_name, .method = method };
         errdefer t.destroy();
@@ -7042,6 +7050,27 @@ fn methodUsesCheckPreimageRec(
                 if (findPrivateMethod(methods, mc.method)) |target| {
                     if (methodUsesCheckPreimageRec(methodBindings(target), methods, depth + 1)) return true;
                 }
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// N-055: the one diagnostic all seven tiers give an `--ir` program whose
+/// `method_call` reaches a private method holding an output intrinsic.
+pub const ir_output_delegation_error = "output intrinsics must be called from the public method or an inlined helper; --ir method_call delegation is not supported";
+
+/// True if `bindings`, at any `if` / `loop` depth, hold an output intrinsic.
+fn containsOutputIntrinsic(bindings: []const types.ANFBinding) bool {
+    for (bindings) |binding| {
+        switch (binding.value) {
+            .add_output, .add_raw_output, .add_data_output => return true,
+            .@"if" => |ie| {
+                if (containsOutputIntrinsic(ie.then) or containsOutputIntrinsic(ie.@"else")) return true;
+            },
+            .loop => |loop| {
+                if (containsOutputIntrinsic(loop.body)) return true;
             },
             else => {},
         }

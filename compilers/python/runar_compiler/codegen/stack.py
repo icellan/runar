@@ -2009,6 +2009,10 @@ class _LoweringContext:
     def _inline_method_call_task(self, binding_name: str, method: ANFMethod,
                                  args: list[str], binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         """Inline a private method by lowering its body in the current context."""
+        # N-055: see _IR_OUTPUT_DELEGATION_ERROR.
+        if _contains_output_intrinsic(method.body):
+            raise RuntimeError(_IR_OUTPUT_DELEGATION_ERROR)
+
         # Track shadowed names so we can restore them after the body runs.
         # When a param name already exists on the stack, temporarily rename
         # the existing entry to avoid duplicate names which break Set-based
@@ -5626,6 +5630,32 @@ def _some_reachable_binding(
                 if target is not None and target.name not in visited:
                     visited.add(target.name)
                     work.append(target.body)
+    return False
+
+
+# N-055: the one diagnostic all seven tiers give an --ir program whose
+# method_call reaches a private method holding an output intrinsic. The source
+# frontend inlines such helpers before ANF, so the intrinsic always sits in the
+# public method; --ir has no delegation support.
+_IR_OUTPUT_DELEGATION_ERROR = (
+    "output intrinsics must be called from the public method or an inlined helper; "
+    "--ir method_call delegation is not supported"
+)
+
+
+def _contains_output_intrinsic(bindings: list[ANFBinding]) -> bool:
+    """True if bindings, at any if / loop depth, hold an output intrinsic."""
+    for b in bindings:
+        kind = b.value.kind
+        if kind in ("add_output", "add_raw_output", "add_data_output"):
+            return True
+        if kind == "if":
+            if (_contains_output_intrinsic(getattr(b.value, "then", None) or [])
+                    or _contains_output_intrinsic(getattr(b.value, "else_", None) or [])):
+                return True
+        if kind == "loop":
+            if _contains_output_intrinsic(getattr(b.value, "body", None) or []):
+                return True
     return False
 
 

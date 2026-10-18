@@ -2228,6 +2228,11 @@ func (ctx *loweringContext) lowerMethodCall(bindingName, object string, method s
 // inlineMethodCall inlines a private method by lowering its body in the current context.
 // The method's parameters are bound to the call arguments.
 func (ctx *loweringContext) inlineMethodCall(bindingName string, method *ir.ANFMethod, args []string, bindingIndex int, lastUses map[string]int) {
+	// N-055: see irOutputDelegationError.
+	if containsOutputIntrinsic(method.Body) {
+		panic(irOutputDelegationError)
+	}
+
 	type shadowEntry struct {
 		paramName    string
 		shadowedName string
@@ -6155,6 +6160,33 @@ func methodReadsVarLenStateRec(
 						return true
 					}
 				}
+			}
+		}
+	}
+	return false
+}
+
+// irOutputDelegationError (N-055) is the one diagnostic all seven tiers give an
+// --ir program whose method_call reaches a private method holding an output
+// intrinsic. The source frontend inlines such helpers before ANF, so the
+// intrinsic always sits in the public method; --ir has no delegation support.
+const irOutputDelegationError = "output intrinsics must be called from the public method or an inlined helper; " +
+	"--ir method_call delegation is not supported"
+
+// containsOutputIntrinsic reports whether bindings, at any if / loop depth,
+// hold an add_output, add_raw_output or add_data_output.
+func containsOutputIntrinsic(bindings []ir.ANFBinding) bool {
+	for _, b := range bindings {
+		switch b.Value.Kind {
+		case "add_output", "add_raw_output", "add_data_output":
+			return true
+		case "if":
+			if containsOutputIntrinsic(b.Value.Then) || containsOutputIntrinsic(b.Value.Else) {
+				return true
+			}
+		case "loop":
+			if containsOutputIntrinsic(b.Value.Body) {
+				return true
 			}
 		}
 	}

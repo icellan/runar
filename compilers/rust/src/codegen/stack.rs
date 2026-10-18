@@ -2747,6 +2747,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) -> LowerTask<'a> {
+        // N-055: see IR_OUTPUT_DELEGATION_ERROR.
+        if contains_output_intrinsic(&method.body) {
+            panic!("{}", IR_OUTPUT_DELEGATION_ERROR);
+        }
+
         // Track shadowed names so we can restore them after the body runs.
         // When a param name already exists on the stack, temporarily rename
         // the existing entry to avoid duplicate names which break Set-based
@@ -7107,6 +7112,24 @@ fn some_reachable_binding(
         }
     }
     false
+}
+
+/// N-055: the one diagnostic all seven tiers give an `--ir` program whose
+/// `method_call` reaches a private method holding an output intrinsic. The
+/// source frontend inlines such helpers before ANF, so the intrinsic always
+/// sits in the public method; `--ir` has no delegation support.
+const IR_OUTPUT_DELEGATION_ERROR: &str = "output intrinsics must be called from the public method or an inlined helper; --ir method_call delegation is not supported";
+
+/// True if `bindings`, at any `if` / `loop` depth, hold an output intrinsic.
+fn contains_output_intrinsic(bindings: &[ANFBinding]) -> bool {
+    bindings.iter().any(|b| match &b.value {
+        ANFValue::AddOutput { .. } | ANFValue::AddRawOutput { .. } | ANFValue::AddDataOutput { .. } => true,
+        ANFValue::If { then, else_branch, .. } => {
+            contains_output_intrinsic(then) || contains_output_intrinsic(else_branch)
+        }
+        ANFValue::Loop { body, .. } => contains_output_intrinsic(body),
+        _ => false,
+    })
 }
 
 /// Check whether a method has add_output, add_raw_output, or computeStateOutput/
