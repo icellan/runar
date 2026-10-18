@@ -422,7 +422,7 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 	// F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores
 	// them as the same 8-byte OP_NUM2BIN word.
 	case "int", "bigint", "RabinSig", "RabinPubKey":
-		n := stateFieldInt64(value, label, 8)
+		n := stateFieldInt64(value, label, fieldType, 8)
 		return encodeNum2Bin(n, 8)
 	// 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
 	// what every compiler writes into `stateFields[].type`, alongside
@@ -885,7 +885,7 @@ func hexToBytes(hex string) []byte {
 // keep their signatures; this is the same "the value cannot be represented, so
 // every result would be wrong" contract as checkedMul / checkedAdd in
 // overflow.go.
-func stateFieldInt64(value interface{}, label string, width int) int64 {
+func stateFieldInt64(value interface{}, label string, fieldType string, width int) int64 {
 	limit := new(big.Int).Lsh(big.NewInt(1), uint(8*width-1))
 	reject := func(n string) {
 		panic(fmt.Sprintf(
@@ -897,6 +897,37 @@ func stateFieldInt64(value interface{}, label string, width int) int64 {
 	}
 	tooWide := func(n *big.Int) bool {
 		return new(big.Int).Abs(n).Cmp(limit) >= 0
+	}
+
+	// N-084: refuse anything that is not an integer (or a decimal integer
+	// string, optionally with the JSON "n" suffix) BEFORE toInt64, which
+	// returns 0 for every other value and so used to serialize a hex string,
+	// bool, []byte, nil or unknown type as a valid 0 word.
+	notInteger := func(got string) {
+		panic(fmt.Sprintf(
+			"runar: SerializeState: state field %q (%s) must be an integer or a decimal integer string, got %s. "+
+				"Serializing anything else would write a number the caller never supplied into the state section",
+			label, fieldType, got))
+	}
+	switch v := value.(type) {
+	case int64, int, int32, uint64:
+	case *big.Int:
+		if v == nil {
+			notInteger("nil")
+		}
+	case float64:
+		// JSON numbers decode to float64; only an integral, finite one is an integer.
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+			notInteger("a non-integer number")
+		}
+	case string:
+		if _, ok := new(big.Int).SetString(strings.TrimSuffix(v, "n"), 10); !ok || strings.ContainsAny(v, "_+") {
+			notInteger("a non-decimal string")
+		}
+	case nil:
+		notInteger("nil")
+	default:
+		notInteger(fmt.Sprintf("%T", value))
 	}
 
 	// Range-check the WIDE value first, while it is still intact.

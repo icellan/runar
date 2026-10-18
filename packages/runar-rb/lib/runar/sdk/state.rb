@@ -473,7 +473,7 @@ module Runar
         # F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
         # stores them as the same 8-byte OP_NUM2BIN word.
         when 'int', 'bigint', 'RabinSig', 'RabinPubKey'
-          n = coerce_to_integer(value)
+          n = coerce_to_integer(value, label, field_type)
           encode_num2bin(n, 8, label)
         when 'bool', 'boolean'
           value ? '01' : '00'
@@ -702,11 +702,21 @@ module Runar
       #   "42n"       → 42  (BigInt string from JSON without reviver)
       #   Integer     → as-is
       #   other       → Integer() conversion
-      def coerce_to_integer(value)
-        return 0 if value.nil?
-        return value.to_s.chomp('n').to_i if value.is_a?(String) && value.end_with?('n')
+      # N-084: only an Integer, or a decimal integer string with the optional
+      # JSON "n" suffix (e.g. "0n", "1000n"), is a num2bin value. nil used to
+      # write 0, "abcn" chomped to 0, and Integer() accepted 1.5, "0x10", "1_0".
+      def coerce_to_integer(value, label = '?', field_type = '?')
+        return value if value.is_a?(Integer)
+        return value.chomp('n').to_i if value.is_a?(String) && value.match?(/\A-?[0-9]+n?\z/)
 
-        Integer(value)
+        got = if value.is_a?(String) then 'a non-decimal string'
+              elsif value.nil? then 'nil'
+              else value.class.to_s
+              end
+        raise ArgumentError,
+              "serialize_state: state field '#{label}' (#{field_type}) must be an integer or a " \
+              "decimal integer string, got #{got}. Serializing anything else would write a " \
+              'number the caller never supplied into the state section'
       end
       private_class_method :coerce_to_integer
     end

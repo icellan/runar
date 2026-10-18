@@ -363,14 +363,31 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
     // OP_NUM2BIN word (STATE_FIELD_WIDTHS: num2bin-le8).
     case 'RabinSig':
     case 'RabinPubKey': {
+      // N-084: only an integer, or a decimal integer string (optionally with
+      // the JSON "n" suffix, e.g. "0n", "1000n"), is a num2bin value. BigInt()
+      // alone coerces `true` to 1n and '' / '  ' to 0n and '0x10' to 16n,
+      // writing a number the caller never supplied into the state section.
       let n: bigint;
       if (typeof value === 'bigint') {
         n = value;
-      } else if (typeof value === 'string' && value.endsWith('n')) {
-        // BigInt string from JSON without reviver (e.g. "0n", "1000n")
-        n = BigInt(value.slice(0, -1));
+      } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+        n = BigInt(value);
+      } else if (typeof value === 'string' && /^-?[0-9]+n?$/.test(value)) {
+        n = BigInt(value.endsWith('n') ? value.slice(0, -1) : value);
       } else {
-        n = BigInt(value as number);
+        const got =
+          typeof value === 'string'
+            ? 'a non-decimal string'
+            : value === null
+              ? 'null'
+              : typeof value === 'number'
+                ? 'a non-integer number'
+                : typeof value;
+        throw new Error(
+          `serializeState: state field "${label}" (${type}) must be an integer ` +
+            `or a decimal integer string, got ${got}. Serializing anything else ` +
+            `would write a number the caller never supplied into the state section.`,
+        );
       }
       return encodeNum2Bin(n, 8, label);
     }

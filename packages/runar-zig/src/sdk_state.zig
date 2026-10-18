@@ -205,17 +205,13 @@ fn encodeStateValue(
     field_type: []const u8,
 ) ![]u8 {
     if (isNum2Bin8Type(field_type)) {
-        switch (value) {
-            .big_int => |decimal_str| return encodeBigNum2Bin(allocator, decimal_str, 8),
-            else => {},
-        }
+        // N-084: only `.int` and a decimal-integer `.big_int` are num2bin
+        // values. `.bytes`, `.boolean` and `.empty_sig` used to encode as 0 / 1,
+        // writing a number the caller never supplied into the state section.
         const n: i64 = switch (value) {
             .int => |i| i,
-            .boolean => |b| if (b) @as(i64, 1) else @as(i64, 0),
-            // .empty_sig (#106) is a call-arg-only marker, never a state field;
-            // grouped with .bytes for exhaustiveness.
-            .bytes, .empty_sig => 0,
-            .big_int => unreachable, // handled above
+            .big_int => |decimal_str| return encodeBigNum2Bin(allocator, decimal_str, 8),
+            .bytes, .boolean, .empty_sig => return error.NotAnInteger,
             .array_value => return error.ArrayValueInScalarField,
         };
         return encodeNum2Bin(allocator, n, 8);
@@ -400,6 +396,13 @@ pub fn encodeBigNum2Bin(allocator: std.mem.Allocator, decimal_str: []const u8, w
     // Check for negative sign
     const negative = decimal_str.len > 0 and decimal_str[0] == '-';
     const digits = if (negative) decimal_str[1..] else decimal_str;
+
+    // N-084: refuse a string that is not a decimal integer (`c - '0'` below
+    // would otherwise wrap or index garbage).
+    if (digits.len == 0) return error.NotAnInteger;
+    for (digits) |c| {
+        if (c < '0' or c > '9') return error.NotAnInteger;
+    }
 
     var buf = try allocator.alloc(u8, width);
     defer allocator.free(buf);

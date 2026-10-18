@@ -283,6 +283,7 @@ test {
     _ = @import("sdk_g1_raw_outputs_test.zig");
     _ = @import("sdk_null_bytestring_arg_test.zig");
     _ = @import("sdk_n045_fixed_width_test.zig");
+    _ = @import("sdk_n084_num2bin_state_test.zig");
     _ = @import("sdk_n051_codepart_len_slots_test.zig");
     _ = @import("sdk_n316_matches_artifact_slot_only_test.zig");
     _ = @import("sdk_n317_hostile_utxo_scripts_test.zig");

@@ -1,6 +1,7 @@
 """State serialization — encode/decode state values as raw bytes matching NUM2BIN format."""
 
 from __future__ import annotations
+import re
 from runar.sdk.errors import MalformedScriptError
 from runar.sdk.types import RunarArtifact, StateField
 
@@ -543,13 +544,21 @@ _NUM2BIN8_TYPES = ('int', 'bigint', 'RabinSig', 'RabinPubKey')
 
 def _encode_state_value(value, field_type: str, label: str = '?') -> str:
     if field_type in _NUM2BIN8_TYPES:
-        if value is None:
-            n = 0
-        elif isinstance(value, str) and value.endswith('n'):
-            # BigInt string from JSON without reviver (e.g. "0n", "1000n")
-            n = int(value[:-1])
+        # N-084: only an int (not a bool) or a decimal integer string, with the
+        # optional JSON "n" suffix (e.g. "0n", "1000n"), is a num2bin value.
+        # None used to write 0, and int() coerced True -> 1 and 1.5 -> 1.
+        if isinstance(value, int) and not isinstance(value, bool):
+            n = value
+        elif isinstance(value, str) and re.fullmatch(r'-?[0-9]+n?', value):
+            n = int(value[:-1] if value.endswith('n') else value)
         else:
-            n = int(value)
+            got = ('a non-decimal string' if isinstance(value, str)
+                   else 'None' if value is None else type(value).__name__)
+            raise ValueError(
+                f'serialize_state: state field {label!r} ({field_type}) must be an integer '
+                f'or a decimal integer string, got {got}. Serializing anything else would '
+                'write a number the caller never supplied into the state section'
+            )
         return _encode_num2bin(n, 8, label)
     elif field_type in ('bool', 'boolean'):
         # 1 raw byte. The canonical Runar primitive name is `boolean` — that is

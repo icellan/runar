@@ -487,7 +487,7 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
             // Defensively handle SdkValue::Bytes containing a BigInt string
             // (e.g. "0n", "1000n") that may have slipped through from JSON
             // artifacts loaded without a BigInt reviver.
-            let n = state_field_i64(value, label, 8);
+            let n = state_field_i64(value, label, field_type, 8);
             encode_num2bin(n, 8)
         }
         // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that
@@ -561,28 +561,47 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
 /// signature; this is the same "the value cannot be represented, so every
 /// result would be wrong" contract as `SdkValue::as_int` and the `i64 overflow`
 /// panics in `prelude.rs`.
-fn state_field_i64(value: &SdkValue, label: &str, width: usize) -> i64 {
+fn state_field_i64(value: &SdkValue, label: &str, field_type: &str, width: usize) -> i64 {
     use num_bigint::BigInt;
 
     // Resolve the value at ARBITRARY precision first — narrowing is what used
     // to destroy it.
+    //
+    // N-084: only an integer, or a decimal integer string with the optional
+    // JSON "n" suffix (e.g. "0n", "1000n" — slipped through from JSON
+    // artifacts loaded without a BigInt reviver), is a num2bin value. A hex
+    // string / "" / any other variant used to encode as 0 (or reach `as_int`'s
+    // unnamed panic).
     let wide: Option<BigInt> = match value {
         SdkValue::Int(i) => Some(BigInt::from(*i)),
         SdkValue::BigInt(bi) => Some(bi.clone()),
-        // Defensively handle SdkValue::Bytes containing a BigInt string
-        // (e.g. "0n", "1000n") that may have slipped through from JSON
-        // artifacts loaded without a BigInt reviver.
         SdkValue::Bytes(s) => {
-            let num_str = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
-            num_str.parse::<BigInt>().ok()
+            let num_str = s.strip_suffix('n').unwrap_or(s.as_str());
+            let digits = num_str.strip_prefix('-').unwrap_or(num_str);
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                num_str.parse::<BigInt>().ok()
+            } else {
+                None
+            }
         }
-        _ => Some(BigInt::from(value.as_int())),
+        _ => None,
     };
 
-    // A non-numeric byte string keeps the historical lenient behaviour (0).
     let n = match wide {
         Some(n) => n,
-        None => return 0,
+        None => {
+            let got = match value {
+                SdkValue::Bytes(_) => "a non-decimal string",
+                SdkValue::Bool(_) => "a boolean",
+                _ => "a non-integer value",
+            };
+            panic!(
+                "serialize_state: state field \"{}\" ({}) must be an integer or a decimal \
+                 integer string, got {}. Serializing anything else would write a number the \
+                 caller never supplied into the state section",
+                label, field_type, got
+            );
+        }
     };
 
     let limit = BigInt::from(1) << (8 * width - 1);

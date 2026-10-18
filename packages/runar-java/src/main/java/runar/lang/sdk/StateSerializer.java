@@ -172,7 +172,7 @@ public final class StateSerializer {
         return switch (fieldType) {
             // F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
             // stores them as the same 8-byte OP_NUM2BIN word.
-            case "int", "bigint", "RabinSig", "RabinPubKey" -> encodeNum2Bin(toBigInteger(value), 8, label);
+            case "int", "bigint", "RabinSig", "RabinPubKey" -> encodeNum2Bin(toBigInteger(value, label, fieldType), 8, label);
             // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
             // what every compiler writes into stateFields[].type, alongside
             // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
@@ -523,15 +523,22 @@ public final class StateSerializer {
     // Value coercion
     // ------------------------------------------------------------------
 
-    static BigInteger toBigInteger(Object value) {
-        if (value == null) return BigInteger.ZERO;
+    // N-084: only an integer, or a decimal integer string with the optional
+    // JSON "n" suffix (e.g. "0n", "1000n"), is a num2bin value. null used to
+    // write 0, and BigInteger accepts "+5"; anything else failed without
+    // naming the field.
+    static BigInteger toBigInteger(Object value, String label, String fieldType) {
         if (value instanceof BigInteger b) return b;
         if (value instanceof Long l) return BigInteger.valueOf(l);
         if (value instanceof Integer i) return BigInteger.valueOf(i);
-        if (value instanceof String s) {
-            String t = s.endsWith("n") ? s.substring(0, s.length() - 1) : s;
-            return new BigInteger(t);
+        if (value instanceof String s && s.matches("-?[0-9]+n?")) {
+            return new BigInteger(s.endsWith("n") ? s.substring(0, s.length() - 1) : s);
         }
-        throw new IllegalArgumentException("toBigInteger: unsupported " + value.getClass());
+        String got = value instanceof String ? "a non-decimal string"
+            : value == null ? "null" : value.getClass().getSimpleName();
+        throw new IllegalArgumentException(String.format(
+            "serializeState: state field \"%s\" (%s) must be an integer or a decimal integer "
+                + "string, got %s. Serializing anything else would write a number the caller "
+                + "never supplied into the state section", label, fieldType, got));
     }
 }
