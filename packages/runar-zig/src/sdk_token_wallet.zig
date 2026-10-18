@@ -262,7 +262,7 @@ fn n076Discover(script: []const u8) !usize {
 
     var state_fields = [_]types.StateField{.{ .name = "", .type_name = "", .index = 1 }};
     var ctor_slots = [_]types.ConstructorSlot{.{ .param_index = 0, .byte_offset = 2 }};
-    var cs_slots = [_]types.CodeSepIndexSlot{.{ .byte_offset = 4, .code_sep_index = 0 }};
+    var cs_slots = [_]types.CodeSepIndexSlot{.{ .byte_offset = 4, .code_sep_index = 1 }};
     var len_slots = [_]types.CodePartLenSlot{.{ .byte_offset = 7 }};
     const artifact = types.RunarArtifact{
         .allocator = allocator,

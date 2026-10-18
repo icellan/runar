@@ -385,6 +385,8 @@ public final class ScriptUtils {
 
         int templatePos = 0;
         int codePos = 0;
+        // N-318: the element read at each placeholder, keyed by template byte offset.
+        java.util.Map<Integer, String> elems = new java.util.HashMap<>();
         for (int byteOffset : offsets) {
             int slotHexOffset = byteOffset * 2;
             int segLen = slotHexOffset - templatePos;
@@ -395,9 +397,35 @@ public final class ScriptUtils {
             templatePos = slotHexOffset + 2;
             int elemOffset = codePos + segLen;
             codePos = elemOffset + decodePushData(code, elemOffset).hexCharsConsumed();
+            elems.put(byteOffset, code.substring(elemOffset, codePos));
         }
-        return code.length() - codePos == template.length() - templatePos
-            && segmentMatches(template, code, lenFields, deployedLen, templatePos, template.length(), codePos);
+        if (!(code.length() - codePos == template.length() - templatePos
+            && segmentMatches(template, code, lenFields, deployedLen, templatePos, template.length(), codePos))) {
+            return false;
+        }
+
+        // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+        // pushScriptNumber(codeSepIndex + shift) there
+        // (ContractScript.resolvedCodeSepSlots), shift = the growth of every
+        // constructor slot before codeSepIndex plus that of every earlier
+        // codeSep slot before it. The matcher does not know the constructor
+        // args, so their growth is taken from the elements actually read.
+        java.util.List<RunarArtifact.CodeSepIndexSlot> sepSlots = new java.util.ArrayList<>(artifact.codeSepIndexSlots());
+        sepSlots.sort(java.util.Comparator.comparingInt(RunarArtifact.CodeSepIndexSlot::byteOffset));
+        java.util.List<int[]> resolved = new java.util.ArrayList<>(); // {byteOffset, width}
+        for (RunarArtifact.CodeSepIndexSlot slot : sepSlots) {
+            long shift = 0;
+            for (RunarArtifact.ConstructorSlot cs : artifact.constructorSlots()) {
+                if (cs.byteOffset() < slot.codeSepIndex()) shift += elems.get(cs.byteOffset()).length() / 2 - 1;
+            }
+            for (int[] prev : resolved) {
+                if (prev[0] < slot.codeSepIndex()) shift += prev[1] - 1;
+            }
+            String expected = ContractScript.pushScriptNumber(java.math.BigInteger.valueOf(slot.codeSepIndex() + shift));
+            if (!expected.equals(elems.get(slot.byteOffset()))) return false;
+            resolved.add(new int[] {slot.byteOffset(), expected.length() / 2});
+        }
+        return true;
     }
 
     /** True when {@code hex} is an even-length string of hex digits (N-317). */

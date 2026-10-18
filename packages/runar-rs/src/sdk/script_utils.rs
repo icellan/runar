@@ -413,6 +413,8 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bo
 
     let mut template_pos = 0;
     let mut code_pos = 0;
+    // N-318: the element read at each placeholder, keyed by template byte offset.
+    let mut elems: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
 
     for byte_offset in &placeholder_offsets {
         let slot_hex_offset = byte_offset * 2;
@@ -429,12 +431,46 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bo
         template_pos = slot_hex_offset + 2;
         let elem_offset = code_pos + seg_len;
         let (_, total_hex_chars, _) = read_script_element(&code_hex, elem_offset)?;
+        elems.insert(*byte_offset, &code_hex[elem_offset..elem_offset + total_hex_chars]);
         code_pos = elem_offset + total_hex_chars;
     }
 
-    Ok(code_pos <= code_hex.len()
+    if !(code_pos <= code_hex.len()
         && code_hex.len() - code_pos == template.len() - template_pos
         && segment_matches(template_pos, template.len(), code_pos))
+    {
+        return Ok(false);
+    }
+
+    // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+    // encode_script_number(code_sep_index + shift) there
+    // (`resolved_code_sep_slot_values`), shift = the growth of every
+    // constructor slot before code_sep_index plus that of every earlier
+    // codeSep slot before it. The matcher does not know the constructor args,
+    // so their growth is taken from the elements actually read.
+    let mut sep_slots: Vec<_> = artifact.code_sep_index_slots.as_deref().unwrap_or(&[]).iter().collect();
+    sep_slots.sort_by_key(|s| s.byte_offset);
+    let mut resolved: Vec<(usize, usize)> = Vec::new(); // (byte_offset, width)
+    for slot in sep_slots {
+        let mut shift: i64 = 0;
+        for cs in slots {
+            if cs.byte_offset < slot.code_sep_index {
+                shift += (elems[&cs.byte_offset].len() / 2) as i64 - 1;
+            }
+        }
+        for &(prev_offset, prev_width) in &resolved {
+            if prev_offset < slot.code_sep_index {
+                shift += prev_width as i64 - 1;
+            }
+        }
+        let expected =
+            crate::sdk::contract::encode_script_number(slot.code_sep_index as i64 + shift);
+        if elems.get(&slot.byte_offset).copied() != Some(expected.as_str()) {
+            return Ok(false);
+        }
+        resolved.push((slot.byte_offset, expected.len() / 2));
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

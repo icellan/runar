@@ -45,7 +45,8 @@ const artifact = {
   asm: '',
   stateFields: [{ name: 'balance', type: 'bigint', index: 1 }],
   constructorSlots: [{ paramIndex: 0, byteOffset: 2 }],
-  codeSepIndexSlots: [{ byteOffset: 4, codeSepIndex: 0 }],
+  // N-318: codeSepIndex 1, so the OP_1 baked below is what deploy writes there.
+  codeSepIndexSlots: [{ byteOffset: 4, codeSepIndex: 1 }],
   codePartLenSlots: [{ byteOffset: 7 }],
   buildTimestamp: '2026-01-01T00:00:00Z',
 } as unknown as RunarArtifact;

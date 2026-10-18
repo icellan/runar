@@ -29,7 +29,7 @@ fn artifact() -> RunarArtifact {
         "script": "76a9008800750400000000ac",
         "stateFields": [{ "name": "balance", "type": "bigint", "index": 1 }],
         "constructorSlots": [{ "paramIndex": 0, "byteOffset": 2 }],
-        "codeSepIndexSlots": [{ "byteOffset": 4, "codeSepIndex": 0 }],
+        "codeSepIndexSlots": [{ "byteOffset": 4, "codeSepIndex": 1 }],
         "codePartLenSlots": [{ "byteOffset": 7 }]
     }))
     .unwrap()

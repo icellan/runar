@@ -24,7 +24,7 @@ RSpec.describe 'N-076: TokenWallet#get_utxos uses the slot-aware matcher' do
       script: '76a9' + '00' + '88' + '00' + '75' + '04' + '00000000' + 'ac',
       state_fields: [Runar::SDK::StateField.new(name: 'balance', type: 'bigint', index: 1)],
       constructor_slots: [Runar::SDK::ConstructorSlot.new(param_index: 0, byte_offset: 2)],
-      code_sep_index_slots: [Runar::SDK::CodeSepIndexSlot.new(byte_offset: 4, code_sep_index: 0)],
+      code_sep_index_slots: [Runar::SDK::CodeSepIndexSlot.new(byte_offset: 4, code_sep_index: 1)],
       code_part_len_slots: [Runar::SDK::CodePartLenSlot.new(byte_offset: 7)]
     )
   end

@@ -410,6 +410,8 @@ pub fn matchesArtifact(
 
     var template_pos: usize = 0;
     var code_pos: usize = 0;
+    // N-318: the element read at each sorted placeholder (start, hex length).
+    var elem_at: [64]struct { start: usize, len: usize } = undefined;
 
     for (0..sorted_count) |i| {
         const slot_hex_offset: usize = @intCast(sorted_offsets[i].byte_offset * 2);
@@ -428,13 +430,56 @@ pub fn matchesArtifact(
         // Read the actual element in the code script
         const elem_offset = code_pos + template_segment_len;
         const elem = try readScriptElement(code_hex, elem_offset);
+        elem_at[i] = .{ .start = elem_offset, .len = elem.total_hex_chars };
         code_pos = elem_offset + elem.total_hex_chars;
     }
 
     // Compare the remaining suffix
     if (template_pos > template.len or code_pos > code_hex.len) return false;
     if (code_hex.len - code_pos != template.len - template_pos) return false;
-    return segmentMatches(artifact, template, template_pos, template.len, code_hex, code_pos, &deployed_len);
+    if (!segmentMatches(artifact, template, template_pos, template.len, code_hex, code_pos, &deployed_len)) return false;
+
+    // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+    // encodeScriptNumber(code_sep_index + shift) there
+    // (`resolvedCodeSepSlotValues`), shift = the growth of every constructor
+    // slot before code_sep_index plus that of every earlier codeSep slot
+    // before it. The matcher does not know the constructor args, so their
+    // growth is taken from the elements actually read. Earlier codeSep slots
+    // are exactly the ones with a lower byte offset (each already verified to
+    // carry its expected value, so its read width is the baked width).
+    const Elem = struct {
+        fn at(offs: []const @TypeOf(sorted_offsets[0]), elems: []const @TypeOf(elem_at[0]), byte_offset: i32) @TypeOf(elem_at[0]) {
+            for (offs, 0..) |o, k| {
+                if (o.byte_offset == byte_offset) return elems[k];
+            }
+            unreachable; // every slot offset was collected above
+        }
+    };
+    // Visit codeSep slots in ascending byte offset (sorted_offsets order).
+    for (0..sorted_count) |i| {
+        const off = sorted_offsets[i].byte_offset;
+        for (artifact.code_sep_index_slots) |slot| {
+            if (slot.byte_offset != off) continue;
+            var shift: i64 = 0;
+            for (artifact.constructor_slots) |cs| {
+                if (cs.byte_offset < slot.code_sep_index) {
+                    shift += @as(i64, @intCast(Elem.at(sorted_offsets[0..sorted_count], elem_at[0..sorted_count], cs.byte_offset).len / 2)) - 1;
+                }
+            }
+            for (artifact.code_sep_index_slots) |prev| {
+                if (prev.byte_offset < off and prev.byte_offset < slot.code_sep_index) {
+                    shift += @as(i64, @intCast(Elem.at(sorted_offsets[0..sorted_count], elem_at[0..sorted_count], prev.byte_offset).len / 2)) - 1;
+                }
+            }
+            var buf: [64]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&buf);
+            const expected = state_mod.encodeScriptNumber(fba.allocator(), @as(i64, slot.code_sep_index) + shift) catch return false;
+            const e = elem_at[i];
+            if (!std.mem.eql(u8, code_hex[e.start .. e.start + e.len], expected)) return false;
+            break; // a duplicate entry at the same offset would re-check the same element
+        }
+    }
+    return true;
 }
 
 /// Compare template[t_start..t_end] against code_hex starting at c_start

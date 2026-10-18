@@ -26,7 +26,7 @@ func n076Artifact() *RunarArtifact {
 		Script:            "76a9" + "00" + "88" + "00" + "75" + "04" + "00000000" + "ac",
 		StateFields:       []StateField{{Name: "balance", Type: "bigint", Index: 1}},
 		ConstructorSlots:  []ConstructorSlot{{ParamIndex: 0, ByteOffset: 2}},
-		CodeSepIndexSlots: []CodeSepIndexSlot{{ByteOffset: 4}},
+		CodeSepIndexSlots: []CodeSepIndexSlot{{ByteOffset: 4, CodeSepIndex: 1}}, // N-318: deploy bakes OP_1 for index 1
 		CodePartLenSlots:  []CodePartLenSlot{{ByteOffset: 7}},
 	}
 }

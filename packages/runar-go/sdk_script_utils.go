@@ -383,6 +383,8 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 
 	templatePos := 0
 	codePos := 0
+	// N-318: the element read at each placeholder, keyed by template byte offset.
+	elems := make(map[int]string)
 
 	for _, offset := range offsets {
 		slotHexOffset := offset * 2
@@ -399,9 +401,42 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		elems[offset] = codeHex[elemOffset : elemOffset+totalHexChars]
 		codePos = elemOffset + totalHexChars
 	}
 
-	return len(codeHex)-codePos == len(template)-templatePos &&
-		segmentMatches(templatePos, len(template), codePos), nil
+	if !(len(codeHex)-codePos == len(template)-templatePos &&
+		segmentMatches(templatePos, len(template), codePos)) {
+		return false, nil
+	}
+
+	// N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+	// encodeScriptNumber(CodeSepIndex + shift) there (resolvedCodeSepSlotValues),
+	// shift = the growth of every constructor slot before CodeSepIndex plus that
+	// of every earlier codeSep slot before it. The matcher does not know the
+	// constructor args, so their growth is taken from the elements actually read.
+	sepSlots := make([]CodeSepIndexSlot, len(artifact.CodeSepIndexSlots))
+	copy(sepSlots, artifact.CodeSepIndexSlots)
+	sort.SliceStable(sepSlots, func(i, j int) bool { return sepSlots[i].ByteOffset < sepSlots[j].ByteOffset })
+	type resolvedSep struct{ byteOffset, width int }
+	var resolved []resolvedSep
+	for _, slot := range sepSlots {
+		shift := 0
+		for _, cs := range artifact.ConstructorSlots {
+			if cs.ByteOffset < slot.CodeSepIndex {
+				shift += len(elems[cs.ByteOffset])/2 - 1
+			}
+		}
+		for _, prev := range resolved {
+			if prev.byteOffset < slot.CodeSepIndex {
+				shift += prev.width - 1
+			}
+		}
+		expected := encodeScriptNumber(int64(slot.CodeSepIndex + shift))
+		if elems[slot.ByteOffset] != expected {
+			return false, nil
+		}
+		resolved = append(resolved, resolvedSep{slot.ByteOffset, len(expected) / 2})
+	}
+	return true, nil
 }

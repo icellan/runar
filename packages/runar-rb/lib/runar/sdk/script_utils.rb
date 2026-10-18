@@ -285,6 +285,8 @@ module Runar
 
         template_pos = 0
         code_pos = 0
+        # N-318: the element read at each placeholder, keyed by template byte offset.
+        elems = {}
 
         slots.each do |slot|
           slot_hex_offset = slot.byte_offset * 2
@@ -295,11 +297,34 @@ module Runar
           template_pos = slot_hex_offset + 2
           elem_offset = code_pos + seg_len
           elem = read_script_element(code_hex, elem_offset)
+          elems[slot.byte_offset] = code_hex[elem_offset, elem[:total_hex_chars]]
           code_pos = elem_offset + elem[:total_hex_chars]
         end
 
-        code_hex.length - code_pos == template.length - template_pos &&
-          segment_matches.call(template_pos, template.length, code_pos)
+        return false unless code_hex.length - code_pos == template.length - template_pos &&
+                            segment_matches.call(template_pos, template.length, code_pos)
+
+        # N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+        # encode_script_int(code_sep_index + shift) there, shift = the growth of
+        # every constructor slot before code_sep_index plus that of every
+        # earlier codeSep slot before it (the TS / Go / Rust / Python / Zig /
+        # Java formula). The matcher does not know the constructor args, so
+        # their growth is taken from the elements actually read.
+        resolved = [] # [byte_offset, width]
+        Array(artifact.code_sep_index_slots).sort_by(&:byte_offset).each do |slot|
+          shift = 0
+          Array(artifact.constructor_slots).each do |cs|
+            shift += elems[cs.byte_offset].length / 2 - 1 if cs.byte_offset < slot.code_sep_index
+          end
+          resolved.each do |prev_offset, prev_width|
+            shift += prev_width - 1 if prev_offset < slot.code_sep_index
+          end
+          expected = State.encode_script_int(slot.code_sep_index + shift)
+          return false unless elems[slot.byte_offset] == expected
+
+          resolved << [slot.byte_offset, expected.length / 2]
+        end
+        true
       end
     end
 

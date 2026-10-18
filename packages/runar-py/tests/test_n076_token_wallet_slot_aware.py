@@ -34,7 +34,7 @@ ARTIFACT = RunarArtifact(
     script='76a9' + '00' + '88' + '00' + '75' + '04' + '00000000' + 'ac',
     state_fields=[StateField(name='balance', type='bigint', index=1)],
     constructor_slots=[ConstructorSlot(param_index=0, byte_offset=2)],
-    code_sep_index_slots=[CodeSepIndexSlot(byte_offset=4, code_sep_index=0)],
+    code_sep_index_slots=[CodeSepIndexSlot(byte_offset=4, code_sep_index=1)],
     code_part_len_slots=[CodePartLenSlot(byte_offset=7)],
 )
 

@@ -7,6 +7,7 @@ import type { RunarArtifact } from 'runar-ir-schema';
 import { abiValueEncoding } from 'runar-ir-schema';
 import { findLastOpReturn } from './state.js';
 import { MalformedScriptError } from './errors.js';
+import { encodeScriptNumber } from './contract.js';
 
 /**
  * Hash a 66- or 130-char hex secp256k1 public key into its 40-char hex
@@ -333,6 +334,8 @@ export function matchesArtifact(
 
   let templatePos = 0;
   let codePos = 0;
+  // N-318: the element read at each placeholder, keyed by template byte offset.
+  const elems = new Map<number, string>();
 
   for (const slot of slots) {
     const slotHexOffset = slot.byteOffset * 2;
@@ -342,9 +345,31 @@ export function matchesArtifact(
     templatePos = slotHexOffset + 2;
     const elemOffset = codePos + segLen;
     const elem = readScriptElement(codeHex, elemOffset);
+    elems.set(slot.byteOffset, codeHex.slice(elemOffset, elemOffset + elem.totalHexChars));
     codePos = elemOffset + elem.totalHexChars;
   }
 
-  return codeHex.length - codePos === template.length - templatePos &&
-    segmentMatches(templatePos, template.length, codePos);
+  if (!(codeHex.length - codePos === template.length - templatePos &&
+    segmentMatches(templatePos, template.length, codePos))) return false;
+
+  // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+  // encodeScriptNumber(codeSepIndex + shift) there (`_resolvedCodeSepSlotValues`),
+  // shift = the growth of every constructor slot before codeSepIndex plus that
+  // of every earlier codeSep slot before it. The matcher does not know the
+  // constructor args, so their growth is taken from the elements actually read.
+  const sepSlots = [...(artifact.codeSepIndexSlots ?? [])].sort((a, b) => a.byteOffset - b.byteOffset);
+  const resolved: Array<{ byteOffset: number; width: number }> = [];
+  for (const slot of sepSlots) {
+    let shift = 0;
+    for (const cs of artifact.constructorSlots ?? []) {
+      if (cs.byteOffset < slot.codeSepIndex) shift += elems.get(cs.byteOffset)!.length / 2 - 1;
+    }
+    for (const prev of resolved) {
+      if (prev.byteOffset < slot.codeSepIndex) shift += prev.width - 1;
+    }
+    const expected = encodeScriptNumber(BigInt(slot.codeSepIndex + shift));
+    if (elems.get(slot.byteOffset) !== expected) return false;
+    resolved.push({ byteOffset: slot.byteOffset, width: expected.length / 2 });
+  }
+  return true;
 }

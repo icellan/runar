@@ -323,6 +323,8 @@ def matches_artifact(
 
     template_pos = 0
     code_pos = 0
+    # N-318: the element read at each placeholder, keyed by template byte offset.
+    elems: dict[int, str] = {}
 
     for offset in offsets:
         slot_hex_offset = offset * 2
@@ -334,9 +336,34 @@ def matches_artifact(
         template_pos = slot_hex_offset + 2
         elem_offset = code_pos + seg_len
         _, total_hex_chars, _ = _read_script_element(code_hex, elem_offset)
+        elems[offset] = code_hex[elem_offset:elem_offset + total_hex_chars]
         code_pos = elem_offset + total_hex_chars
 
-    return (
+    if not (
         len(code_hex) - code_pos == len(template) - template_pos
         and segment_matches(template_pos, len(template), code_pos)
-    )
+    ):
+        return False
+
+    # N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+    # _encode_script_number(code_sep_index + shift) there
+    # (``_resolved_code_sep_slot_values``), shift = the growth of every
+    # constructor slot before code_sep_index plus that of every earlier codeSep
+    # slot before it. The matcher does not know the constructor args, so their
+    # growth is taken from the elements actually read.
+    from runar.sdk.contract import _encode_script_number  # contract imports this module
+
+    resolved: list[tuple[int, int]] = []  # (byte_offset, width)
+    for slot in sorted(artifact.code_sep_index_slots, key=lambda s: s.byte_offset):
+        shift = 0
+        for cs in artifact.constructor_slots:
+            if cs.byte_offset < slot.code_sep_index:
+                shift += len(elems[cs.byte_offset]) // 2 - 1
+        for prev_offset, prev_width in resolved:
+            if prev_offset < slot.code_sep_index:
+                shift += prev_width - 1
+        expected = _encode_script_number(slot.code_sep_index + shift)
+        if elems.get(slot.byte_offset) != expected:
+            return False
+        resolved.append((slot.byte_offset, len(expected) // 2))
+    return True
