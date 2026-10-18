@@ -1095,6 +1095,11 @@ module RunarCompiler
             advance # 'default'
             expect(TOK_COLON, ":")
             initializer = parse_unary
+          else
+            # N-301: an unknown option (e.g. a typo of +embed_always+) is
+            # refused, never silently dropped. Same text in all seven tiers.
+            @errors << "#{@file}:#{peek.line}:#{peek.col}: unknown prop option '#{peek.value}' (expected readonly, embed_always or default)"
+            break
           end
         end
 

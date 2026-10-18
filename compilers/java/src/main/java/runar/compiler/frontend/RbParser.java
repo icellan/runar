@@ -1007,6 +1007,13 @@ public final class RbParser {
                     advance();
                     expect(TK.COLON, ":");
                     initializer = parseUnary();
+                } else {
+                    // N-301: an unknown option (e.g. a typo of `embed_always`) is
+                    // refused, never silently dropped. Same text in all seven tiers.
+                    errors.add(file + ":" + peek().line + ":" + peek().col
+                        + ": unknown prop option '" + peek().value
+                        + "' (expected readonly, embed_always or default)");
+                    break;
                 }
             }
 

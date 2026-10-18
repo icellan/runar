@@ -1301,7 +1301,9 @@ const Parser = struct {
                 if (self.expect(.colon) == null) break;
                 initializer = self.parseUnary();
             } else {
-                // Unknown trailing option -- stop parsing options
+                // N-301: an unknown option (e.g. a typo of `embed_always`) is
+                // refused, never silently dropped. Same text in all seven tiers.
+                self.addErrorFmt("unknown prop option '{s}' (expected readonly, embed_always or default)", .{self.peek().text});
                 break;
             }
         }

@@ -1353,7 +1353,13 @@ impl<'a> RbParser<'a> {
                 self.expect(&Token::Colon);
                 initializer = Some(self.parse_unary());
             } else {
-                // Unknown trailing option -- stop parsing options
+                // N-301: an unknown option (e.g. a typo of `embed_always`) is
+                // refused, never silently dropped. Same text in all seven tiers.
+                let tok_text = rb_token_text(self.peek());
+                self.errors.push(format!(
+                    "unknown prop option '{}' (expected readonly, embed_always or default)",
+                    tok_text
+                ));
                 break;
             }
         }

@@ -1020,7 +1020,13 @@ class RbParser {
         this.expect(':');
         initializer = this.parseUnary();
       } else {
-        // Unknown trailing option -- stop parsing options
+        // N-301: an unknown option (e.g. a typo of `embed_always`) is refused,
+        // never silently dropped. Same text in all seven tiers.
+        this.errors.push(makeDiagnostic(
+          `unknown prop option '${this.peek().value || this.peek().type}' (expected readonly, embed_always or default)`,
+          'error',
+          this.loc(),
+        ));
         break;
       }
     }

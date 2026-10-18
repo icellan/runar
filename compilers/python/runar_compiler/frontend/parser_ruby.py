@@ -1073,6 +1073,15 @@ class _RbParser:
                 self._expect(TOK_COLON, ":")
                 initializer = self._parse_unary()
 
+            else:
+                # N-301: an unknown option (e.g. a typo of ``embed_always``) is
+                # refused, never silently dropped. Same text in all seven tiers.
+                self._errors.append(
+                    f"unknown prop option '{self._peek().value}' "
+                    "(expected readonly, embed_always or default)"
+                )
+                break
+
         # In stateless contracts (SmartContract and UnsafeSmartContract),
         # all properties are always readonly.
         if parent_class in ("SmartContract", "UnsafeSmartContract"):

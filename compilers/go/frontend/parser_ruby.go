@@ -1118,7 +1118,9 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 			p.expect(rbTokColon)
 			initializer = p.parseUnary()
 		} else {
-			// Unknown trailing option -- stop parsing options
+			// N-301: an unknown option (e.g. a typo of `embed_always`) is
+			// refused, never silently dropped. Same text in all seven tiers.
+			p.addError(fmt.Sprintf("line %d: unknown prop option '%s' (expected readonly, embed_always or default)", p.peek().line, p.peek().value))
 			break
 		}
 	}
