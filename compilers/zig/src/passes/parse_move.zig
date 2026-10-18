@@ -1248,6 +1248,9 @@ const Parser = struct {
             const ret_unknown = types.spelledIfUnknown(ret_ti, ret_spelled);
             if (ret_unknown.len > 0 and !std.mem.eql(u8, ret_unknown, "unknown")) {
                 self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_unknown, method_name });
+            } else if (is_public and ret_ti != .void) {
+                // N-332: public methods return nothing.
+                self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{method_name});
             }
             has_return_type = true;
         }

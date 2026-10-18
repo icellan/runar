@@ -552,7 +552,7 @@ class ZigParser extends ParserCore<ZigToken> {
       // The AST keeps no return type; N-331 refuses an unknown name. `init`
       // returns the contract struct itself, which is not a type to check.
       const returnType = this.parseType();
-      if (name !== 'init') checkReturnType(returnType.type, name, sourceLocation, this.errors);
+      if (name !== 'init') checkReturnType(returnType.type, name, sourceLocation, this.errors, isPublic);
     }
 
     const previousSelfNames = this.selfNames;

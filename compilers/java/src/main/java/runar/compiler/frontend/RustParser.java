@@ -1142,7 +1142,7 @@ public final class RustParser {
             hasReturnType = true;
             s.advance();
             // The AST keeps no return type; N-331 refuses an unknown name.
-            String unknownReturn = LexDiag.unknownReturnType(parseRustType(s), rawName);
+            String unknownReturn = LexDiag.unknownReturnType(parseRustType(s), rawName, visibility == Visibility.PUBLIC);
             if (unknownReturn != null) s.addError(unknownReturn);
         }
 

@@ -906,7 +906,12 @@ const Parser = struct {
             const rt = self.parseTypeNode();
             if (!std.mem.eql(u8, name, "init")) {
                 const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), typeNodeName(rt));
-                if (rt_unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+                if (rt_unknown.len > 0) {
+                    self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+                } else if (is_public and typeNodeToRunarType(rt) != .void) {
+                    // N-332: public methods return nothing.
+                    self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{name});
+                }
             }
         }
         if (self.expect(.lbrace) == null) return null;

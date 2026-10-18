@@ -1051,7 +1051,7 @@ class Indirect extends SmartContract {
         return this.check2(v);
     }
 
-    public check2(v: bigint): bigint {
+    private check2(v: bigint): bigint {
         return this.helper(v);
     }
 

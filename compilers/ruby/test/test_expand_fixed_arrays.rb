@@ -361,7 +361,7 @@ class TestExpandFixedArrays < Minitest::Test
       class R extends StatefulSmartContract {
         board: FixedArray<bigint, 3> = [0n, 0n, 0n];
         constructor() { super(); }
-        public m(idx: bigint): bigint {
+        private m(idx: bigint): bigint {
           return this.board[idx] + 1n;
         }
       }

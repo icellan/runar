@@ -900,7 +900,10 @@ class GoParser extends ParserCore<GoToken> {
     if (this.current().type !== '{') {
       // The AST keeps no return type: could be runar.Bigint, bool, etc.
       // N-331 refuses an unknown name.
-      checkReturnType(this.parseGoType(), funcName, location, this.errors);
+      // N-332: an exported method with a receiver is a public entry point.
+      const isEntryPoint = hasReceiver && funcName.length > 0 &&
+        funcName[0]! === funcName[0]!.toUpperCase() && funcName[0]! !== funcName[0]!.toLowerCase();
+      checkReturnType(this.parseGoType(), funcName, location, this.errors, isEntryPoint);
     }
 
     // Body

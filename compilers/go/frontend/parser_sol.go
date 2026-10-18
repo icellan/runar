@@ -1011,6 +1011,7 @@ func (p *solParser) parseFunction() MethodNode {
 	// separated by `|`, any other token makes the spelling malformed.
 	visibility := "private"
 	var sighashSpecs []*string
+	var pendingRet TypeNode
 	for p.checkIdent("public") || p.checkIdent("private") || p.checkIdent("external") ||
 		p.checkIdent("internal") || p.checkIdent("view") || p.checkIdent("pure") ||
 		p.checkIdent("returns") || p.checkIdent("payable") ||
@@ -1028,10 +1029,10 @@ func (p *solParser) parseFunction() MethodNode {
 			if p.check(solTokLParen) {
 				p.advance()
 				// N-331: the AST keeps no return type; an unknown name is refused.
+				// N-332: checked after the modifier loop, because `public`
+				// may follow `returns (...)`.
 				if p.check(solTokIdent) {
-					if d := UnknownReturnTypeDiagnostic(parseSolType(p.peek().value), name, loc); d != nil {
-						p.errors = append(p.errors, *d)
-					}
+					pendingRet = parseSolType(p.peek().value)
 				}
 				depth := 1
 				for depth > 0 && !p.check(solTokEOF) {
@@ -1044,6 +1045,12 @@ func (p *solParser) parseFunction() MethodNode {
 					p.advance()
 				}
 			}
+		}
+	}
+
+	if pendingRet != nil {
+		if d := UnknownReturnTypeDiagnostic(pendingRet, name, loc, visibility == "public"); d != nil {
+			p.errors = append(p.errors, *d)
 		}
 	}
 

@@ -1419,7 +1419,7 @@ func (p *pyParser) parsePyMethod(visibility string) MethodNode {
 		// is Python's spelling of "returns nothing".
 		rt := p.parsePyTypeAnnotation()
 		if ct, ok := rt.(CustomType); !ok || ct.Name != "None" {
-			if d := UnknownReturnTypeDiagnostic(rt, nameTok.value, loc); d != nil {
+			if d := UnknownReturnTypeDiagnostic(rt, nameTok.value, loc, visibility == "public"); d != nil {
 				p.errors = append(p.errors, *d)
 			}
 		}

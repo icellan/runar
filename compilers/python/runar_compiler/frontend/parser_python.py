@@ -1088,7 +1088,7 @@ class _PyParser:
             # `None` is Python's spelling of "returns nothing".
             ret_type = self.parse_type_annotation()
             if not (isinstance(ret_type, CustomType) and ret_type.name == "None"):
-                reject_unknown_return_type(self.errors, ret_type, name_tok.value, location)
+                reject_unknown_return_type(self.errors, ret_type, name_tok.value, location, visibility == "public")
 
         self.expect(TOK_COLON)
         body = self.parse_block()

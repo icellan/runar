@@ -858,7 +858,7 @@ class RustParser extends ParserCore<RustToken> {
     if (this.current().type === '->') {
       this.advance();
       // The type is not stored (inferred from body); N-331 refuses an unknown name.
-      checkReturnType(this.parseRustType(), name, location, this.errors);
+      checkReturnType(this.parseRustType(), name, location, this.errors, isPublic);
       hasReturnType = true;
     }
 

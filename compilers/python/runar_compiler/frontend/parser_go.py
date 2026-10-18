@@ -1108,7 +1108,7 @@ class _GoParser:
 
         # Parse optional return type
         if not self.check(TOK_LBRACE):
-            self._check_return_type(method_name, location)
+            self._check_return_type(method_name, location, visibility == "public")
 
         # Parse body
         body = self._parse_block()
@@ -1251,7 +1251,7 @@ class _GoParser:
 
         return tok.value[0].islower()
 
-    def _check_return_type(self, method_name: str, location: SourceLocation) -> None:
+    def _check_return_type(self, method_name: str, location: SourceLocation, is_public: bool = False) -> None:
         """Consume a return type specification before the function body.
 
         The AST keeps no return type, so N-331 refuses an unknown type name
@@ -1264,12 +1264,12 @@ class _GoParser:
                 nxt = self.tokens[self.pos + 1].kind if self.pos + 1 < len(self.tokens) else TOK_EOF
                 if self.check(TOK_IDENT) and nxt not in (TOK_DOT, TOK_COMMA, TOK_RPAREN):
                     self.advance()  # result name
-                reject_unknown_return_type(self.errors, self.parse_type(), method_name, location)
+                reject_unknown_return_type(self.errors, self.parse_type(), method_name, location, is_public)
                 if not self.match(TOK_COMMA):
                     break
             self.expect(TOK_RPAREN)
         else:
-            reject_unknown_return_type(self.errors, self.parse_type(), method_name, location)
+            reject_unknown_return_type(self.errors, self.parse_type(), method_name, location, is_public)
         # Anything left before the body is not a type to check.
         while not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
             self.advance()

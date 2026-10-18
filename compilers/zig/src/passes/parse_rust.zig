@@ -1156,8 +1156,14 @@ const Parser = struct {
             _ = self.bump();
             // The AST keeps no return type; N-331 refuses an unknown name.
             const rt = self.parseRustType();
-            const rt_unknown = types.spelledIfUnknown(types.typeNodeToRunarType(rt), types.typeNodeName(rt));
-            if (rt_unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+            const rt_ti = types.typeNodeToRunarType(rt);
+            const rt_unknown = types.spelledIfUnknown(rt_ti, types.typeNodeName(rt));
+            if (rt_unknown.len > 0) {
+                self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+            } else if (is_public and rt_ti != .void) {
+                // N-332: public methods return nothing.
+                self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{name});
+            }
         }
 
         // Parse body

@@ -829,7 +829,7 @@ class _ZigParser:
             # to check.
             ret_type = self._parse_type()[0]
             if name != "init":
-                ret_msg = unknown_return_type_message(ret_type, name)
+                ret_msg = unknown_return_type_message(ret_type, name, is_public)
                 if ret_msg is not None:
                     self._errors.append(ret_msg)
 

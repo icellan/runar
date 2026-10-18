@@ -811,7 +811,7 @@ module RunarCompiler
           # The AST keeps no return type; N-331 refuses an unknown name. `init`
           # returns the contract struct itself, which is not a type to check.
           ret_type = parse_type
-          Frontend.reject_unknown_return_type(@errors, ret_type[:type], name, source_location) unless name == "init"
+          Frontend.reject_unknown_return_type(@errors, ret_type[:type], name, source_location, is_public) unless name == "init"
         end
 
         prev_self_names = @self_names

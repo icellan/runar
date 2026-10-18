@@ -1041,7 +1041,7 @@ func (p *moveParser) parseMoveFunction(attrs []moveAttribute) (MethodNode, bool)
 	hasReturnType := false
 	if p.match(moveTokColon) {
 		// The AST keeps no return type; N-331 refuses an unknown name.
-		if d := UnknownReturnTypeDiagnostic(p.parseMoveTypeNode(), name, loc); d != nil {
+		if d := UnknownReturnTypeDiagnostic(p.parseMoveTypeNode(), name, loc, visibility == "public"); d != nil {
 			p.errors = append(p.errors, *d)
 		}
 		hasReturnType = true

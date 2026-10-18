@@ -1114,7 +1114,7 @@ func (p *javaParser) parseMethod(name string, returnType TypeNode, annotations m
 	// Return type is not encoded in MethodNode; we accept void for public
 	// methods but do not enforce it here. The typechecker handles rules.
 	// N-331: an unknown name is refused here, where it is spelled.
-	if d := UnknownReturnTypeDiagnostic(returnType, name, loc); d != nil {
+	if d := UnknownReturnTypeDiagnostic(returnType, name, loc, visibility == "public"); d != nil {
 		p.errors = append(p.errors, *d)
 	}
 

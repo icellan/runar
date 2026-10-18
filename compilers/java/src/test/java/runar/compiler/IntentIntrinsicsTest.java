@@ -578,9 +578,9 @@ class IntentIntrinsicsTest {
             \tDeadline runar.Bigint `runar:"readonly"`
             }
 
-            func (c *Sl) Spend() bool {
+            func (c *Sl) Spend() {
             \th := runar.CurrentBlockHeight()
-            \treturn h > c.Deadline
+            \trunar.Assert(h > c.Deadline)
             }
             """;
         expectTypeError(src, "StatefulSmartContract");

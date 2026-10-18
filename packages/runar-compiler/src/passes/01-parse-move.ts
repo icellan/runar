@@ -638,7 +638,7 @@ class MoveParser {
     let hasReturnType = false;
     if (this.current().type === ':') {
       this.advance();
-      checkReturnType(this.parseMoveType(), name, location, this.errors);
+      checkReturnType(this.parseMoveType(), name, location, this.errors, visibility === 'public');
       hasReturnType = true;
     }
 

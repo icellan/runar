@@ -362,7 +362,6 @@ class R(StatefulSmartContract):
     def __init__(self):
         super().__init__()
 
-    @public
     def m(self, idx: Bigint) -> Bigint:
         return self.board[idx] + 1
 '''

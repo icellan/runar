@@ -466,7 +466,7 @@ function parseMethod(
   // N-331: the AST keeps no return type, so an unknown name is refused here.
   const returnTypeNode = method.getReturnTypeNode();
   if (returnTypeNode) {
-    checkReturnType(parseTypeNode(returnTypeNode, file, errors), name, locFromNode(method, file), errors);
+    checkReturnType(parseTypeNode(returnTypeNode, file, errors), name, locFromNode(method, file), errors, method.hasModifier(SyntaxKind.PublicKeyword));
   }
 
   let visibility: 'public' | 'private' = 'private';

@@ -137,14 +137,29 @@ pub fn static_method_message(name: &str) -> String {
 /// return type, so every surface parser calls this where the annotation is
 /// spelled. `None` for any other type; `unknown` is the missing-annotation
 /// placeholder, diagnosed elsewhere.
-pub fn unknown_return_type_message(t: &TypeNode, method: &str) -> Option<String> {
+///
+/// N-332: when `is_public`, any non-void return type is also refused -- public
+/// methods are spending entry points and return void (spec/grammar.md:161).
+pub fn unknown_return_type_message(t: &TypeNode, method: &str, is_public: bool) -> Option<String> {
     match t {
-        TypeNode::Custom(name) if name != "unknown" => Some(format!(
+        TypeNode::Custom(name) if name == "unknown" => None,
+        TypeNode::Custom(name) => Some(format!(
             "Type '{}' of the return value of method '{}' is not a Rúnar type",
             name, method
         )),
+        TypeNode::Primitive(super::ast::PrimitiveTypeName::Void) => None,
+        _ if is_public => Some(public_return_type_message(method)),
         _ => None,
     }
+}
+
+/// N-332's refusal of a PUBLIC method that declares a non-void return type (the
+/// TS reference's `publicReturnTypeMessage`).
+pub fn public_return_type_message(method: &str) -> String {
+    format!(
+        "Public method '{}' must not declare a return type: public methods are spending entry points and return void (spec/grammar.md:161)",
+        method
+    )
 }
 
 /// N-023's (R49) refusal, on the .runar.java surface, of an assignment (=,

@@ -1026,7 +1026,7 @@ module RunarCompiler
           # is Python's spelling of "returns nothing".
           ret_type = parse_type
           unless ret_type.is_a?(CustomType) && ret_type.name == "None"
-            Frontend.reject_unknown_return_type(@errors, ret_type, raw_name, location)
+            Frontend.reject_unknown_return_type(@errors, ret_type, raw_name, location, decorators.include?("public"))
           end
         end
 

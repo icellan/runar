@@ -1254,7 +1254,7 @@ public final class PyParser {
                 // `None` is Python's spelling of "returns nothing".
                 TypeNode returnType = parseTypeAnnotation();
                 if (!(returnType instanceof CustomType ct && ct.name().equals("None"))) {
-                    String unknownReturn = LexDiag.unknownReturnType(returnType, nameTok.value);
+                    String unknownReturn = LexDiag.unknownReturnType(returnType, nameTok.value, visibility.equals("public"));
                     if (unknownReturn != null) addError(unknownReturn);
                 }
             }

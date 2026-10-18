@@ -48,6 +48,10 @@ pub const STATIC_METHOD_FMT = "static methods are not allowed in Rúnar contract
 /// spelled. Arguments: the unknown type name, then the method name.
 pub const UNKNOWN_RETURN_TYPE_FMT = "Type '{s}' of the return value of method '{s}' is not a Rúnar type";
 
+/// N-332: a PUBLIC method that declares a non-void return type (the TS
+/// reference's `publicReturnTypeMessage`). Argument: the method name.
+pub const PUBLIC_RETURN_TYPE_FMT = "Public method '{s}' must not declare a return type: public methods are spending entry points and return void (spec/grammar.md:161)";
+
 /// N-053: a .runar.rb / .runar.py statement whose first token can begin
 /// neither a statement nor an expression (the TS reference's
 /// unsupportedStatementMessage). The argument is the token's source text.

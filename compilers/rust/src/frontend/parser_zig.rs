@@ -992,7 +992,7 @@ impl<'a> ZigParser<'a> {
             // itself, which is not a type to check.
             let (ret_type, _) = self.parse_type();
             if method_name != "init" {
-                if let Some(msg) = unknown_return_type_message(&ret_type, &method_name) {
+                if let Some(msg) = unknown_return_type_message(&ret_type, &method_name, is_public) {
                     self.errors.push(msg);
                 }
             }

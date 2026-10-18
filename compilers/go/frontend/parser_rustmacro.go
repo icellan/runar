@@ -997,7 +997,7 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 	if p.current().kind == rustTokArrow {
 		p.advance()
 		// The AST keeps no return type; N-331 refuses an unknown name.
-		if d := UnknownReturnTypeDiagnostic(p.parseRustType(), rawName, loc); d != nil {
+		if d := UnknownReturnTypeDiagnostic(p.parseRustType(), rawName, loc, visibility == "public"); d != nil {
 			p.errors = append(p.errors, *d)
 		}
 	}

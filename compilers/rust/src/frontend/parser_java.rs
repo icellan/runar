@@ -1019,7 +1019,7 @@ impl<'a> JavaParser<'a> {
                 };
 
             // The return type is not used structurally; N-331 refuses an unknown name.
-            if let Some(msg) = unknown_return_type_message(&member_type, &member_name) {
+            if let Some(msg) = unknown_return_type_message(&member_type, &member_name, visibility == Visibility::Public) {
                 self.errors.push(Diagnostic::error(msg, Some(member_loc.clone())));
             }
             methods.push(MethodNode {

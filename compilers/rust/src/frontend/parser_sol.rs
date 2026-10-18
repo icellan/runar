@@ -904,6 +904,7 @@ impl<'a> SolParser<'a> {
         // token makes the spelling malformed.
         let mut visibility = Visibility::Private;
         let mut sighash_specs: Vec<Option<String>> = Vec::new();
+        let mut pending_ret: Option<TypeNode> = None;
         loop {
             match self.peek().clone() {
                 Token::Public => {
@@ -934,11 +935,10 @@ impl<'a> SolParser<'a> {
                             if *self.peek() == Token::LParen {
                                 self.advance();
                                 // N-331: the AST keeps no return type; an unknown name is refused.
+                                // N-332: checked after the modifier loop, because
+                                // `public` may follow `returns (...)`.
                                 if matches!(self.peek(), Token::Ident(_)) {
-                                    let ret = self.parse_type();
-                                    if let Some(msg) = unknown_return_type_message(&ret, &name) {
-                                        self.errors.push(Diagnostic::error(msg, Some(location.clone())));
-                                    }
+                                    pending_ret = Some(self.parse_type());
                                 }
                                 let mut depth: i32 = 1;
                                 while depth > 0 && *self.peek() != Token::Eof {
@@ -959,6 +959,12 @@ impl<'a> SolParser<'a> {
                     }
                 }
                 _ => break,
+            }
+        }
+
+        if let Some(ret) = pending_ret {
+            if let Some(msg) = unknown_return_type_message(&ret, &name, visibility == Visibility::Public) {
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
             }
         }
 

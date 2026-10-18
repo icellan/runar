@@ -939,7 +939,7 @@ public final class MoveParser {
             boolean hasReturnType = false;
             if (match(Kind.COLON)) {
                 // The AST keeps no return type; N-331 refuses an unknown name.
-                String unknownReturn = LexDiag.unknownReturnType(parseTypeNode(), name);
+                String unknownReturn = LexDiag.unknownReturnType(parseTypeNode(), name, visibility == Visibility.PUBLIC);
                 if (unknownReturn != null) errors.add(unknownReturn);
                 hasReturnType = true;
             }

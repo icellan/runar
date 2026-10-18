@@ -255,7 +255,7 @@ class TsParserTest {
     void parsesReturnWithAndWithoutValue() throws Exception {
         ContractNode c = parseSnippet("""
               constructor() { super(); }
-              public valued(): bigint {
+              private valued(): bigint {
                 return 7n;
               }
               public bare(): void {
@@ -440,7 +440,7 @@ class TsParserTest {
     void parsesTernaryExpression() throws Exception {
         ContractNode c = parseSnippet("""
               constructor() { super(); }
-              public foo(x: bigint): bigint {
+              private foo(x: bigint): bigint {
                 return x > 0n ? x : -x;
               }
             """);

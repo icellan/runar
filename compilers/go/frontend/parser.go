@@ -721,7 +721,13 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 	params := p.parseMethodParams(node)
 	// N-331: the AST keeps no return type, so an unknown name is refused here.
 	if rt := p.findChildByType(node, "type_annotation"); rt != nil {
-		if d := UnknownReturnTypeDiagnostic(p.parseTypeAnnotation(rt), name, p.loc(node)); d != nil {
+		isPublic := false
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if c := node.Child(i); c.Type() == "accessibility_modifier" && p.nodeText(c) == "public" {
+				isPublic = true
+			}
+		}
+		if d := UnknownReturnTypeDiagnostic(p.parseTypeAnnotation(rt), name, p.loc(node), isPublic); d != nil {
 			p.errors = append(p.errors, *d)
 		}
 	}

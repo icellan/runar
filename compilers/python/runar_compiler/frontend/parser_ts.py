@@ -894,7 +894,7 @@ class _TsParser:
         # unknown name.
         if self.check(TOK_COLON):
             self.advance()
-            reject_unknown_return_type(self.errors, self._parse_type(), name, location)
+            reject_unknown_return_type(self.errors, self._parse_type(), name, location, visibility == "public")
 
         body = self._parse_block()
 

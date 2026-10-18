@@ -709,6 +709,7 @@ module RunarCompiler
         # token makes the spelling malformed.
         visibility = "private"
         sighash_specs = []
+        pending_ret = nil
         while (check_ident("sighash") && peek_at(1).kind == TOK_LPAREN) ||
               check_ident("public") || check_ident("private") ||
               check_ident("external") || check_ident("internal") ||
@@ -724,11 +725,9 @@ module RunarCompiler
           if tok.value == "returns" && check(TOK_LPAREN)
             advance # (
             # N-331: the AST keeps no return type; an unknown name is refused.
-            if check(TOK_IDENT)
-              Frontend.reject_unknown_return_type(
-                @errors, Frontend.parse_sol_type_name(peek.value), name, location
-              )
-            end
+            # N-332: checked after the modifier loop, because `public` may
+            # follow `returns (...)`.
+            pending_ret = Frontend.parse_sol_type_name(peek.value) if check(TOK_IDENT)
             depth = 1
             while depth > 0 && !check(TOK_EOF)
               depth += 1 if check(TOK_LPAREN)
@@ -736,6 +735,10 @@ module RunarCompiler
               advance
             end
           end
+        end
+
+        if pending_ret
+          Frontend.reject_unknown_return_type(@errors, pending_ret, name, location, visibility == "public")
         end
 
         body = parse_sol_block

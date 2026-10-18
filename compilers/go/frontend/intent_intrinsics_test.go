@@ -728,9 +728,9 @@ type Sl struct {
 	Deadline runar.Bigint ` + "`runar:\"readonly\"`" + `
 }
 
-func (c *Sl) Spend() bool {
+func (c *Sl) Spend() {
 	h := runar.CurrentBlockHeight()
-	return h > c.Deadline
+	runar.Assert(h > c.Deadline)
 }
 `
 	expectIntrinsicTypeError(t, source, "StatefulSmartContract")

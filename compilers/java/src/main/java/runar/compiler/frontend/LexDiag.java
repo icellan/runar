@@ -102,14 +102,33 @@ final class LexDiag {
      * elsewhere.
      */
     static String unknownReturnType(runar.compiler.ir.ast.TypeNode t, String methodName) {
+        return unknownReturnType(t, methodName, false);
+    }
+
+    /**
+     * As {@link #unknownReturnType(runar.compiler.ir.ast.TypeNode, String)},
+     * and N-332: when {@code isPublic}, any non-void return type is also
+     * refused, because public methods are spending entry points and return
+     * void (spec/grammar.md:161).
+     */
+    static String unknownReturnType(runar.compiler.ir.ast.TypeNode t, String methodName, boolean isPublic) {
         // This tier's PrimitiveTypeName has no VOID member, so the .runar.ts /
         // .runar.zig parsers carry `void` as a CustomType; it is "returns nothing".
-        if (t instanceof runar.compiler.ir.ast.CustomType ct
-            && !ct.name().equals("unknown") && !ct.name().equals("void")) {
+        if (t instanceof runar.compiler.ir.ast.CustomType ct) {
+            if (ct.name().equals("unknown") || ct.name().equals("void")) return null;
             return "Type '" + ct.name() + "' of the return value of method '" + methodName
                 + "' is not a Rúnar type";
         }
-        return null;
+        return isPublic ? publicReturnType(methodName) : null;
+    }
+
+    /**
+     * N-332: a PUBLIC method that declares a non-void return type (the TS
+     * reference's publicReturnTypeMessage).
+     */
+    static String publicReturnType(String methodName) {
+        return "Public method '" + methodName + "' must not declare a return type: "
+            + "public methods are spending entry points and return void (spec/grammar.md:161)";
     }
 
     /**

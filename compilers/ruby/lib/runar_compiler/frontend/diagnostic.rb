@@ -116,16 +116,33 @@ module RunarCompiler
     # keeps no return type, so every surface parser calls this where the
     # annotation is spelled. nil for any other type; "unknown" is the
     # missing-annotation placeholder, diagnosed elsewhere.
-    def self.unknown_return_type_message(type, method_name)
-      return nil unless type.is_a?(CustomType) && type.name != "unknown"
+    #
+    # N-332: when +is_public+, any non-void return type is also refused --
+    # public methods are spending entry points and return void
+    # (spec/grammar.md:161).
+    def self.unknown_return_type_message(type, method_name, is_public = false)
+      if type.is_a?(CustomType)
+        return nil if type.name == "unknown"
 
-      "Type '#{type.name}' of the return value of method '#{method_name}' is not a Rúnar type"
+        return "Type '#{type.name}' of the return value of method '#{method_name}' is not a Rúnar type"
+      end
+      return nil unless is_public
+      return nil if type.is_a?(PrimitiveType) && type.name == "void"
+
+      public_return_type_message(method_name)
+    end
+
+    # N-332's refusal of a PUBLIC method that declares a non-void return type
+    # (the TS reference's publicReturnTypeMessage).
+    def self.public_return_type_message(method_name)
+      "Public method '#{method_name}' must not declare a return type: public methods are " \
+        "spending entry points and return void (spec/grammar.md:161)"
     end
 
     # N-331: append the unknown-return-type diagnostic to +errors+ when +type+
     # (the parsed return annotation) is not a Rúnar type.
-    def self.reject_unknown_return_type(errors, type, method_name, loc)
-      msg = unknown_return_type_message(type, method_name)
+    def self.reject_unknown_return_type(errors, type, method_name, loc, is_public = false)
+      msg = unknown_return_type_message(type, method_name, is_public)
       errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc) if msg
     end
 

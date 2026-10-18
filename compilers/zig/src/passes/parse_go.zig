@@ -1517,7 +1517,7 @@ const Parser = struct {
 
         // Skip optional return type (anything before '{'); N-331 refuses an
         // unknown name in it.
-        self.checkReturnType(method_name);
+        self.checkReturnType(method_name, is_public and has_receiver);
         self.skipReturnType();
 
         // Parse body
@@ -1656,12 +1656,22 @@ const Parser = struct {
     /// N-331: the AST keeps no return type, so a single (unparenthesised)
     /// result type that is not a Rúnar type is refused where it is spelled.
     /// A parenthesised result list is left to `skipReturnType`.
-    fn checkReturnType(self: *Parser, method_name: []const u8) void {
-        if (self.current.kind == .lbrace or self.current.kind == .eof or self.current.kind == .lparen) return;
+    /// N-332: a PUBLIC method (`is_public`) may declare no result at all,
+    /// parenthesised list and native `bool` included.
+    fn checkReturnType(self: *Parser, method_name: []const u8, is_public: bool) void {
+        if (self.current.kind == .lbrace or self.current.kind == .eof) return;
+        if (self.current.kind == .lparen) {
+            if (is_public) self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{method_name});
+            return;
+        }
         var spelled: []const u8 = "";
         const ti = self.parseGoTypeNamed(&spelled);
         const unknown = types.spelledIfUnknown(ti, spelled);
-        if (unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ unknown, method_name });
+        if (unknown.len > 0) {
+            self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ unknown, method_name });
+        } else if (is_public and ti != .void) {
+            self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{method_name});
+        }
     }
 
     fn skipReturnType(self: *Parser) void {

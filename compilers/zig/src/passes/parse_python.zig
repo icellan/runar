@@ -1477,6 +1477,9 @@ const Parser = struct {
             const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), types.typeNodeName(rt));
             if (rt_unknown.len > 0 and !std.mem.eql(u8, rt_unknown, "None")) {
                 self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+            } else if (rt_unknown.len == 0 and std.mem.eql(u8, visibility, "public") and typeNodeToRunarType(rt) != .void) {
+                // N-332: public methods return nothing.
+                self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{name});
             }
         }
 

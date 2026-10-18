@@ -479,10 +479,18 @@ public final class JavaParser {
 
         // The AST keeps no return type; N-331 refuses an unknown name. A
         // primitive return type (`void`, `boolean`) is not a name to check.
-        if (!isConstructor && m.getReturnType() != null && !(m.getReturnType() instanceof PrimitiveTypeTree)) {
-            String unknownReturn = LexDiag.unknownReturnType(convertType(m.getReturnType(), filename), m.getName().toString());
-            if (unknownReturn != null) {
-                throw new ParseException(unknownReturn);
+        // N-332: a public method may declare no return type but `void`.
+        if (!isConstructor && m.getReturnType() != null) {
+            if (m.getReturnType() instanceof PrimitiveTypeTree ptt) {
+                if (vis == Visibility.PUBLIC && ptt.getPrimitiveTypeKind() != javax.lang.model.type.TypeKind.VOID) {
+                    throw new ParseException(LexDiag.publicReturnType(m.getName().toString()));
+                }
+            } else {
+                String unknownReturn = LexDiag.unknownReturnType(
+                    convertType(m.getReturnType(), filename), m.getName().toString(), vis == Visibility.PUBLIC);
+                if (unknownReturn != null) {
+                    throw new ParseException(unknownReturn);
+                }
             }
         }
 

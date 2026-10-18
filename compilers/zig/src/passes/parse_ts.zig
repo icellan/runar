@@ -1072,9 +1072,13 @@ const Parser = struct {
         if (self.current.kind == .colon) {
             _ = self.bump();
             const rt = self.parseTypeAnnotation();
-            if (typeNodeToRunarType(rt) == .unknown) {
+            const rt_ti = typeNodeToRunarType(rt);
+            if (rt_ti == .unknown) {
                 const spelled = types.typeNodeName(rt);
                 if (!std.mem.eql(u8, spelled, "unknown")) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ spelled, name });
+            } else if (is_public and rt_ti != .void) {
+                // N-332: public methods return nothing.
+                self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{name});
             }
         }
 

@@ -467,7 +467,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		}
 
 		params := p.extractParams(funcDecl.Type.Params)
-		p.checkReturnTypes(funcDecl, methodName)
+		p.checkReturnTypes(funcDecl, methodName, visibility == "public")
 		body := p.extractStatements(funcDecl.Body)
 
 		pos := p.fset.Position(funcDecl.Pos())
@@ -501,7 +501,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		p.receiverName = "" // no receiver for standalone functions
 
 		params := p.extractParams(funcDecl.Type.Params)
-		p.checkReturnTypes(funcDecl, methodName)
+		p.checkReturnTypes(funcDecl, methodName, false)
 		body := p.extractStatements(funcDecl.Body)
 
 		pos := p.fset.Position(funcDecl.Pos())
@@ -664,7 +664,7 @@ func (p *goContractParser) extractParams(fieldList *ast.FieldList) []ParamNode {
 
 // checkReturnTypes (N-331): the AST keeps no return type, so a result whose
 // type names something that is not a Rúnar type is refused here.
-func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string) {
+func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string, isPublic bool) {
 	if fd.Type.Results == nil {
 		return
 	}
@@ -673,9 +673,14 @@ func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string)
 		// Go's own `bool` is the documented spelling of `boolean` (docs/formats/go.md)
 		// and every other tier's .runar.go parser accepts it as a result type.
 		if id, ok := field.Type.(*ast.Ident); ok && id.Name == "bool" {
+			// N-332: a public method may not declare any result, `bool` included.
+			if isPublic {
+				d := Diagnostic{Message: PublicReturnTypeMsg(methodName), Severity: SeverityError, Loc: &loc}
+				p.errors = append(p.errors, d)
+			}
 			continue
 		}
-		if d := UnknownReturnTypeDiagnostic(p.resolveType(field.Type), methodName, loc); d != nil {
+		if d := UnknownReturnTypeDiagnostic(p.resolveType(field.Type), methodName, loc, isPublic); d != nil {
 			p.errors = append(p.errors, *d)
 		}
 	}

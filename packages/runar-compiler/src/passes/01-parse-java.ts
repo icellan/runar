@@ -668,7 +668,7 @@ class JavaParser {
     loc: SourceLocation,
   ): MethodNode {
     // The AST keeps no return type; N-331 refuses an unknown name here.
-    checkReturnType(returnType, name, loc, this.errors);
+    checkReturnType(returnType, name, loc, this.errors, isPublic);
     const params = this.parseParamList();
     // optional throws clause
     if (this.current().type === 'ident' && this.current().value === 'throws') {

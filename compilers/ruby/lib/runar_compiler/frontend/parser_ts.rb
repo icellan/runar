@@ -940,7 +940,7 @@ module RunarCompiler
         # unknown name.
         if check(TOK_COLON)
           advance
-          Frontend.reject_unknown_return_type(@errors, parse_type, name, location)
+          Frontend.reject_unknown_return_type(@errors, parse_type, name, location, visibility == "public")
         end
 
         body = parse_block

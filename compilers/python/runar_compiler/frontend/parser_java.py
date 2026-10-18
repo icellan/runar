@@ -935,7 +935,7 @@ class _JavaParser:
         body = self._parse_block()
         # The AST keeps no return type: methods in Rúnar are declared by their
         # body structure. N-331 refuses an unknown return type name.
-        reject_unknown_return_type(self.errors, return_type, name, loc)
+        reject_unknown_return_type(self.errors, return_type, name, loc, visibility == "public")
         return MethodNode(
             name=name,
             params=params,

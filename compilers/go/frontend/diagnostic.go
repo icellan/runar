@@ -111,16 +111,36 @@ func StaticMethodMsg(name string) string {
 // checkReturnType). The AST keeps no return type, so every surface parser calls
 // this where the annotation is spelled. It returns nil for any other type;
 // "unknown" is the missing-annotation placeholder, diagnosed elsewhere.
-func UnknownReturnTypeDiagnostic(t TypeNode, methodName string, loc SourceLocation) *Diagnostic {
-	ct, ok := t.(CustomType)
-	if !ok || ct.Name == "unknown" {
-		return nil
+//
+// N-332: when isPublic, any non-void return type is also refused -- public
+// methods are spending entry points and return void (spec/grammar.md:161).
+func UnknownReturnTypeDiagnostic(t TypeNode, methodName string, loc SourceLocation, isPublic bool) *Diagnostic {
+	if ct, ok := t.(CustomType); ok {
+		if ct.Name == "unknown" {
+			return nil
+		}
+		return &Diagnostic{
+			Message:  "Type '" + ct.Name + "' of the return value of method '" + methodName + "' is not a Rúnar type",
+			Severity: SeverityError,
+			Loc:      &loc,
+		}
 	}
-	return &Diagnostic{
-		Message:  "Type '" + ct.Name + "' of the return value of method '" + methodName + "' is not a Rúnar type",
-		Severity: SeverityError,
-		Loc:      &loc,
+	if isPublic {
+		if pt, ok := t.(PrimitiveType); !ok || pt.Name != "void" {
+			return &Diagnostic{
+				Message:  PublicReturnTypeMsg(methodName),
+				Severity: SeverityError,
+				Loc:      &loc,
+			}
+		}
 	}
+	return nil
+}
+
+// PublicReturnTypeMsg is N-332's refusal of a PUBLIC method that declares a
+// non-void return type (the TS reference's publicReturnTypeMessage).
+func PublicReturnTypeMsg(methodName string) string {
+	return "Public method '" + methodName + "' must not declare a return type: public methods are spending entry points and return void (spec/grammar.md:161)"
 }
 
 // BareJavaPropertyAssignmentMsg is N-023's (R49) refusal, on the .runar.java

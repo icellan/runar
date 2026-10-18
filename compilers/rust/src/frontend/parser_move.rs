@@ -1094,7 +1094,7 @@ impl<'a> MoveParser<'a> {
             self.advance();
             // The AST keeps no return type; N-331 refuses an unknown name.
             let ret_type = self.parse_type();
-            if let Some(msg) = unknown_return_type_message(&ret_type, &name) {
+            if let Some(msg) = unknown_return_type_message(&ret_type, &name, visibility == Visibility::Public) {
                 self.errors.push(Diagnostic::error(msg, Some(location.clone())));
             }
             has_return_type = true;

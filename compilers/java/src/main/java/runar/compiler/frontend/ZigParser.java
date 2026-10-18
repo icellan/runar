@@ -779,7 +779,7 @@ public final class ZigParser {
                 // type to check.
                 ParsedType returnType = parseType();
                 if (!"init".equals(name)) {
-                    String unknownReturn = LexDiag.unknownReturnType(returnType.type, name);
+                    String unknownReturn = LexDiag.unknownReturnType(returnType.type, name, isPublic);
                     if (unknownReturn != null) {
                         errors.add(file + ":" + l.line() + ":" + l.column() + ": " + unknownReturn);
                     }

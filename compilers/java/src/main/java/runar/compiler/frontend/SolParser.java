@@ -801,6 +801,7 @@ public final class SolParser {
             // separated by `|`, any other token makes the spelling malformed.
             Visibility visibility = Visibility.PRIVATE;
             List<String> sighashSpecs = new ArrayList<>();
+            TypeNode pendingRet = null;
             while (checkIdent("public") || checkIdent("private")
                 || checkIdent("external") || checkIdent("internal")
                 || checkIdent("view") || checkIdent("pure")
@@ -818,9 +819,10 @@ public final class SolParser {
                     if (check(TOK_LPAREN)) {
                         advance();
                         // N-331: the AST keeps no return type; an unknown name is refused.
+                        // N-332: checked after the modifier loop, because
+                        // `public` may follow `returns (...)`.
                         if (check(TOK_IDENT)) {
-                            String unknownReturn = LexDiag.unknownReturnType(parseSolType(peek().value), name);
-                            if (unknownReturn != null) addError(unknownReturn);
+                            pendingRet = parseSolType(peek().value);
                         }
                         int depth = 1;
                         while (depth > 0 && !check(TOK_EOF)) {
@@ -830,6 +832,11 @@ public final class SolParser {
                         }
                     }
                 }
+            }
+
+            if (pendingRet != null) {
+                String unknownReturn = LexDiag.unknownReturnType(pendingRet, name, visibility == Visibility.PUBLIC);
+                if (unknownReturn != null) addError(unknownReturn);
             }
 
             List<Statement> body = parseSolBlock();

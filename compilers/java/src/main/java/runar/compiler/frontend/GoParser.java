@@ -1233,7 +1233,7 @@ public final class GoParser {
             List<ParamNode> params = parseFuncParams();
 
             if (!check(Tok.LBRACE)) {
-                checkReturnType(methodName);
+                checkReturnType(methodName, visibility == Visibility.PUBLIC);
                 skipReturnType();
             }
             List<Statement> body = parseBlock();
@@ -1366,7 +1366,7 @@ public final class GoParser {
          * entry of a parenthesised result list (named or not). The rest is
          * left to {@link #skipReturnType()}.
          */
-        void checkReturnType(String methodName) {
+        void checkReturnType(String methodName, boolean isPublic) {
             if (check(Tok.LPAREN)) {
                 advance();
                 while (!check(Tok.RPAREN) && !check(Tok.LBRACE) && !check(Tok.EOF)) {
@@ -1374,13 +1374,13 @@ public final class GoParser {
                     if (check(Tok.IDENT) && next.kind != Tok.DOT && next.kind != Tok.COMMA && next.kind != Tok.RPAREN) {
                         advance(); // result name
                     }
-                    String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName);
+                    String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName, isPublic);
                     if (unknownReturn != null) addError(unknownReturn);
                     if (!match(Tok.COMMA)) break;
                 }
                 match(Tok.RPAREN);
             } else {
-                String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName);
+                String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName, isPublic);
                 if (unknownReturn != null) addError(unknownReturn);
             }
         }

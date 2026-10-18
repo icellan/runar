@@ -996,7 +996,7 @@ class PyParser {
       // is Python's spelling of "returns nothing".
       const returnType = this.parseType();
       if (!(returnType.kind === 'custom_type' && returnType.name === 'None')) {
-        checkReturnType(returnType, rawName, loc, this.errors);
+        checkReturnType(returnType, rawName, loc, this.errors, decorators.includes('public'));
       }
     }
 

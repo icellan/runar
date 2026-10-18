@@ -532,7 +532,7 @@ fn parse_methods(
             // N-331: the AST keeps no return type, so an unknown name is refused here.
             if let Some(ref ann) = method.function.return_type {
                 let ret = parse_type_node(&ann.type_ann, file, errors);
-                if let Some(msg) = unknown_return_type_message(&ret, &name) {
+                if let Some(msg) = unknown_return_type_message(&ret, &name, method.accessibility == Some(Accessibility::Public)) {
                     errors.push(Diagnostic::error(msg, Some(real_loc(cm, file, method.span().lo))));
                 }
             }

@@ -1369,7 +1369,7 @@ impl<'a> GoParser<'a> {
 
         // Optional return type (Rúnar doesn't use it structurally; N-331
         // refuses an unknown name)
-        self.skip_return_type(&method_name, &loc);
+        self.skip_return_type(&method_name, &loc, visibility == Visibility::Public);
 
         // Body
         let body = self.parse_block();
@@ -1411,7 +1411,7 @@ impl<'a> GoParser<'a> {
         };
 
         let params = self.parse_params();
-        self.skip_return_type(&func_name, &loc);
+        self.skip_return_type(&func_name, &loc, false);
         let body = self.parse_block();
 
         self.receiver_name = saved_recv;
@@ -1512,7 +1512,7 @@ impl<'a> GoParser<'a> {
     /// Skip an optional return type declaration (everything up to `{` or EOF).
     /// N-331: the AST keeps no return type, so a result type that is not a
     /// Rúnar type is refused here, where it is spelled.
-    fn skip_return_type(&mut self, method_name: &str, loc: &SourceLocation) {
+    fn skip_return_type(&mut self, method_name: &str, loc: &SourceLocation, is_public: bool) {
         // If next token is `{`, no return type
         if matches!(self.current().typ, TokenType::LBrace | TokenType::Eof) {
             return;
@@ -1528,7 +1528,7 @@ impl<'a> GoParser<'a> {
                     self.advance(); // result name
                 }
                 let ret = self.parse_type();
-                if let Some(msg) = unknown_return_type_message(&ret, method_name) {
+                if let Some(msg) = unknown_return_type_message(&ret, method_name, is_public) {
                     self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
                 }
                 if !self.match_tok(&TokenType::Comma) {
@@ -1537,7 +1537,7 @@ impl<'a> GoParser<'a> {
             }
         } else {
             let ret = self.parse_type();
-            if let Some(msg) = unknown_return_type_message(&ret, method_name) {
+            if let Some(msg) = unknown_return_type_message(&ret, method_name, is_public) {
                 self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
             }
         }

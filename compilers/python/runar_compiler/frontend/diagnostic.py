@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from runar_compiler.frontend.ast_nodes import CustomType, SourceLocation
+from runar_compiler.frontend.ast_nodes import CustomType, PrimitiveType, SourceLocation
 
 
 class Severity:
@@ -92,21 +92,40 @@ def unexpected_token_after_class_message(token: str) -> str:
     return f"Unexpected token after class end: '{token}'"
 
 
-def unknown_return_type_message(t, method: str) -> Optional[str]:
+def public_return_type_message(method: str) -> str:
+    """N-332's refusal of a PUBLIC method that declares a non-void return type
+    (the TS reference's ``publicReturnTypeMessage``)."""
+    return (
+        f"Public method '{method}' must not declare a return type: public methods "
+        f"are spending entry points and return void (spec/grammar.md:161)"
+    )
+
+
+def unknown_return_type_message(t, method: str, is_public: bool = False) -> Optional[str]:
     """N-331's refusal of a method whose RETURN-type annotation names a type
     that is not a Rúnar type (the TS reference's ``checkReturnType``). The AST
     keeps no return type, so every surface parser calls this where the
     annotation is spelled. ``None`` for any other type; ``unknown`` is the
-    missing-annotation placeholder, diagnosed elsewhere."""
-    if isinstance(t, CustomType) and t.name != "unknown":
-        return f"Type '{t.name}' of the return value of method '{method}' is not a Rúnar type"
+    missing-annotation placeholder, diagnosed elsewhere.
+
+    N-332: when ``is_public``, any non-void return type is also refused --
+    public methods are spending entry points and return void
+    (spec/grammar.md:161)."""
+    if isinstance(t, CustomType):
+        if t.name != "unknown":
+            return f"Type '{t.name}' of the return value of method '{method}' is not a Rúnar type"
+        return None
+    if is_public and not (isinstance(t, PrimitiveType) and t.name == "void"):
+        return public_return_type_message(method)
     return None
 
 
-def reject_unknown_return_type(errors: list, t, method: str, loc: Optional[SourceLocation]) -> None:
+def reject_unknown_return_type(
+    errors: list, t, method: str, loc: Optional[SourceLocation], is_public: bool = False
+) -> None:
     """N-331: append the unknown-return-type diagnostic to ``errors`` when
     ``t`` (the parsed return annotation) is not a Rúnar type."""
-    msg = unknown_return_type_message(t, method)
+    msg = unknown_return_type_message(t, method, is_public)
     if msg is not None:
         errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
 

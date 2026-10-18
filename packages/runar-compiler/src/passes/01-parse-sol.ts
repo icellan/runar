@@ -518,7 +518,7 @@ class SolParser {
     if (this.current().type === 'ident' && this.current().value === 'returns') {
       this.advance();
       this.expect('(');
-      if (this.current().type === 'ident') checkReturnType(this.parseType(), name, location, this.errors);
+      if (this.current().type === 'ident') checkReturnType(this.parseType(), name, location, this.errors, visibility === 'public');
       while (this.current().type !== ')' && this.current().type !== 'eof') this.advance();
       this.expect(')');
     }

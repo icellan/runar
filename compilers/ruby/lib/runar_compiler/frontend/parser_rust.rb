@@ -1020,7 +1020,7 @@ module RunarCompiler
         if check(TOK_ARROW)
           advance
           # The AST keeps no return type; N-331 refuses an unknown name.
-          Frontend.reject_unknown_return_type(@errors, parse_rust_type, raw_name, location)
+          Frontend.reject_unknown_return_type(@errors, parse_rust_type, raw_name, location, is_public)
           has_return_type = true
         end
 

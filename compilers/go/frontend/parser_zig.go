@@ -911,7 +911,7 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 		// not a type to check.
 		rt := p.parseType()
 		if name != "init" {
-			if d := UnknownReturnTypeDiagnostic(rt.typeNode, name, loc); d != nil {
+			if d := UnknownReturnTypeDiagnostic(rt.typeNode, name, loc, isPublic); d != nil {
 				p.errors = append(p.errors, *d)
 			}
 		}

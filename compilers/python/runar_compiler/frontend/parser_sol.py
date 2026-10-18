@@ -633,6 +633,7 @@ class _SolParser:
         # spelling malformed.
         visibility = "private"
         sighash_specs: list[str | None] = []
+        pending_ret = None
         while (
             (self.check_ident("sighash") and self._peek_at(1).kind == TOK_LPAREN)
             or self.check_ident("public")
@@ -655,9 +656,10 @@ class _SolParser:
                 if self.check(TOK_LPAREN):
                     self.advance()
                     # N-331: the AST keeps no return type; an unknown name is refused.
+                    # N-332: checked after the modifier loop, because
+                    # ``public`` may follow ``returns (...)``.
                     if self.check(TOK_IDENT):
-                        reject_unknown_return_type(
-                            self.errors, _parse_sol_type(self.peek().value), name, location)
+                        pending_ret = _parse_sol_type(self.peek().value)
                     depth = 1
                     while depth > 0 and not self.check(TOK_EOF):
                         if self.check(TOK_LPAREN):
@@ -665,6 +667,9 @@ class _SolParser:
                         if self.check(TOK_RPAREN):
                             depth -= 1
                         self.advance()
+
+        if pending_ret is not None:
+            reject_unknown_return_type(self.errors, pending_ret, name, location, visibility == "public")
 
         body = self.parse_sol_block()
 

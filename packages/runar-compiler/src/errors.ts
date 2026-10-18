@@ -149,10 +149,24 @@ export function checkReturnType(
   methodName: string,
   loc: SourceLocation,
   errors: CompilerDiagnostic[],
+  isPublic = false,
 ): void {
-  if (type.kind === 'custom_type' && type.name !== 'unknown') {
-    errors.push(makeDiagnostic(unknownReturnTypeMessage(type.name, methodName), 'error', loc));
+  if (type.kind === 'custom_type') {
+    if (type.name !== 'unknown') {
+      errors.push(makeDiagnostic(unknownReturnTypeMessage(type.name, methodName), 'error', loc));
+    }
+  } else if (isPublic && !(type.kind === 'primitive_type' && type.name === 'void')) {
+    errors.push(makeDiagnostic(publicReturnTypeMessage(methodName), 'error', loc));
   }
+}
+
+/**
+ * N-332: a PUBLIC method that declares a non-void return type. Public methods
+ * are spending entry points and return nothing (spec/grammar.md:161). Every
+ * tier's surface parsers emit this one wording.
+ */
+export function publicReturnTypeMessage(methodName: string): string {
+  return `Public method '${methodName}' must not declare a return type: public methods are spending entry points and return void (spec/grammar.md:161)`;
 }
 
 /**

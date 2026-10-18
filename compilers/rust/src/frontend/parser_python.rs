@@ -1458,7 +1458,7 @@ impl<'a> PyParser<'a> {
             // is Python's spelling of "returns nothing".
             let ret_type = self.parse_type();
             if !matches!(&ret_type, TypeNode::Custom(n) if n == "None") {
-                if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name) {
+                if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name, decorators.iter().any(|d| d == "public")) {
                     self.errors.push(Diagnostic::error(msg, Some(def_loc.clone())));
                 }
             }

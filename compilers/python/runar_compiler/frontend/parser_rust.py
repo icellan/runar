@@ -977,7 +977,7 @@ class _RustParser:
             has_return_type = True
             self.advance()
             # The AST keeps no return type; N-331 refuses an unknown name.
-            reject_unknown_return_type(self.errors, self.parse_rust_type(), raw_name, func_loc)
+            reject_unknown_return_type(self.errors, self.parse_rust_type(), raw_name, func_loc, visibility == "public")
 
         self.expect(TOK_LBRACE)
         body: list[Statement] = []

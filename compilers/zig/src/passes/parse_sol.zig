@@ -1233,6 +1233,7 @@ const Parser = struct {
         // spelling of the `@sighash` directive; FLAGS must be identifiers
         // separated by `|`) and skip 'returns (Type)' clauses
         var is_public = false;
+        var pending_ret: ?[]const u8 = null;
         var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
         while (self.current.kind == .ident) {
             const mod = self.current.text;
@@ -1252,10 +1253,9 @@ const Parser = struct {
                 if (self.current.kind == .lparen) {
                     _ = self.bump();
                     // N-331: the AST keeps no return type; an unknown name is refused.
-                    if (self.current.kind == .ident) {
-                        const ret_name = self.current.text;
-                        if (resolveSolType(ret_name) == .unknown) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_name, name });
-                    }
+                    // N-332: checked after the modifier loop, because `public`
+                    // may follow `returns (...)`.
+                    if (self.current.kind == .ident) pending_ret = self.current.text;
                     var paren_depth: u32 = 1;
                     while (paren_depth > 0 and self.current.kind != .eof) {
                         if (self.current.kind == .lparen) paren_depth += 1;
@@ -1264,6 +1264,15 @@ const Parser = struct {
                     }
                 }
             } else break;
+        }
+
+        if (pending_ret) |ret_name| {
+            const ret_ti = resolveSolType(ret_name);
+            if (ret_ti == .unknown) {
+                self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_name, name });
+            } else if (is_public and ret_ti != .void) {
+                self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{name});
+            }
         }
 
         const body = self.parseBlock();

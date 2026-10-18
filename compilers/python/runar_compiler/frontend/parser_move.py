@@ -860,7 +860,7 @@ class _MoveParser:
         has_return_type = False
         if self.match(TOK_COLON):
             # The AST keeps no return type; N-331 refuses an unknown name.
-            reject_unknown_return_type(self.errors, self._parse_move_type_node(), name, location)
+            reject_unknown_return_type(self.errors, self._parse_move_type_node(), name, location, visibility == "public")
             has_return_type = True
 
         body = self._parse_move_block()
