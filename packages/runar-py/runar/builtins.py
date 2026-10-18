@@ -455,8 +455,10 @@ def sha256_compress(state: bytes, block: bytes) -> bytes:
     Returns:
         32-byte updated hash state (big-endian).
     """
-    assert len(state) == 32, f"state must be 32 bytes, got {len(state)}"
-    assert len(block) == 64, f"block must be 64 bytes, got {len(block)}"
+    if len(state) != 32:
+        raise ValueError(f"state must be 32 bytes, got {len(state)}")
+    if len(block) != 64:
+        raise ValueError(f"block must be 64 bytes, got {len(block)}")
 
     # Parse state as 8 big-endian uint32
     H = list(struct.unpack('>8I', state))
