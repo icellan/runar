@@ -2143,8 +2143,8 @@ class LoopWithIdent extends SmartContract {
     );
     let err = format!("{:?}", result.err());
     assert!(
-        err.contains("compile-time constant"),
-        "expected a 'compile-time constant' loop-bound diagnostic, got: {err}"
+        err.contains("Cannot determine loop bound at compile time. For-loop bounds must be integer literals."),
+        "expected the reference identifier loop-bound diagnostic, got: {err}"
     );
 }
 

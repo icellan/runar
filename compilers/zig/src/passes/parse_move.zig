@@ -1720,6 +1720,7 @@ const Parser = struct {
         return .{ .for_stmt = .{
             .var_name = var_name,
             .init_value = 0,
+            .init_is_const = true,
             .bound = bound,
             .bound_is_const = bound_is_const,
             .bound_ident = bound_ident,
@@ -1737,8 +1738,12 @@ const Parser = struct {
         const body = self.parseMoveBlock();
         self.skipSemicolons();
 
-        // Infinite loop — use a large bound
-        return .{ .for_stmt = .{ .var_name = "_l", .init_value = 0, .bound = 1000, .body = body, .source_loc = loc } };
+        // Infinite loop — use a large bound. N-026: the reference lowers
+        // `loop { }` to a `for` whose condition is the literal `true`, which its
+        // validator refuses because the condition does not test the iterator
+        // (`cond_tests_iter`). Mark it the same way so this tier emits that
+        // sentence rather than the bound one.
+        return .{ .for_stmt = .{ .var_name = "_l", .init_value = 0, .init_is_const = true, .bound = 1000, .bound_is_const = true, .cond_tests_iter = false, .body = body, .source_loc = loc } };
     }
 
     fn parseMoveReturn(self: *Parser) ?Statement {

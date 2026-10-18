@@ -1409,7 +1409,18 @@ const Parser = struct {
         var range_end: i64 = 0;
         var range_end_is_const = true;
         var range_end_ident: ?[]const u8 = null;
-        if (self.current.kind == .number) {
+        // N-026: a number is the whole bound only when the token after it ends
+        // the range (`{`, or `)` of `(a..b).rev()`). `0..3 + 1` continues the
+        // expression, so it takes the expression path and is refused as a
+        // non-literal bound like every other tier does, instead of dying on a
+        // stray `+` while looking for the loop body.
+        const number_ends_range = blk: {
+            if (self.current.kind != .number) break :blk false;
+            var ahead = self.tokenizer;
+            const after = ahead.next();
+            break :blk after.kind == .lbrace or after.kind == .rparen;
+        };
+        if (number_ends_range) {
             const end_tok = self.bump();
             range_end = parseNumberLiteral(end_tok.text);
         } else {

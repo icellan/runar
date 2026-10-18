@@ -1266,6 +1266,7 @@ const Parser = struct {
         return Statement{ .for_stmt = .{
             .var_name = var_name,
             .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
+            .init_is_const = true, // N-026: no declaration folded in => the reference's literal 0
             .bound = bound,
             .bound_is_const = bound_is_const,
             .bound_ident = bound_ident,

@@ -873,7 +873,7 @@ class _ValidationContext:
         # binds ``iterVar = start + i*step`` on each unrolled iteration.
         if isinstance(stmt.condition, BinaryExpr):
             if not _is_compile_time_constant(stmt.condition.right):
-                self._add_error("for loop bound must be a compile-time constant")
+                self._add_error(_for_loop_bound_diagnostic(stmt.condition.right))
 
         # R-148: the START, checked the same way and for the same reason. Until
         # now only the BOUND was validated here; a non-literal start reached
@@ -1410,6 +1410,24 @@ def _is_representable_for_update(
         return False
 
     return False
+
+
+def _for_loop_bound_diagnostic(bound: Expression | None) -> str:
+    # The reference (TypeScript) tier's sentence for a for-loop bound that is not
+    # an integer literal. The reference's validator trusts a bare identifier (or
+    # boolean literal, or a negation of one) as "could be a const" and lets ANF
+    # lowering refuse it with the "Cannot determine" sentence; every other
+    # non-literal shape (``this.x``, an expression) is refused by its validator
+    # with the "must be a compile-time constant" sentence. Both sentences are
+    # shared verbatim by all seven tiers (N-026).
+    while isinstance(bound, UnaryExpr) and bound.op == "-":
+        bound = bound.operand
+    if isinstance(bound, (Identifier, BoolLiteral)):
+        return (
+            "Cannot determine loop bound at compile time. "
+            "For-loop bounds must be integer literals."
+        )
+    return "For loop bound must be a compile-time constant (literal or const variable)"
 
 
 def _is_compile_time_constant(expr: Expression | None) -> bool:

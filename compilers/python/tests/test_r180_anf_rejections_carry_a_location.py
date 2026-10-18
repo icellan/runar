@@ -13,7 +13,7 @@ user wrote something the language does not accept — but unlike every
 validation-stage rejection they arrive with no `file:line:column`. Compare, for
 the same contract shape:
 
-    validation   LoopBound.runar.ts:8:4: for loop bound must be a compile-time constant
+    validation   LoopBound.runar.ts:8:4: For loop bound must be a compile-time constant (literal or const variable)
     ANF lowering For loop counting up (i++) must use '<' or '<=' (got '>').
 
 Four of the nine are reachable from ordinary source, verified by compiling each
@@ -165,7 +165,7 @@ def _compile(tmp_path: Path, name: str, source: str, *extra: str) -> subprocess.
 def test_a_validation_rejection_is_located(tmp_path):
     """The format the ANF-stage rejections must match. Passes today."""
     res = _compile(tmp_path, "LoopBound", LOOP_BOUND, "--hex")
-    assert "for loop bound must be a compile-time constant" in res.stderr, res.stderr
+    assert "For loop bound must be a compile-time constant" in res.stderr, res.stderr
     assert LOCATED.search(res.stderr), (
         "the validator stopped emitting file:line:column; this test's target is gone:\n"
         + res.stderr

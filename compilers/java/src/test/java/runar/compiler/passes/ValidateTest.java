@@ -400,7 +400,8 @@ class ValidateTest {
             () -> Validate.run(c)
         );
         assertTrue(
-            e.errors().stream().anyMatch(m -> m.contains("compile-time constant")),
+            e.errors().stream().anyMatch(m -> m.contains(
+                "Cannot determine loop bound at compile time. For-loop bounds must be integer literals.")),
             "expected for-loop-bound error, got " + e.errors()
         );
     }

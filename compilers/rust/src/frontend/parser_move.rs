@@ -1252,6 +1252,14 @@ impl<'a> MoveParser<'a> {
                 }
                 Some(stmt)
             }
+            Token::Loop => {
+                let stmt = self.parse_loop_as_for();
+                // Optional trailing semicolon after loop block
+                if *self.peek() == Token::Semicolon {
+                    self.advance();
+                }
+                Some(stmt)
+            }
             _ => {
                 // Expression statement or assignment
                 let expr = self.parse_expression();
@@ -1565,6 +1573,33 @@ impl<'a> MoveParser<'a> {
                 source_location: self.loc(),
             }),
             condition,
+            update: Box::new(Statement::ExpressionStatement {
+                expression: Expression::BigIntLiteral { value: BigInt::from(0) },
+                source_location: self.loc(),
+            }),
+            body,
+            source_location: self.loc(),
+        }
+    }
+
+    /// N-026: `loop { ... }` has no bound the unrolled loop model can
+    /// represent. It is lowered exactly as the reference tier lowers it -- a
+    /// `for` whose condition is the literal `true` -- so the validator refuses
+    /// it with the reference's sentence ("For loop condition must compare the
+    /// loop variable '_l' ...") instead of the parser dying on the `loop`
+    /// keyword.
+    fn parse_loop_as_for(&mut self) -> Statement {
+        self.advance(); // consume 'loop'
+        let body = self.parse_block_converting_self();
+        Statement::ForStatement {
+            init: Box::new(Statement::VariableDecl {
+                name: "_l".to_string(),
+                var_type: None,
+                mutable: true,
+                init: Expression::BigIntLiteral { value: BigInt::from(0) },
+                source_location: self.loc(),
+            }),
+            condition: Expression::BoolLiteral { value: true },
             update: Box::new(Statement::ExpressionStatement {
                 expression: Expression::BigIntLiteral { value: BigInt::from(0) },
                 source_location: self.loc(),

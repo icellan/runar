@@ -1210,7 +1210,7 @@ module RunarCompiler
         # lowering binds iterVar = start + i*step on each unrolled iteration.
         if stmt.condition.is_a?(BinaryExpr)
           unless compile_time_constant?(stmt.condition.right)
-            add_error("for loop bound must be a compile-time constant")
+            add_error(for_loop_bound_diagnostic(stmt.condition.right))
           end
         end
 
@@ -1844,6 +1844,22 @@ module RunarCompiler
       # rejected here with a graceful diagnostic — anf-lower's
       # _extract_loop_shape would otherwise raise. Mirrors the reference TS
       # compiler's observable behavior: only literal loop bounds compile.
+      #
+      # N-026: the sentence for a refused bound is the reference tier's. Its
+      # validator trusts a bare identifier (or boolean literal, or a negation of
+      # one) as "could be a const" and lets ANF lowering refuse it with the
+      # "Cannot determine" sentence; every other non-literal shape (`this.x`, an
+      # expression) gets the "must be a compile-time constant" sentence. Both
+      # are shared verbatim by all seven tiers.
+      def for_loop_bound_diagnostic(bound)
+        bound = bound.operand while bound.is_a?(UnaryExpr) && bound.op == "-"
+        if bound.is_a?(Identifier) || bound.is_a?(BoolLiteral)
+          "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
+        else
+          "For loop bound must be a compile-time constant (literal or const variable)"
+        end
+      end
+
       def compile_time_constant?(expr)
         return false if expr.nil?
         return true if expr.is_a?(BigIntLiteral)

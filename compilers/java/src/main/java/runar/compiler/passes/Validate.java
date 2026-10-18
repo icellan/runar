@@ -1409,7 +1409,7 @@ public final class Validate {
             // unrolled iteration.
             if (f.condition() instanceof BinaryExpr be) {
                 if (!isCompileTimeConstant(be.right())) {
-                    error("for-loop bound must be a compile-time constant", f.sourceLocation());
+                    error(forLoopBoundDiagnostic(be.right()), f.sourceLocation());
                 }
             } else {
                 error("for-loop condition must be a comparison against a compile-time constant",
@@ -2131,6 +2131,26 @@ public final class Validate {
     // here with a graceful diagnostic — anf-lower's extractLoopShape would
     // otherwise throw. Mirrors the reference TS compiler's observable behavior:
     // only literal loop bounds compile.
+    /**
+     * The reference (TypeScript) tier's sentence for a for-loop bound that is not an integer
+     * literal. The reference's validator trusts a bare identifier (or boolean literal, or a
+     * negation of one) as "could be a const" and lets ANF lowering refuse it with the "Cannot
+     * determine" sentence; every other non-literal shape ({@code this.x}, an expression) is
+     * refused by its validator with the "must be a compile-time constant" sentence. Both sentences
+     * are shared verbatim by all seven tiers (N-026).
+     */
+    private static String forLoopBoundDiagnostic(Expression bound) {
+        Expression e = bound;
+        while (e instanceof UnaryExpr u && u.op() == Expression.UnaryOp.NEG) {
+            e = u.operand();
+        }
+        if (e instanceof Identifier || e instanceof BoolLiteral) {
+            return "Cannot determine loop bound at compile time. "
+                + "For-loop bounds must be integer literals.";
+        }
+        return "For loop bound must be a compile-time constant (literal or const variable)";
+    }
+
     private static boolean isCompileTimeConstant(Expression e) {
         if (e == null) return false;
         if (e instanceof BigIntLiteral) return true;

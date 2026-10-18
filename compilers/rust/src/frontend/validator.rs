@@ -1431,10 +1431,7 @@ fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Ve
             // i*step` on each unrolled iteration.
             if let Expression::BinaryExpr { right, .. } = condition {
                 if !is_compile_time_constant(right) {
-                    errors.push(Diagnostic::error(
-                        "For loop bound must be a compile-time constant (literal or const variable)",
-                        None,
-                    ));
+                    errors.push(Diagnostic::error(for_loop_bound_diagnostic(right), None));
                 }
             }
 
@@ -1642,6 +1639,29 @@ fn for_update_is_representable(
             }
         }
         _ => false,
+    }
+}
+
+/// The reference (TypeScript) tier's sentence for a for-loop bound that is not
+/// an integer literal. The reference's validator trusts a bare identifier (or
+/// boolean literal, or a negation of one) as "could be a const" and lets ANF
+/// lowering refuse it with the "Cannot determine" sentence; every other
+/// non-literal shape (`this.x`, an expression) is refused by its validator with
+/// the "must be a compile-time constant" sentence. Both sentences are shared
+/// verbatim by all seven tiers (N-026).
+fn for_loop_bound_diagnostic(bound: &Expression) -> &'static str {
+    let mut e = bound;
+    while let Expression::UnaryExpr { op, operand } = e {
+        if *op != UnaryOp::Neg {
+            break;
+        }
+        e = operand;
+    }
+    match e {
+        Expression::Identifier { .. } | Expression::BoolLiteral { .. } => {
+            "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
+        }
+        _ => "For loop bound must be a compile-time constant (literal or const variable)",
     }
 }
 

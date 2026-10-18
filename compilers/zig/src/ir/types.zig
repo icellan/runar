@@ -340,6 +340,11 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// surface syntax carries no update clause at all (`for i in 0..N`,
 /// `range(N)`, a bare `while (c)`), which is always representable.
 /// `init_is_const` is the START's counterpart to `bound_is_const` (N-137).
+/// N-026: it defaults to `false` (fail closed), like `bound_is_const`: a
+/// constructor that never decided whether the start is a literal gets the
+/// refusal, not a silent `0`. A parser whose surface has no start expression
+/// (a bare `while`, `loop`) sets it `true` explicitly with `init_value = 0`,
+/// which is the literal the reference supplies there.
 /// The unrolled loop model synthesises iteration k as `start + k*step`, so a
 /// start that is not a compile-time literal cannot be represented. The bound
 /// had a flag; the start did not, and every surface parser's initializer
@@ -371,7 +376,7 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// `var_name` becomes the reference's `__while_no_init` placeholder when no
 /// adjacent declaration folds in, and the reference's update rule still lets
 /// the update advance the variable the condition tests.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = false, bound_ident: ?[]const u8 = null, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, cond_lhs_name: ?[]const u8 = null, source_loc: ?SourceLocation = null };
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = false, bound_ident: ?[]const u8 = null, init_is_const: bool = false, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, cond_lhs_name: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {
