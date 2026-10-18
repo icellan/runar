@@ -579,7 +579,9 @@ module Runar
         new_satoshis = 0
 
         if has_multi_output
-          code_script = @code_script.empty? ? build_code_script : @code_script
+          # N-075: get_code_part_hex carries the inscription envelope, as the
+          # single-output path's get_locking_script does.
+          code_script = get_code_part_hex
           contract_outputs = Array(opts.outputs).map do |out_spec|
             state_dict = out_spec.is_a?(OutputSpec) ? out_spec.state : (out_spec['state'] || out_spec[:state])
             sats = out_spec.is_a?(OutputSpec) ? out_spec.satoshis : (out_spec['satoshis'] || out_spec[:satoshis] || 1)

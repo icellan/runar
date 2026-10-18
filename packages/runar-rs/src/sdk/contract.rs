@@ -1155,7 +1155,9 @@ impl RunarContract {
 
         if is_stateful && has_multi_output {
             // Multi-output: build a locking script for each output
-            let code_script = self.code_script.clone().unwrap_or_else(|| self.build_code_script());
+            // N-075: get_code_part_hex() carries the inscription envelope, as the
+            // single-output path's get_locking_script() does.
+            let code_script = self.get_code_part_hex();
             let state_fields = self.artifact.state_fields.as_ref().unwrap();
             let outputs = options.unwrap().outputs.as_ref().unwrap();
             contract_outputs = Some(
@@ -5237,5 +5239,62 @@ mod tests {
         };
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
         let _ = contract.get_code_sep_index(0);
+    }
+
+    /// N-075: the multi-output continuation path (`CallOptions.outputs`) built
+    /// each output from the bare code script and dropped the 1sat inscription
+    /// envelope that the single-output path (`get_locking_script`) keeps.
+    ///
+    /// Proves: with an inscription attached, every multi-output script is
+    /// byte-identical to the single-output locking script for the same state.
+    /// Does NOT prove: a full spend validating under a script interpreter, nor
+    /// the same fix in the other SDKs.
+    #[test]
+    fn n075_multi_output_continuation_keeps_inscription_envelope() {
+        let artifact = make_stateful_artifact("aabbccdd");
+        let inscription = Inscription {
+            content_type: "text/plain".to_string(),
+            data: utf8_to_hex("hello"),
+        };
+        let mut contract = RunarContract::new(artifact.clone(), vec![SdkValue::Int(0)]);
+        contract.with_inscription(inscription.clone()).expect("with_inscription");
+
+        let signer = MockSigner::new();
+        let mut provider = MockProvider::always_ack("testnet");
+        let address = signer.get_address().unwrap();
+        provider.add_utxo(&address, Utxo {
+            txid: "aa".repeat(32),
+            output_index: 0,
+            satoshis: 500_000,
+            script: format!("76a914{}88ac", "00".repeat(20)),
+        });
+        contract.deploy(&mut provider, &signer, &DeployOptions {
+            satoshis: 50_000,
+            change_address: None,
+            funding_signer: None,
+            acknowledge_unsound: vec![],
+        }).unwrap();
+
+        let mut state7 = std::collections::HashMap::new();
+        state7.insert("count".to_string(), SdkValue::Int(7));
+        let mut state9 = std::collections::HashMap::new();
+        state9.insert("count".to_string(), SdkValue::Int(9));
+        let options = CallOptions {
+            outputs: Some(vec![
+                OutputSpec { satoshis: 2000, state: state7 },
+                OutputSpec { satoshis: 2000, state: state9 },
+            ]),
+            ..Default::default()
+        };
+        let prepared = contract
+            .prepare_call("increment", &[], &mut provider, &signer, Some(&options))
+            .unwrap();
+
+        assert_eq!(prepared.contract_outputs.len(), 2);
+        for (i, count) in [7i64, 9].iter().enumerate() {
+            let mut reference = RunarContract::new(artifact.clone(), vec![SdkValue::Int(*count)]);
+            reference.with_inscription(inscription.clone()).expect("with_inscription");
+            assert_eq!(prepared.contract_outputs[i].script, reference.get_locking_script());
+        }
     }
 }

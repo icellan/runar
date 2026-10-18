@@ -1549,7 +1549,9 @@ export class RunarContract {
     }
 
     if (isStateful && hasMultiOutput) {
-      const codeScript = this._codeScript ?? this.buildCodeScript();
+      // N-075: getCodePartHex() carries the inscription envelope (as the
+      // single-output path's getLockingScript() does); buildCodeScript() alone dropped it.
+      const codeScript = this.getCodePartHex();
       contractOutputs = options!.outputs!.map((out) => {
         const stateHex = serializeState(this.artifact.stateFields!, out.state);
         return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };

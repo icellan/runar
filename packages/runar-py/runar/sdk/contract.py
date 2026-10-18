@@ -1008,7 +1008,9 @@ class RunarContract:
 
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
-            code_script = self._code_script or self._build_code_script()
+            # N-075: _get_code_part_hex() carries the inscription envelope, as the
+            # single-output path's get_locking_script() does.
+            code_script = self._get_code_part_hex()
             contract_outputs = []
             for out_spec in opts.outputs:
                 if isinstance(out_spec, dict):
