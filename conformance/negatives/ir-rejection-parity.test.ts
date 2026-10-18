@@ -234,6 +234,15 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
  * became `false` -- the opposite of what it declared, with no diagnostic.
  */
 
+/*
+ * `I62`-`I63` (N-063) reuse the `multi-method` control with the private
+ * helper `computeThreshold` made recursive: I62 calls itself, I63 calls a
+ * new private `pingBack` that calls it back. Before N-265 no `--ir` loader
+ * but Go's refused either (TS RangeError, Rust SIGABRT, Zig SIGSEGV, Ruby
+ * SystemStackError, Java StackOverflowError). Graded by discrimination like
+ * the rest of the lane: a crash is BROKEN, not a refusal.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],
