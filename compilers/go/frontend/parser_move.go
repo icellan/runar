@@ -497,13 +497,16 @@ func snakeToCamel(s string) string {
 	if len(parts) <= 1 {
 		return s
 	}
-	result := parts[0]
+	var result strings.Builder
+	result.Grow(len(s))
+	result.WriteString(parts[0])
 	for _, part := range parts[1:] {
 		if len(part) > 0 {
-			result += string(unicode.ToUpper(rune(part[0]))) + part[1:]
+			result.WriteRune(unicode.ToUpper(rune(part[0])))
+			result.WriteString(part[1:])
 		}
 	}
-	return result
+	return result.String()
 }
 
 // moveBuiltinMap maps Move-style snake_case builtins to Rúnar camelCase.
