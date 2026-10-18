@@ -358,6 +358,66 @@ test "interop: shared payload depth bound" {
     }
 }
 
+// F-296. The DoS size bound is hard-coded per tier; the fixture's
+// `size_limits` is the shared source of truth and every tier pins its own
+// constants to it. Then `size_vectors` is replayed: one byte over each limit
+// must be 'too-large'; exactly at the limit must be rejected for a LATER
+// reason (so the guard is not off by one). Proves this tier returns the
+// fixture reason; does not prove the other six tiers agree -- each replays
+// this same fixture -- and says nothing about the sig/pubkey being well-formed.
+test "interop: size limits and size vectors" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const limits = parsed.value.object.get("size_limits").?.object;
+    try std.testing.expectEqual(@as(i64, @intCast(envelope.MAX_ENVELOPE_PAYLOAD_BYTES)), limits.get("max_payload_bytes").?.integer);
+    try std.testing.expectEqual(@as(i64, @intCast(envelope.MAX_ENVELOPE_FIELD_BYTES)), limits.get("max_field_bytes").?.integer);
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const ve = parsed.value.object.get("valid_envelope").?.object;
+    const svs = parsed.value.object.get("size_vectors").?.array;
+    try std.testing.expect(svs.items.len >= 6);
+    for (svs.items) |sv| {
+        const obj = sv.object;
+        const vid = obj.get("_vector_id").?.string;
+        const field = obj.get("field").?.string;
+        const big = try allocator.alloc(u8, @intCast(obj.get("length").?.integer));
+        defer allocator.free(big);
+        @memset(big, 'x');
+        var env = envelope.SignedEnvelope{
+            .payload = ve.get("payload").?.string,
+            .sig = ve.get("sig").?.string,
+            .pubkey = ve.get("pubkey").?.string,
+            .nonce = ve.get("nonce").?.integer,
+            .expiresAt = ve.get("expiresAt").?.integer,
+        };
+        if (std.mem.eql(u8, field, "payload")) {
+            env.payload = big;
+        } else if (std.mem.eql(u8, field, "sig")) {
+            env.sig = big;
+        } else if (std.mem.eql(u8, field, "pubkey")) {
+            env.pubkey = big;
+        } else {
+            std.debug.print("{s}: unknown field {s}\n", .{ vid, field });
+            return error.TestUnexpectedResult;
+        }
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        const too_large = r.reason.? == .too_large;
+        if (too_large != obj.get("expect_too_large").?.bool) {
+            std.debug.print("{s}: reason={s}\n", .{ vid, r.reason.?.wire() });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 // F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
 // signature, and the TS reference accepts it: BIP-62's low-S rule is
 // transaction-script policy, not part of the envelope protocol. Ruby used to

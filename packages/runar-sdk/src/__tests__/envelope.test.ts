@@ -16,6 +16,7 @@ import {
 import type { SignedEnvelope, EnvelopeSigner } from '../envelope.js';
 import { MAX_ENVELOPE_PAYLOAD_DEPTH } from '../envelope.js';
 import type { RunarArtifact } from 'runar-ir-schema';
+import { InputLimits } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Test signer — signs precomputed digests directly via raw ECDSA, matching
@@ -463,6 +464,47 @@ describe('verifyEnvelope payload depth bound (R-260)', () => {
     );
     const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as { payload_depth_limit: number };
     expect(fixture.payload_depth_limit).toBe(MAX_ENVELOPE_PAYLOAD_DEPTH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-296 — the DoS size bound ('too-large') is pinned cross-tier.
+//
+// Every tier hard-codes the same two limits (16 MiB payload, 4 MiB sig/pubkey)
+// separately. conformance/sdk-envelope/fixtures.json carries them as
+// `size_limits` plus `size_vectors` (a generation spec -- a 16 MiB literal does
+// not belong in a checked-in fixture). Proves: this tier's limits equal the
+// fixture's and its verifyEnvelope returns 'too-large' for one byte over each
+// limit while NOT returning it at the limit. Does not prove the other six
+// tiers agree -- each replays the same fixture in its own interop test.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope size bound is pinned to the cross-tier fixture (F-296)', () => {
+  const fixturePath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../conformance/sdk-envelope/fixtures.json',
+  );
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+    valid_envelope: SignedEnvelope;
+    size_limits?: { max_payload_bytes: number; max_field_bytes: number };
+    size_vectors?: Array<{ _vector_id: string; field: 'payload' | 'sig' | 'pubkey'; length: number; expect_too_large: boolean }>;
+  };
+
+  it('pins the limits to the fixture', () => {
+    expect(fixture.size_limits).toBeDefined();
+    expect(fixture.size_limits!.max_payload_bytes).toBe(InputLimits.MAX_IR_BYTES);
+    expect(fixture.size_limits!.max_field_bytes).toBe(InputLimits.MAX_STRING_BYTES);
+  });
+
+  it('replays every size vector with the fixture reason', () => {
+    expect(fixture.size_vectors?.length ?? 0).toBeGreaterThanOrEqual(6);
+    for (const v of fixture.size_vectors!) {
+      const envelope = { ...fixture.valid_envelope, [v.field]: 'x'.repeat(v.length) };
+      const r = verifyEnvelope({ envelope, nowMs: 1700000000500 });
+      expect(r.ok, v._vector_id).toBe(false);
+      if (v.expect_too_large) expect(r.reason, v._vector_id).toBe('too-large');
+      else expect(r.reason, v._vector_id).not.toBe('too-large');
+    }
   });
 });
 

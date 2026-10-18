@@ -527,5 +527,54 @@
       "expected_payload": "{\"expiresAt\":1700000030000,\"msg\":\"héllo\",\"nonce\":1700000000000,\"用户\":\"alice\",\"🔥\":\"fire\"}",
       "expected_sig": "304402207e137858bb8427abbeb1036b6fda12640edce81eba423181507cd4027ece63ac0220160f849fc4f8cd4c2b352623d4cd6e15d1557a8126d5d085b2dd34333c096f1e"
     }
+  ],
+  "size_vectors_notes": "F-296 (CL-GAP-088). The DoS size bound is hard-coded separately in every tier (TS InputLimits.MAX_IR_BYTES/MAX_STRING_BYTES, Go MaxEnvelope*Bytes, Rust/Python/Zig/Ruby/Java MAX_ENVELOPE_*_BYTES) and until now nothing pinned the seven values to each other or replayed a 'too-large' rejection. `size_limits` is the one shared source of truth: each tier asserts its own constants equal it. `size_vectors` is a GENERATION SPEC, not a literal -- a 16 MiB string does not belong in a checked-in fixture. To replay a vector, take `valid_envelope`, replace the named `field` (payload | sig | pubkey) with `length` ASCII 'x' characters (so bytes == chars in every tier), and call verifyEnvelope with verify_now_ms. expect_too_large=true: reason MUST be 'too-large' (the guard runs before JSON parse, hashing and ECDSA, so a tier that skips the guard returns a different reason or ok). expect_too_large=false (exactly at the limit): ok is false (the all-'x' field is not valid JSON / not a valid signature / not the signer's key) but reason MUST NOT be 'too-large' -- this catches an off-by-one guard (>= instead of >). Lengths are measured in UTF-8 bytes for payload and in characters for sig/pubkey, which coincide for ASCII.",
+  "size_limits": {
+    "max_payload_bytes": 16777216,
+    "max_field_bytes": 4194304
+  },
+  "size_vectors": [
+    {
+      "_vector_id": "sz1-payload-limit-plus-1-too-large",
+      "_notes": "One byte over max_payload_bytes.",
+      "field": "payload",
+      "length": 16777217,
+      "expect_too_large": true
+    },
+    {
+      "_vector_id": "sz2-payload-at-limit-not-too-large",
+      "_notes": "Exactly max_payload_bytes: passes the size guard, then fails on the later stage (bad-json).",
+      "field": "payload",
+      "length": 16777216,
+      "expect_too_large": false
+    },
+    {
+      "_vector_id": "sz3-sig-limit-plus-1-too-large",
+      "_notes": "One char over max_field_bytes.",
+      "field": "sig",
+      "length": 4194305,
+      "expect_too_large": true
+    },
+    {
+      "_vector_id": "sz4-sig-at-limit-not-too-large",
+      "_notes": "Exactly max_field_bytes: passes the size guard.",
+      "field": "sig",
+      "length": 4194304,
+      "expect_too_large": false
+    },
+    {
+      "_vector_id": "sz5-pubkey-limit-plus-1-too-large",
+      "_notes": "One char over max_field_bytes.",
+      "field": "pubkey",
+      "length": 4194305,
+      "expect_too_large": true
+    },
+    {
+      "_vector_id": "sz6-pubkey-at-limit-not-too-large",
+      "_notes": "Exactly max_field_bytes: passes the size guard.",
+      "field": "pubkey",
+      "length": 4194304,
+      "expect_too_large": false
+    }
   ]
 }

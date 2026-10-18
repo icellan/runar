@@ -71,6 +71,18 @@ type fixture struct {
 	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 	MalleabilityVectors  []fixtureMalleability    `json:"malleability_vectors"`
+	SizeLimits           struct {
+		MaxPayloadBytes int `json:"max_payload_bytes"`
+		MaxFieldBytes   int `json:"max_field_bytes"`
+	} `json:"size_limits"`
+	SizeVectors []fixtureSizeVector `json:"size_vectors"`
+}
+
+type fixtureSizeVector struct {
+	VectorID       string `json:"_vector_id"`
+	Field          string `json:"field"`
+	Length         int    `json:"length"`
+	ExpectTooLarge bool   `json:"expect_too_large"`
 }
 
 func loadFixture(t *testing.T) fixture {
@@ -381,6 +393,51 @@ func TestEnvelopeInterop_PayloadDepthLimitMatchesFixture(t *testing.T) {
 	f := loadFixture(t)
 	if f.PayloadDepthLimit != MaxEnvelopePayloadDepth {
 		t.Fatalf("fixture payload_depth_limit=%d, MaxEnvelopePayloadDepth=%d", f.PayloadDepthLimit, MaxEnvelopePayloadDepth)
+	}
+}
+
+// TestEnvelopeInterop_SizeLimitsMatchFixture — F-296. The DoS size bound is
+// hard-coded per tier; the fixture's size_limits is the shared source of truth
+// and every tier pins its own constants to it. Does not prove the other six
+// tiers agree -- each replays this same fixture.
+func TestEnvelopeInterop_SizeLimitsMatchFixture(t *testing.T) {
+	f := loadFixture(t)
+	if f.SizeLimits.MaxPayloadBytes != MaxEnvelopePayloadBytes || f.SizeLimits.MaxFieldBytes != MaxEnvelopeFieldBytes {
+		t.Fatalf("fixture size_limits=%+v, MaxEnvelopePayloadBytes=%d MaxEnvelopeFieldBytes=%d",
+			f.SizeLimits, MaxEnvelopePayloadBytes, MaxEnvelopeFieldBytes)
+	}
+}
+
+// TestEnvelopeInterop_SizeVectors — F-296. Replays size_vectors: one byte over
+// each limit must be 'too-large'; exactly at the limit must be rejected for a
+// LATER reason (so the guard is not off by one). Proves this tier returns the
+// fixture reason; says nothing about the sig/pubkey being well-formed.
+func TestEnvelopeInterop_SizeVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.SizeVectors) < 6 {
+		t.Fatal("size_vectors missing or short")
+	}
+	for _, sv := range f.SizeVectors {
+		env := f.ValidEnvelope
+		big := strings.Repeat("x", sv.Length)
+		switch sv.Field {
+		case "payload":
+			env.Payload = big
+		case "sig":
+			env.Sig = big
+		case "pubkey":
+			env.Pubkey = big
+		default:
+			t.Fatalf("%s: unknown field %q", sv.VectorID, sv.Field)
+		}
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if r.OK {
+			t.Errorf("%s: expected ok=false", sv.VectorID)
+			continue
+		}
+		if got := r.Reason == ReasonTooLarge; got != sv.ExpectTooLarge {
+			t.Errorf("%s: reason=%s, expect_too_large=%v", sv.VectorID, r.Reason, sv.ExpectTooLarge)
+		}
 	}
 }
 

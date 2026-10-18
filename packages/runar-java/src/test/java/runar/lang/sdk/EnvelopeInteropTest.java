@@ -296,6 +296,49 @@ class EnvelopeInteropTest {
             Envelope.MAX_ENVELOPE_PAYLOAD_DEPTH);
     }
 
+    /**
+     * F-296. The DoS size bound is hard-coded per tier; the fixture's
+     * {@code size_limits} is the shared source of truth and every tier pins its
+     * own constants to it. Does not prove the other six tiers agree -- each
+     * replays this same fixture.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void sizeLimitsMatchFixture() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        Map<String, Object> limits = (Map<String, Object>) fixture.get("size_limits");
+        assertEquals(((Number) limits.get("max_payload_bytes")).intValue(), Envelope.MAX_ENVELOPE_PAYLOAD_BYTES);
+        assertEquals(((Number) limits.get("max_field_bytes")).intValue(), Envelope.MAX_ENVELOPE_FIELD_BYTES);
+    }
+
+    /**
+     * F-296. Replays {@code size_vectors}: one byte over each limit must be
+     * {@code too-large}; exactly at the limit must be rejected for a LATER
+     * reason (so the guard is not off by one). Proves this tier returns the
+     * fixture reason; says nothing about the sig/pubkey being well-formed.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void sizeVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        Map<String, Object> valid = (Map<String, Object>) fixture.get("valid_envelope");
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("size_vectors");
+        assertTrue(vectors != null && vectors.size() >= 6, "size_vectors missing or short");
+        for (Map<String, Object> sv : vectors) {
+            String vid = (String) sv.get("_vector_id");
+            Map<String, Object> m = new LinkedHashMap<>(valid);
+            m.put((String) sv.get("field"), "x".repeat(((Number) sv.get("length")).intValue()));
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap(m);
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            assertFalse(r.ok, vid + ": expected ok=false");
+            boolean tooLarge = r.reason == Envelope.VerifyEnvelopeReason.TOO_LARGE;
+            assertEquals(Boolean.TRUE.equals(sv.get("expect_too_large")), tooLarge, vid + ": reason=" + r.reason);
+        }
+    }
+
     // -------------------------------------------------------------------
     // R-261 — explicit clock options
     // -------------------------------------------------------------------

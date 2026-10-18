@@ -161,6 +161,36 @@ def test_payload_depth_limit_matches_fixture(fixture: dict) -> None:
     assert fixture["payload_depth_limit"] == MAX_ENVELOPE_PAYLOAD_DEPTH
 
 
+def test_size_limits_match_fixture(fixture: dict) -> None:
+    """F-296. The DoS size bound is hard-coded per tier; the fixture's
+    `size_limits` is the shared source of truth and each tier pins its own
+    constants to it. Does not prove the other six tiers agree -- each replays
+    this same fixture."""
+    from runar.sdk.envelope import MAX_ENVELOPE_FIELD_BYTES, MAX_ENVELOPE_PAYLOAD_BYTES
+
+    assert fixture["size_limits"]["max_payload_bytes"] == MAX_ENVELOPE_PAYLOAD_BYTES
+    assert fixture["size_limits"]["max_field_bytes"] == MAX_ENVELOPE_FIELD_BYTES
+
+
+def test_size_vectors(fixture: dict) -> None:
+    """F-296. Replays `size_vectors`: one byte over each limit must be
+    'too-large'; exactly at the limit must be rejected for a LATER reason (so
+    the guard is not off by one). Proves this tier's verify_envelope returns
+    the fixture reason; says nothing about the sig/pubkey being well-formed."""
+    vectors = fixture["size_vectors"]
+    assert len(vectors) >= 6, "size_vectors missing or short"
+    for v in vectors:
+        vid = v["_vector_id"]
+        d = dict(fixture["valid_envelope"])
+        d[v["field"]] = "x" * v["length"]
+        r = verify_envelope(SignedEnvelope.from_dict(d), now_ms=fixture["verify_now_ms"])
+        assert not r.ok, f"{vid}: expected ok=False"
+        if v["expect_too_large"]:
+            assert r.reason == VerifyEnvelopeReason.TOO_LARGE, f"{vid}: got {r.reason}"
+        else:
+            assert r.reason != VerifyEnvelopeReason.TOO_LARGE, f"{vid}: got {r.reason}"
+
+
 def test_clock_skew_vectors(fixture: dict) -> None:
     """R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied".
 

@@ -151,6 +151,36 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     expect(fixture['payload_depth_limit']).to eq(Runar::SDK::Envelope::MAX_ENVELOPE_PAYLOAD_DEPTH)
   end
 
+  # F-296. The DoS size bound is hard-coded per tier; the fixture's
+  # size_limits is the shared source of truth and every tier pins its own
+  # constants to it. Does not prove the other six tiers agree -- each replays
+  # this same fixture.
+  it 'pins the size limits to the fixture' do
+    expect(fixture['size_limits']['max_payload_bytes']).to eq(Runar::SDK::Envelope::MAX_ENVELOPE_PAYLOAD_BYTES)
+    expect(fixture['size_limits']['max_field_bytes']).to eq(Runar::SDK::Envelope::MAX_ENVELOPE_FIELD_BYTES)
+  end
+
+  # F-296. Replays size_vectors: one byte over each limit must be 'too-large';
+  # exactly at the limit must be rejected for a LATER reason (so the guard is
+  # not off by one). Proves this tier returns the fixture reason; says nothing
+  # about the sig/pubkey being well-formed.
+  it 'replays every size vector' do
+    vectors = fixture['size_vectors']
+    expect(vectors.length).to be >= 6
+    vectors.each do |v|
+      vid = v['_vector_id']
+      h = fixture['valid_envelope'].merge(v['field'] => 'x' * v['length'])
+      env = Runar::SDK::Envelope::SignedEnvelope.from_h(h)
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+      expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
+      if v['expect_too_large']
+        expect(r[:reason]).to eq('too-large'), "#{vid}: got reason=#{r[:reason]}"
+      else
+        expect(r[:reason]).not_to eq('too-large'), "#{vid}: got reason=#{r[:reason]}"
+      end
+    end
+  end
+
   # R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
   # tiers already distinguished the two; Go conflated them and silently gave a
   # caller asking for strict expiry a five-second replay window, and both Go
