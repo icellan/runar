@@ -719,6 +719,12 @@ func (p *parseContext) parseConstructor(node *sitter.Node) MethodNode {
 func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 	name := p.getMethodName(node)
 	params := p.parseMethodParams(node)
+	// N-331: the AST keeps no return type, so an unknown name is refused here.
+	if rt := p.findChildByType(node, "type_annotation"); rt != nil {
+		if d := UnknownReturnTypeDiagnostic(p.parseTypeAnnotation(rt), name, p.loc(node)); d != nil {
+			p.errors = append(p.errors, *d)
+		}
+	}
 	body := p.parseMethodBody(node)
 
 	visibility := "private"

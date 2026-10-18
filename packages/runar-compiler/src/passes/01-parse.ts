@@ -46,7 +46,7 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, OPTIONAL_CHAINING, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, makeDiagnostic, OPTIONAL_CHAINING, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral } from './int-literal.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
@@ -462,6 +462,12 @@ function parseMethod(
   }
 
   const params = parseParams(method.getParameters(), file, errors);
+
+  // N-331: the AST keeps no return type, so an unknown name is refused here.
+  const returnTypeNode = method.getReturnTypeNode();
+  if (returnTypeNode) {
+    checkReturnType(parseTypeNode(returnTypeNode, file, errors), name, locFromNode(method, file), errors);
+  }
 
   let visibility: 'public' | 'private' = 'private';
   if (method.hasModifier(SyntaxKind.PublicKeyword)) {

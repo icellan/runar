@@ -35,7 +35,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{char_index_positions, lex_error_at_index, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::resolve_native_sighash;
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, type_too_deep, DepthTracker, NestingCounter};
@@ -933,6 +933,13 @@ impl<'a> SolParser<'a> {
                             // Skip the parenthesised return type list
                             if *self.peek() == Token::LParen {
                                 self.advance();
+                                // N-331: the AST keeps no return type; an unknown name is refused.
+                                if matches!(self.peek(), Token::Ident(_)) {
+                                    let ret = self.parse_type();
+                                    if let Some(msg) = unknown_return_type_message(&ret, &name) {
+                                        self.errors.push(Diagnostic::error(msg, Some(location.clone())));
+                                    }
+                                }
                                 let mut depth: i32 = 1;
                                 while depth > 0 && *self.peek() != Token::Eof {
                                     if *self.peek() == Token::LParen {

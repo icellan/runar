@@ -1515,7 +1515,9 @@ const Parser = struct {
         // Parse parameters
         const params = self.parseGoParams();
 
-        // Skip optional return type (anything before '{')
+        // Skip optional return type (anything before '{'); N-331 refuses an
+        // unknown name in it.
+        self.checkReturnType(method_name);
         self.skipReturnType();
 
         // Parse body
@@ -1649,6 +1651,17 @@ const Parser = struct {
 
         _ = self.expect(.rparen);
         return params.items;
+    }
+
+    /// N-331: the AST keeps no return type, so a single (unparenthesised)
+    /// result type that is not a Rúnar type is refused where it is spelled.
+    /// A parenthesised result list is left to `skipReturnType`.
+    fn checkReturnType(self: *Parser, method_name: []const u8) void {
+        if (self.current.kind == .lbrace or self.current.kind == .eof or self.current.kind == .lparen) return;
+        var spelled: []const u8 = "";
+        const ti = self.parseGoTypeNamed(&spelled);
+        const unknown = types.spelledIfUnknown(ti, spelled);
+        if (unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ unknown, method_name });
     }
 
     fn skipReturnType(self: *Parser) void {

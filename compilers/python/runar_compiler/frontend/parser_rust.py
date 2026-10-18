@@ -25,7 +25,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
@@ -976,7 +976,8 @@ class _RustParser:
         if self.check(TOK_ARROW):
             has_return_type = True
             self.advance()
-            self.parse_rust_type()
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            reject_unknown_return_type(self.errors, self.parse_rust_type(), raw_name, func_loc)
 
         self.expect(TOK_LBRACE)
         body: list[Statement] = []

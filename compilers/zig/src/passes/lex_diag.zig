@@ -42,6 +42,12 @@ pub const JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java cont
 /// method name as written in the source.
 pub const STATIC_METHOD_FMT = "static methods are not allowed in Rúnar contracts; method '{s}' is declared static";
 
+/// N-331: a method whose RETURN-type annotation names a type that is not a
+/// Rúnar type (the TS reference's `unknownReturnTypeMessage`). The AST keeps no
+/// return type, so every surface parser refuses it where the annotation is
+/// spelled. Arguments: the unknown type name, then the method name.
+pub const UNKNOWN_RETURN_TYPE_FMT = "Type '{s}' of the return value of method '{s}' is not a Rúnar type";
+
 /// N-053: a .runar.rb / .runar.py statement whose first token can begin
 /// neither a statement nor an expression (the TS reference's
 /// unsupportedStatementMessage). The argument is the token's source text.

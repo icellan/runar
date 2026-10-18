@@ -46,7 +46,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message
 from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
@@ -933,9 +933,9 @@ class _JavaParser:
         params = self._parse_params()
         visibility = "public" if is_public_ann else "private"
         body = self._parse_block()
-        # return_type is intentionally unused by the Python-side AST: methods
-        # in Rúnar are declared by their body structure.
-        _ = return_type
+        # The AST keeps no return type: methods in Rúnar are declared by their
+        # body structure. N-331 refuses an unknown return type name.
+        reject_unknown_return_type(self.errors, return_type, name, loc)
         return MethodNode(
             name=name,
             params=params,

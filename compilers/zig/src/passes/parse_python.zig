@@ -1470,9 +1470,14 @@ const Parser = struct {
 
         const params = self.parsePyParams();
 
-        // Optional return type: -> Type
+        // Optional return type: -> Type. The AST keeps none; N-331 refuses an
+        // unknown name. `None` is Python's spelling of "returns nothing".
         if (self.match(.arrow)) {
-            _ = self.parsePyTypeAnnotation();
+            const rt = self.parsePyTypeAnnotation();
+            const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), types.typeNodeName(rt));
+            if (rt_unknown.len > 0 and !std.mem.eql(u8, rt_unknown, "None")) {
+                self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+            }
         }
 
         _ = self.expect(.colon);

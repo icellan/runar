@@ -33,7 +33,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{char_index_positions, lex_error_at_index, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_move_attribute_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -1092,7 +1092,11 @@ impl<'a> MoveParser<'a> {
         let mut has_return_type = false;
         if *self.peek() == Token::Colon {
             self.advance();
-            let _ret_type = self.parse_type();
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            let ret_type = self.parse_type();
+            if let Some(msg) = unknown_return_type_message(&ret_type, &name) {
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
+            }
             has_return_type = true;
         }
 

@@ -42,7 +42,7 @@ use super::ast::{
 };
 use super::diagnostic::{
     invalid_escape_sequence_message, lex_error, static_method_message,
-    unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
+    unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
@@ -1454,7 +1454,14 @@ impl<'a> PyParser<'a> {
 
         // Optional return type annotation: -> Type
         if self.match_tok(&Token::Arrow) {
-            self.parse_type(); // consume and discard return type
+            // The AST keeps no return type; N-331 refuses an unknown name. `None`
+            // is Python's spelling of "returns nothing".
+            let ret_type = self.parse_type();
+            if !matches!(&ret_type, TypeNode::Custom(n) if n == "None") {
+                if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name) {
+                    self.errors.push(Diagnostic::error(msg, Some(def_loc.clone())));
+                }
+            }
         }
 
         self.expect(&Token::Colon);

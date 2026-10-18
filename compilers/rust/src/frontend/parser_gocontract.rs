@@ -42,7 +42,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_go_directive_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -1367,8 +1367,9 @@ impl<'a> GoParser<'a> {
         // Parameters
         let params = self.parse_params();
 
-        // Optional return type (skip it — Rúnar doesn't use it structurally)
-        self.skip_return_type();
+        // Optional return type (Rúnar doesn't use it structurally; N-331
+        // refuses an unknown name)
+        self.skip_return_type(&method_name, &loc);
 
         // Body
         let body = self.parse_block();
@@ -1410,7 +1411,7 @@ impl<'a> GoParser<'a> {
         };
 
         let params = self.parse_params();
-        self.skip_return_type();
+        self.skip_return_type(&func_name, &loc);
         let body = self.parse_block();
 
         self.receiver_name = saved_recv;
@@ -1509,10 +1510,36 @@ impl<'a> GoParser<'a> {
     }
 
     /// Skip an optional return type declaration (everything up to `{` or EOF).
-    fn skip_return_type(&mut self) {
+    /// N-331: the AST keeps no return type, so a result type that is not a
+    /// Rúnar type is refused here, where it is spelled.
+    fn skip_return_type(&mut self, method_name: &str, loc: &SourceLocation) {
         // If next token is `{`, no return type
         if matches!(self.current().typ, TokenType::LBrace | TokenType::Eof) {
             return;
+        }
+        if matches!(self.current().typ, TokenType::LParen) {
+            // Parenthesised result list: `(T, U)` or named `(x T, y U)`.
+            self.advance();
+            while !matches!(self.current().typ, TokenType::RParen | TokenType::LBrace | TokenType::Eof) {
+                let next = self.tokens.get(self.pos + 1).map(|t| t.typ.clone());
+                if matches!(self.current().typ, TokenType::Ident(_))
+                    && !matches!(next, Some(TokenType::Dot) | Some(TokenType::Comma) | Some(TokenType::RParen))
+                {
+                    self.advance(); // result name
+                }
+                let ret = self.parse_type();
+                if let Some(msg) = unknown_return_type_message(&ret, method_name) {
+                    self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
+                }
+                if !self.match_tok(&TokenType::Comma) {
+                    break;
+                }
+            }
+        } else {
+            let ret = self.parse_type();
+            if let Some(msg) = unknown_return_type_message(&ret, method_name) {
+                self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
+            }
         }
         // Otherwise skip until we find `{` (possibly a parenthesized multi-return)
         let mut depth = 0usize;

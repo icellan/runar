@@ -1154,7 +1154,10 @@ const Parser = struct {
         // Optional return type: -> Type
         if (self.current.kind == .arrow) {
             _ = self.bump();
-            _ = self.parseRustType(); // consume and discard
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            const rt = self.parseRustType();
+            const rt_unknown = types.spelledIfUnknown(types.typeNodeToRunarType(rt), types.typeNodeName(rt));
+            if (rt_unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
         }
 
         // Parse body

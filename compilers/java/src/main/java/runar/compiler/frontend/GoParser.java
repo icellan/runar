@@ -1233,6 +1233,7 @@ public final class GoParser {
             List<ParamNode> params = parseFuncParams();
 
             if (!check(Tok.LBRACE)) {
+                checkReturnType(methodName);
                 skipReturnType();
             }
             List<Statement> body = parseBlock();
@@ -1357,6 +1358,31 @@ public final class GoParser {
                 return Character.isLowerCase(tok.value.charAt(0));
             }
             return Character.isLowerCase(tok.value.charAt(0));
+        }
+
+        /**
+         * N-331: the AST keeps no return type, so a result type that is not a
+         * Rúnar type is refused where it is spelled: a single type, or each
+         * entry of a parenthesised result list (named or not). The rest is
+         * left to {@link #skipReturnType()}.
+         */
+        void checkReturnType(String methodName) {
+            if (check(Tok.LPAREN)) {
+                advance();
+                while (!check(Tok.RPAREN) && !check(Tok.LBRACE) && !check(Tok.EOF)) {
+                    Token next = peekAt(1);
+                    if (check(Tok.IDENT) && next.kind != Tok.DOT && next.kind != Tok.COMMA && next.kind != Tok.RPAREN) {
+                        advance(); // result name
+                    }
+                    String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName);
+                    if (unknownReturn != null) addError(unknownReturn);
+                    if (!match(Tok.COMMA)) break;
+                }
+                match(Tok.RPAREN);
+            } else {
+                String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName);
+                if (unknownReturn != null) addError(unknownReturn);
+            }
         }
 
         void skipReturnType() {

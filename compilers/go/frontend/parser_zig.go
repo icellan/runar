@@ -906,8 +906,15 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 			sighashSpecs = append(sighashSpecs, nil)
 		}
 	} else if !p.check(zigTokLBrace) {
-		// Skip return type if present (anything before '{')
-		p.parseType()
+		// The AST keeps no return type (anything before '{'); N-331 refuses an
+		// unknown name. `init` returns the contract struct itself, which is
+		// not a type to check.
+		rt := p.parseType()
+		if name != "init" {
+			if d := UnknownReturnTypeDiagnostic(rt.typeNode, name, loc); d != nil {
+				p.errors = append(p.errors, *d)
+			}
+		}
 	}
 
 	// Set up self names for this method scope

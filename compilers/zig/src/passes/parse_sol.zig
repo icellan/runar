@@ -1251,6 +1251,11 @@ const Parser = struct {
                 // Skip (Type) clause
                 if (self.current.kind == .lparen) {
                     _ = self.bump();
+                    // N-331: the AST keeps no return type; an unknown name is refused.
+                    if (self.current.kind == .ident) {
+                        const ret_name = self.current.text;
+                        if (resolveSolType(ret_name) == .unknown) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_name, name });
+                    }
                     var paren_depth: u32 = 1;
                     while (paren_depth > 0 and self.current.kind != .eof) {
                         if (self.current.kind == .lparen) paren_depth += 1;

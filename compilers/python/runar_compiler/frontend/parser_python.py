@@ -28,7 +28,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message, unsupported_statement_message
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message, unsupported_statement_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
@@ -1084,7 +1084,11 @@ class _PyParser:
         params = self.parse_params()
 
         if self.match(TOK_ARROW):
-            self.parse_type_annotation()  # skip return type
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            # `None` is Python's spelling of "returns nothing".
+            ret_type = self.parse_type_annotation()
+            if not (isinstance(ret_type, CustomType) and ret_type.name == "None"):
+                reject_unknown_return_type(self.errors, ret_type, name_tok.value, location)
 
         self.expect(TOK_COLON)
         body = self.parse_block()

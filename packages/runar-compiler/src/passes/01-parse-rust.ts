@@ -36,7 +36,7 @@ import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.j
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -857,7 +857,8 @@ class RustParser extends ParserCore<RustToken> {
     let hasReturnType = false;
     if (this.current().type === '->') {
       this.advance();
-      this.parseRustType(); // consume (type not stored — inferred from body)
+      // The type is not stored (inferred from body); N-331 refuses an unknown name.
+      checkReturnType(this.parseRustType(), name, location, this.errors);
       hasReturnType = true;
     }
 

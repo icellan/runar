@@ -817,6 +817,11 @@ public final class SolParser {
                 if (tok.value.equals("returns")) {
                     if (check(TOK_LPAREN)) {
                         advance();
+                        // N-331: the AST keeps no return type; an unknown name is refused.
+                        if (check(TOK_IDENT)) {
+                            String unknownReturn = LexDiag.unknownReturnType(parseSolType(peek().value), name);
+                            if (unknownReturn != null) addError(unknownReturn);
+                        }
                         int depth = 1;
                         while (depth > 0 && !check(TOK_EOF)) {
                             if (check(TOK_LPAREN)) depth++;

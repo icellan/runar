@@ -1022,7 +1022,12 @@ module RunarCompiler
 
         # Optional return type: -> Type
         if match_tok(TOK_ARROW)
-          parse_type # consume and discard
+          # The AST keeps no return type; N-331 refuses an unknown name. `None`
+          # is Python's spelling of "returns nothing".
+          ret_type = parse_type
+          unless ret_type.is_a?(CustomType) && ret_type.name == "None"
+            Frontend.reject_unknown_return_type(@errors, ret_type, raw_name, location)
+          end
         end
 
         expect(TOK_COLON)

@@ -808,7 +808,10 @@ module RunarCompiler
           expect(TOK_RPAREN)
           sighash_specs << (count == 1 && arg.kind == TOK_STRING ? arg.value : nil)
         elsif !check(TOK_LBRACE)
-          parse_type
+          # The AST keeps no return type; N-331 refuses an unknown name. `init`
+          # returns the contract struct itself, which is not a type to check.
+          ret_type = parse_type
+          Frontend.reject_unknown_return_type(@errors, ret_type[:type], name, source_location) unless name == "init"
         end
 
         prev_self_names = @self_names

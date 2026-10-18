@@ -41,6 +41,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     static_method_message,
+    unknown_return_type_message,
     with_lex_errors,
 )
 
@@ -823,7 +824,14 @@ class _ZigParser:
             self._expect(TOK_RPAREN, ")")
             sighash_specs.append(arg.value if count == 1 and arg.kind == TOK_STRING else None)
         elif self._current().kind != TOK_LBRACE:
-            self._parse_type()
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            # `init` returns the contract struct itself, which is not a type
+            # to check.
+            ret_type = self._parse_type()[0]
+            if name != "init":
+                ret_msg = unknown_return_type_message(ret_type, name)
+                if ret_msg is not None:
+                    self._errors.append(ret_msg)
 
         prev_self_names = self._self_names
         prev_stateful_ctx_names = self._stateful_context_names

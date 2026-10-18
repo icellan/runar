@@ -723,6 +723,12 @@ module RunarCompiler
           # Skip 'returns (Type)' clause
           if tok.value == "returns" && check(TOK_LPAREN)
             advance # (
+            # N-331: the AST keeps no return type; an unknown name is refused.
+            if check(TOK_IDENT)
+              Frontend.reject_unknown_return_type(
+                @errors, Frontend.parse_sol_type_name(peek.value), name, location
+              )
+            end
             depth = 1
             while depth > 0 && !check(TOK_EOF)
               depth += 1 if check(TOK_LPAREN)

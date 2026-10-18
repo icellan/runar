@@ -106,6 +106,23 @@ func StaticMethodMsg(name string) string {
 	return "static methods are not allowed in Rúnar contracts; method '" + name + "' is declared static"
 }
 
+// UnknownReturnTypeDiagnostic is N-331's refusal of a method whose RETURN-type
+// annotation names a type that is not a Rúnar type (the TS reference's
+// checkReturnType). The AST keeps no return type, so every surface parser calls
+// this where the annotation is spelled. It returns nil for any other type;
+// "unknown" is the missing-annotation placeholder, diagnosed elsewhere.
+func UnknownReturnTypeDiagnostic(t TypeNode, methodName string, loc SourceLocation) *Diagnostic {
+	ct, ok := t.(CustomType)
+	if !ok || ct.Name == "unknown" {
+		return nil
+	}
+	return &Diagnostic{
+		Message:  "Type '" + ct.Name + "' of the return value of method '" + methodName + "' is not a Rúnar type",
+		Severity: SeverityError,
+		Loc:      &loc,
+	}
+}
+
 // BareJavaPropertyAssignmentMsg is N-023's (R49) refusal, on the .runar.java
 // surface, of an assignment (=, op=, ++, --) to a bare property name that no
 // local or parameter shadows (the TS reference's

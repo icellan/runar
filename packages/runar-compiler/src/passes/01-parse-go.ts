@@ -32,7 +32,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { identifierCollisionMessage } from './snake-to-camel.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -898,8 +898,9 @@ class GoParser extends ParserCore<GoToken> {
 
     // Optional return type
     if (this.current().type !== '{') {
-      // Skip return type: could be runar.Bigint, bool, etc.
-      this.parseGoType();
+      // The AST keeps no return type: could be runar.Bigint, bool, etc.
+      // N-331 refuses an unknown name.
+      checkReturnType(this.parseGoType(), funcName, location, this.errors);
     }
 
     // Body

@@ -26,7 +26,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type
 from runar_compiler.frontend.sighash_directive import (
     lost_directive_message,
     resolve_native_sighash,
@@ -859,7 +859,8 @@ class _MoveParser:
         # Optional return type: : Type
         has_return_type = False
         if self.match(TOK_COLON):
-            self._parse_move_type_name()  # skip return type
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            reject_unknown_return_type(self.errors, self._parse_move_type_node(), name, location)
             has_return_type = True
 
         body = self._parse_move_block()

@@ -1027,6 +1027,12 @@ func (p *solParser) parseFunction() MethodNode {
 		if tok.value == "returns" {
 			if p.check(solTokLParen) {
 				p.advance()
+				// N-331: the AST keeps no return type; an unknown name is refused.
+				if p.check(solTokIdent) {
+					if d := UnknownReturnTypeDiagnostic(parseSolType(p.peek().value), name, loc); d != nil {
+						p.errors = append(p.errors, *d)
+					}
+				}
 				depth := 1
 				for depth > 0 && !p.check(solTokEOF) {
 					if p.check(solTokLParen) {

@@ -1040,6 +1040,9 @@ const Parser = struct {
             // N-050: a static method is not a contract method (`@Public static`
             // used to become a spending entry point).
             if (is_static) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{member_name});
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            const ret_unknown = types.spelledIfUnknown(types.typeNodeToRunarType(type_node), types.typeNodeName(type_node));
+            if (ret_unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_unknown, member_name });
             var method = self.parseMethodAfterName(member_name, is_public_annotation, self.tokenSourceLoc(name_tok));
             if (embed_always) |l| self.addErrorAtLoc(l, sighash_directive.LOST_EMBED_ALWAYS_ERROR);
             if (sighash_directive.resolveNativeSighash(self.allocator, member_name, is_public_annotation, sighash_specs.items)) |r| switch (r) {

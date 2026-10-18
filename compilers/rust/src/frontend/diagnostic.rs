@@ -3,7 +3,7 @@
 //! Provides a `Diagnostic` type that mirrors the TypeScript compiler's
 //! `CompilerDiagnostic` type: `{ message, loc?, severity }`.
 
-use super::ast::SourceLocation;
+use super::ast::{SourceLocation, TypeNode};
 use std::fmt;
 
 /// Severity levels for compiler diagnostics.
@@ -130,6 +130,21 @@ pub fn unexpected_token_after_class_message(token: &str) -> String {
 /// the method name as written in the source.
 pub fn static_method_message(name: &str) -> String {
     format!("static methods are not allowed in Rúnar contracts; method '{}' is declared static", name)
+}
+
+/// N-331's refusal of a method whose RETURN-type annotation names a type that
+/// is not a Rúnar type (the TS reference's `checkReturnType`). The AST keeps no
+/// return type, so every surface parser calls this where the annotation is
+/// spelled. `None` for any other type; `unknown` is the missing-annotation
+/// placeholder, diagnosed elsewhere.
+pub fn unknown_return_type_message(t: &TypeNode, method: &str) -> Option<String> {
+    match t {
+        TypeNode::Custom(name) if name != "unknown" => Some(format!(
+            "Type '{}' of the return value of method '{}' is not a Rúnar type",
+            name, method
+        )),
+        _ => None,
+    }
 }
 
 /// N-023's (R49) refusal, on the .runar.java surface, of an assignment (=,

@@ -1068,10 +1068,14 @@ const Parser = struct {
     fn parseMethod(self: *Parser, name: []const u8, is_public: bool, loc: types.SourceLocation) MethodNode {
         const params = self.parseParams();
 
-        // Skip optional return type
+        // Optional return type. The AST keeps none; N-331 refuses an unknown name.
         if (self.current.kind == .colon) {
             _ = self.bump();
-            _ = self.parseTypeAnnotation();
+            const rt = self.parseTypeAnnotation();
+            if (typeNodeToRunarType(rt) == .unknown) {
+                const spelled = types.typeNodeName(rt);
+                if (!std.mem.eql(u8, spelled, "unknown")) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ spelled, name });
+            }
         }
 
         const body = self.parseBlock();

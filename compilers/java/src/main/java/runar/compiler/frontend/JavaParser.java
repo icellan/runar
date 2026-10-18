@@ -477,6 +477,15 @@ public final class JavaParser {
             params.add(new ParamNode(p.getName().toString(), convertType(p.getType(), filename)));
         }
 
+        // The AST keeps no return type; N-331 refuses an unknown name. A
+        // primitive return type (`void`, `boolean`) is not a name to check.
+        if (!isConstructor && m.getReturnType() != null && !(m.getReturnType() instanceof PrimitiveTypeTree)) {
+            String unknownReturn = LexDiag.unknownReturnType(convertType(m.getReturnType(), filename), m.getName().toString());
+            if (unknownReturn != null) {
+                throw new ParseException(unknownReturn);
+            }
+        }
+
         List<Statement> body = m.getBody() == null
             ? List.of()
             : convertStatements(m.getBody().getStatements(), filename, cu);

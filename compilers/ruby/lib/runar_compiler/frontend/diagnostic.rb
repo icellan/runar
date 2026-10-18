@@ -111,6 +111,24 @@ module RunarCompiler
       "static methods are not allowed in Rúnar contracts; method '#{name}' is declared static"
     end
 
+    # N-331's refusal of a method whose RETURN-type annotation names a type
+    # that is not a Rúnar type (the TS reference's checkReturnType). The AST
+    # keeps no return type, so every surface parser calls this where the
+    # annotation is spelled. nil for any other type; "unknown" is the
+    # missing-annotation placeholder, diagnosed elsewhere.
+    def self.unknown_return_type_message(type, method_name)
+      return nil unless type.is_a?(CustomType) && type.name != "unknown"
+
+      "Type '#{type.name}' of the return value of method '#{method_name}' is not a Rúnar type"
+    end
+
+    # N-331: append the unknown-return-type diagnostic to +errors+ when +type+
+    # (the parsed return annotation) is not a Rúnar type.
+    def self.reject_unknown_return_type(errors, type, method_name, loc)
+      msg = unknown_return_type_message(type, method_name)
+      errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc) if msg
+    end
+
     # N-023's (R49) refusal, on the .runar.java surface, of an assignment
     # (=, op=, ++, --) to a bare property name that no local or parameter
     # shadows (the TS reference's bareJavaPropertyAssignmentMessage). In Java

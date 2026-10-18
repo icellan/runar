@@ -1019,7 +1019,8 @@ module RunarCompiler
         has_return_type = false
         if check(TOK_ARROW)
           advance
-          parse_rust_type # consume but don't store
+          # The AST keeps no return type; N-331 refuses an unknown name.
+          Frontend.reject_unknown_return_type(@errors, parse_rust_type, raw_name, location)
           has_return_type = true
         end
 

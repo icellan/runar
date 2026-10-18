@@ -30,7 +30,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
+import { checkReturnType, makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
@@ -549,7 +549,10 @@ class ZigParser extends ParserCore<ZigToken> {
       this.expect(')');
       sighashSpecs.push(count === 1 && arg.type === 'string' ? arg.value : null);
     } else if (this.current().type !== '{') {
-      this.parseType();
+      // The AST keeps no return type; N-331 refuses an unknown name. `init`
+      // returns the contract struct itself, which is not a type to check.
+      const returnType = this.parseType();
+      if (name !== 'init') checkReturnType(returnType.type, name, sourceLocation, this.errors);
     }
 
     const previousSelfNames = this.selfNames;

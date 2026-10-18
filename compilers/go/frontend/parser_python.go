@@ -1415,8 +1415,14 @@ func (p *pyParser) parsePyMethod(visibility string) MethodNode {
 
 	// Parse optional return type annotation: -> Type
 	if p.match(pyTokArrow) {
-		// Skip return type
-		p.parsePyTypeAnnotation()
+		// The AST keeps no return type; N-331 refuses an unknown name. `None`
+		// is Python's spelling of "returns nothing".
+		rt := p.parsePyTypeAnnotation()
+		if ct, ok := rt.(CustomType); !ok || ct.Name != "None" {
+			if d := UnknownReturnTypeDiagnostic(rt, nameTok.value, loc); d != nil {
+				p.errors = append(p.errors, *d)
+			}
+		}
 	}
 
 	p.expect(pyTokColon)

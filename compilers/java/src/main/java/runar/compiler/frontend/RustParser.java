@@ -1141,7 +1141,9 @@ public final class RustParser {
         if (s.check(TOK_ARROW)) {
             hasReturnType = true;
             s.advance();
-            parseRustType(s);
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            String unknownReturn = LexDiag.unknownReturnType(parseRustType(s), rawName);
+            if (unknownReturn != null) s.addError(unknownReturn);
         }
 
         s.expect(TOK_LBRACE);

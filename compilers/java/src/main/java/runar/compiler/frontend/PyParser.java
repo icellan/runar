@@ -1250,7 +1250,13 @@ public final class PyParser {
             List<ParamNode> params = parseParams();
 
             if (match(TokKind.ARROW)) {
-                parseTypeAnnotation(); // skip return type
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                // `None` is Python's spelling of "returns nothing".
+                TypeNode returnType = parseTypeAnnotation();
+                if (!(returnType instanceof CustomType ct && ct.name().equals("None"))) {
+                    String unknownReturn = LexDiag.unknownReturnType(returnType, nameTok.value);
+                    if (unknownReturn != null) addError(unknownReturn);
+                }
             }
 
             expect(TokKind.COLON);

@@ -9,7 +9,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, static_method_message, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
@@ -790,7 +790,11 @@ impl RustDslParser {
         // Optional return type
         if matches!(self.current().typ, TokenType::Arrow) {
             self.advance_clone();
-            self.parse_rust_type();
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            let ret_type = self.parse_rust_type();
+            if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name) {
+                self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
+            }
         }
 
         self.expect(&TokenType::LBrace);

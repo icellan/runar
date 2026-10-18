@@ -1092,7 +1092,9 @@ public final class TsParser {
 
             if (check(TOK_COLON)) {
                 advance();
-                parseType();
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                String unknownReturn = LexDiag.unknownReturnType(parseType(), name);
+                if (unknownReturn != null) addError(unknownReturn);
             }
 
             List<Statement> body = parseBlock();

@@ -94,6 +94,25 @@ final class LexDiag {
     }
 
     /**
+     * N-331: a method whose RETURN-type annotation names a type that is not a
+     * Rúnar type (the TS reference's checkReturnType). The AST keeps no return
+     * type, so every surface parser calls this where the annotation is
+     * spelled. Returns the diagnostic, or {@code null} for any other type;
+     * {@code unknown} is the missing-annotation placeholder, diagnosed
+     * elsewhere.
+     */
+    static String unknownReturnType(runar.compiler.ir.ast.TypeNode t, String methodName) {
+        // This tier's PrimitiveTypeName has no VOID member, so the .runar.ts /
+        // .runar.zig parsers carry `void` as a CustomType; it is "returns nothing".
+        if (t instanceof runar.compiler.ir.ast.CustomType ct
+            && !ct.name().equals("unknown") && !ct.name().equals("void")) {
+            return "Type '" + ct.name() + "' of the return value of method '" + methodName
+                + "' is not a Rúnar type";
+        }
+        return null;
+    }
+
+    /**
      * N-023 (R49): an assignment ({@code =}, op=, {@code ++}, {@code --}) on
      * the .runar.java surface to a bare property name that no local or
      * parameter shadows (the TS reference's

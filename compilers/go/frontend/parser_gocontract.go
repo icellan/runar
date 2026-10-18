@@ -467,6 +467,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		}
 
 		params := p.extractParams(funcDecl.Type.Params)
+		p.checkReturnTypes(funcDecl, methodName)
 		body := p.extractStatements(funcDecl.Body)
 
 		pos := p.fset.Position(funcDecl.Pos())
@@ -500,6 +501,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		p.receiverName = "" // no receiver for standalone functions
 
 		params := p.extractParams(funcDecl.Type.Params)
+		p.checkReturnTypes(funcDecl, methodName)
 		body := p.extractStatements(funcDecl.Body)
 
 		pos := p.fset.Position(funcDecl.Pos())
@@ -658,6 +660,25 @@ func (p *goContractParser) extractParams(fieldList *ast.FieldList) []ParamNode {
 		}
 	}
 	return params
+}
+
+// checkReturnTypes (N-331): the AST keeps no return type, so a result whose
+// type names something that is not a Rúnar type is refused here.
+func (p *goContractParser) checkReturnTypes(fd *ast.FuncDecl, methodName string) {
+	if fd.Type.Results == nil {
+		return
+	}
+	loc := p.locAt(p.fset.Position(fd.Pos()))
+	for _, field := range fd.Type.Results.List {
+		// Go's own `bool` is the documented spelling of `boolean` (docs/formats/go.md)
+		// and every other tier's .runar.go parser accepts it as a result type.
+		if id, ok := field.Type.(*ast.Ident); ok && id.Name == "bool" {
+			continue
+		}
+		if d := UnknownReturnTypeDiagnostic(p.resolveType(field.Type), methodName, loc); d != nil {
+			p.errors = append(p.errors, *d)
+		}
+	}
 }
 
 func (p *goContractParser) extractStatements(block *ast.BlockStmt) []Statement {

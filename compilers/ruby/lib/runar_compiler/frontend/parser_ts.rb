@@ -936,10 +936,11 @@ module RunarCompiler
       def parse_method(name, visibility, location, sighash_text = nil)
         params = parse_params
 
-        # Skip optional return type annotation
+        # Optional return type annotation. The AST keeps none; N-331 refuses an
+        # unknown name.
         if check(TOK_COLON)
           advance
-          parse_type
+          Frontend.reject_unknown_return_type(@errors, parse_type, name, location)
         end
 
         body = parse_block

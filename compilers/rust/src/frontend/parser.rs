@@ -22,7 +22,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, Diagnostic, OPTIONAL_CHAINING};
+use super::diagnostic::{lex_error, static_method_message, unknown_return_type_message, Diagnostic, OPTIONAL_CHAINING};
 use super::int_literal::{invalid_integer_literal, parse_int_literal};
 use super::sighash_directive::lost_directive_message;
 
@@ -528,6 +528,14 @@ fn parse_methods(
             }
 
             let params = parse_method_params(&method.function.params, file, errors);
+
+            // N-331: the AST keeps no return type, so an unknown name is refused here.
+            if let Some(ref ann) = method.function.return_type {
+                let ret = parse_type_node(&ann.type_ann, file, errors);
+                if let Some(msg) = unknown_return_type_message(&ret, &name) {
+                    errors.push(Diagnostic::error(msg, Some(real_loc(cm, file, method.span().lo))));
+                }
+            }
 
             let visibility = if method.accessibility == Some(Accessibility::Public) {
                 Visibility::Public

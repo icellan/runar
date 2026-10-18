@@ -25,7 +25,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type
 from runar_compiler.frontend.sighash_directive import resolve_native_sighash
 
 
@@ -654,6 +654,10 @@ class _SolParser:
             if tok.value == "returns":
                 if self.check(TOK_LPAREN):
                     self.advance()
+                    # N-331: the AST keeps no return type; an unknown name is refused.
+                    if self.check(TOK_IDENT):
+                        reject_unknown_return_type(
+                            self.errors, _parse_sol_type(self.peek().value), name, location)
                     depth = 1
                     while depth > 0 and not self.check(TOK_EOF):
                         if self.check(TOK_LPAREN):

@@ -1,4 +1,4 @@
-import type { SourceLocation } from './ir/index.js';
+import type { SourceLocation, TypeNode } from './ir/index.js';
 
 /**
  * Severity levels for compiler diagnostics.
@@ -127,6 +127,32 @@ export function unexpectedTokenAfterClassMessage(token: string): string {
  */
 export function staticMethodMessage(name: string): string {
   return `static methods are not allowed in Rúnar contracts; method '${name}' is declared static`;
+}
+
+/**
+ * N-331: a method whose RETURN-type annotation names a type that is not a
+ * Rúnar type. The AST has no return-type field, so every surface parser checks
+ * the annotation where it is spelled, with this one diagnostic. `typeName` is
+ * the unknown name, `methodName` the method it annotates.
+ */
+export function unknownReturnTypeMessage(typeName: string, methodName: string): string {
+  return `Type '${typeName}' of the return value of method '${methodName}' is not a Rúnar type`;
+}
+
+/**
+ * N-331: push the unknown-return-type diagnostic when `type` (the parsed return
+ * annotation) is a named type that is not a Rúnar type. `unknown` is the
+ * missing-annotation placeholder, diagnosed elsewhere.
+ */
+export function checkReturnType(
+  type: TypeNode,
+  methodName: string,
+  loc: SourceLocation,
+  errors: CompilerDiagnostic[],
+): void {
+  if (type.kind === 'custom_type' && type.name !== 'unknown') {
+    errors.push(makeDiagnostic(unknownReturnTypeMessage(type.name, methodName), 'error', loc));
+  }
 }
 
 /**

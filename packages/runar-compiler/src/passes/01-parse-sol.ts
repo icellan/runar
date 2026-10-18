@@ -18,7 +18,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -514,10 +514,11 @@ class SolParser {
       break;
     }
 
-    // Return type (skip)
+    // Return type: the AST keeps none, but N-331 refuses an unknown name.
     if (this.current().type === 'ident' && this.current().value === 'returns') {
       this.advance();
       this.expect('(');
+      if (this.current().type === 'ident') checkReturnType(this.parseType(), name, location, this.errors);
       while (this.current().type !== ')' && this.current().type !== 'eof') this.advance();
       this.expect(')');
     }

@@ -874,7 +874,8 @@ module RunarCompiler
         has_return_type = false
         if check(TOK_COLON)
           advance
-          parse_move_type
+          # The AST keeps no return type; N-331 refuses an unknown name.
+          Frontend.reject_unknown_return_type(@errors, parse_move_type, name, location)
           has_return_type = true
         end
 

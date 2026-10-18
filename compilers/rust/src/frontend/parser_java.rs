@@ -47,7 +47,8 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{
-    bare_java_property_assignment_message, lex_error, static_method_message, Diagnostic, JAVA_CHAR_LITERAL,
+    bare_java_property_assignment_message, lex_error, static_method_message, unknown_return_type_message,
+    Diagnostic, JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
@@ -1017,7 +1018,10 @@ impl<'a> JavaParser<'a> {
                     None => None,
                 };
 
-            let _ = member_type; // return type not used structurally
+            // The return type is not used structurally; N-331 refuses an unknown name.
+            if let Some(msg) = unknown_return_type_message(&member_type, &member_name) {
+                self.errors.push(Diagnostic::error(msg, Some(member_loc.clone())));
+            }
             methods.push(MethodNode {
                 name: member_name,
                 params,

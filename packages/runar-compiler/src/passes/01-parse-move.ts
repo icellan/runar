@@ -19,7 +19,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { normalizeLoopCondition } from './loop-condition.js';
 import { lostDirectiveMessage, resolveNativeSighash, unknownMoveAttributeMessage } from './sighash-directive.js';
@@ -638,7 +638,7 @@ class MoveParser {
     let hasReturnType = false;
     if (this.current().type === ':') {
       this.advance();
-      this.parseMoveType();
+      checkReturnType(this.parseMoveType(), name, location, this.errors);
       hasReturnType = true;
     }
 

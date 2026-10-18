@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from runar_compiler.frontend.ast_nodes import SourceLocation
+from runar_compiler.frontend.ast_nodes import CustomType, SourceLocation
 
 
 class Severity:
@@ -90,6 +90,25 @@ def unexpected_token_after_class_message(token: str) -> str:
     """N-004's refusal of the first token after a .runar.rb class's ``end``
     (the TS reference's unexpectedTokenAfterClassMessage)."""
     return f"Unexpected token after class end: '{token}'"
+
+
+def unknown_return_type_message(t, method: str) -> Optional[str]:
+    """N-331's refusal of a method whose RETURN-type annotation names a type
+    that is not a Rúnar type (the TS reference's ``checkReturnType``). The AST
+    keeps no return type, so every surface parser calls this where the
+    annotation is spelled. ``None`` for any other type; ``unknown`` is the
+    missing-annotation placeholder, diagnosed elsewhere."""
+    if isinstance(t, CustomType) and t.name != "unknown":
+        return f"Type '{t.name}' of the return value of method '{method}' is not a Rúnar type"
+    return None
+
+
+def reject_unknown_return_type(errors: list, t, method: str, loc: Optional[SourceLocation]) -> None:
+    """N-331: append the unknown-return-type diagnostic to ``errors`` when
+    ``t`` (the parsed return annotation) is not a Rúnar type."""
+    msg = unknown_return_type_message(t, method)
+    if msg is not None:
+        errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
 
 
 def static_method_message(name: str) -> str:

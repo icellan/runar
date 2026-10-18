@@ -774,7 +774,16 @@ public final class ZigParser {
                 expect(Kind.RPAREN, ")");
                 sighashSpecs.add(count == 1 && arg.kind == Kind.STRING ? arg.value : null);
             } else if (current().kind != Kind.LBRACE) {
-                parseType();
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                // `init` returns the contract struct itself, which is not a
+                // type to check.
+                ParsedType returnType = parseType();
+                if (!"init".equals(name)) {
+                    String unknownReturn = LexDiag.unknownReturnType(returnType.type, name);
+                    if (unknownReturn != null) {
+                        errors.add(file + ":" + l.line() + ":" + l.column() + ": " + unknownReturn);
+                    }
+                }
             }
 
             Set<String> prevSelf = selfNames;

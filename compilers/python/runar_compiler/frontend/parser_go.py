@@ -27,7 +27,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type
 from runar_compiler.frontend.sighash_directive import (
     lost_directive_message,
     resolve_native_sighash,
@@ -1108,7 +1108,7 @@ class _GoParser:
 
         # Parse optional return type
         if not self.check(TOK_LBRACE):
-            self._skip_return_type()
+            self._check_return_type(method_name, location)
 
         # Parse body
         body = self._parse_block()
@@ -1250,6 +1250,29 @@ class _GoParser:
             return tok.value[0].islower()
 
         return tok.value[0].islower()
+
+    def _check_return_type(self, method_name: str, location: SourceLocation) -> None:
+        """Consume a return type specification before the function body.
+
+        The AST keeps no return type, so N-331 refuses an unknown type name
+        here, where it is spelled (single type or a parenthesised result list,
+        named or not).
+        """
+        if self.check(TOK_LPAREN):
+            self.advance()
+            while not self.check(TOK_RPAREN) and not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
+                nxt = self.tokens[self.pos + 1].kind if self.pos + 1 < len(self.tokens) else TOK_EOF
+                if self.check(TOK_IDENT) and nxt not in (TOK_DOT, TOK_COMMA, TOK_RPAREN):
+                    self.advance()  # result name
+                reject_unknown_return_type(self.errors, self.parse_type(), method_name, location)
+                if not self.match(TOK_COMMA):
+                    break
+            self.expect(TOK_RPAREN)
+        else:
+            reject_unknown_return_type(self.errors, self.parse_type(), method_name, location)
+        # Anything left before the body is not a type to check.
+        while not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
+            self.advance()
 
     def _skip_return_type(self) -> None:
         """Skip a return type specification before the function body."""

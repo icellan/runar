@@ -1242,7 +1242,13 @@ const Parser = struct {
         var has_return_type = false;
         if (self.current.kind == .colon) {
             _ = self.bump();
-            _ = self.parseMoveTypeName(); // skip return type
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            var ret_spelled: []const u8 = "";
+            const ret_ti = self.parseMoveTypeNameNamed(&ret_spelled);
+            const ret_unknown = types.spelledIfUnknown(ret_ti, ret_spelled);
+            if (ret_unknown.len > 0 and !std.mem.eql(u8, ret_unknown, "unknown")) {
+                self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_unknown, method_name });
+            }
             has_return_type = true;
         }
 

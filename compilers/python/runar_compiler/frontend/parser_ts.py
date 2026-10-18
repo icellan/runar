@@ -26,6 +26,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     OPTIONAL_CHAINING,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
+    reject_unknown_return_type,
     static_method_message,
     with_lex_errors,
 )
@@ -889,10 +890,11 @@ class _TsParser:
     ) -> MethodNode:
         params = self._parse_params()
 
-        # Skip optional return type annotation
+        # Optional return type annotation. The AST keeps none; N-331 refuses an
+        # unknown name.
         if self.check(TOK_COLON):
             self.advance()
-            self._parse_type()
+            reject_unknown_return_type(self.errors, self._parse_type(), name, location)
 
         body = self._parse_block()
 

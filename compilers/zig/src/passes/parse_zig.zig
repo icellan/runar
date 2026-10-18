@@ -899,7 +899,16 @@ const Parser = struct {
         var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
         if (self.parseSighashReturnType()) |spec| {
             sighash_specs.append(self.allocator, spec) catch {};
-        } else if (self.current.kind != .lbrace) _ = self.parseTypeNode();
+        } else if (self.current.kind != .lbrace) {
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            // `init` returns the contract struct itself, which is not a type
+            // to check.
+            const rt = self.parseTypeNode();
+            if (!std.mem.eql(u8, name, "init")) {
+                const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), typeNodeName(rt));
+                if (rt_unknown.len > 0) self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+            }
+        }
         if (self.expect(.lbrace) == null) return null;
         const body = self.parseBlock();
         var sighash_type: ?i32 = null;

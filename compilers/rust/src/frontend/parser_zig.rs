@@ -49,7 +49,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
+use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_message, unknown_return_type_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -987,8 +987,15 @@ impl<'a> ZigParser<'a> {
                 _ => None,
             });
         } else if *self.peek() != Token::LBrace {
-            // Skip return type (everything before '{')
-            self.parse_type();
+            // The AST keeps no return type (everything before '{'); N-331
+            // refuses an unknown name. `init` returns the contract struct
+            // itself, which is not a type to check.
+            let (ret_type, _) = self.parse_type();
+            if method_name != "init" {
+                if let Some(msg) = unknown_return_type_message(&ret_type, &method_name) {
+                    self.errors.push(msg);
+                }
+            }
         }
 
         // Save/restore self names

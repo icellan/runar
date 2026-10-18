@@ -1065,7 +1065,8 @@ module RunarCompiler
 
         # Optional return type
         unless check(TOK_LBRACE)
-          parse_go_type
+          # The AST keeps no return type; N-331 refuses an unknown name.
+          Frontend.reject_unknown_return_type(@errors, parse_go_type, func_name, location)
         end
 
         # Body
