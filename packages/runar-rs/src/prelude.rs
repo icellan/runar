@@ -323,15 +323,12 @@ fn blake3_iv_bytes() -> [u8; 32] {
 }
 
 fn blake3_compress_impl(cv: &[u8], block: &[u8], block_len: u32) -> [u8; 32] {
-    // Defensive: pad / truncate to the canonical sizes so a misuse doesn't
-    // panic. Production code should always pass exactly 32 / 64 bytes.
-    let mut cv_buf = [0u8; 32];
-    let n = cv.len().min(32);
-    cv_buf[..n].copy_from_slice(&cv[..n]);
-
-    let mut blk_buf = [0u8; 64];
-    let n = block.len().min(64);
-    blk_buf[..n].copy_from_slice(&block[..n]);
+    // N-161: refuse wrong operand sizes, matching the on-chain F-114 guard
+    // and the TS interpreter (no silent pad / truncate).
+    assert!(cv.len() == 32, "blake3Compress: chaining value must be 32 bytes, got {}", cv.len());
+    assert!(block.len() == 64, "blake3Compress: block must be 64 bytes, got {}", block.len());
+    let cv_buf = cv;
+    let blk_buf = block;
 
     let mut h = [0u32; 8];
     for i in 0..8 {
@@ -1824,6 +1821,27 @@ mod tests {
         }
         let msg64 = vec![0xcdu8; 64];
         assert_eq!(blake3_hash(&msg64), blake3_compress(&blake3_iv_bytes(), &msg64));
+    }
+
+    // N-161: the compiled blake3Compress script aborts (F-114 operand-size
+    // guard) unless cv is exactly 32 bytes and block exactly 64 bytes; the mock
+    // used to zero-pad / truncate and return a digest.
+    // Proves: blake3_compress panics for 31/33-byte cv and 63/65-byte block.
+    // Does not prove the script behaviour itself (pinned by execution in
+    // packages/runar-testing f114-compress-operand-size-vm.test.ts).
+    #[test]
+    fn test_blake3_compress_rejects_wrong_operand_sizes() {
+        for (cv_len, blk_len) in [(31usize, 64usize), (33, 64), (32, 63), (32, 65)] {
+            let cv = vec![0x11u8; cv_len];
+            let blk = vec![0x22u8; blk_len];
+            let r = std::panic::catch_unwind(|| blake3_compress(&cv, &blk));
+            assert!(
+                r.is_err(),
+                "blake3_compress(cv={} bytes, block={} bytes) returned a digest; the on-chain script aborts",
+                cv_len,
+                blk_len
+            );
+        }
     }
 
     #[test]

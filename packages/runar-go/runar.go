@@ -495,16 +495,13 @@ func blake3Round(s *[16]uint32, m *[16]uint32) {
 // length for blake3Hash, or 64 for a full-block compress. Output is 32
 // little-endian bytes.
 func blake3CompressImpl(cv, block []byte, blockLen uint32) []byte {
+	// N-161: refuse wrong operand sizes, matching the on-chain F-114 guard
+	// and the TS interpreter (no silent pad / truncate).
 	if len(cv) != 32 {
-		// Defensive: pad / truncate to 32 bytes so a misuse doesn't panic.
-		fixed := make([]byte, 32)
-		copy(fixed, cv)
-		cv = fixed
+		panic(fmt.Sprintf("blake3Compress: chaining value must be 32 bytes, got %d", len(cv)))
 	}
 	if len(block) != 64 {
-		fixed := make([]byte, 64)
-		copy(fixed, block)
-		block = fixed
+		panic(fmt.Sprintf("blake3Compress: block must be 64 bytes, got %d", len(block)))
 	}
 
 	var h [8]uint32

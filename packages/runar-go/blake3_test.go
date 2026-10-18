@@ -121,3 +121,28 @@ func TestBlake3Hash_RejectsMessagesLongerThan64Bytes(t *testing.T) {
 		t.Fatalf("Blake3Hash(64B) = %x, want %x", got, direct)
 	}
 }
+
+// N-161: the compiled blake3Compress script aborts (F-114 operand-size guard)
+// unless cv is exactly 32 bytes and block exactly 64 bytes, and the TS
+// interpreter throws on the same inputs. The native mock used to zero-pad /
+// truncate silently and return a digest.
+// Proves: Blake3Compress panics for 31/33-byte cv and 63/65-byte block, and
+// still accepts 32/64. Does not prove the script behaviour itself (pinned by
+// execution in packages/runar-testing f114-compress-operand-size-vm.test.ts).
+func TestBlake3Compress_RejectsWrongOperandSizes(t *testing.T) {
+	mustPanic := func(name string, cvLen, blockLen int) {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Blake3Compress(cv=%d bytes, block=%d bytes) returned a digest; the on-chain script aborts", cvLen, blockLen)
+				}
+			}()
+			Blake3Compress(ByteString(make([]byte, cvLen)), ByteString(make([]byte, blockLen)))
+		})
+	}
+	mustPanic("cv31", 31, 64)
+	mustPanic("cv33", 33, 64)
+	mustPanic("block63", 32, 63)
+	mustPanic("block65", 32, 65)
+	_ = Blake3Compress(ByteString(make([]byte, 32)), ByteString(make([]byte, 64)))
+}
