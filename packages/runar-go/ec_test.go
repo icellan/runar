@@ -52,7 +52,13 @@ func TestEcOnCurve_RejectsNonCanonicalX(t *testing.T) {
 	y0, _ := new(big.Int).SetString("4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee", 16)
 	ecP, _ := new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
 	noncanonicalX := new(big.Int).Add(ecP, big.NewInt(1))
-	aliasPoint := EcMakePoint(noncanonicalX, y0)
+	// N-183: EcMakePoint now refuses x >= p, as the script does, so the alias
+	// is written out as raw bytes (it is still a 64-byte Point). This proves
+	// EcOnCurve rejects the alias; it does not exercise EcMakePoint.
+	aliasBytes := make([]byte, 64)
+	noncanonicalX.FillBytes(aliasBytes[:32])
+	y0.FillBytes(aliasBytes[32:])
+	aliasPoint := Point(aliasBytes)
 	if EcOnCurve(aliasPoint) {
 		t.Fatal("x = p + 1 (non-canonical encoding of x0 = 1) must be rejected")
 	}
