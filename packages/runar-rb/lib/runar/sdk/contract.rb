@@ -2337,9 +2337,17 @@ module Runar
 
       # Resolve adjusted codeSepIndex values for each codeSepIndexSlot.
       # Each slot stores the template-relative codeSepIndex; we adjust it
-      # accounting for constructor slot expansions that precede it.
+      # accounting for constructor slot expansions that precede it AND the
+      # expansion of every earlier (lower byte_offset) codeSep slot that
+      # precedes it (N-322, mirrors TS _resolvedCodeSepSlotValues). Slots are
+      # resolved in ascending byte_offset order; the result stays aligned with
+      # @artifact.code_sep_index_slots (result[i] belongs to slot i).
       def resolved_code_sep_slot_values
-        @artifact.code_sep_index_slots.map do |slot|
+        slots = @artifact.code_sep_index_slots
+        values = Array.new(slots.length)
+        done = []
+        slots.each_index.sort_by { |i| [slots[i].byte_offset, i] }.each do |i|
+          slot = slots[i]
           base = slot.code_sep_index
           shift = 0
           @artifact.constructor_slots.each do |cs|
@@ -2348,8 +2356,15 @@ module Runar
             encoded = encode_arg(resolve_constructor_arg(cs.param_index))
             shift  += encoded.length / 2 - 1
           end
-          base + shift
+          done.each do |prev_offset, prev_value|
+            next unless prev_offset < base
+
+            shift += encode_arg(prev_value).length / 2 - 1
+          end
+          values[i] = base + shift
+          done << [slot.byte_offset, values[i]]
         end
+        values
       end
 
       # N-223: shared out-of-range guard for every +@constructor_args[param_index]+
