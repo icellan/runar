@@ -67,6 +67,11 @@ pub fn build_p2pkh_script(address_or_pub_key: &str) -> String {
 /// `ScriptUtils.need` guard — already used for the on-chain state-section
 /// reader — applied here to the push-data reader used by constructor-arg
 /// extraction and artifact matching.
+/// True when `s` is an even-length string of ASCII hex digits (N-317).
+pub(crate) fn is_hex_bytes(s: &str) -> bool {
+    s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn need_hex_chars(hex: &str, offset: usize, chars: usize, what: &str) -> Result<(), String> {
     if offset + chars > hex.len() {
         let remaining = hex.len().saturating_sub(offset);
@@ -336,6 +341,12 @@ pub fn extract_constructor_args(
 /// the length of the code part being matched (everything before the state
 /// section, inscription envelope included).
 pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bool, String> {
+    // N-317: refuse anything that is not whole bytes of hex up front, so no
+    // reader below slices a partial byte (or off a UTF-8 char boundary, which
+    // panics) and every tier makes the same call.
+    if !is_hex_bytes(script_hex) {
+        return Err("matches_artifact: script is not an even-length hex string".to_string());
+    }
     let mut code_hex = script_hex.to_string();
     if let Some(ref state_fields) = artifact.state_fields {
         if !state_fields.is_empty() {

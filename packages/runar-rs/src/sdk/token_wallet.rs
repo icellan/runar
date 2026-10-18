@@ -4,7 +4,7 @@ use super::types::{RunarArtifact, Utxo, SdkValue, CallOptions};
 use super::provider::Provider;
 use super::signer::Signer;
 use super::contract::RunarContract;
-use super::script_utils::{build_p2pkh_script, matches_artifact};
+use super::script_utils::{build_p2pkh_script, is_hex_bytes, matches_artifact};
 use super::state::find_last_op_return;
 use std::sync::Once;
 
@@ -246,6 +246,12 @@ impl TokenWallet {
                 }
                 if !slotted {
                     return utxo.script.starts_with(template.as_str());
+                }
+                // N-317: any UTXO the provider lists is attacker-influenced; a
+                // script that is not whole ASCII hex bytes is not an instance of
+                // this contract (and slicing it below could panic).
+                if !is_hex_bytes(&utxo.script) {
+                    return false;
                 }
                 // `matches_artifact` strips the state section only for
                 // artifacts that declare state fields; cut it here for the rest.

@@ -7,7 +7,7 @@ import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { UTXO } from './types.js';
 import { RunarContract } from './contract.js';
-import { buildP2PKHScript, matchesArtifact } from './script-utils.js';
+import { buildP2PKHScript, isHexBytes, matchesArtifact } from './script-utils.js';
 import { findLastOpReturn } from './state.js';
 
 // N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
@@ -224,12 +224,16 @@ export class TokenWallet {
       // matchesArtifact strips the state section only for artifacts that
       // declare stateFields; cut it here for the rest so the code part is
       // what gets matched.
-      let codeHex = utxo.script;
-      if (!(this.artifact.stateFields && this.artifact.stateFields.length > 0)) {
-        const opReturnPos = findLastOpReturn(codeHex);
-        if (opReturnPos !== -1) codeHex = codeHex.slice(0, opReturnPos);
-      }
+      // N-317: any UTXO the provider lists is attacker-influenced. A script
+      // that is not whole hex bytes, or that fails to parse anywhere below,
+      // is not an instance of this contract; it must never abort the listing.
       try {
+        if (!isHexBytes(utxo.script)) return false;
+        let codeHex = utxo.script;
+        if (!(this.artifact.stateFields && this.artifact.stateFields.length > 0)) {
+          const opReturnPos = findLastOpReturn(codeHex);
+          if (opReturnPos !== -1) codeHex = codeHex.slice(0, opReturnPos);
+        }
         return matchesArtifact(this.artifact, codeHex);
       } catch {
         // A script that is not well-formed at the artifact's slot offsets

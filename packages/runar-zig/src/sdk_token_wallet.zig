@@ -85,6 +85,10 @@ pub const TokenWallet = struct {
                     if (u.script.len < prefix.len) break :blk false;
                     break :blk std.mem.eql(u8, u.script[0..prefix.len], prefix);
                 }
+                // N-317: any UTXO the provider lists is attacker-influenced; a
+                // script that is not whole hex bytes is not an instance of this
+                // contract.
+                if (!script_utils.isHexBytes(u.script)) break :blk false;
                 // matchesArtifact strips the state section only for artifacts
                 // that declare state fields; cut it here for the rest.
                 var code_hex: []const u8 = u.script;

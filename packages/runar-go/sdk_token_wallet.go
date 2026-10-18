@@ -240,6 +240,11 @@ func (tw *TokenWallet) GetUtxos() ([]UTXO, error) {
 			}
 			continue
 		}
+		// N-317: any UTXO the provider lists is attacker-influenced; a script
+		// that is not whole hex bytes is not an instance of this contract.
+		if !isHexBytes(utxo.Script) {
+			continue
+		}
 		// MatchesArtifact strips the state section only for artifacts that
 		// declare StateFields; cut it here for the rest.
 		codeHex := utxo.Script

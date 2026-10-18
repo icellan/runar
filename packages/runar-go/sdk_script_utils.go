@@ -40,6 +40,20 @@ func needHexChars(hexStr string, offset, chars int, what string) error {
 	return nil
 }
 
+// isHexBytes reports whether s is an even-length string of hex digits (N-317).
+func isHexBytes(s string) bool {
+	if len(s)%2 != 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // readScriptElement reads a Bitcoin Script push data element at the given hex
 // offset. Returns the pushed data hex, total hex chars consumed, and the
 // opcode, or a *MalformedScriptError (F-238) if the opcode byte itself, an
@@ -302,6 +316,11 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) (map[stri
 // Returns a *MalformedScriptError (F-238) if scriptHex is not a well-formed
 // sequence of push elements at the offsets the artifact expects.
 func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
+	// N-317: refuse anything that is not whole bytes of hex up front, so no
+	// reader below sees a partial byte and every tier makes the same call.
+	if !isHexBytes(scriptHex) {
+		return false, &MalformedScriptError{Message: "MatchesArtifact: script is not an even-length hex string"}
+	}
 	codeHex := scriptHex
 	if artifact.StateFields != nil && len(artifact.StateFields) > 0 {
 		opReturnPos := FindLastOpReturn(scriptHex)

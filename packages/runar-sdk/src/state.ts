@@ -297,7 +297,9 @@ export function findLastOpReturn(scriptHex: string): number {
       const b1 = parseInt(scriptHex.slice(offset + 4, offset + 6), 16);
       const b2 = parseInt(scriptHex.slice(offset + 6, offset + 8), 16);
       const b3 = parseInt(scriptHex.slice(offset + 8, offset + 10), 16);
-      const pushLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+      // N-317: unsigned. A signed `b3 << 24` made lengths >= 0x80000000
+      // negative, walking `offset` backwards forever on a 27-byte script.
+      const pushLen = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
       offset += 10 + pushLen * 2;
     } else {
       // All other opcodes (OP_0, OP_1..OP_16, OP_IF, OP_ADD, etc.)

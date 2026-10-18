@@ -213,6 +213,12 @@ module Runar
         result
       end
 
+      # True when +s+ is an even-length string of hex digits (N-317). \A/\z,
+      # not ^/$, so a trailing newline is not accepted.
+      def hex_bytes?(s)
+        s.length.even? && s.match?(/\A\h*\z/)
+      end
+
       # Determine whether a given on-chain script was produced from the given
       # contract artifact (regardless of what constructor args were used).
       #
@@ -220,6 +226,13 @@ module Runar
       # @param script_hex [String] hex-encoded on-chain locking script
       # @return [Boolean]
       def matches_artifact(artifact, script_hex)
+        # N-317: refuse anything that is not whole bytes of hex up front, so
+        # no reader below sees a partial byte and every tier makes the same call.
+        unless hex_bytes?(script_hex)
+          raise Runar::SDK::MalformedScriptError,
+                'matches_artifact: script is not an even-length hex string'
+        end
+
         code_hex = script_hex
         if artifact.state_fields && !artifact.state_fields.empty?
           op_return_pos = State.find_last_op_return(script_hex)

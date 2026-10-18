@@ -18,8 +18,7 @@ from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.contract import RunarContract
 from runar.sdk.deployment import build_p2pkh_script
-from runar.sdk.errors import MalformedScriptError
-from runar.sdk.script_utils import matches_artifact
+from runar.sdk.script_utils import is_hex_bytes, matches_artifact
 from runar.sdk.state import find_last_op_return
 
 
@@ -239,17 +238,24 @@ class TokenWallet:
                 if utxo.script.startswith(template):
                     result.append(utxo)
             else:
-                code_hex = utxo.script
-                # matches_artifact strips the state section only for
-                # artifacts that declare state fields; cut it here for the rest.
-                if not self.artifact.state_fields:
-                    pos = find_last_op_return(code_hex)
-                    if pos != -1:
-                        code_hex = code_hex[:pos]
+                # N-317: any UTXO the provider lists is attacker-influenced. A
+                # script that is not whole hex bytes, or that fails to parse in
+                # any way below, is not an instance of this contract; it must
+                # never abort the listing.
+                if not is_hex_bytes(utxo.script):
+                    continue
                 try:
+                    code_hex = utxo.script
+                    # matches_artifact strips the state section only for
+                    # artifacts that declare state fields; cut it here for the
+                    # rest.
+                    if not self.artifact.state_fields:
+                        pos = find_last_op_return(code_hex)
+                        if pos != -1:
+                            code_hex = code_hex[:pos]
                     if matches_artifact(self.artifact, code_hex):
                         result.append(utxo)
-                except MalformedScriptError:
+                except Exception:  # noqa: BLE001 - per-UTXO, see N-317 above
                     # Not well-formed at the artifact's slot offsets (F-238):
                     # not an instance of this contract.
                     pass

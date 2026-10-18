@@ -251,6 +251,14 @@ def restore_constructor_args(
 # Script matching
 # ---------------------------------------------------------------------------
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def is_hex_bytes(s: str) -> bool:
+    """True when ``s`` is an even-length string of hex digits (N-317)."""
+    return len(s) % 2 == 0 and all(ch in _HEX_DIGITS for ch in s)
+
+
 def matches_artifact(
     artifact: RunarArtifact,
     script_hex: str,
@@ -258,6 +266,12 @@ def matches_artifact(
     """Determine whether a given on-chain script was produced from the given
     contract artifact (regardless of what constructor args were used).
     """
+    # N-317: refuse anything that is not whole bytes of hex up front, so no
+    # reader below sees a partial byte and every tier makes the same call.
+    if not is_hex_bytes(script_hex):
+        raise MalformedScriptError(
+            "matches_artifact: script is not an even-length hex string"
+        )
     code_hex = script_hex
     if artifact.state_fields:
         op_return_pos = find_last_op_return(script_hex)

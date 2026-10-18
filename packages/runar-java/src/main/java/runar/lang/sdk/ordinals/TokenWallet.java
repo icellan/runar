@@ -81,6 +81,11 @@ public final class TokenWallet {
             }
             // matchesArtifact strips the state section only for artifacts
             // that declare state fields; cut it here for the rest.
+            // N-317: any UTXO the provider lists is attacker-influenced. A
+            // script that is not whole hex bytes, or that fails to parse in any
+            // way below, is not an instance of this contract; it must never
+            // abort the listing.
+            if (!ScriptUtils.isHexBytes(script)) continue;
             try {
                 String codeHex = script;
                 if (!artifact.isStateful()) {
@@ -88,7 +93,7 @@ public final class TokenWallet {
                     if (pos != -1) codeHex = codeHex.substring(0, pos);
                 }
                 if (ScriptUtils.matchesArtifact(artifact, codeHex)) out.add(u);
-            } catch (IllegalArgumentException malformed) {
+            } catch (RuntimeException malformed) {
                 // Not well-formed at the artifact's slot offsets (F-238): not
                 // an instance of this contract.
             }

@@ -150,7 +150,9 @@ function readScriptElement(
     const b1 = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(hex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(hex.slice(offset + 8, offset + 10), 16);
-    const len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    // N-317: unsigned. `b3 << 24` is a signed 32-bit shift, so a length
+    // >= 0x80000000 went negative and slipped past `need`.
+    const len = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
     const dataLen = len * 2;
     need(hex, offset, 10 + dataLen, 'OP_PUSHDATA4 payload');
     return { dataHex: hex.slice(offset + 10, offset + 10 + dataLen), totalHexChars: 10 + dataLen, opcode };
@@ -256,6 +258,11 @@ export function extractConstructorArgs(
 // Script matching
 // ---------------------------------------------------------------------------
 
+/** True when `hex` is an even-length string of hex digits (N-317). */
+export function isHexBytes(hex: string): boolean {
+  return hex.length % 2 === 0 && /^[0-9a-fA-F]*$/.test(hex);
+}
+
 /**
  * Determine whether a given on-chain script was produced from the given
  * contract artifact (regardless of what constructor args were used).
@@ -264,6 +271,12 @@ export function matchesArtifact(
   artifact: RunarArtifact,
   scriptHex: string,
 ): boolean {
+  // N-317: a provider-supplied script is untrusted. Refuse anything that is
+  // not whole bytes of hex up front, so no reader below sees a partial byte
+  // (`parseInt('0g', 16)` is 0) and every tier makes the same call.
+  if (!isHexBytes(scriptHex)) {
+    throw new MalformedScriptError('matchesArtifact: script is not an even-length hex string');
+  }
   let codeHex = scriptHex;
   if (artifact.stateFields && artifact.stateFields.length > 0) {
     const opReturnPos = findLastOpReturn(scriptHex);

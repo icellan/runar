@@ -1,0 +1,337 @@
+{
+  "fixture_version": 1,
+  "notes": "N-317: hostile UTXO scripts. matches = matchesArtifact(artifacts[artifact], script): 'match' (true), 'no_match' (false), or 'malformed' (the tier's typed malformed-script error; any other exception, panic or timeout is a failure). wallet = whether TokenWallet.getUtxos keeps a UTXO with this script (null: not part of the wallet replay). script = prefix + repeat*count + suffix. The whole replay must finish within a CPU-time budget. Replayed by all 7 SDKs.",
+  "artifacts": {
+    "stateful": {
+      "version": "runar-v0.1.0",
+      "compilerVersion": "0.1.0",
+      "contractName": "HostileProbeStateful",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "supply",
+              "type": "bigint"
+            }
+          ]
+        },
+        "methods": [
+          {
+            "name": "transfer",
+            "params": [],
+            "isPublic": true
+          }
+        ]
+      },
+      "script": "76a90088750400000000819c69ac",
+      "asm": "",
+      "constructorSlots": [
+        {
+          "paramIndex": 0,
+          "byteOffset": 2
+        }
+      ],
+      "codePartLenSlots": [
+        {
+          "byteOffset": 6
+        }
+      ],
+      "buildTimestamp": "2026-01-01T00:00:00Z",
+      "stateFields": [
+        {
+          "name": "balance",
+          "type": "bigint",
+          "index": 0
+        }
+      ]
+    },
+    "stateless": {
+      "version": "runar-v0.1.0",
+      "compilerVersion": "0.1.0",
+      "contractName": "HostileProbe",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "supply",
+              "type": "bigint"
+            }
+          ]
+        },
+        "methods": [
+          {
+            "name": "transfer",
+            "params": [],
+            "isPublic": true
+          }
+        ]
+      },
+      "script": "76a90088750400000000819c69ac",
+      "asm": "",
+      "constructorSlots": [
+        {
+          "paramIndex": 0,
+          "byteOffset": 2
+        }
+      ],
+      "codePartLenSlots": [
+        {
+          "byteOffset": 6
+        }
+      ],
+      "buildTimestamp": "2026-01-01T00:00:00Z",
+      "stateFields": []
+    }
+  },
+  "cases": [
+    {
+      "name": "stateful-genuine",
+      "artifact": "stateful",
+      "prefix": "76a902112288750410000000819c69ac6a1122000000000000",
+      "matches": "match",
+      "wallet": true,
+      "why": "honest deployment (RunarContract.getLockingScript, supply=0x2211; state as the SDK serialises it): ctor arg 021122, code-part length 16"
+    },
+    {
+      "name": "stateful-odd-length-code-part",
+      "artifact": "stateful",
+      "prefix": "76a902112288750410000000819c69a",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "odd number of hex chars, no state section"
+    },
+    {
+      "name": "stateful-odd-length-state",
+      "artifact": "stateful",
+      "prefix": "76a902112288750410000000819c69ac6a010",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "genuine code part, odd-length state section"
+    },
+    {
+      "name": "stateful-non-hex-at-slot",
+      "artifact": "stateful",
+      "prefix": "76a9zz88",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "non-hex byte where the ctor push opcode is read"
+    },
+    {
+      "name": "stateful-partial-hex-at-slot",
+      "artifact": "stateful",
+      "prefix": "76a90g8875040e000000819c69ac",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "'0g' at the slot: TS parseInt read it as OP_0 (prefix parse) and the rest matched; Java threw NumberFormatException, not the typed error"
+    },
+    {
+      "name": "stateful-non-hex-in-state",
+      "artifact": "stateful",
+      "prefix": "76a902112288750410000000819c69ac6a01zz",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "genuine code part, non-hex state section"
+    },
+    {
+      "name": "stateful-non-ascii",
+      "artifact": "stateful",
+      "prefix": "76a90é112288750410000000819c69ac",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "a non-ASCII char replaces one hex digit of the ctor push, straddling a byte window (Rust: slicing off a char boundary panics)"
+    },
+    {
+      "name": "stateful-truncated-pushdata1",
+      "artifact": "stateful",
+      "prefix": "76a94c",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "OP_PUSHDATA1 with no length byte"
+    },
+    {
+      "name": "stateful-truncated-pushdata1-payload",
+      "artifact": "stateful",
+      "prefix": "76a94c05aabb",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "OP_PUSHDATA1 declares 5 bytes, 2 remain"
+    },
+    {
+      "name": "stateful-truncated-pushdata2",
+      "artifact": "stateful",
+      "prefix": "76a94d0100",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "OP_PUSHDATA2 declares 1 byte, none remain"
+    },
+    {
+      "name": "stateful-truncated-pushdata4",
+      "artifact": "stateful",
+      "prefix": "76a94e01000000",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "OP_PUSHDATA4 declares 1 byte, none remain"
+    },
+    {
+      "name": "stateful-pushdata4-high-bit-length",
+      "artifact": "stateful",
+      "prefix": "76a94e00000080aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "OP_PUSHDATA4 length 0x80000000: signed 32-bit length arithmetic goes negative (TS: findLastOpReturn never terminates)"
+    },
+    {
+      "name": "stateful-pushdata4-ffffffff-length",
+      "artifact": "stateful",
+      "prefix": "76a94effffffffaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "OP_PUSHDATA4 length 0xffffffff (Java: StringIndexOutOfBoundsException escaped getUtxos)"
+    },
+    {
+      "name": "stateful-push-runs-past-end",
+      "artifact": "stateful",
+      "prefix": "76a905aabb8875",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "ctor push declares 5 bytes but the script ends after 3"
+    },
+    {
+      "name": "stateful-push-swallows-next-segment",
+      "artifact": "stateful",
+      "prefix": "76a905aabb88750410000000819c69ac6a1122000000000000",
+      "matches": "no_match",
+      "wallet": false,
+      "why": "ctor push consumes the bytes the template expects after the slot"
+    },
+    {
+      "name": "stateful-empty",
+      "artifact": "stateful",
+      "prefix": "",
+      "matches": "no_match",
+      "wallet": null,
+      "why": "empty script (getUtxos includes empty-script UTXOs by design, so not in the wallet replay)"
+    },
+    {
+      "name": "stateful-shorter-than-template",
+      "artifact": "stateful",
+      "prefix": "76",
+      "matches": "no_match",
+      "wallet": false,
+      "why": "ends before the first slot"
+    },
+    {
+      "name": "stateful-ends-at-slot",
+      "artifact": "stateful",
+      "prefix": "76a9",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "ends exactly where the ctor push opcode must be read"
+    },
+    {
+      "name": "stateful-wrong-code-part-length",
+      "artifact": "stateful",
+      "prefix": "76a902112288750411000000819c69ac6a1122000000000000",
+      "matches": "no_match",
+      "wallet": false,
+      "why": "code-part length field is one more than the code part"
+    },
+    {
+      "name": "stateful-large-genuine",
+      "artifact": "stateful",
+      "prefix": "76a94e00001000",
+      "repeat": "ab",
+      "count": 1048576,
+      "suffix": "88750412001000819c69ac6a1122000000000000",
+      "matches": "match",
+      "wallet": true,
+      "why": "1 MiB ctor arg (OP_PUSHDATA4), honest code-part length"
+    },
+    {
+      "name": "stateful-large-high-bit-pushdata4",
+      "artifact": "stateful",
+      "prefix": "76a9",
+      "repeat": "4e00000080",
+      "count": 209716,
+      "matches": "malformed",
+      "wallet": false,
+      "why": "~1 MiB of OP_PUSHDATA4 0x80000000 headers"
+    },
+    {
+      "name": "stateful-large-zeros",
+      "artifact": "stateful",
+      "prefix": "",
+      "repeat": "00",
+      "count": 1048576,
+      "matches": "no_match",
+      "wallet": false,
+      "why": "1 MiB of OP_0"
+    },
+    {
+      "name": "stateless-genuine",
+      "artifact": "stateless",
+      "prefix": "76a902112288750410000000819c69ac",
+      "matches": "match",
+      "wallet": true,
+      "why": "honest deployment of the stateless variant"
+    },
+    {
+      "name": "stateless-genuine-with-trailer",
+      "artifact": "stateless",
+      "prefix": "76a902112288750410000000819c69ac6a1122000000000000",
+      "matches": "no_match",
+      "wallet": true,
+      "why": "matchesArtifact sees the trailer as code; getUtxos cuts at the OP_RETURN first and keeps it"
+    },
+    {
+      "name": "stateless-non-hex",
+      "artifact": "stateless",
+      "prefix": "76a9zz",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "non-hex (Python: find_last_op_return raised ValueError outside getUtxos' try)"
+    },
+    {
+      "name": "stateless-odd-length",
+      "artifact": "stateless",
+      "prefix": "76a902112288750410000000819c69aca",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "odd number of hex chars"
+    },
+    {
+      "name": "stateless-non-ascii",
+      "artifact": "stateless",
+      "prefix": "76aé",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "a non-ASCII char straddles the second byte window (Rust: find_last_op_return slices off a char boundary and panics)"
+    },
+    {
+      "name": "stateless-pushdata4-high-bit-length",
+      "artifact": "stateless",
+      "prefix": "76a94e00000080aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "TS: findLastOpReturn, called by getUtxos outside its try, never terminates"
+    },
+    {
+      "name": "stateless-pushdata4-0x40-length",
+      "artifact": "stateless",
+      "prefix": "76a94e00000040aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matches": "malformed",
+      "wallet": false,
+      "why": "Java: int pushLen*2 overflowed to a negative offset (StringIndexOutOfBoundsException escaped getUtxos)"
+    },
+    {
+      "name": "stateless-large-high-bit-pushdata4",
+      "artifact": "stateless",
+      "prefix": "76a9",
+      "repeat": "4e00000080",
+      "count": 209716,
+      "matches": "malformed",
+      "wallet": false,
+      "why": "~1 MiB of OP_PUSHDATA4 0x80000000 headers"
+    }
+  ]
+}

@@ -314,6 +314,15 @@ pub fn extractConstructorArgs(
     return result;
 }
 
+/// True when `s` is an even-length string of ASCII hex digits (N-317).
+pub fn isHexBytes(s: []const u8) bool {
+    if (s.len % 2 != 0) return false;
+    for (s) |ch| {
+        if (!std.ascii.isHex(ch)) return false;
+    }
+    return true;
+}
+
 /// Determine whether a given on-chain script was produced from the given
 /// contract artifact (regardless of what constructor args were used).
 ///
@@ -323,6 +332,9 @@ pub fn matchesArtifact(
     artifact: *const types.RunarArtifact,
     script_hex: []const u8,
 ) error{MalformedScript}!bool {
+    // N-317: refuse anything that is not whole bytes of hex up front, so no
+    // reader below sees a partial byte and every tier makes the same call.
+    if (!isHexBytes(script_hex)) return error.MalformedScript;
     // Strip state suffix for stateful contracts
     var code_hex = script_hex;
     if (artifact.state_fields.len > 0) {

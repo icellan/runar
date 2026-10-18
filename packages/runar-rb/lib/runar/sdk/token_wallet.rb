@@ -187,16 +187,22 @@ module Runar
           elsif !slotted
             utxo.script.start_with?(template)
           else
-            # matches_artifact strips the state section only for artifacts
-            # that declare state fields; cut it here for the rest.
-            code_hex = utxo.script
-            unless declares_state
-              pos = State.find_last_op_return(code_hex)
-              code_hex = code_hex[0, pos] if pos != -1
-            end
+            # N-317: any UTXO the provider lists is attacker-influenced. A
+            # script that is not whole hex bytes, or that fails to parse in any
+            # way below, is not an instance of this contract; it must never
+            # abort the listing.
+            next false unless ScriptUtils.hex_bytes?(utxo.script)
+
             begin
+              # matches_artifact strips the state section only for artifacts
+              # that declare state fields; cut it here for the rest.
+              code_hex = utxo.script
+              unless declares_state
+                pos = State.find_last_op_return(code_hex)
+                code_hex = code_hex[0, pos] if pos != -1
+              end
               ScriptUtils.matches_artifact(@artifact, code_hex)
-            rescue MalformedScriptError
+            rescue StandardError
               # Not well-formed at the artifact's slot offsets (F-238): not an
               # instance of this contract.
               false
