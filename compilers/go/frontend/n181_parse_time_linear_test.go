@@ -89,7 +89,7 @@ func TestN181AdversarialShapesParseWithinCPUBudget(t *testing.T) {
 // n181Budget of CPU on it. A goroutine left running by a failure keeps
 // burning CPU, so after a failure later subtests can fail too; run one with
 // -run to see its own number.
-func n181Check(t *testing.T, name, file, source string, malformed bool) {
+func n181Check(t *testing.T, name, file, source string, malformed bool) *ParseResult {
 	if len(source) > MaxSourceBytes {
 		t.Fatalf("%s: %d bytes is over MAX_SOURCE_BYTES", name, len(source))
 	}
@@ -119,6 +119,7 @@ wait:
 	if res.SourceSizeErr != nil {
 		t.Fatalf("%s: refused by the size cap, so the parser never ran", name)
 	}
+	return res
 }
 
 // TestN181CursorWalkMatchesChildIndexWalk pins that tsWalk visits exactly the

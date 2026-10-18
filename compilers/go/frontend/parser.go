@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
@@ -159,13 +160,37 @@ func Parse(source []byte, fileName string) *ParseResult {
 	return withNestingLimit(func() *ParseResult { return parseTsSurface(source, fileName) })
 }
 
+// tsParseTimeLimit bounds the tree-sitter parse of a .runar.ts source (N-308).
+//
+// It is WALL-CLOCK, not an operation count: the go-tree-sitter binding exposes
+// no operation counter (its SetOperationLimit is ts_parser_set_timeout_micros,
+// whose clock is process CPU via clock() on macOS but CLOCK_MONOTONIC wall
+// time on Linux), so the bound is a context deadline, which tree-sitter polls
+// through its cancellation flag every 100 parse actions on every OS.
+// Generous on purpose: a valid source filling MAX_SOURCE_BYTES parses in
+// about a second; the quadratic recovery shapes run for minutes.
+const tsParseTimeLimit = 20 * time.Second
+
+// TsParseTooComplexMessage is the diagnostic for a .runar.ts source whose
+// tree-sitter parse exceeded tsParseTimeLimit.
+const TsParseTooComplexMessage = "source too complex to parse: tree-sitter parse of the .runar.ts source exceeded its time bound"
+
 // parseTsSurface is the .runar.ts surface: tree-sitter parse, then conversion
 // to the Rúnar AST.
 func parseTsSurface(source []byte, fileName string) *ParseResult {
 	parser := sitter.NewParser()
 	parser.SetLanguage(typescript.GetLanguage())
 
-	tree, err := parser.ParseCtx(context.Background(), nil, source)
+	// N-308: tree-sitter's error recovery is quadratic on some bracket-free
+	// shapes (`|| || … a`, `lambda: lambda: … a`, `a and a … a` filling
+	// MAX_SOURCE_BYTES ran >137 s CPU inside the C parser). Bound the parse
+	// and refuse past the bound.
+	ctx, cancel := context.WithTimeout(context.Background(), tsParseTimeLimit)
+	defer cancel()
+	tree, err := parser.ParseCtx(ctx, nil, source)
+	if err != nil && ctx.Err() != nil {
+		return &ParseResult{Errors: []Diagnostic{{Message: TsParseTooComplexMessage, Severity: SeverityError}}}
+	}
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: fmt.Sprintf("parse error: %v", err), Severity: SeverityError}}}
 	}
