@@ -123,11 +123,237 @@ fn decodeScriptNumberValue(allocator: std.mem.Allocator, data_hex: []const u8) !
 }
 
 /// Render a little-endian magnitude as a signed decimal string (caller owns it).
+/// No leading zeros; "0" for a zero magnitude; "-" only when `negative` and
+/// the magnitude is nonzero.
 ///
-/// Repeated multiply-by-256-and-add over base-10 digits — the mirror of the
-/// repeated divide-by-256 that `sdk_state.encodeBigScriptNumber` uses to go the
-/// other way, and likewise needs no bignum dependency.
+/// N-324: SUBQUADRATIC. The magnitude is untrusted (a constructor arg read off
+/// a provider script can be 1 MiB), and the old digit-by-digit loop was
+/// quadratic — ~100 min for 1 MiB. Divide and conquer instead: split the bytes
+/// at `DEC_LEAF_BYTES << k`, convert both halves to base-10^18 limbs, and
+/// recombine as `hi * 256^h + lo` with a Karatsuba multiply carried out IN
+/// base 10^18 — multiplication and addition only, never a bignum division.
+/// The powers `256^(DEC_LEAF_BYTES << k)` come from repeated squaring.
+/// `magnitudeToDecimalReference` (the old loop, test-only) pins the output.
 fn magnitudeToDecimal(allocator: std.mem.Allocator, le_bytes: []const u8, negative: bool) ![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Powers 256^(DEC_LEAF_BYTES << k) for every split the recursion makes.
+    var levels: usize = 0;
+    while ((DEC_LEAF_BYTES << @intCast(levels)) < le_bytes.len) levels += 1;
+    const pows = try arena.alloc([]const u64, levels);
+    if (levels > 0) {
+        const one = try arena.alloc(u8, DEC_LEAF_BYTES + 1);
+        @memset(one, 0);
+        one[DEC_LEAF_BYTES] = 1;
+        const p0 = try arena.alloc(u64, decLimbsFor(one.len));
+        decFromBytesLeaf(one, p0);
+        pows[0] = decTrim(p0);
+        for (1..levels) |k| {
+            const prev = pows[k - 1];
+            const sq = try arena.alloc(u64, 2 * prev.len);
+            var sq_fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(try arena.alloc(u64, 8 * prev.len + 4096)));
+            try decMul(sq, prev, prev, sq_fba.allocator());
+            pows[k] = decTrim(sq);
+        }
+    }
+
+    // One stack-discipline scratch buffer for the whole recursion: every
+    // temporary is freed in reverse order, so FixedBufferAllocator reclaims it.
+    const total = decLimbsFor(le_bytes.len);
+    var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(try arena.alloc(u64, 10 * total + 4096)));
+    const limbs = try arena.alloc(u64, total);
+    try decFromBytes(le_bytes, limbs, pows, fba.allocator());
+    const t = decTrim(limbs);
+
+    if (t.len == 0) return allocator.dupe(u8, "0");
+    var top_buf: [DEC_LIMB_DIGITS]u8 = undefined;
+    const top = std.fmt.bufPrint(&top_buf, "{d}", .{t[t.len - 1]}) catch unreachable;
+    const sign_len: usize = if (negative) 1 else 0;
+    var out = try allocator.alloc(u8, sign_len + top.len + DEC_LIMB_DIGITS * (t.len - 1));
+    if (negative) out[0] = '-';
+    @memcpy(out[sign_len .. sign_len + top.len], top);
+    var pos = sign_len + top.len;
+    var k: usize = t.len - 1;
+    while (k > 0) {
+        k -= 1;
+        var v = t[k];
+        var d: usize = DEC_LIMB_DIGITS;
+        while (d > 0) {
+            d -= 1;
+            out[pos + d] = '0' + @as(u8, @intCast(v % 10));
+            v /= 10;
+        }
+        pos += DEC_LIMB_DIGITS;
+    }
+    return out;
+}
+
+const DEC_BASE: u64 = 1_000_000_000_000_000_000; // 10^18 per limb
+const DEC_LIMB_DIGITS: usize = 18;
+const DEC_LEAF_BYTES: usize = 64;
+/// Below this many limbs (in the shorter operand) multiply by columns. A
+/// column sums at most this many products (< 10^36 each) plus a carry, so it
+/// must stay under ~330 to fit a u128; 128 measured fastest in Debug.
+const DEC_KARATSUBA_MIN: usize = 128;
+
+/// An upper bound on the base-10^18 limbs of any `byte_len`-byte magnitude,
+/// with at least one limb of slack (log10(2) is rounded UP to 0.30103).
+fn decLimbsFor(byte_len: usize) usize {
+    return (byte_len * 8 * 30103 / 100000 + 1) / DEC_LIMB_DIGITS + 2;
+}
+
+fn decTrim(x: []const u64) []const u64 {
+    var n = x.len;
+    while (n > 0 and x[n - 1] == 0) n -= 1;
+    return x[0..n];
+}
+
+/// out = the LE magnitude `le`, by repeated multiply-by-2^(8c)-and-add over
+/// limbs (quadratic, used only for leaves of at most DEC_LEAF_BYTES + 1 bytes).
+fn decFromBytesLeaf(le: []const u8, out: []u64) void {
+    @memset(out, 0);
+    var used: usize = 0;
+    var i: usize = le.len;
+    while (i > 0) {
+        const c: usize = @min(i, 8);
+        i -= c;
+        var w: u64 = 0;
+        var j: usize = c;
+        while (j > 0) {
+            j -= 1;
+            w = (w << 8) | le[i + j];
+        }
+        const mult: u128 = @as(u128, 1) << @intCast(8 * c);
+        var carry: u128 = w;
+        for (out[0..used]) |*d| {
+            const t = @as(u128, d.*) * mult + carry;
+            carry = t / DEC_BASE;
+            d.* = @intCast(t - carry * DEC_BASE);
+        }
+        while (carry > 0) {
+            out[used] = @intCast(carry % DEC_BASE);
+            carry /= DEC_BASE;
+            used += 1;
+        }
+    }
+}
+
+/// out = le (LE bytes) in base 10^18. out.len >= decLimbsFor(le.len).
+fn decFromBytes(le: []const u8, out: []u64, pows: []const []const u64, fba: std.mem.Allocator) error{OutOfMemory}!void {
+    if (le.len <= DEC_LEAF_BYTES) return decFromBytesLeaf(le, out);
+    var k: usize = 0;
+    while ((DEC_LEAF_BYTES << @intCast(k + 1)) < le.len) k += 1;
+    const h = DEC_LEAF_BYTES << @intCast(k);
+    const hi_dec = try fba.alloc(u64, decLimbsFor(le.len - h));
+    defer fba.free(hi_dec);
+    try decFromBytes(le[h..], hi_dec, pows, fba);
+    const lo_dec = try fba.alloc(u64, decLimbsFor(h));
+    defer fba.free(lo_dec);
+    try decFromBytes(le[0..h], lo_dec, pows, fba);
+    try decMul(out, decTrim(hi_dec), pows[k], fba);
+    decAddInto(out, decTrim(lo_dec));
+}
+
+/// dst += src. The caller guarantees the sum fits in dst.
+fn decAddInto(dst: []u64, src: []const u64) void {
+    var carry: u64 = 0;
+    var i: usize = 0;
+    while (i < src.len or carry != 0) : (i += 1) {
+        var s = dst[i] + carry + (if (i < src.len) src[i] else 0);
+        if (s >= DEC_BASE) {
+            s -= DEC_BASE;
+            carry = 1;
+        } else carry = 0;
+        dst[i] = s;
+    }
+}
+
+/// dst -= src. The caller guarantees dst >= src.
+fn decSubInto(dst: []u64, src: []const u64) void {
+    var borrow: u64 = 0;
+    var i: usize = 0;
+    while (i < src.len or borrow != 0) : (i += 1) {
+        const x = (if (i < src.len) src[i] else 0) + borrow;
+        if (dst[i] >= x) {
+            dst[i] -= x;
+            borrow = 0;
+        } else {
+            dst[i] = dst[i] + DEC_BASE - x;
+            borrow = 1;
+        }
+    }
+}
+
+/// out = a * b by columns; out.len == a.len + b.len, b.len small.
+fn decMulColumns(out: []u64, a: []const u64, b: []const u64) void {
+    var carry: u128 = 0;
+    for (0..out.len - 1) |k| {
+        var acc: u128 = carry;
+        var i: usize = if (k >= a.len) k - a.len + 1 else 0;
+        const last = @min(k, b.len - 1);
+        while (i <= last) : (i += 1) acc += @as(u128, b[i]) * a[k - i];
+        carry = acc / DEC_BASE; // one u128 division per column, not two
+        out[k] = @intCast(acc - carry * DEC_BASE);
+    }
+    out[out.len - 1] = @intCast(carry);
+}
+
+/// out = a * b in base 10^18 (Karatsuba). out.len >= a.len + b.len; all of
+/// `out` is written. Temporaries come from `fba` and are freed in LIFO order.
+fn decMul(out: []u64, a_in: []const u64, b_in: []const u64, fba: std.mem.Allocator) error{OutOfMemory}!void {
+    const a = if (a_in.len >= b_in.len) a_in else b_in;
+    const b = if (a_in.len >= b_in.len) b_in else a_in;
+    @memset(out[a.len + b.len ..], 0);
+    const o = out[0 .. a.len + b.len];
+    if (b.len == 0) return @memset(o, 0);
+    if (b.len < DEC_KARATSUBA_MIN) return decMulColumns(o, a, b);
+    if (2 * b.len <= a.len) {
+        // Unbalanced: b-sized chunks of a, each a balanced product.
+        @memset(o, 0);
+        const tmp = try fba.alloc(u64, 2 * b.len);
+        defer fba.free(tmp);
+        var off: usize = 0;
+        while (off < a.len) : (off += b.len) {
+            const chunk = a[off..@min(off + b.len, a.len)];
+            const t = tmp[0 .. chunk.len + b.len];
+            try decMul(t, chunk, b, fba);
+            decAddInto(o[off..], decTrim(t));
+        }
+        return;
+    }
+    // Balanced: b.len > a.len / 2 >= m, so b1 is never empty.
+    const m = a.len / 2;
+    const a0 = a[0..m];
+    const a1 = a[m..];
+    const b0 = b[0..m];
+    const b1 = b[m..];
+    try decMul(o[0 .. 2 * m], a0, b0, fba); // z0
+    try decMul(o[2 * m ..], a1, b1, fba); // z2
+    const sa = try fba.alloc(u64, a1.len + 1);
+    defer fba.free(sa);
+    @memset(sa, 0);
+    @memcpy(sa[0..a1.len], a1);
+    decAddInto(sa, a0);
+    const sb = try fba.alloc(u64, @max(m, b1.len) + 1);
+    defer fba.free(sb);
+    @memset(sb, 0);
+    @memcpy(sb[0..b1.len], b1);
+    decAddInto(sb, b0);
+    const z1 = try fba.alloc(u64, sa.len + sb.len);
+    defer fba.free(z1);
+    try decMul(z1, decTrim(sa), decTrim(sb), fba);
+    decSubInto(z1, decTrim(o[0 .. 2 * m]));
+    decSubInto(z1, decTrim(o[2 * m ..]));
+    decAddInto(o[m..], decTrim(z1));
+}
+
+/// TEST-ONLY REFERENCE (N-324): the pre-N-324 conversion, kept verbatim so the
+/// equivalence test can compare the fast one against it. Repeated
+/// multiply-by-256-and-add over base-10 digits — QUADRATIC: a 64 KiB magnitude
+/// takes ~24 s in Debug, 1 MiB ~100 min. Never call it outside tests.
+fn magnitudeToDecimalReference(allocator: std.mem.Allocator, le_bytes: []const u8, negative: bool) ![]u8 {
     var digits: std.ArrayListUnmanaged(u8) = .empty; // base-10, least significant first
     defer digits.deinit(allocator);
     try digits.append(allocator, 0);
@@ -776,4 +1002,81 @@ test "extractConstructorArgs still extracts when the repeated value fits its pla
 
     try std.testing.expectEqual(@as(i64, 5), result.get("alpha").?.int);
     try std.testing.expectEqual(@as(i64, 7), result.get("beta").?.int);
+}
+
+// N-324: the subquadratic magnitudeToDecimal must render EXACTLY what the old
+// quadratic loop (kept as magnitudeToDecimalReference) rendered.
+//
+// Proves: byte-identical decimal output, sign included, for magnitudes of
+// 0, 1, 8, 9, 64, 1000 bytes and sizes chosen to land the top multiply in
+// each decMul branch at DEC_KARATSUBA_MIN = 128 limbs (~957 bytes): columns
+// (everything up to ~1900 bytes, and 5000: a 121-limb hi times a 548-limb
+// power), balanced Karatsuba (2048, 16384), the unbalanced chunk loop (3072,
+// 6000, the latter with a short last chunk) — plus leaf / split edges
+// (63-65, 127-129, 2047-2049). Patterns: all-zero, all-0xff, seeded random,
+// high-zero-padded (a non-minimal encoding's magnitude) and a lone top byte,
+// with `negative` both ways; a zero magnitude with `negative` set stays "0",
+// never "-0"; nothing leaks (std.testing.allocator).
+// Does NOT prove: digit equality beyond 16 KiB (the reference is quadratic
+// and too slow there) — the 1 MiB case is covered for cost and decoded state
+// by the N-320 hostile-state replay, not digit by digit. Nor the speed; that
+// is the N-320 replay's CPU budget.
+test "N-324: subquadratic magnitudeToDecimal matches the quadratic reference" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x4e333234);
+    const rnd = prng.random();
+    const sizes = [_]usize{ 0, 1, 2, 7, 8, 9, 16, 63, 64, 65, 127, 128, 129, 200, 256, 257, 511, 512, 513, 1000, 1024, 1025, 1900, 2047, 2048, 2049, 3072, 5000, 6000 };
+    var checked: usize = 0;
+    for (sizes) |n| {
+        const bytes = try a.alloc(u8, n);
+        defer a.free(bytes);
+        for (0..5) |pattern| {
+            switch (pattern) {
+                0 => @memset(bytes, 0),
+                1 => @memset(bytes, 0xff),
+                2 => rnd.bytes(bytes),
+                3 => { // high-zero padding: a non-minimal encoding's magnitude
+                    rnd.bytes(bytes);
+                    for (bytes[n / 2 ..]) |*x| x.* = 0;
+                },
+                else => { // a lone nonzero top byte over zeros
+                    @memset(bytes, 0);
+                    if (n > 0) bytes[n - 1] = 0x7f;
+                },
+            }
+            for ([_]bool{ false, true }) |neg| {
+                const want = try magnitudeToDecimalReference(a, bytes, neg);
+                defer a.free(want);
+                const got = try magnitudeToDecimal(a, bytes, neg);
+                defer a.free(got);
+                try std.testing.expectEqualStrings(want, got);
+                checked += 1;
+            }
+        }
+    }
+    // Seeded random sizes across the column / unbalanced / Karatsuba bands,
+    // and one deep balanced case.
+    var extra: [21]usize = undefined;
+    for (extra[0..20]) |*n| n.* = rnd.uintLessThan(usize, 6000);
+    extra[20] = 16384;
+    for (extra) |n| {
+        const bytes = try a.alloc(u8, n);
+        defer a.free(bytes);
+        rnd.bytes(bytes);
+        const neg = rnd.boolean();
+        const want = try magnitudeToDecimalReference(a, bytes, neg);
+        defer a.free(want);
+        const got = try magnitudeToDecimal(a, bytes, neg);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(want, got);
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, sizes.len * 10 + extra.len), checked);
+    // Anchors independent of either implementation.
+    const z = try magnitudeToDecimal(a, &.{ 0, 0, 0 }, true);
+    defer a.free(z);
+    try std.testing.expectEqualStrings("0", z);
+    const two64 = try magnitudeToDecimal(a, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 1 }, true);
+    defer a.free(two64);
+    try std.testing.expectEqualStrings("-18446744073709551616", two64);
 }

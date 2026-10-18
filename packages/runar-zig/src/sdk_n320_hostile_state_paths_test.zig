@@ -14,9 +14,11 @@
 //! artifact over a script with no state section is refused (C10, as in TS)
 //! instead of carrying constructor-initial state; nothing leaks on either path
 //! (std.testing.allocator); the replay used less than a process-CPU budget.
-//! Does NOT prove: fromUtxo on stateful-large-genuine — EXCLUDED (see the
-//! comment at the exclusion; open N-320 escalation: the 1 MiB bigint
-//! constructor arg decodes in quadratic time). Nor that a hang would be cut off -- Zig cannot stop a running
+//! N-324: no case is excluded — fromUtxo on stateful-large-genuine decodes its
+//! 1 MiB bigint constructor arg (2.5M decimal digits) inside that same budget,
+//! because the magnitude-to-decimal conversion is now subquadratic; it used to
+//! be quadratic (~100 min) and was skipped here.
+//! Does NOT prove: that a hang would be cut off -- Zig cannot stop a running
 //! thread, so a non-terminating reader stalls this test rather than failing it
 //! at the budget; a panic aborts the test binary rather than being reported
 //! per case. Nor on-chain spendability or artifact shapes beyond the two.
@@ -28,7 +30,6 @@ const contract_mod = @import("sdk_contract.zig");
 
 const DIR = "../../conformance/sdk-matches-artifact/";
 const CPU_BUDGET_US: i64 = 20 * std.time.us_per_s;
-const LARGE_BIGINT_CASE = "stateful-large-genuine";
 
 fn cpuMicros() i64 {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);
@@ -93,7 +94,6 @@ test "N-320: hostile scripts on the state-reading paths" {
     defer stateful.deinit();
 
     var failures: usize = 0;
-    var excluded: usize = 0;
     const start = cpuMicros();
 
     for (cases, want) |cv, wv| {
@@ -138,21 +138,8 @@ test "N-320: hostile scripts on the state-reading paths" {
             failures += 1;
         }
 
-        // fromUtxo on the case's artifact.
-        //
-        // EXCLUDED, loudly, for one case: fromUtxo on stateful-large-genuine
-        // decodes its 1 MiB bigint constructor arg to a decimal string, and
-        // magnitudeToDecimal (like std.math.big.int toString) is quadratic —
-        // it does not return in any useful time, and Zig cannot cut a stalled
-        // test off at the budget, so it would block every later test. Open
-        // N-320 escalation: the fix is a design choice (decode-size cap in all
-        // 7 tiers, a big_int representation change, or a subquadratic
-        // conversion). Counted and printed, never silent.
-        if (std.mem.eql(u8, name, LARGE_BIGINT_CASE)) {
-            std.debug.print("N-320 ESCALATED, not run: fromUtxo {s} (quadratic decimal decode of a 1 MiB bigint)\n", .{name});
-            excluded += 1;
-            continue;
-        }
+        // fromUtxo on the case's artifact — every case, stateful-large-genuine
+        // (1 MiB bigint ctor arg) included (N-324).
         const artifact_json = try std.json.Stringify.valueAlloc(allocator, artifacts_json.get(c.get("artifact").?.string).?, .{});
         defer allocator.free(artifact_json);
         var artifact = try types.RunarArtifact.fromJson(allocator, artifact_json);
@@ -176,5 +163,4 @@ test "N-320: hostile scripts on the state-reading paths" {
     const used = cpuMicros() - start;
     try std.testing.expect(used < CPU_BUDGET_US);
     try std.testing.expectEqual(@as(usize, 0), failures);
-    try std.testing.expectEqual(@as(usize, 1), excluded);
 }
