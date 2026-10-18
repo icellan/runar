@@ -1366,23 +1366,78 @@ mod tests {
         );
     }
 
+    /// Tracked sources that are over the nesting limit ON PURPOSE: conformance
+    /// negatives whose job is to be refused with the shared
+    /// `MAX_SOURCE_NESTING` diagnostic. They are not part of the claim the
+    /// corpus test makes (that sources people actually write stay far below
+    /// the limit), so they are excluded by exact repo-relative path, never by
+    /// pattern: an ordinary source that crosses the bound must still fail.
+    const DESIGNED_OVER_LIMIT: &[&str] = &["conformance/negatives/N285-ts-type-operator-nesting.runar.ts"];
+
+    fn is_designed_over_limit(root: &std::path::Path, file: &std::path::Path) -> bool {
+        DESIGNED_OVER_LIMIT.iter().any(|rel| file == root.join(rel))
+    }
+
+    /// Worst `max_estimate` over the corpus, skipping designed-over-limit
+    /// negatives. Returns `(estimate, file)`.
+    fn corpus_worst(
+        root: &std::path::Path,
+        sources: impl Iterator<Item = (std::path::PathBuf, String)>,
+    ) -> Option<(u32, std::path::PathBuf)> {
+        sources
+            .filter(|(f, _)| !is_designed_over_limit(root, f))
+            .map(|(f, s)| (max_estimate(&s), f))
+            .max_by_key(|(e, _)| *e)
+    }
+
     /// Headroom on every git-tracked .runar.ts source: the estimate stays far
     /// below the limit (the claim in the comment on `Model`).
     ///
     /// What this proves: every source this crate ships (not scratch/
-    /// untracked clutter) stays far under the crash-guard bound.
+    /// untracked clutter, not the designed-over-limit negatives) stays far
+    /// under the crash-guard bound.
     /// What this does not prove: anything about sources outside the repo,
     /// or about sources added after this test last ran.
     #[test]
     fn the_corpus_stays_far_below_the_limit() {
-        let files = corpus_runar_ts_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let files = corpus_runar_ts_files(&root);
         assert!(files.len() > 100, "corpus not found ({} files)", files.len());
-        let (worst, file) = files
+        let sources = files
             .iter()
-            .filter_map(|f| std::fs::read_to_string(f).ok().map(|s| (max_estimate(&s), f.clone())))
-            .max_by_key(|(e, _)| *e)
-            .unwrap();
+            .filter_map(|f| std::fs::read_to_string(f).ok().map(|s| (f.clone(), s)));
+        let (worst, file) = corpus_worst(&root, sources).unwrap();
         assert!(worst <= 2 * MAX_SOURCE_NESTING as u32, "{}: estimate {worst}", file.display());
         eprintln!("F-213 corpus: {} .runar.ts files, max estimate {worst} ({})", files.len(), file.display());
+    }
+
+    /// Guard for the exclusion above: it must not become a way to hide
+    /// ordinary over-limit sources.
+    ///
+    /// What this proves: (1) an ordinary (not listed) source above the bound
+    /// is still the corpus worst and exceeds the bound, so the corpus test
+    /// would fail on it; (2) every exclusion entry is a tracked file that
+    /// really exceeds the bound, so the list cannot go stale or vacuous.
+    /// What this does not prove: that the real corpus has no other over-limit
+    /// source (the corpus test itself covers that).
+    #[test]
+    fn the_designed_over_limit_exclusion_does_not_hide_ordinary_sources() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let deep = "(".repeat(2 * MAX_SOURCE_NESTING + 50);
+        let ordinary = root.join("examples/ts/p2pkh/P2PKH.runar.ts");
+        let (worst, file) = corpus_worst(&root, vec![(ordinary.clone(), deep.clone())].into_iter()).unwrap();
+        assert_eq!(file, ordinary);
+        assert!(worst > 2 * MAX_SOURCE_NESTING as u32, "ordinary deep source must exceed the bound: {worst}");
+        // The same deep text under an excluded path is skipped.
+        let excluded = root.join(DESIGNED_OVER_LIMIT[0]);
+        assert!(corpus_worst(&root, vec![(excluded, deep)].into_iter()).is_none());
+
+        let tracked = corpus_runar_ts_files(&root);
+        for rel in DESIGNED_OVER_LIMIT {
+            let path = root.join(rel);
+            assert!(tracked.contains(&path), "{rel} is not a tracked .runar.ts source");
+            let src = std::fs::read_to_string(&path).expect("read excluded negative");
+            assert!(max_estimate(&src) > 2 * MAX_SOURCE_NESTING as u32, "{rel} no longer exceeds the bound");
+        }
     }
 }
