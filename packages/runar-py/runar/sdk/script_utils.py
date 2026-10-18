@@ -266,7 +266,12 @@ def matches_artifact(
 
     template = artifact.script
 
-    if not artifact.constructor_slots:
+    # N-316: compare literally only when the template has no slot of ANY kind.
+    if (
+        not artifact.constructor_slots
+        and not artifact.code_sep_index_slots
+        and not artifact.code_part_len_slots
+    ):
         return code_hex == template
 
     # Every OP_0 placeholder the SDK substitutes at deploy time -- constructor

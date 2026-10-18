@@ -354,7 +354,11 @@ public final class ScriptUtils {
         }
 
         String template = artifact.scriptHex();
-        if (artifact.constructorSlots().isEmpty()) return codeHex.equals(template);
+        // N-316: compare literally only when the template has no slot of ANY kind.
+        if (artifact.constructorSlots().isEmpty() && artifact.codeSepIndexSlots().isEmpty()
+            && artifact.codePartLenSlots().isEmpty()) {
+            return codeHex.equals(template);
+        }
 
         java.util.TreeSet<Integer> offsets = new java.util.TreeSet<>();
         for (RunarArtifact.ConstructorSlot s : artifact.constructorSlots()) offsets.add(s.byteOffset());

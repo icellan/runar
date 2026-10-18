@@ -312,7 +312,9 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 
 	template := artifact.Script
 
-	if artifact.ConstructorSlots == nil || len(artifact.ConstructorSlots) == 0 {
+	// N-316: compare literally only when the template has no slot of ANY kind.
+	if len(artifact.ConstructorSlots) == 0 && len(artifact.CodeSepIndexSlots) == 0 &&
+		len(artifact.CodePartLenSlots) == 0 {
 		return codeHex == template, nil
 	}
 

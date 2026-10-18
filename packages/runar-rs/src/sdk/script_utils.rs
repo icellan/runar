@@ -347,10 +347,15 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bo
 
     let template = &artifact.script;
 
-    let slots = match artifact.constructor_slots.as_ref() {
-        Some(s) if !s.is_empty() => s,
-        _ => return Ok(code_hex == *template),
-    };
+    // N-316: compare literally only when the template has no slot of ANY kind.
+    let none_of = |n: Option<usize>| n.unwrap_or(0) == 0;
+    if none_of(artifact.constructor_slots.as_ref().map(|v| v.len()))
+        && none_of(artifact.code_sep_index_slots.as_ref().map(|v| v.len()))
+        && none_of(artifact.code_part_len_slots.as_ref().map(|v| v.len()))
+    {
+        return Ok(code_hex == *template);
+    }
+    let slots = artifact.constructor_slots.as_deref().unwrap_or(&[]);
 
     // Deduplicate by byteOffset and sort. codeSepIndex placeholders are
     // substituted at deploy time too (OP_0 -> the adjusted separator index).

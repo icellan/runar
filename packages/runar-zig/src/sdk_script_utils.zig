@@ -334,7 +334,10 @@ pub fn matchesArtifact(
 
     const template = artifact.script;
 
-    if (artifact.constructor_slots.len == 0) {
+    // N-316: compare literally only when the template has no slot of ANY kind.
+    if (artifact.constructor_slots.len == 0 and artifact.code_sep_index_slots.len == 0 and
+        artifact.code_part_len_slots.len == 0)
+    {
         return std.mem.eql(u8, code_hex, template);
     }
 
@@ -369,7 +372,8 @@ pub fn matchesArtifact(
     }
 
     // Insertion sort
-    for (1..sorted_count) |i| {
+    // N-316: sorted_count is 0 when only codePartLenSlots exist; 1..0 would panic.
+    for (1..@max(sorted_count, 1)) |i| {
         const key = sorted_offsets[i];
         var j: usize = i;
         while (j > 0 and sorted_offsets[j - 1].byte_offset > key.byte_offset) {

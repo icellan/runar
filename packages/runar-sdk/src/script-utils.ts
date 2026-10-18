@@ -272,14 +272,21 @@ export function matchesArtifact(
 
   const template = artifact.script;
 
-  if (!artifact.constructorSlots || artifact.constructorSlots.length === 0) return codeHex === template;
+  // N-316: a template with no slot of ANY kind is compared literally. Gating on
+  // constructorSlots alone skipped codeSepIndex / codePartLen slots too, so a
+  // stateful artifact carrying only those never matched its honest deployment.
+  if (
+    !(artifact.constructorSlots?.length) &&
+    !(artifact.codeSepIndexSlots?.length) &&
+    !(artifact.codePartLenSlots?.length)
+  ) return codeHex === template;
 
   // Every OP_0 placeholder the SDK replaces at deploy time is one variable
   // script element: constructor slots AND codeSepIndex slots (the latter bake
   // as OP_1 post-R-010, so comparing them literally rejected every honest
   // deployment of a stateful contract that carries one; Go/Rust/Python match).
   const placeholderOffsets = [
-    ...artifact.constructorSlots.map((s) => s.byteOffset),
+    ...(artifact.constructorSlots ?? []).map((s) => s.byteOffset),
     ...(artifact.codeSepIndexSlots ?? []).map((s) => s.byteOffset),
   ];
 

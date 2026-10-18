@@ -228,7 +228,10 @@ module Runar
 
         template = artifact.script
 
-        if artifact.constructor_slots.nil? || artifact.constructor_slots.empty?
+        # N-316: compare literally only when the template has no slot of ANY kind.
+        if Array(artifact.constructor_slots).empty? &&
+           Array(artifact.code_sep_index_slots).empty? &&
+           Array(artifact.code_part_len_slots).empty?
           return code_hex == template
         end
 
@@ -237,7 +240,7 @@ module Runar
         # (the latter bake as OP_1, so comparing them literally rejected every
         # honest deployment carrying one; Go/Rust/Python/TS match).
         # De-duplicate by byte_offset.
-        slots = (artifact.constructor_slots.map(&:byte_offset) +
+        slots = (Array(artifact.constructor_slots).map(&:byte_offset) +
                  Array(artifact.code_sep_index_slots).map(&:byte_offset))
                 .uniq.sort.map { |off| Struct.new(:byte_offset).new(off) }
 
