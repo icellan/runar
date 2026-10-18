@@ -955,7 +955,11 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
 	}
 
-	p.match(rbTokEnd) // end of class
+	// N-319: the class `end` is required; EOF here means it is missing.
+	if !p.match(rbTokEnd) {
+		eofTok := p.peek()
+		p.errors = append(p.errors, lexDiag("unterminated class: missing closing 'end'", p.fileName, eofTok.line, eofTok.col))
+	}
 
 	// Auto-generate constructor if not provided
 	if constructor == nil {

@@ -1099,7 +1099,8 @@ const Parser = struct {
         // N-093: a `runar_sighash` with no `def` after it annotates nothing.
         for (pending_sighash.items) |p| self.addErrorAtLoc(p.loc, sighash_directive.LOST_SIGHASH_ERROR);
 
-        _ = self.match(.kw_end); // end of class
+        // N-319: the class `end` is required; EOF here means it is missing.
+        if (!self.match(.kw_end)) self.addError("unterminated class: missing closing 'end'");
 
         // Auto-generate constructor if not provided
         if (constructor == null) {

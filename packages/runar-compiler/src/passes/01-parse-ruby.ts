@@ -867,7 +867,15 @@ class RbParser {
       this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', p.loc));
     }
 
-    this.match('end'); // end of class
+    // N-319: the class `end` is required; EOF here means it is missing.
+    if (!this.match('end')) {
+      const eofTok = this.current();
+      this.errors.push(makeDiagnostic(
+        "unterminated class: missing closing 'end'",
+        'error',
+        { file: this.file, line: eofTok.line, column: eofTok.column },
+      ));
+    }
 
     // Auto-generate constructor if not provided
     if (!constructor) {

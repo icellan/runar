@@ -878,7 +878,12 @@ public final class RbParser {
                 errors.add(file + ":" + sl.line() + ":" + sl.column() + ": "
                     + SighashDirective.lostDirectiveMessage("@sighash"));
             }
-            match(TK.END);
+            // N-319: the class `end` is required; EOF here means it is missing.
+            if (!match(TK.END)) {
+                Token eofTok = peek();
+                errors.add(file + ":" + eofTok.line + ":" + eofTok.col
+                    + ": unterminated class: missing closing 'end'");
+            }
 
             if (constructor == null) {
                 constructor = autoGenerateConstructor(properties);

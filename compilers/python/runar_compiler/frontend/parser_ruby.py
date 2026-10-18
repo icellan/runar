@@ -944,7 +944,9 @@ class _RbParser:
         for _ in pending_sighash:
             self._errors.append(lost_directive_message("@sighash"))
 
-        self._match(TOK_END)  # end of class
+        # N-319: the class `end` is required; EOF here means it is missing.
+        if not self._match(TOK_END):
+            self._errors.append("unterminated class: missing closing 'end'")
 
         # Auto-generate constructor if not provided
         if constructor is None:

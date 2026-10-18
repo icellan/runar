@@ -1173,7 +1173,11 @@ impl<'a> RbParser<'a> {
             self.errors.push(lost_directive_message("@sighash"));
         }
 
-        self.match_tok(&Token::End); // end of class
+        // N-319: the class `end` is required; EOF here means it is missing.
+        if !self.match_tok(&Token::End) {
+            self.errors
+                .push("unterminated class: missing closing 'end'".to_string());
+        }
 
         // Auto-generate constructor if not provided
         let mut constructor =

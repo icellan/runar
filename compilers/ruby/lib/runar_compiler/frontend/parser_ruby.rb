@@ -961,7 +961,11 @@ module RunarCompiler
           @errors << located_message(p[:loc], SighashDirective.lost_directive_message("@sighash"))
         end
 
-        match_tok(TOK_END) # end of class
+        # N-319: the class +end+ is required; EOF here means it is missing.
+        unless match_tok(TOK_END)
+          eof_tok = peek
+          @errors << "#{@file}:#{eof_tok.line}:#{eof_tok.col}: unterminated class: missing closing 'end'"
+        end
 
         # Auto-generate constructor if not provided
         constructor = auto_generate_constructor(properties) if constructor.nil?

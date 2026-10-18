@@ -458,17 +458,18 @@ class TestParserRubyEdges < Minitest::Test
         # No end, no methods, no constructor
     RB
 
-    # Must NOT raise. The TS reference (01-parse-ruby.ts) recovers from the
-    # missing `end` by treating EOF as an implicit close: it reports no
-    # errors and produces a contract named `Broken` with property `x` and
-    # no methods (constructor auto-generated). Ruby must agree on that
-    # specific recovered shape, not merely avoid raising — a stub that
+    # Must NOT raise. N-319: the class `end` is required, so every tier
+    # reports the shared "missing closing 'end'" diagnostic; the TS reference
+    # (01-parse-ruby.ts) still returns the partial contract named `Broken`
+    # with property `x` and no methods (constructor auto-generated). Ruby must
+    # agree on that specific recovered shape, not merely avoid raising — a stub that
     # always returns an empty/wrong-named contract would still pass the old
     # assertion-free body but fails these checks.
     # Does not prove: anything about method bodies (this fixture has none).
     begin
       result = parse(source)
-      assert_empty result.errors
+      assert_equal 1, result.errors.size
+      assert_includes result.errors.first.message, "missing closing 'end'"
       refute_nil result.contract
       assert_equal 'Broken', result.contract.name
       assert_equal %w[x], result.contract.properties.map(&:name)

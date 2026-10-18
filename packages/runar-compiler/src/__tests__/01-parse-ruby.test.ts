@@ -1207,10 +1207,11 @@ end
       expect(result.contract).toBeNull();
     });
 
-    it('does not throw when class end keyword is missing', () => {
-      // The parser loops until 'end' or 'eof' — on eof it exits and
-      // match('end') silently returns false.  The contract is still
-      // returned rather than null, so the main guarantee is no exception.
+    it('reports a diagnostic when class end keyword is missing', () => {
+      // N-319: the class `end` is required. On eof the body loop exits and the
+      // parser must report the shared "missing closing 'end'" diagnostic
+      // rather than silently returning a partial contract. Proves the
+      // diagnostic is emitted and nothing throws; does not prove its location.
       const rb = `
 class Foo < Runar::SmartContract
   prop :x, Bigint
@@ -1219,18 +1220,9 @@ class Foo < Runar::SmartContract
     @x = x
   end
 `;
-      // Must not throw.
-      let threw = false;
-      let result: ReturnType<typeof parseRubySource> | null = null;
-      try {
-        result = parseRubySource(rb, 'Test.runar.rb');
-      } catch {
-        threw = true;
-      }
-      expect(threw).toBe(false);
-      // Either a contract is returned (partial parse) or errors are present.
-      // Both are acceptable — the requirement is that no exception is raised.
-      expect(result).not.toBeNull();
+      const result = parseRubySource(rb, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.some(e => e.message.includes("missing closing 'end'"))).toBe(true);
     });
 
     it('produces an error for unknown parent class', () => {
