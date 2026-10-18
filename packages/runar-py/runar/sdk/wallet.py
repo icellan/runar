@@ -245,7 +245,9 @@ class WalletProvider(Provider):
             if not out.get('spendable', False):
                 continue
             locking_script = out.get('locking_script', '')
-            if locking_script and locking_script != expected_script:
+            # N-043: an output without a usable script is dropped (fail-closed,
+            # matching the TypeScript reference).
+            if not locking_script or locking_script != expected_script:
                 continue
 
             outpoint = out.get('outpoint', '')
@@ -256,7 +258,7 @@ class WalletProvider(Provider):
                 txid=txid,
                 output_index=int(vout_str),
                 satoshis=out.get('satoshis', 0),
-                script=locking_script or expected_script,
+                script=locking_script,
             ))
 
         return utxos

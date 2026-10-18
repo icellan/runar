@@ -1350,6 +1350,38 @@ mod tests {
         assert_eq!(utxos[0].output_index, 0);
     }
 
+    // N-043: an output with an empty / absent locking script is dropped
+    // (fail-closed, the TS reference policy).
+    // PROVES: only the output carrying the signer's P2PKH script is returned.
+    // DOES NOT PROVE: behaviour against a real BRC-100 wallet.
+    #[test]
+    fn wallet_provider_get_utxos_drops_empty_locking_script() {
+        let wallet = MockWalletClient::new();
+        let pub_key = wallet.public_key.clone();
+        let expected_script = build_p2pkh_script(&pub_key);
+        wallet.add_output(&format!("{}.0", "aa".repeat(32)), 50_000, &expected_script);
+        wallet.add_output(&format!("{}.1", "bb".repeat(32)), 30_000, "");
+        wallet.outputs.borrow_mut().push(WalletOutput {
+            outpoint: format!("{}.2", "cc".repeat(32)),
+            satoshis: 20_000,
+            locking_script: None,
+            spendable: true,
+        });
+
+        let mut provider = WalletProvider::new(
+            wallet,
+            (2, "test".to_string()),
+            "1".to_string(),
+            "my-basket".to_string(),
+            None, None, None, None, None,
+        );
+        provider.get_derived_pub_key().unwrap();
+
+        let utxos = provider.get_utxos("ignored").unwrap();
+        assert_eq!(utxos.len(), 1);
+        assert_eq!(utxos[0].satoshis, 50_000);
+    }
+
     #[test]
     fn wallet_provider_ensure_funding_creates_action_when_insufficient() {
         let wallet = MockWalletClient::new();

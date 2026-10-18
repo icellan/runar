@@ -335,6 +335,23 @@ class TestWalletProviderConstructor:
 # ---------------------------------------------------------------------------
 
 class TestWalletProviderGetUtxos:
+    def test_drops_output_with_empty_or_missing_locking_script(self):
+        """N-043: an output without a usable script is dropped (TS reference)."""
+        # PROVES: empty / absent locking_script is not returned (and not
+        # silently replaced by the expected P2PKH script); the matching output is.
+        # DOES NOT PROVE: behaviour against a real BRC-100 wallet.
+        wallet = MockWalletClient()
+        signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+        provider = WalletProvider(wallet, signer, basket='test')
+        expected_script = build_p2pkh_script(MOCK_PUB_KEY)
+        wallet.set_outputs([
+            {'outpoint': 'aa' * 32 + '.0', 'satoshis': 1, 'locking_script': expected_script, 'spendable': True},
+            {'outpoint': 'bb' * 32 + '.1', 'satoshis': 2, 'locking_script': '', 'spendable': True},
+            {'outpoint': 'cc' * 32 + '.2', 'satoshis': 3, 'spendable': True},
+        ])
+        utxos = provider.get_utxos('ignored')
+        assert [(u.txid, u.script) for u in utxos] == [('aa' * 32, expected_script)]
+
     def test_filters_spendable_p2pkh(self):
         """get_utxos returns only spendable P2PKH UTXOs matching the signer."""
         wallet = MockWalletClient()

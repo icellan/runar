@@ -20,6 +20,8 @@ pub const DeployError = error{
     InvalidScript,
     OutOfMemory,
     BuildFailed,
+    /// An address string that is not a decodable Base58Check P2PKH address (N-043).
+    InvalidAddress,
 };
 
 /// Result of building a deploy transaction.
@@ -228,7 +230,13 @@ pub fn buildP2PKHScript(allocator: std.mem.Allocator, address: []const u8) ![]u8
     }
 
     // Decode Base58Check address
-    const decoded = bsvz.compat.address.decodeP2pkh(allocator, address) catch return error.OutOfMemory;
+    // N-043: only a real allocation failure is OutOfMemory; every decode
+    // failure (bad Base58, checksum, payload length, network prefix) is
+    // InvalidAddress.
+    const decoded = bsvz.compat.address.decodeP2pkh(allocator, address) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidAddress,
+    };
     const ls = decoded.lockingScript();
     const hex_buf = try allocator.alloc(u8, ls.len * 2);
     _ = bsvz.primitives.hex.encodeLower(&ls, hex_buf) catch {
@@ -317,6 +325,24 @@ test "buildP2PKHScript accepts G as pubkey, hash and address; rejects bad addres
             std.debug.print("buildP2PKHScript accepted {s}\n", .{in});
             return error.TestUnexpectedResult;
         } else |_| {}
+    }
+}
+
+// N-043: an address that fails to decode used to surface as error.OutOfMemory
+// (every decode failure was mapped to it). Proves: a bad checksum, a P2SH
+// payload and a non-Base58 string each yield the distinct error.InvalidAddress.
+// Does not prove: which underlying bsvz decode error occurred (all collapse to
+// InvalidAddress); real allocation failure still reports OutOfMemory (not
+// exercised here).
+test "N-043 buildP2PKHScript reports a distinct InvalidAddress error" {
+    const allocator = std.testing.allocator;
+    const bad = [_][]const u8{
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb", // bad checksum
+        "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", // P2SH
+        "1Badx", // not Base58Check
+    };
+    for (bad) |in| {
+        try std.testing.expectError(error.InvalidAddress, buildP2PKHScript(allocator, in));
     }
 }
 

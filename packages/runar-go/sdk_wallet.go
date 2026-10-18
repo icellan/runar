@@ -183,8 +183,13 @@ func (p *WalletProvider) GetUtxos(address string) ([]UTXO, error) {
 		if !out.Spendable {
 			continue
 		}
+		// N-043: an output without a usable locking script is dropped
+		// (fail-closed), matching the TypeScript reference.
+		if out.LockingScript == "" {
+			continue
+		}
 		// Filter by P2PKH match if we have a signer pubkey.
-		if expectedScript != "" && out.LockingScript != "" && out.LockingScript != expectedScript {
+		if expectedScript != "" && out.LockingScript != expectedScript {
 			continue
 		}
 		txid, vout := parseOutpoint(out.Outpoint)

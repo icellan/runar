@@ -270,7 +270,9 @@ module Runar
           next unless out[:spendable] || out['spendable']
 
           locking_script = out[:locking_script] || out['locking_script'] || ''
-          next unless locking_script == expected_script || locking_script.empty?
+          # N-043: an output without a usable script is dropped (fail-closed,
+          # matching the TypeScript reference).
+          next if locking_script.empty? || locking_script != expected_script
 
           outpoint = out[:outpoint] || out['outpoint'] || ''
           txid, vout_str = outpoint.split('.')

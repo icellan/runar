@@ -323,6 +323,10 @@ pub const WalletProvider = struct {
         for (wallet_outputs) |wo| {
             if (!wo.spendable) continue;
 
+            // N-043: an output without a usable locking script is dropped
+            // (fail-closed), matching the TypeScript reference.
+            if (wo.locking_script.len == 0) continue;
+
             // Filter by expected script if set
             if (self.expected_script) |es| {
                 if (!std.mem.eql(u8, wo.locking_script, es)) continue;
@@ -682,6 +686,41 @@ test "WalletProvider returns UTXOs from wallet outputs" {
     try std.testing.expectEqual(@as(usize, 1), utxos.len);
     try std.testing.expectEqual(@as(i64, 5000), utxos[0].satoshis);
     try std.testing.expectEqual(@as(i32, 0), utxos[0].output_index);
+}
+
+// N-043: an output the wallet reports with an empty locking script is dropped
+// (fail-closed, the TypeScript reference policy), with or without an expected
+// script configured. Proves: only the output that carries a script is returned.
+// Does not prove: behaviour against a real BRC-100 wallet.
+test "N-043 WalletProvider.getUtxos drops an output with an empty locking script" {
+    const allocator = std.testing.allocator;
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+
+    const good = "76a914" ++ "00" ** 20 ++ "88ac";
+    try mock.addOutput(.{ .outpoint = "aabb" ++ "00" ** 30 ++ ".0", .satoshis = 5000, .locking_script = good, .spendable = true });
+    try mock.addOutput(.{ .outpoint = "ccdd" ++ "00" ** 30 ++ ".1", .satoshis = 3000, .locking_script = "", .spendable = true });
+
+    const wc = mock.walletClient();
+    var wp = WalletProvider.init(allocator, wc, "test-basket", .{});
+    defer wp.deinit();
+
+    // First without an expected script, then with one.
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        if (round == 1) try wp.setExpectedScript(good);
+        var prov = wp.provider();
+        const utxos = try prov.getUtxos(allocator, "any-address");
+        defer {
+            for (utxos) |*u| {
+                var mu = u.*;
+                mu.deinit(allocator);
+            }
+            allocator.free(utxos);
+        }
+        try std.testing.expectEqual(@as(usize, 1), utxos.len);
+        try std.testing.expectEqual(@as(i64, 5000), utxos[0].satoshis);
+    }
 }
 
 // N-260 / R100: WalletProvider.broadcast used to discard the signed tx and

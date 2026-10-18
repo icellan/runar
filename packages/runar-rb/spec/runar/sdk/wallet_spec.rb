@@ -297,8 +297,8 @@ end
 # (0279be667e…), get_utxos returns, keeps the spendable outputs whose script is
 # 76a914 HASH160(G) 88ac, and drops an output locked to another key's P2PKH
 # (the Genesis address) and an unspendable one.
-# DOES NOT PROVE: behaviour against a real BRC-100 wallet, or the policy for an
-# output reported with an empty locking script (kept as-is, like Go/Python).
+# DOES NOT PROVE: behaviour against a real BRC-100 wallet. (The empty-locking-script
+# policy is pinned separately, in the N-043 example below.)
 RSpec.describe Runar::SDK::WalletProvider, '#get_utxos (F-043)' do
   g_script       = '76a914751e76e8199196d454941c45d1b3a323f1433bd688ac'
   genesis_script = '76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac'
@@ -325,5 +325,27 @@ RSpec.describe Runar::SDK::WalletProvider, '#get_utxos (F-043)' do
     expect(utxos.map { |u| [u.txid, u.output_index, u.satoshis, u.script] }).to eq(
       [['aa' * 32, 0, 1000, g_script], ['dd' * 32, 3, 4000, g_script]]
     )
+  end
+end
+
+# N-043: an output reported with an empty / missing locking script is dropped
+# (fail-closed), matching the TypeScript reference. It used to be kept with
+# script ''.
+# PROVES: only the output carrying the signer's P2PKH script is returned.
+# DOES NOT PROVE: behaviour against a real BRC-100 wallet.
+RSpec.describe Runar::SDK::WalletProvider, '#get_utxos (N-043)' do
+  g_script = '76a914751e76e8199196d454941c45d1b3a323f1433bd688ac'
+
+  it 'drops spendable outputs whose locking script is empty or missing' do
+    outs = [
+      { outpoint: "#{'aa' * 32}.0", satoshis: 1000, locking_script: g_script, spendable: true },
+      { outpoint: "#{'bb' * 32}.1", satoshis: 2000, locking_script: '', spendable: true },
+      { outpoint: "#{'cc' * 32}.2", satoshis: 3000, spendable: true }
+    ]
+    wallet = MockWalletClient.new
+    wallet.define_singleton_method(:list_outputs) { |basket:, tags: [], limit: 100| outs }
+    signer = Runar::SDK::WalletSigner.new(wallet: wallet, protocol_id: [2, 'test'], key_id: '1')
+    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b')
+    expect(wp.get_utxos('ignored').map { |u| [u.txid, u.script] }).to eq([['aa' * 32, g_script]])
   end
 end
