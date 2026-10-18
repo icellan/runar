@@ -39,11 +39,14 @@ same way every other cross-tier fixture suite in this repo
 | Rust | `packages/runar-rs/tests/f297_codegen_conformance.rs` | all 5 fixtures, structural + a real `cargo check` against `runar-lang` as an external dependency |
 | Python | `packages/runar-py/tests/test_f297_codegen_conformance.py` | all 5 fixtures, structural + `exec()` of the generated module in a fresh namespace |
 
-No tier's generator fully satisfies MANIFEST.md today: `from_utxo` /
-`attach_inscription` (or the language-idiomatic spelling) are missing from
-every generator, including the TypeScript reference. Each runner above
-documents its own generator's gaps in its module doc comment rather than
-asserting them away.
+N-278: every tier's generator emits the `from_utxo` / `attach_inscription`
+delegations MANIFEST.md requires (language-idiomatic spelling:
+`fromUtxo`/`attachInscription`, Go's `<Name>ContractFromUtxo` /
+`AttachInscription`), and every tier's runner asserts them. The Go runner
+asserts them for all five fixtures (`go vet`-compiled) and runs the
+round-trip on `p2pkh.json`; the Rust generator additionally emits the
+`outputs` option (`Option<Vec<OutputSpec>>`) and typed state accessors
+(`count()` returning `Option<BigInt>`), matching Ruby/Java.
 
 **Zig compile step (N-190).** Zig can't `eval` a string or in-memory-compile
 the way the other tiers' runners do, so the compile check lives as a

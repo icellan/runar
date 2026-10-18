@@ -46,11 +46,10 @@
 //     throwing.
 //
 // What this does not prove:
-//   - Full MANIFEST compliance. `attachInscription` is NOT emitted by
-//     `generateTypescript` for `inscribed.json` -- the reference generator
-//     has the same gap as every other tier's generator (the underlying
-//     `RunarContract.withInscription` exists; the typed wrapper does not
-//     delegate to it). Documented here rather than asserted away.
+//   - Full MANIFEST compliance beyond what is asserted below. N-278: both
+//     `fromUtxo` and `attachInscription` are now asserted for every fixture
+//     (`attachInscription` delegates to `RunarContract.withInscription`), and
+//     the delegation is executed against the real `RunarContract`.
 //   - A real type-check. `ts.transpileModule` strips types without
 //     checking them (matching the existing `loadWrapper` precedent in this
 //     package) -- a type-only error in the generated `.d.ts`-equivalent
@@ -73,7 +72,7 @@ import ts from 'typescript';
 import type { RunarArtifact } from 'runar-ir-schema';
 import { RunarContract } from '../contract.js';
 import { buildP2PKHScript } from '../script-utils.js';
-import { generateTypescript } from '../codegen/index.js';
+import { generateTypescript, generateRust, generatePython, generateGo } from '../codegen/index.js';
 
 function fixturesDir(rel: string): string {
   return fileURLToPath(new URL(`../../../../conformance/sdk-codegen/fixtures/${rel}`, import.meta.url));
@@ -108,6 +107,8 @@ describe('F-297 — cross-SDK codegen conformance (TypeScript runner)', () => {
       expect(src).toContain('export class P2PKHContract');
       expect(src).toContain('static fromUtxo(');
       expect(src).toContain('static async fromTxId(');
+      expect(src).toContain('attachInscription(insc: Inscription)');
+      expect(src).toContain('this.inner.withInscription(insc)');
       expect(src).toContain('connect(provider: Provider, signer: Signer)');
       expect(src).toContain('getLockingScript()');
       expect(src).toContain('async deploy(');
@@ -216,20 +217,57 @@ describe('F-297 — cross-SDK codegen conformance (TypeScript runner)', () => {
     const artifact = loadFixture('inscribed.json');
     const src = generateTypescript(artifact);
 
-    it('constructs correctly but does NOT emit attachInscription (documented generator gap)', () => {
+    it('constructs correctly and emits attachInscription + fromUtxo delegations (N-278)', () => {
       expect(src).toContain('export class InscribedHolderContract');
       expect(src).toContain('owner:');
       expect(src).toContain('async transfer(');
       expect(src).toContain('async prepareTransfer(');
       expect(src).toContain('async finalizeTransfer(');
-      expect(src).not.toContain('attachInscription');
+      expect(src).toContain('attachInscription(insc: Inscription)');
+      expect(src).toContain('static fromUtxo(');
       expect(src).not.toContain('{{');
+    });
+
+    it('attachInscription splices the envelope and fromUtxo restores it, through the real RunarContract (N-278)', () => {
+      const Wrapper = loadWrapper(src, 'InscribedHolderContract');
+      const wrapper = new Wrapper(artifact, { owner: '11'.repeat(20) });
+      const plain = wrapper.getLockingScript() as string;
+      const insc = { contentType: 'text/plain', data: Buffer.from('hello').toString('hex') };
+      expect(wrapper.attachInscription(insc)).toBe(wrapper); // chains like withInscription
+      const inscribed = wrapper.getLockingScript() as string;
+      expect(inscribed).not.toBe(plain);
+      expect(inscribed).toContain(Buffer.from('text/plain').toString('hex'));
+      const restored = Wrapper.fromUtxo(artifact, { txid: 'aa'.repeat(32), outputIndex: 0, satoshis: 1000, script: inscribed });
+      expect(restored.getLockingScript()).toBe(inscribed);
     });
 
     it('constructs and resolves getLockingScript() against the real RunarContract', () => {
       const Wrapper = loadWrapper(src, 'InscribedHolderContract');
       const wrapper = new Wrapper(artifact, { owner: '11'.repeat(20) });
       expect(typeof wrapper.getLockingScript()).toBe('string');
+    });
+  });
+
+  // N-278: the TS SDK renders the same shared templates for Go/Rust/Python
+  // (`generateGo` etc.), so the typed Rust accessors rely on `buildCodegenContext`
+  // producing the same `stateFields` the Rust SDK's own context builder does.
+  describe('shared-template outputs carry the N-278 members', () => {
+    it('generateRust emits from_utxo, attach_inscription, outputs and typed state accessors', () => {
+      const src = generateRust(loadFixture('counter.json'));
+      expect(src).toContain('pub fn from_utxo(artifact: RunarArtifact, utxo: &Utxo)');
+      expect(src).toContain('pub fn attach_inscription(&mut self, insc: Inscription)');
+      expect(src).toContain('pub outputs: Option<Vec<OutputSpec>>,');
+      expect(src).toContain('pub fn count(&self) -> Option<BigInt>');
+      expect(generateRust(loadFixture('p2pkh.json'))).not.toContain('Option<BigInt>');
+    });
+
+    it('generateGo and generatePython emit the from-UTXO factory and attach-inscription method', () => {
+      const go = generateGo(loadFixture('p2pkh.json'));
+      expect(go).toContain('func P2PKHContractFromUtxo(artifact *runar.RunarArtifact, utxo runar.UTXO)');
+      expect(go).toContain('func (c *P2PKHContract) AttachInscription(insc *runar.Inscription) error');
+      const py = generatePython(loadFixture('p2pkh.json'));
+      expect(py).toContain('def from_utxo(');
+      expect(py).toContain('def attach_inscription(self, insc: Inscription)');
     });
   });
 

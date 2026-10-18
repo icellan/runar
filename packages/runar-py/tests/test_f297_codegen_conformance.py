@@ -39,11 +39,10 @@ What this test proves:
     module-body execution time).
 
 What this test does not prove:
-  - Full MANIFEST compliance. The Python generator does not emit
-    `from_utxo` (the underlying `RunarContract.from_utxo` exists and is used
-    directly by non-generated code, but the typed wrapper does not delegate
-    to it) or `attach_inscription` (`RunarContract.with_inscription` exists,
-    same gap). Both are documented here rather than asserted away.
+  - Full MANIFEST compliance beyond what is asserted below. N-278: both
+    `from_utxo` and `attach_inscription` are now asserted for every fixture,
+    and their delegation to `RunarContract.from_utxo` / `with_inscription`
+    is executed against the real SDK.
   - Runtime behavior beyond "the module execs". Unlike
     `test_f239_codegen_satoshis_none.py`, this file does not deploy or call
     anything through `MockProvider` — that is a property of this narrower
@@ -59,6 +58,7 @@ import pathlib
 
 import pytest
 
+from runar.sdk import Inscription, Utxo
 from runar.sdk.codegen import generate_python
 from runar.sdk.types import RunarArtifact
 
@@ -88,6 +88,10 @@ def test_p2pkh_fixture_has_required_structural_elements():
 
     assert "class P2PKHContract" in src
     assert "def from_txid(" in src
+    assert "def from_utxo(" in src
+    assert "def attach_inscription(self, insc: Inscription)" in src
+    assert "self._inner.with_inscription(insc)" in src
+    assert "RunarContract.from_utxo(artifact, utxo)" in src
     assert "def connect(self, provider: Provider, signer: Signer)" in src
     assert "def get_locking_script(self)" in src
     assert "def deploy(" in src
@@ -170,11 +174,7 @@ def test_stateful_escrow_fixture_has_required_structural_elements():
     assert "EscrowContract" in ns
 
 
-def test_inscribed_fixture_compiles_despite_missing_attach_inscription():
-    # MANIFEST requires an `attach_inscription` delegation for this fixture.
-    # The Python generator does not emit one (no inscription section in
-    # _PYTHON_TEMPLATE) -- documented in this module's doc comment rather
-    # than faked here.
+def test_inscribed_fixture_emits_attach_inscription_and_from_utxo():
     artifact = load_fixture("inscribed.json")
     src = generate_python(artifact)
 
@@ -183,11 +183,35 @@ def test_inscribed_fixture_compiles_despite_missing_attach_inscription():
     assert "def transfer(" in src
     assert "def prepare_transfer(" in src
     assert "def finalize_transfer(" in src
-    assert "attach_inscription" not in src
+    assert "def attach_inscription(self, insc: Inscription)" in src
+    assert "def from_utxo(" in src
     assert "{{" not in src, "unrendered Mustache tag"
 
     ns = exec_check(src, "inscribed.json")
     assert "InscribedHolderContract" in ns
+
+
+def test_attach_inscription_and_from_utxo_delegate_to_the_real_contract():
+    """N-278: the wrapper's `attach_inscription` splices the envelope into the
+    locking script and `from_utxo` restores a wrapper with the identical
+    script, both through the real `RunarContract`."""
+    artifact = load_fixture("inscribed.json")
+    ns = exec_check(generate_python(artifact), "inscribed.json")
+    wrapper_cls = ns["InscribedHolderContract"]
+
+    wrapper = wrapper_cls(artifact, owner="11" * 20)
+    plain = wrapper.get_locking_script()
+    insc = Inscription(content_type="text/plain", data=b"hello".hex())
+    assert wrapper.attach_inscription(insc) is wrapper  # chains like with_inscription
+    inscribed = wrapper.get_locking_script()
+    assert inscribed != plain
+    assert b"text/plain".hex() in inscribed
+
+    restored = wrapper_cls.from_utxo(
+        artifact, Utxo(txid="aa" * 32, output_index=0, satoshis=1000, script=inscribed)
+    )
+    assert isinstance(restored, wrapper_cls)
+    assert restored.get_locking_script() == inscribed
 
 
 def test_all_five_fixtures_generate_and_exec_cleanly():

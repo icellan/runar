@@ -146,6 +146,84 @@ func TestGenerateGo_P2PKHFixture_MethodsHaveParamsAndBodies(t *testing.T) {
 	vetGenerated(t, src)
 }
 
+// N-278: MANIFEST.md requires every typed wrapper to expose a from-UTXO
+// factory and an attach-inscription method delegating to the untyped
+// RunarContract (FromUtxo / WithInscription). The Go generator emitted only
+// the FromTxId factory.
+//
+// What this proves: for all five shared fixtures the generated wrapper
+// contains <Name>ContractFromUtxo and AttachInscription, compiles (go vet),
+// and, run against the real SDK on the p2pkh fixture, AttachInscription
+// splices the ordinals envelope into the locking script and
+// <Name>ContractFromUtxo restores a wrapper whose locking script is
+// byte-identical.
+//
+// What this does not prove: that an inscribed UTXO deploys/spends on a
+// validating node (the fixtures' scripts are placeholders), nor stateful
+// from-UTXO state recovery through the wrapper.
+func TestGenerateGo_AllFixtures_FromUtxoAndAttachInscription(t *testing.T) {
+	for _, tc := range []struct{ fixture, name string }{
+		{"p2pkh.json", "P2PKH"},
+		{"counter.json", "Counter"},
+		{"simple.json", "Simple"},
+		{"stateful-escrow.json", "Escrow"},
+		{"inscribed.json", "InscribedHolder"},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			src := GenerateGo(loadCodegenFixture(t, tc.fixture))
+			assertContains(t, src, "func "+tc.name+"ContractFromUtxo(artifact *runar.RunarArtifact, utxo runar.UTXO) (*"+tc.name+"Contract, error) {")
+			assertContains(t, src, "inner, err := runar.FromUtxo(artifact, utxo)")
+			assertContains(t, src, "func (c *"+tc.name+"Contract) AttachInscription(insc *runar.Inscription) error {")
+			assertContains(t, src, "_, err := c.inner.WithInscription(insc)")
+			if strings.Contains(src, "{{") {
+				t.Fatalf("generated Go still contains unrendered Mustache tags:\n%s", src)
+			}
+			vetGenerated(t, src)
+		})
+	}
+}
+
+func TestGenerateGo_P2PKH_AttachInscriptionAndFromUtxoRoundTrip(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "conformance", "sdk-codegen", "fixtures", "p2pkh.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := GenerateGo(loadCodegenFixture(t, "p2pkh.json"))
+	driver := codegenDriverPrelude + `
+func main() {
+	art, _, _, _ := setup()
+	c := NewP2PKHContract(art, strings.Repeat("11", 20))
+	plain := c.GetLockingScript()
+	if err := c.AttachInscription(&runar.Inscription{ContentType: "text/plain", Data: hex.EncodeToString([]byte("hello"))}); err != nil {
+		fail("AttachInscription: %v", err)
+	}
+	inscribed := c.GetLockingScript()
+	if inscribed == plain {
+		fail("AttachInscription did not change the locking script")
+	}
+	if !strings.Contains(inscribed, hex.EncodeToString([]byte("text/plain"))) {
+		fail("inscribed script lacks the content type: %s", inscribed)
+	}
+	restored, err := P2PKHContractFromUtxo(art, runar.UTXO{Txid: strings.Repeat("aa", 32), OutputIndex: 0, Satoshis: 1000, Script: inscribed})
+	if err != nil {
+		fail("FromUtxo: %v", err)
+	}
+	if got := restored.GetLockingScript(); got != inscribed {
+		fail("restored script %s != inscribed %s", got, inscribed)
+	}
+	fmt.Println("CODEGEN_E2E_OK")
+}
+`
+	dir, env := codegenTempModule(t, map[string]string{
+		"wrapper.go":    wrapper,
+		"main.go":       driver,
+		"artifact.json": string(data),
+	})
+	if out := runGo(t, dir, env, "run", "."); !strings.Contains(out, "CODEGEN_E2E_OK") {
+		t.Fatalf("driver did not report success:\n%s", out)
+	}
+}
+
 // compileCodegenSource compiles a Rúnar TS source with the Go compiler and
 // returns the artifact JSON and the decoded artifact.
 func compileCodegenSource(t *testing.T, fileName, src string) ([]byte, *RunarArtifact) {

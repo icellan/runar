@@ -143,7 +143,7 @@ def _to_pascal_case(name: str) -> str:
     return name[0].upper() + name[1:] if name else name
 
 
-_SNAKE_RESERVED = {'connect', 'deploy', 'contract', 'get_locking_script'}
+_SNAKE_RESERVED = {'connect', 'deploy', 'contract', 'get_locking_script', 'attach_inscription'}
 
 
 def _safe_method_name(name: str) -> str:
@@ -362,7 +362,7 @@ _PYTHON_TEMPLATE = (
     'from runar.sdk import (\n'
     '    RunarContract, RunarArtifact, Provider, Signer,\n'
     '    TransactionData, DeployOptions, CallOptions, PreparedCall,\n'
-    '    TerminalOutput as SdkTerminalOutput,\n'
+    '    TerminalOutput as SdkTerminalOutput, Utxo, Inscription,\n'
     ')\n'
     'from runar.sdk.deployment import build_p2pkh_script\n'
     '\n'
@@ -430,6 +430,21 @@ _PYTHON_TEMPLATE = (
     '        instance = cls.__new__(cls)\n'
     '        instance._inner = inner\n'
     '        return instance\n'
+    '\n'
+    '    @classmethod\n'
+    '    def from_utxo(\n'
+    '        cls,\n'
+    '        artifact: RunarArtifact,\n'
+    '        utxo: Utxo,\n'
+    '    ) -> {{contractName}}Contract:\n'
+    '        inner = RunarContract.from_utxo(artifact, utxo)\n'
+    '        instance = cls.__new__(cls)\n'
+    '        instance._inner = inner\n'
+    '        return instance\n'
+    '\n'
+    '    def attach_inscription(self, insc: Inscription) -> {{contractName}}Contract:\n'
+    '        self._inner.with_inscription(insc)\n'
+    '        return self\n'
     '\n'
     '    def connect(self, provider: Provider, signer: Signer) -> None:\n'
     '        self._inner.connect(provider, signer)\n'

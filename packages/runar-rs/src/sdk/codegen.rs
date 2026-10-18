@@ -32,6 +32,19 @@ fn rust_sdk_value_expr(abi_type: &str, var_name: &str) -> String {
     }
 }
 
+/// Match arms (over `Option<&SdkValue>`) that read a state value of the given
+/// ABI type as the Rust type `map_type_to_rust` returns for it. Anything that
+/// does not fit yields `None` through the template's `_ => None` arm.
+fn rust_state_read_arms(abi_type: &str) -> &'static str {
+    match abi_type {
+        "bigint" => "Some(SdkValue::BigInt(v)) => Some(v.clone()), Some(SdkValue::Int(v)) => Some(BigInt::from(*v)),",
+        "boolean" => "Some(SdkValue::Bool(v)) => Some(*v),",
+        "Sig" | "PubKey" | "ByteString" | "Addr" | "Ripemd160" | "Sha256" | "Point"
+        | "SigHashPreimage" => "Some(SdkValue::Bytes(v)) => Some(v.clone()),",
+        _ => "Some(v) => Some(v.clone()),",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Name conversion utilities
 // ---------------------------------------------------------------------------
@@ -81,7 +94,7 @@ fn to_pascal_case(name: &str) -> String {
 }
 
 /// Reserved method names on the generated wrapper struct.
-const RESERVED_NAMES: &[&str] = &["connect", "deploy", "contract", "get_locking_script"];
+const RESERVED_NAMES: &[&str] = &["connect", "deploy", "contract", "get_locking_script", "attach_inscription"];
 
 /// Generate a safe method name (snake_case), avoiding collisions with wrapper methods.
 fn safe_rust_method_name(name: &str) -> String {
@@ -178,6 +191,15 @@ struct CtxMethod {
     prepare_user_params: Vec<CtxParam>,
 }
 
+/// A mutable state field exposed as a typed accessor on the wrapper (N-278).
+#[derive(Debug, Clone)]
+struct CtxStateField {
+    original_name: String,
+    name: String,
+    param_type: String,
+    read_arms: String,
+}
+
 #[derive(Debug, Clone)]
 struct CodegenContext {
     contract_name: String,
@@ -189,6 +211,7 @@ struct CodegenContext {
     constructor_params: Vec<CtxParam>,
     constructor_args_expr: String,
     methods: Vec<CtxMethod>,
+    state_fields: Vec<CtxStateField>,
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +365,34 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
         })
         .collect();
 
+    // State accessors. A field whose accessor name would collide with another
+    // member of the wrapper is exposed as `state_<name>` instead.
+    let mut taken: Vec<String> = RESERVED_NAMES.iter().map(|n| n.to_string()).collect();
+    taken.extend(
+        ["new", "from_txid", "from_utxo", "contract_mut"].iter().map(|n| n.to_string()),
+    );
+    for m in &methods {
+        taken.push(m.name.clone());
+        taken.push(format!("prepare_{}", m.name));
+        taken.push(format!("finalize_{}", m.name));
+    }
+    let state_fields: Vec<CtxStateField> = artifact
+        .state_fields
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|f| {
+            let snake = to_snake_case(&f.name);
+            let name = if taken.contains(&snake) { format!("state_{}", snake) } else { snake };
+            CtxStateField {
+                original_name: f.name.clone(),
+                name,
+                param_type: map_type_to_rust(&f.field_type).to_string(),
+                read_arms: rust_state_read_arms(&f.field_type).to_string(),
+            }
+        })
+        .collect();
+
     CodegenContext {
         contract_name: artifact.contract_name.clone(),
         is_stateful,
@@ -352,6 +403,7 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
         constructor_params,
         constructor_args_expr,
         methods,
+        state_fields,
     }
 }
 
@@ -655,6 +707,20 @@ fn context_to_mustache(ctx: &CodegenContext) -> HashMap<String, MustacheValue> {
         MustacheValue::Str(ctx.constructor_args_expr.clone()),
     );
 
+    let state_field_maps: Vec<HashMap<String, MustacheValue>> = ctx
+        .state_fields
+        .iter()
+        .map(|f| {
+            let mut fm = HashMap::new();
+            fm.insert("originalName".to_string(), MustacheValue::Str(f.original_name.clone()));
+            fm.insert("name".to_string(), MustacheValue::Str(f.name.clone()));
+            fm.insert("type".to_string(), MustacheValue::Str(f.param_type.clone()));
+            fm.insert("readArms".to_string(), MustacheValue::Str(f.read_arms.clone()));
+            fm
+        })
+        .collect();
+    m.insert("stateFields".to_string(), MustacheValue::List(state_field_maps));
+
     // Methods are rendered as a list section
     let method_maps: Vec<HashMap<String, MustacheValue>> = ctx
         .methods
@@ -679,6 +745,7 @@ use num_bigint::BigInt;
 use runar::sdk::{
     RunarContract, RunarArtifact, SdkValue, Provider, Signer,
     TransactionData, DeployOptions, CallOptions, PreparedCall,
+    OutputSpec, Utxo, Inscription,
 };
 use runar::sdk::deployment::build_p2pkh_script_from_address;
 
@@ -709,6 +776,7 @@ pub struct {{contractName}}StatefulCallOptions {
     pub change_address: Option<String>,
     pub change_pub_key: Option<String>,
     pub new_state: Option<HashMap<String, SdkValue>>,
+    pub outputs: Option<Vec<OutputSpec>>,
 }
 
 impl {{contractName}}StatefulCallOptions {
@@ -718,6 +786,7 @@ impl {{contractName}}StatefulCallOptions {
             change_address: self.change_address.clone(),
             change_pub_key: self.change_pub_key.clone(),
             new_state: self.new_state.clone(),
+            outputs: self.outputs.clone(),
             ..Default::default()
         }
     }
@@ -764,6 +833,18 @@ impl {{contractName}}Contract {
         Ok(Self { inner })
     }
 
+    /// Reconnect to an existing contract from a known UTXO.
+    pub fn from_utxo(artifact: RunarArtifact, utxo: &Utxo) -> Result<Self, String> {
+        let inner = RunarContract::from_utxo(artifact, utxo)?;
+        Ok(Self { inner })
+    }
+
+    /// Attach a 1sat ordinals inscription to the contract.
+    pub fn attach_inscription(&mut self, insc: Inscription) -> Result<&mut Self, String> {
+        self.inner.with_inscription(insc)?;
+        Ok(self)
+    }
+
     /// Store a provider and signer for implicit use.
     pub fn connect(&mut self, provider: Box<dyn Provider>, signer: Box<dyn Signer>) {
         self.inner.connect(provider, signer);
@@ -794,6 +875,16 @@ impl {{contractName}}Contract {
         &mut self.inner
     }
 
+{{#stateFields}}
+    /// Decoded state field `{{originalName}}`, or `None` when it is absent or holds another shape.
+    pub fn {{name}}(&self) -> Option<{{type}}> {
+        match self.inner.state().get("{{originalName}}") {
+            {{readArms}}
+            _ => None,
+        }
+    }
+
+{{/stateFields}}
 {{#methods}}
     /// Call the {{originalName}} method.
     pub fn {{name}}(

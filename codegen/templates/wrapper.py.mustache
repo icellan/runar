@@ -9,7 +9,7 @@ from typing import Optional, Any
 from runar.sdk import (
     RunarContract, RunarArtifact, Provider, Signer,
     TransactionData, DeployOptions, CallOptions, PreparedCall,
-    TerminalOutput as SdkTerminalOutput,
+    TerminalOutput as SdkTerminalOutput, Utxo, Inscription,
 )
 from runar.sdk.deployment import build_p2pkh_script
 
@@ -77,6 +77,21 @@ class {{contractName}}Contract:
         instance = cls.__new__(cls)
         instance._inner = inner
         return instance
+
+    @classmethod
+    def from_utxo(
+        cls,
+        artifact: RunarArtifact,
+        utxo: Utxo,
+    ) -> {{contractName}}Contract:
+        inner = RunarContract.from_utxo(artifact, utxo)
+        instance = cls.__new__(cls)
+        instance._inner = inner
+        return instance
+
+    def attach_inscription(self, insc: Inscription) -> {{contractName}}Contract:
+        self._inner.with_inscription(insc)
+        return self
 
     def connect(self, provider: Provider, signer: Signer) -> None:
         self._inner.connect(provider, signer)

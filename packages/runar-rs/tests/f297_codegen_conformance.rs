@@ -39,23 +39,18 @@
 //!     note in `codegen_rejects_bare_constructor_param_reference` below).
 //!
 //! What this test does not prove:
-//!   - Full MANIFEST compliance. The Rust generator does NOT emit
-//!     `from_utxo`/`from_txid`-as-factory-pair parity with Ruby/Java (it has
-//!     `from_txid` but no `from_utxo`), does NOT emit `attach_inscription`
-//!     (so `inscribed.json`'s delegation requirement is unmet — the
-//!     `InscribedHolderContract` wrapper compiles but has no inscription
-//!     API), does NOT emit an `OutputSpec` record or expose
-//!     `CallOptions.outputs` on `*StatefulCallOptions` (only
-//!     satoshis/change_address/change_pub_key/new_state), and does NOT emit
-//!     typed state accessors (e.g. a `count()` getter on `CounterContract`).
-//!     These are real gaps in the Rust generator relative to its Ruby/Java
-//!     peers, not gaps in this runner — fixing them is generator feature
-//!     work, out of scope for the runner this file adds, and is called out
-//!     here rather than silently passed over.
-//!   - Runtime behavior. Like the Ruby/Zig runners (and unlike Go's, which
-//!     also runs the generated wrapper end-to-end against a `MockProvider`),
-//!     this is a static compile-check only — it does not deploy, call, or
-//!     sign anything.
+//!   - Full MANIFEST compliance beyond what is asserted below. N-278: the
+//!     Rust generator now emits `from_utxo`, `attach_inscription`
+//!     (delegating to `RunarContract::with_inscription`), `outputs`
+//!     (`Option<Vec<OutputSpec>>`) on `*StatefulCallOptions`, and typed state
+//!     accessors (`count()` on `CounterContract`, returning `Option<BigInt>`
+//!     because a state field can be absent or hold another shape).
+//!   - Deploy/call/sign behavior. Like the Ruby/Zig runners (and unlike Go's,
+//!     which also runs the generated wrapper end-to-end against a
+//!     `MockProvider`), the compile-check does not deploy, call, or sign
+//!     anything; `generated_wrappers_run_attach_inscription_from_utxo_and_state_accessors`
+//!     only runs the new N-278 surface (inscription splice, from-UTXO
+//!     restore, state accessor) against the real SDK.
 //!   - Anything about the TypeScript or Python generators (separate items).
 
 use std::collections::HashMap;
@@ -110,6 +105,10 @@ fn p2pkh_fixture_has_required_structural_elements() {
     assert_contains(&src, "pub struct P2PKHConstructorArgs", "p2pkh");
     assert_contains(&src, "pub struct P2PKHContract", "p2pkh");
     assert_contains(&src, "pub fn from_txid(", "p2pkh");
+    assert_contains(&src, "pub fn from_utxo(artifact: RunarArtifact, utxo: &Utxo) -> Result<Self, String>", "p2pkh");
+    assert_contains(&src, "RunarContract::from_utxo(artifact, utxo)", "p2pkh");
+    assert_contains(&src, "pub fn attach_inscription(&mut self, insc: Inscription) -> Result<&mut Self, String>", "p2pkh");
+    assert_contains(&src, "self.inner.with_inscription(insc)?;", "p2pkh");
     assert_contains(&src, "pub fn connect(", "p2pkh");
     assert_contains(&src, "pub fn get_locking_script(", "p2pkh");
     assert_contains(&src, "pub fn deploy(", "p2pkh");
@@ -133,6 +132,11 @@ fn counter_fixture_has_required_structural_elements() {
     assert_contains(&src, "pub change_address:", "counter");
     assert_contains(&src, "pub change_pub_key:", "counter");
     assert_contains(&src, "pub new_state:", "counter");
+    assert_contains(&src, "pub outputs: Option<Vec<OutputSpec>>,", "counter");
+    assert_contains(&src, "outputs: self.outputs.clone(),", "counter");
+    assert_contains(&src, "pub fn count(&self) -> Option<BigInt>", "counter");
+    assert_contains(&src, "pub fn from_utxo(", "counter");
+    assert_contains(&src, "pub fn attach_inscription(", "counter");
     assert_contains(&src, "pub struct TerminalOutput", "counter");
     assert_contains(&src, "pub fn increment(", "counter");
     assert_contains(&src, "pub fn reset(", "counter");
@@ -162,6 +166,8 @@ fn stateful_escrow_fixture_has_required_structural_elements() {
     assert_contains(&src, "pub seller:", "escrow");
     assert_contains(&src, "pub amount:", "escrow");
     assert_contains(&src, "pub struct EscrowStatefulCallOptions", "escrow");
+    assert_contains(&src, "pub outputs: Option<Vec<OutputSpec>>,", "escrow");
+    assert_contains(&src, "pub fn amount(&self) -> Option<BigInt>", "escrow");
     assert_contains(&src, "pub struct TerminalOutput", "escrow");
 
     // claim: non-terminal, single Sig (buyerSig) -> prepare/finalize.
@@ -186,14 +192,7 @@ fn stateful_escrow_fixture_has_required_structural_elements() {
 }
 
 #[test]
-fn inscribed_fixture_compiles_despite_missing_attach_inscription() {
-    // MANIFEST requires an `attach_inscription`/`attachInscription` delegation
-    // for this fixture. The Rust generator does not emit one (no
-    // `{{#hasInscription}}`-equivalent section in RUST_TEMPLATE) — documented
-    // in this module's doc comment rather than faked here. What IS asserted
-    // is that the rest of the wrapper (constructor args, transfer +
-    // prepare/finalize) still renders correctly for a fixture shaped like
-    // every other stateless + Sig-param contract.
+fn inscribed_fixture_emits_attach_inscription_and_from_utxo() {
     let artifact = load_fixture("inscribed.json");
     let src = generate_rust(&artifact);
 
@@ -203,7 +202,8 @@ fn inscribed_fixture_compiles_despite_missing_attach_inscription() {
     assert_contains(&src, "pub fn transfer(", "inscribed");
     assert_contains(&src, "pub fn prepare_transfer(", "inscribed");
     assert_contains(&src, "pub fn finalize_transfer(", "inscribed");
-    assert_not_contains(&src, "attach_inscription", "inscribed (Rust generator gap, documented above)");
+    assert_contains(&src, "pub fn attach_inscription(&mut self, insc: Inscription) -> Result<&mut Self, String>", "inscribed");
+    assert_contains(&src, "pub fn from_utxo(", "inscribed");
     assert!(!src.contains("{{"), "inscribed: unrendered Mustache tag:\n{src}");
 }
 
@@ -327,5 +327,76 @@ fn cargo_check_rejects_bare_constructor_param_reference() {
     assert!(
         stderr.contains("E0425") || stderr.contains("cannot find value"),
         "expected an E0425 'cannot find value' error, got:\n{stderr}"
+    );
+}
+
+/// N-278: the generated surface is not just present, it type-checks at a call
+/// site and does what it says against the real SDK. Writes the counter and
+/// inscribed wrappers plus a `#[test]` that attaches an inscription, restores
+/// the contract with `from_utxo`, and reads the typed state accessor, then
+/// runs it with `cargo test`.
+#[test]
+fn generated_wrappers_run_attach_inscription_from_utxo_and_state_accessors() {
+    let mut files: HashMap<&str, String> = HashMap::new();
+    files.insert("counter", generate_rust(&load_fixture("counter.json")));
+    files.insert("inscribed", generate_rust(&load_fixture("inscribed.json")));
+    files.insert(
+        "callsite",
+        r#"
+use num_bigint::BigInt;
+use runar::sdk::{Inscription, RunarArtifact, Utxo};
+
+fn artifact(name: &str) -> RunarArtifact {
+    let path = format!("{}/../../conformance/sdk-codegen/fixtures/{}", env!("F297_REPO"), name);
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn attach_inscription_then_from_utxo_round_trips() {
+    use crate::inscribed::{InscribedHolderConstructorArgs, InscribedHolderContract};
+    let art = artifact("inscribed.json");
+    let mut c = InscribedHolderContract::new(
+        art.clone(),
+        InscribedHolderConstructorArgs { owner: "11".repeat(20) },
+    );
+    let plain = c.get_locking_script();
+    c.attach_inscription(Inscription {
+        content_type: "text/plain".to_string(),
+        data: "68656c6c6f".to_string(),
+    })
+    .unwrap();
+    let inscribed = c.get_locking_script();
+    assert_ne!(plain, inscribed);
+    let utxo = Utxo { txid: "aa".repeat(32), output_index: 0, satoshis: 1000, script: inscribed.clone() };
+    let restored = InscribedHolderContract::from_utxo(art, &utxo).unwrap();
+    assert_eq!(restored.get_locking_script(), inscribed);
+}
+
+#[test]
+fn state_accessor_reads_the_typed_field() {
+    use crate::counter::{CounterConstructorArgs, CounterContract};
+    let c = CounterContract::new(artifact("counter.json"), CounterConstructorArgs { count: BigInt::from(5) });
+    assert_eq!(c.count(), Some(BigInt::from(5)));
+}
+"#
+        .to_string(),
+    );
+    let crate_dir = write_crate("callsite", &files);
+    let mut manifest = fs::read_to_string(crate_dir.join("Cargo.toml")).unwrap();
+    manifest.push_str("serde_json = \"1\"\n");
+    fs::write(crate_dir.join("Cargo.toml"), manifest).unwrap();
+    let output = Command::new(env!("CARGO"))
+        .arg("test")
+        .arg("--offline")
+        .current_dir(&crate_dir)
+        .env("CARGO_TARGET_DIR", scratch_root().join("target"))
+        .env("F297_REPO", repo_root())
+        .output()
+        .expect("spawn cargo test");
+    assert!(
+        output.status.success(),
+        "generated-wrapper call-site tests failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

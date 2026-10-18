@@ -83,10 +83,11 @@ func toSnakeCase(name string) string {
 
 // Go reserved method names on the generated wrapper struct.
 var goReservedNames = map[string]bool{
-	"Connect":          true,
-	"Deploy":           true,
-	"Contract":         true,
-	"GetLockingScript": true,
+	"Connect":           true,
+	"Deploy":            true,
+	"Contract":          true,
+	"GetLockingScript":  true,
+	"AttachInscription": true,
 }
 
 // safeGoMethodName generates a safe method name, avoiding collisions with
@@ -646,6 +647,22 @@ func {{contractName}}ContractFromTxId(artifact *runar.RunarArtifact, txid string
 		return nil, err
 	}
 	return &{{contractName}}Contract{inner: inner}, nil
+}
+
+// {{contractName}}ContractFromUtxo reconnects to an existing contract from a known UTXO.
+func {{contractName}}ContractFromUtxo(artifact *runar.RunarArtifact, utxo runar.UTXO) (*{{contractName}}Contract, error) {
+	inner, err := runar.FromUtxo(artifact, utxo)
+	if err != nil {
+		return nil, err
+	}
+	return &{{contractName}}Contract{inner: inner}, nil
+}
+
+// AttachInscription attaches a 1sat ordinals inscription to the contract. It returns
+// an error when the envelope would break the contract's own SIZE(_codePart) pin.
+func (c *{{contractName}}Contract) AttachInscription(insc *runar.Inscription) error {
+	_, err := c.inner.WithInscription(insc)
+	return err
 }
 
 // Connect stores a provider and signer for implicit use.

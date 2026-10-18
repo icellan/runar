@@ -123,7 +123,7 @@ export function getPublicMethods(artifact: RunarArtifact): ABIMethod[] {
 }
 
 /** Reserved method names on the generated wrapper class. */
-const RESERVED_NAMES = new Set(['connect', 'deploy', 'contract']);
+const RESERVED_NAMES = new Set(['connect', 'deploy', 'contract', 'attachInscription']);
 
 /**
  * Generate a safe method name, avoiding collisions with wrapper class methods.
@@ -223,7 +223,7 @@ export function toSnakeCase(name: string): string {
 }
 
 // Go reserved names (PascalCase)
-const GO_RESERVED = new Set(['Connect', 'Deploy', 'Contract', 'GetLockingScript']);
+const GO_RESERVED = new Set(['Connect', 'Deploy', 'Contract', 'GetLockingScript', 'AttachInscription']);
 
 export function safeGoMethodName(name: string): string {
   const pascal = toPascalCase(name);
@@ -232,7 +232,7 @@ export function safeGoMethodName(name: string): string {
 }
 
 // Rust/Python reserved names (snake_case)
-const SNAKE_RESERVED = new Set(['connect', 'deploy', 'contract', 'get_locking_script']);
+const SNAKE_RESERVED = new Set(['connect', 'deploy', 'contract', 'get_locking_script', 'attach_inscription']);
 
 export function safeRustMethodName(name: string): string {
   const snake = toSnakeCase(name);
@@ -249,6 +249,20 @@ export function safePythonMethodName(name: string): string {
 // ---------------------------------------------------------------------------
 // Rust SdkValue expression builder
 // ---------------------------------------------------------------------------
+
+/**
+ * Match arms (over `Option<&SdkValue>`) that read a state value of the given
+ * ABI type as the Rust type `mapTypeToRust` returns for it. Anything that does
+ * not fit yields `None` through the template's `_ => None` arm.
+ */
+function rustStateReadArms(abiType: string): string {
+  if (abiType === 'bigint') {
+    return 'Some(SdkValue::BigInt(v)) => Some(v.clone()), Some(SdkValue::Int(v)) => Some(BigInt::from(*v)),';
+  }
+  if (abiType === 'boolean') return 'Some(SdkValue::Bool(v)) => Some(*v),';
+  if (abiType in RUST_TYPE_MAP) return 'Some(SdkValue::Bytes(v)) => Some(v.clone()),';
+  return 'Some(v) => Some(v.clone()),';
+}
 
 /** Build the Rust expression to convert a typed param into SdkValue. */
 export function rustSdkValueExpr(abiType: string, varName: string): string {
@@ -293,6 +307,14 @@ interface CodegenMethod {
   prepareUserParams: CodegenParam[];
 }
 
+/** A mutable state field exposed as a typed accessor on the wrapper (Rust only). */
+interface CodegenStateField {
+  originalName: string;
+  name: string;
+  type: string;
+  readArms: string;
+}
+
 export interface CodegenContext {
   contractName: string;
   contractNameSnake: string;
@@ -304,6 +326,7 @@ export interface CodegenContext {
   constructorParams: CodegenParam[];
   constructorArgsExpr: string;
   methods: CodegenMethod[];
+  stateFields: CodegenStateField[];
 }
 
 /**
@@ -430,6 +453,27 @@ export function buildCodegenContext(artifact: RunarArtifact, lang: TargetLang): 
     };
   });
 
+  // State accessors (Rust only). A field whose accessor name would collide with
+  // another member of the wrapper is exposed as `state_<name>` instead.
+  const stateFields: CodegenStateField[] = [];
+  if (lang === 'rust') {
+    const taken = new Set<string>([...SNAKE_RESERVED, 'new', 'from_txid', 'from_utxo', 'contract_mut']);
+    for (const m of methods) {
+      taken.add(m.name);
+      taken.add(`prepare_${m.name}`);
+      taken.add(`finalize_${m.name}`);
+    }
+    for (const f of artifact.stateFields ?? []) {
+      const snake = toSnakeCase(f.name);
+      stateFields.push({
+        originalName: f.name,
+        name: taken.has(snake) ? `state_${snake}` : snake,
+        type: mapTypeToRust(f.type),
+        readArms: rustStateReadArms(f.type),
+      });
+    }
+  }
+
   return {
     contractName: artifact.contractName,
     contractNameSnake: toSnakeCase(artifact.contractName),
@@ -441,5 +485,6 @@ export function buildCodegenContext(artifact: RunarArtifact, lang: TargetLang): 
     constructorParams,
     constructorArgsExpr,
     methods,
+    stateFields,
   };
 }
