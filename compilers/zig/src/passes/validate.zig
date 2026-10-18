@@ -454,9 +454,31 @@ fn validateConstructor(
                 .severity = .@"error",
             });
         }
+        try rejectUnknownParamType(allocator, errors, param, "constructor", null);
     }
 
     try validateConstructorSlotBijection(allocator, contract, errors);
+}
+
+/// N-325: a parameter whose annotation names a type no tier recognises. Every
+/// parser lowers an unrecognised name to `.unknown`, which the checker treats as
+/// compatible with anything, so `c: TTT` used to compile. `spelled_type` is empty
+/// for a missing annotation (the parsers diagnose that) and `StatefulContext` is
+/// the explicit context parameter of the stateful surfaces, dropped by ANF lowering.
+fn rejectUnknownParamType(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+    param: types.ParamNode,
+    comptime kind: []const u8,
+    method_name: ?[]const u8,
+) !void {
+    if (param.spelled_type.len == 0) return;
+    if (std.mem.eql(u8, param.spelled_type, "unknown") or std.mem.eql(u8, param.spelled_type, "StatefulContext")) return;
+    const message = if (method_name) |m|
+        try std.fmt.allocPrint(allocator, "type '{s}' of parameter '{s}' in {s} '{s}' is not a Rúnar type", .{ param.spelled_type, param.name, kind, m })
+    else
+        try std.fmt.allocPrint(allocator, "type '{s}' of parameter '{s}' in {s} is not a Rúnar type", .{ param.spelled_type, param.name, kind });
+    try errors.append(allocator, .{ .message = message, .owned_message = true, .severity = .@"error" });
 }
 
 /// Distinct bare constructor parameters the constructor assigns to one
@@ -706,6 +728,7 @@ fn validateMethods(
                     .severity = .@"error",
                 });
             }
+            try rejectUnknownParamType(allocator, errors, p, "method", method.name);
         }
 
         // `return` is a PRIVATE-helper construct only (NEW-012).
@@ -4280,4 +4303,48 @@ test "F-063: an output intrinsic inside an array literal in a loop body is rejec
         if (std.mem.indexOf(u8, err.message, "Output intrinsic 'addOutput'") != null) found = true;
     }
     try testing.expect(found);
+}
+
+// N-325: a method / constructor parameter annotated with a type name no tier
+// recognises. Every parser lowers it to `.unknown` and records the spelled name
+// in `spelled_type`; the validator refuses it, but not the missing-annotation
+// case (empty `spelled_type`) and not the explicit `StatefulContext` parameter.
+// Proves the validator side only; conformance/negatives/n325-* covers the source
+// path through every parser.
+test "validate: N-325 parameter with an unknown type name is refused" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("pk", .pub_key, true)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
+    var super_args = [_]Expression{.{ .identifier = "pk" }};
+    var ctor_params = [_]types.ParamNode{
+        .{ .name = "pk", .type_info = .unknown, .type_name = "unknown", .spelled_type = "UUU" },
+    };
+    var mparams = [_]types.ParamNode{
+        .{ .name = "c", .type_info = .unknown, .type_name = "unknown", .spelled_type = "TTT" },
+        .{ .name = "ctx", .type_info = .unknown, .type_name = "StatefulContext", .spelled_type = "StatefulContext" },
+        .{ .name = "bare", .type_info = .unknown },
+    };
+    var body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &mparams, .body = &body },
+    };
+    const contract = ContractNode{
+        .name = "P2PKH",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &ctor_params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var saw_ctor = false;
+    var saw_method = false;
+    for (result.errors) |err| {
+        if (std.mem.indexOf(u8, err.message, "type 'UUU' of parameter 'pk' in constructor is not a Rúnar type") != null) saw_ctor = true;
+        if (std.mem.indexOf(u8, err.message, "type 'TTT' of parameter 'c' in method 'unlock' is not a Rúnar type") != null) saw_method = true;
+        try testing.expect(std.mem.indexOf(u8, err.message, "StatefulContext") == null);
+    }
+    try testing.expect(saw_ctor);
+    try testing.expect(saw_method);
 }

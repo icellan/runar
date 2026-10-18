@@ -1625,7 +1625,8 @@ const Parser = struct {
             }
 
             // Now parse the type
-            const param_type = self.parseGoType();
+            var param_spelled: []const u8 = "";
+            const param_type = self.parseGoTypeNamed(&param_spelled);
 
             // Create params for all collected names
             for (names.items) |name| {
@@ -1634,6 +1635,7 @@ const Parser = struct {
                     .name = camel,
                     .type_info = param_type,
                     .type_name = types.runarTypeToString(param_type),
+                    .spelled_type = types.spelledIfUnknown(param_type, param_spelled),
                 }) catch {};
             }
 

@@ -894,3 +894,60 @@ describe('Validator: ByteString property initializer hex validation (F-265)', ()
     expect(hasError(result, "ByteString literal 'zzz' has odd length (3)")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// N-325: a parameter annotated with a type name that is not a Rúnar type
+// ---------------------------------------------------------------------------
+//
+// Proves the TS validator refuses an unknown named type on a public-method,
+// private-method and constructor parameter, quoting the name, and still accepts
+// `StatefulContext` (the explicit context parameter of the Zig/Go/Move stateful
+// surfaces) and ordinary types. Does NOT prove the other six tiers or the other
+// eight surfaces: conformance/negatives/n325-* covers those.
+describe('N-325: unknown parameter type names', () => {
+  it('rejects an unknown type on a public method parameter', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: bigint) { super(t); this.t = t; }
+        public verify(a: bigint, c: TTT) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, "Type 'TTT' of parameter 'c' in method 'verify' is not a Rúnar type")).toBe(true);
+  });
+
+  it('rejects an unknown type on a private method parameter', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: bigint) { super(t); this.t = t; }
+        private helper(x: TTT): bigint { return 1n; }
+        public verify(a: bigint) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, "Type 'TTT' of parameter 'x' in method 'helper' is not a Rúnar type")).toBe(true);
+  });
+
+  it('rejects an unknown type on a constructor parameter', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: TTT) { super(t); this.t = t; }
+        public verify(a: bigint) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, "Type 'TTT' of parameter 't' in constructor is not a Rúnar type")).toBe(true);
+  });
+
+  it('accepts the same contract with a real type', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: bigint) { super(t); this.t = t; }
+        private helper(x: bigint): bigint { return 1n; }
+        public verify(a: bigint, c: ByteString) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, 'is not a Rúnar type')).toBe(false);
+  });
+});

@@ -355,6 +355,14 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
                     "Constructor parameter '{}' must have a type annotation",
                     param.name
                 ), Some(ctor.source_location.clone())));
+            } else if name != "StatefulContext" {
+                // N-325: a named type that is not a Rúnar type is refused.
+                // `StatefulContext` is the explicit context parameter of the
+                // Zig/Go/Move stateful surfaces, dropped by ANF lowering.
+                errors.push(Diagnostic::error(format!(
+                    "Type '{}' of parameter '{}' in constructor is not a Rúnar type",
+                    name, param.name
+                ), Some(ctor.source_location.clone())));
             }
         }
         if matches!(param.param_type, TypeNode::FixedArray { .. }) {
@@ -604,6 +612,12 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
                 errors.push(Diagnostic::error(format!(
                     "Parameter '{}' in method '{}' must have a type annotation",
                     param.name, method.name
+                ), Some(method.source_location.clone())));
+            } else if name != "StatefulContext" {
+                // N-325: see the constructor check above.
+                errors.push(Diagnostic::error(format!(
+                    "Type '{}' of parameter '{}' in method '{}' is not a Rúnar type",
+                    name, param.name, method.name
                 ), Some(method.source_location.clone())));
             }
         }

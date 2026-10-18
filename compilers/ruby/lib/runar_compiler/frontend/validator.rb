@@ -241,6 +241,7 @@ module RunarCompiler
               loc: ctor.source_location
             )
           end
+          reject_unknown_param_type(param, "constructor", ctor.source_location)
         end
 
         # Validate constructor body
@@ -990,7 +991,26 @@ module RunarCompiler
       # Method validation (private)
       # -------------------------------------------------------------------
 
+      # N-325: a parameter whose type is a name that is not a Rúnar type.
+      # "unknown" is the missing-annotation case, diagnosed by the parser;
+      # StatefulContext is the explicit context parameter of the Zig/Go/Move
+      # stateful surfaces, dropped by ANF lowering.
+      def reject_unknown_param_type(param, where, loc)
+        t = param.type
+        return unless t.is_a?(CustomType)
+        return if t.name == "unknown" || t.name == "StatefulContext"
+
+        add_error(
+          "type '#{t.name}' of parameter '#{param.name}' in #{where} is not a Rúnar type",
+          loc: loc
+        )
+      end
+
       def validate_method(method)
+        method.params.each do |param|
+          reject_unknown_param_type(param, "method '#{method.name}'", method.source_location)
+        end
+
         # `return` is a PRIVATE-helper construct only (NEW-012).
         reject_return_in_public_method(method) if method.visibility == "public"
 

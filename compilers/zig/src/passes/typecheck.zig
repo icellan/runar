@@ -890,6 +890,14 @@ const TypeChecker = struct {
                     };
                     self.recordAffineAlias(decl.name, val, decl_type);
                 } else {
+                    // N-325: N-323 only checked the initializer branch, so a
+                    // declaration WITHOUT one (`var q runar.TTT`) still compiled.
+                    // There is no initializer type to quote, hence the plain form.
+                    if (decl.type_info) |declared| {
+                        if (declared == .unknown and decl.type_name.len > 0) {
+                            self.addError("unsupported type '{s}' in local declaration of '{s}'", .{ decl.type_name, decl.name });
+                        }
+                    }
                     env.define(decl.name, decl.type_info orelse .unknown);
                 }
             },

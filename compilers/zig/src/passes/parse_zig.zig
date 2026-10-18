@@ -920,10 +920,12 @@ const Parser = struct {
         const n = self.bump();
         if (self.expect(.colon) == null) return null;
         const type_node = self.parseTypeNode();
+        const param_ti = typeNodeToRunarType(type_node);
         return ParamNode{
             .name = n.text,
-            .type_info = typeNodeToRunarType(type_node),
+            .type_info = param_ti,
             .type_name = typeNodeName(type_node),
+            .spelled_type = types.spelledIfUnknown(param_ti, typeNodeName(type_node)),
         };
     }
 

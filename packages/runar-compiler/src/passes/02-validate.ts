@@ -380,6 +380,17 @@ function validateConstructor(ctx: ValidationContext): void {
         ctor.sourceLocation,
       ));
     }
+    // N-325: a named type that is not a Rúnar type is refused, not carried
+    // through as an opaque name nothing downstream compares. `unknown` is the
+    // missing-annotation case above; `StatefulContext` is the explicit context
+    // parameter of the Zig/Go/Move stateful surfaces, dropped by ANF lowering.
+    if (param.type.kind === 'custom_type' && param.type.name !== 'unknown' && param.type.name !== 'StatefulContext') {
+      ctx.errors.push(makeDiagnostic(
+        `Type '${param.type.name}' of parameter '${param.name}' in constructor is not a Rúnar type`,
+        'error',
+        ctor.sourceLocation,
+      ));
+    }
     if (param.type.kind === 'fixed_array_type') {
       ctx.errors.push(makeDiagnostic(
         `Constructor parameter '${param.name}' cannot be a FixedArray. Use initialized properties or pass each element as a separate parameter.`,
@@ -590,6 +601,14 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
     if (param.type.kind === 'custom_type' && param.type.name === 'unknown') {
       ctx.errors.push(makeDiagnostic(
         `Parameter '${param.name}' in method '${method.name}' must have a type annotation`,
+        'error',
+        method.sourceLocation,
+      ));
+    }
+    // N-325: see the constructor check above.
+    if (param.type.kind === 'custom_type' && param.type.name !== 'unknown' && param.type.name !== 'StatefulContext') {
+      ctx.errors.push(makeDiagnostic(
+        `Type '${param.type.name}' of parameter '${param.name}' in method '${method.name}' is not a Rúnar type`,
         'error',
         method.sourceLocation,
       ));

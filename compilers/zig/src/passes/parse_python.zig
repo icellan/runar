@@ -1502,16 +1502,19 @@ const Parser = struct {
 
             var type_info: RunarType = .unknown;
             var type_name: []const u8 = "";
+            var spelled_type: []const u8 = "";
             if (self.match(.colon)) {
                 const tn = self.parsePyTypeAnnotation();
                 type_info = typeNodeToRunarType(tn);
                 type_name = runarTypeToTypeName(type_info);
+                spelled_type = types.spelledIfUnknown(type_info, types.typeNodeName(tn));
             }
 
             params.append(self.allocator, .{
                 .name = self.declare(param_name),
                 .type_info = type_info,
                 .type_name = type_name,
+                .spelled_type = spelled_type,
             }) catch {};
 
             if (!self.match(.comma)) break;

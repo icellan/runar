@@ -1157,7 +1157,7 @@ const Parser = struct {
         };
     }
 
-    const ParamTypeEntry = struct { name: []const u8, type_info: RunarType, type_name: []const u8 };
+    const ParamTypeEntry = struct { name: []const u8, type_info: RunarType, type_name: []const u8, spelled_type: []const u8 = "" };
     const ParamTypeMap = []ParamTypeEntry;
 
     /// Parse optional key: Type pairs after `runar_public` or `params`.
@@ -1187,6 +1187,7 @@ const Parser = struct {
                 .name = raw_name,
                 .type_info = type_info,
                 .type_name = type_name,
+                .spelled_type = types.spelledIfUnknown(type_info, type_tok.text),
             }) catch {};
 
             // Optional comma
@@ -1400,11 +1401,13 @@ const Parser = struct {
             // Look up the type from the preceding runar_public/params declaration
             var type_info: RunarType = .unknown;
             var type_name: []const u8 = "";
+            var spelled_type: []const u8 = "";
             if (param_types) |pt| {
                 for (pt) |entry| {
                     if (std.mem.eql(u8, entry.name, raw_name)) {
                         type_info = entry.type_info;
                         type_name = entry.type_name;
+                        spelled_type = entry.spelled_type;
                         break;
                     }
                 }
@@ -1414,6 +1417,7 @@ const Parser = struct {
                 .name = camel_name,
                 .type_info = type_info,
                 .type_name = type_name,
+                .spelled_type = spelled_type,
             }) catch {};
 
             if (!self.match(.comma)) break;

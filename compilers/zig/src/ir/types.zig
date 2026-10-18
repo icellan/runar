@@ -233,7 +233,15 @@ pub const MethodNode = struct {
     /// spelling (N-093; e.g. `runar.Sighash("SINGLE|FORKID")` on `.runar.zig`).
     sighash_type: ?i32 = null,
 };
-pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "" };
+/// `spelled_type` is the annotation as the author spelled it, set ONLY when it did not
+/// resolve to a known type (`type_info == .unknown`); empty otherwise, and when there is
+/// no annotation. Only a diagnostic reads it: N-325.
+pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "", spelled_type: []const u8 = "" };
+
+/// The spelled annotation, kept only when it failed to resolve (see `ParamNode.spelled_type`).
+pub fn spelledIfUnknown(ti: RunarType, spelled: []const u8) []const u8 {
+    return if (ti == .unknown) spelled else "";
+}
 pub const ANFParam = ParamNode;
 pub const AssignmentNode = struct { target: []const u8, value: Expression };
 

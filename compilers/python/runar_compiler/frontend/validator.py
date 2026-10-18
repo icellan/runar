@@ -320,6 +320,19 @@ class _ValidationContext:
                 loc=loc,
             )
 
+    def _reject_unknown_param_type(self, param, where: str, loc) -> None:
+        # N-325: a parameter whose type is a name that is not a Rúnar type.
+        # "unknown" is the missing-annotation case, diagnosed by the parser;
+        # StatefulContext is the explicit context parameter of the Zig/Go/Move
+        # stateful surfaces, dropped by ANF lowering.
+        t = param.type
+        if isinstance(t, CustomType) and t.name not in ("unknown", "StatefulContext"):
+            self._add_error(
+                f"type '{t.name}' of parameter '{param.name}' in {where} "
+                "is not a Rúnar type",
+                loc=loc,
+            )
+
     # -------------------------------------------------------------------
     # Constructor validation
     # -------------------------------------------------------------------
@@ -336,6 +349,7 @@ class _ValidationContext:
                     "Use initialized properties or pass each element as a separate parameter.",
                     loc=ctor.source_location,
                 )
+            self._reject_unknown_param_type(param, "constructor", ctor.source_location)
 
         # Check super() as first statement
         if len(ctor.body) == 0:
@@ -532,6 +546,9 @@ class _ValidationContext:
                     "Arrays are only allowed as contract properties.",
                     loc=method.source_location,
                 )
+            self._reject_unknown_param_type(
+                param, f"method '{method.name}'", method.source_location
+            )
 
         # `return` is a PRIVATE-helper construct only (NEW-012).
         if method.visibility == "public":

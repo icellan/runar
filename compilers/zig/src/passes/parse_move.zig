@@ -1328,7 +1328,8 @@ const Parser = struct {
                 }
             }
 
-            const type_info = self.parseMoveTypeName();
+            var spelled_type: []const u8 = "";
+            const type_info = self.parseMoveTypeNameNamed(&spelled_type);
 
             // Skip self/contract parameters (first param that refers to the contract)
             if (std.mem.eql(u8, param_name, "self") or std.mem.eql(u8, param_name, "contract")) {
@@ -1345,6 +1346,7 @@ const Parser = struct {
                 .name = camel_name,
                 .type_info = type_info,
                 .type_name = runarTypeToTypeName(type_info),
+                .spelled_type = types.spelledIfUnknown(type_info, spelled_type),
             }) catch {};
 
             if (self.current.kind == .comma) {

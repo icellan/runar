@@ -1138,6 +1138,7 @@ const Parser = struct {
                     .name = self.declare(param_name_tok.text),
                     .type_info = param_type_info,
                     .type_name = runarTypeToTypeName(param_type_info),
+                    .spelled_type = types.spelledIfUnknown(param_type_info, types.typeNodeName(param_type)),
                 }) catch {};
             } else {
                 _ = self.bump();

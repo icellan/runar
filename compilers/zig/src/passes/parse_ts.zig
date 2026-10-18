@@ -1183,11 +1183,13 @@ const Parser = struct {
             // Type annotation: : Type
             var type_name: []const u8 = "";
             var type_info: RunarType = .unknown;
+            var spelled_type: []const u8 = "";
             if (self.current.kind == .colon) {
                 _ = self.bump();
                 const tn = self.parseTypeAnnotation();
                 type_info = typeNodeToRunarType(tn);
                 type_name = runarTypeToTypeName(type_info);
+                spelled_type = types.spelledIfUnknown(type_info, types.typeNodeName(tn));
             } else {
                 self.addErrorFmt("parameter '{s}' must have an explicit type annotation", .{param_name});
             }
@@ -1196,6 +1198,7 @@ const Parser = struct {
                 .name = param_name,
                 .type_info = type_info,
                 .type_name = type_name,
+                .spelled_type = spelled_type,
             }) catch {};
 
             if (self.current.kind == .comma) {

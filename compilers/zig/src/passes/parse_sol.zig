@@ -1314,6 +1314,7 @@ const Parser = struct {
                 .name = clean_name,
                 .type_info = type_info,
                 .type_name = runarTypeToTypeName(type_info),
+                .spelled_type = types.spelledIfUnknown(type_info, type_name),
             }) catch {};
 
             if (self.current.kind == .comma) {

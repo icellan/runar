@@ -709,6 +709,7 @@ public final class Validate {
                         ctor.sourceLocation()
                     );
                 }
+                rejectUnknownParamType(p, "constructor", ctor.sourceLocation());
             }
 
             if (ctor.body().isEmpty()) {
@@ -919,6 +920,24 @@ public final class Validate {
             }
         }
 
+        /**
+         * N-325: a parameter whose type is a name that is not a Rúnar type.
+         * "unknown" is the missing-annotation case, diagnosed by the parser;
+         * StatefulContext is the explicit context parameter of the Zig/Go/Move
+         * stateful surfaces, dropped by ANF lowering.
+         */
+        private void rejectUnknownParamType(ParamNode p, String where, SourceLocation loc) {
+            if (p.type() instanceof CustomType ct
+                && !ct.name().equals("unknown")
+                && !ct.name().equals("StatefulContext")) {
+                error(
+                    "Type '" + ct.name() + "' of parameter '" + p.name() + "' in " + where
+                        + " is not a Rúnar type",
+                    loc
+                );
+            }
+        }
+
         private void validateMethod(MethodNode m) {
             for (ParamNode p : m.params()) {
                 if (p.type() instanceof FixedArrayType) {
@@ -929,6 +948,7 @@ public final class Validate {
                         m.sourceLocation()
                     );
                 }
+                rejectUnknownParamType(p, "method '" + m.name() + "'", m.sourceLocation());
             }
 
             // `return` is a PRIVATE-helper construct only (NEW-012).

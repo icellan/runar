@@ -339,6 +339,18 @@ func (ctx *validationContext) validatePropertyType(t TypeNode, loc SourceLocatio
 	}
 }
 
+// rejectUnknownParamType refuses a parameter whose type is a name that is not
+// a Rúnar type (N-325). "unknown" is the missing-annotation case, already
+// diagnosed by the parser; StatefulContext is the explicit context parameter of
+// the Zig/Go/Move stateful surfaces, dropped by ANF lowering.
+func (ctx *validationContext) rejectUnknownParamType(param ParamNode, where string, loc *SourceLocation) {
+	ct, ok := param.Type.(CustomType)
+	if !ok || ct.Name == "unknown" || ct.Name == "StatefulContext" {
+		return
+	}
+	ctx.addErrorWithLoc(fmt.Sprintf("type '%s' of parameter '%s' in %s is not a Rúnar type", ct.Name, param.Name, where), loc)
+}
+
 // ---------------------------------------------------------------------------
 // Constructor validation
 // ---------------------------------------------------------------------------
@@ -391,6 +403,7 @@ func (ctx *validationContext) validateConstructor() {
 				&ctor.SourceLocation,
 			)
 		}
+		ctx.rejectUnknownParamType(param, "constructor", &ctor.SourceLocation)
 	}
 
 	// Validate constructor body
@@ -611,6 +624,7 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 				&method.SourceLocation,
 			)
 		}
+		ctx.rejectUnknownParamType(param, fmt.Sprintf("method '%s'", method.Name), &method.SourceLocation)
 	}
 
 	// `return` is a PRIVATE-helper construct only (NEW-012).

@@ -1143,6 +1143,7 @@ const Parser = struct {
                 .name = pname,
                 .type_info = ti,
                 .type_name = types.runarTypeToString(ti),
+                .spelled_type = types.spelledIfUnknown(ti, types.typeNodeName(param_type)),
             }) catch {};
             if (!self.match(.comma)) break;
         }
