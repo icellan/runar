@@ -600,6 +600,14 @@ func (p *goContractParser) resolveType(expr ast.Expr) TypeNode {
 		}
 		return CustomType{Name: fmt.Sprintf("%v.%s", e.X, e.Sel.Name)}
 	case *ast.Ident:
+		// Go's own int64 and bool are the documented spellings of bigint and
+		// boolean (docs/formats/go.md "Type Mapping").
+		switch e.Name {
+		case "int64":
+			return PrimitiveType{Name: "bigint"}
+		case "bool":
+			return PrimitiveType{Name: "boolean"}
+		}
 		return mapGoType(e.Name)
 	case *ast.ArrayType:
 		if e.Len != nil {

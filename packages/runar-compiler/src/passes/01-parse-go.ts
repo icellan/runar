@@ -288,7 +288,7 @@ function goToCamel(name: string): string {
 
 const GO_TYPE_MAP: Record<string, string> = {
   Int: 'bigint', Bigint: 'bigint', BigintBig: 'bigint',
-  Bool: 'boolean', bool: 'boolean', int: 'bigint',
+  Bool: 'boolean', bool: 'boolean', int: 'bigint', int64: 'bigint',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
   Ripemd160: 'Ripemd160', Ripemd160Hash: 'Ripemd160', Addr: 'Addr',
