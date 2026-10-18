@@ -25,8 +25,12 @@ const APPROVED_ALLOWLISTS: Record<string, string[]> = {
   // EVM/STARK proof-system primitives are Go-only by project policy
   // (see CLAUDE.md "EVM/STARK proof-system primitives are Go-only by
   // project policy" + the project_go_only_crypto_modules memory).
-  // Covers: BabyBear / KoalaBear / Poseidon2* / BN254 + Groth16 /
-  // Merkle / merkleRootSha256 / SP1 FRI / FiatShamir-KB.
+  // Covers: BabyBear / merkleRootSha256.
+  // The policy also scopes KoalaBear, Poseidon2*, BN254 + Groth16, SP1 FRI
+  // and FiatShamir-KB to Go. No conformance fixture calls any of them: they
+  // are covered only by Go unit and integration tests. The BN254 / Groth16
+  // fixture is tracked as N-314. tests/f278-go-only-coverage-claims.test.ts
+  // fails if the "Covers:" list names a family that no fixture calls.
   // Non-Go tiers may carry partial ports but are NOT conformance
   // targets for these families. Their parsers are still exercised
   // by the all-tier --parser-only matrix.

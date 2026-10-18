@@ -183,7 +183,7 @@ The complete set of fixtures with a `compilers` allowlist is enumerated and pinn
 
 ##### Go-only crypto family
 
-These fixtures exercise the Baby Bear / KoalaBear / Poseidon2 / BN254-witness / FRI / Merkle / FiatShamir-KB Stack-IR codegen modules, which currently ship in the Go compiler only (Mode-3 STARK / FRI verification flows). See CLAUDE.md ("Go-only crypto codegen modules").
+These fixtures exercise the Baby Bear / Merkle Stack-IR codegen modules (BabyBear base field and Ext4, plus `merkleRootSha256`). The Go-only policy (see CLAUDE.md, "EVM/STARK proof-system primitives") covers more families than that, but no conformance fixture calls KoalaBear, Poseidon2, BN254 / Groth16, the SP1 FRI verifier (`verifySP1FRI`) or FiatShamir-KB. The `checkFriFold` method in `babybear-ext4` is a FRI colinearity relation written in contract source over BabyBear Ext4. It is not the SP1 FRI verifier codegen. Those families are covered only by Go unit and integration tests, and no conformance golden pins their bytes. For BN254 / Groth16 that means `compilers/go/codegen/bn254_generic_test.go`, `bn254_pairing_validation_test.go` and `bn254_groth16_test.go`, `packages/runar-go/bn254_real_pairing_test.go`, and `integration/go/groth16_test.go`, which runs the pipeline on `integration/go/contracts/Groth16Verifier.runar.go`. A BN254 / Groth16 conformance fixture is tracked as N-314. `tests/f278-go-only-coverage-claims.test.ts` fails if this list names a family that no fixture calls.
 
 | Fixture | Allowlist | Rationale |
 |---|---|---|
