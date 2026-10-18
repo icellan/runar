@@ -62,6 +62,10 @@ class TypeCheckResult:
         return [d.format_message() for d in self.errors]
 
 
+# N-321: cap on a typecheck message; mirrored in every tier.
+MAX_DIAGNOSTIC_CHARS = 1024
+
+
 def type_check(contract: ContractNode) -> TypeCheckResult:
     """Type-check a Runar AST. Returns the same AST plus any errors."""
     checker = _TypeChecker(contract)
@@ -553,6 +557,9 @@ class _TypeChecker:
             self._add_error(CONTINUATION_AMOUNT_READ_ONLY)
 
     def _add_error(self, msg: str) -> None:
+        # N-321: a message may echo user-written type text of any length; cap it.
+        if len(msg) > MAX_DIAGNOSTIC_CHARS:
+            msg = f"{msg[:MAX_DIAGNOSTIC_CHARS]}...({len(msg) - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
         loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
 

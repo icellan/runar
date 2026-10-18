@@ -29,6 +29,17 @@ export interface TypeCheckResult {
   errors: CompilerDiagnostic[];
 }
 
+/** N-321: cap on a typecheck message; mirrored in every tier. */
+export const MAX_DIAGNOSTIC_CHARS = 1024;
+
+function capDiagnostic(d: CompilerDiagnostic): CompilerDiagnostic {
+  if (d.message.length <= MAX_DIAGNOSTIC_CHARS) return d;
+  let cut = MAX_DIAGNOSTIC_CHARS;
+  const c = d.message.charCodeAt(cut);
+  if (c >= 0xdc00 && c <= 0xdfff) cut--; // do not split a surrogate pair
+  return { ...d, message: `${d.message.slice(0, cut)}...(${d.message.length - cut} more bytes elided)` };
+}
+
 /**
  * Type-check a Rúnar AST. Returns the same AST (no transformation) plus
  * any type errors found.
@@ -43,7 +54,7 @@ export function typecheck(contract: ContractNode): TypeCheckResult {
     checker.checkMethod(method);
   }
 
-  return { typedContract: contract, errors };
+  return { typedContract: contract, errors: errors.map(capDiagnostic) };
 }
 
 // ---------------------------------------------------------------------------

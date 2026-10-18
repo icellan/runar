@@ -192,6 +192,9 @@ module RunarCompiler
       "continuationAmount"      => FuncSig.new(params: [], return_type: "bigint"),
     }.freeze
 
+    # N-321: cap on a typecheck message; mirrored in every tier.
+    MAX_DIAGNOSTIC_CHARS = 1024
+
     # F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
     CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned"
 
@@ -814,6 +817,10 @@ module RunarCompiler
       end
 
       def add_error(msg)
+        # N-321: a message may echo user-written type text of any length; cap it.
+        if msg.length > MAX_DIAGNOSTIC_CHARS
+          msg = "#{msg[0, MAX_DIAGNOSTIC_CHARS]}...(#{msg.length - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+        end
         loc = @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
       end

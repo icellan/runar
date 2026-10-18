@@ -41,6 +41,7 @@ test {
     _ = @import("tests/f203_py_bytes_escape.zig");
     _ = @import("tests/java_parenthesised_expression.zig");
     _ = @import("tests/f213_source_nesting_limit.zig");
+    _ = @import("tests/n321_diagnostic_type_echo.zig");
     _ = @import("tests/n180_call_depth_limit.zig");
     _ = @import("tests/n264_composite_nesting.zig");
     _ = @import("tests/n266_locktime_bfs_perf.zig");

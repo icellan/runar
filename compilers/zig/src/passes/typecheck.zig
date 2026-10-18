@@ -41,6 +41,9 @@ pub const TypeCheckResult = struct {
     }
 };
 
+/// N-321: cap on a typecheck message; mirrored in every tier.
+const MAX_DIAGNOSTIC_BYTES: usize = 1024;
+
 /// Type-check a Runar AST. Returns the same AST plus any errors.
 pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult {
     var checker = try TypeChecker.init(allocator, contract);
@@ -676,7 +679,18 @@ const TypeChecker = struct {
     }
 
     fn addError(self: *TypeChecker, comptime fmt: []const u8, args: anytype) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        var msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        // N-321: a message may echo user-written source text of any length; cap it.
+        if (msg.len > MAX_DIAGNOSTIC_BYTES) {
+            var cut: usize = MAX_DIAGNOSTIC_BYTES;
+            while (cut > 0 and (msg[cut] & 0xC0) == 0x80) cut -= 1;
+            const capped = std.fmt.allocPrint(self.allocator, "{s}...({d} more bytes elided)", .{ msg[0..cut], msg.len - cut }) catch {
+                self.allocator.free(msg);
+                return;
+            };
+            self.allocator.free(msg);
+            msg = capped;
+        }
         self.errors.append(self.allocator, msg) catch {
             self.allocator.free(msg);
         };

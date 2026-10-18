@@ -32,6 +32,9 @@ impl TypeCheckResult {
 /// F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
 pub const CONTINUATION_AMOUNT_READ_ONLY: &str = "continuationAmount() is read-only and cannot be assigned";
 
+/// N-321: cap on a typecheck message; mirrored in every tier.
+pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
+
 pub fn typecheck(contract: &ContractNode) -> TypeCheckResult {
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut checker = TypeChecker::new(contract, &mut errors);
@@ -620,7 +623,19 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Push a type-check error using the current method's source location.
+    /// N-321: a message longer than MAX_DIAGNOSTIC_BYTES (it may echo user-written
+    /// type text of any length) is cut and ends `...(N more bytes elided)`.
     fn add_error(&mut self, msg: impl Into<String>) {
+        let mut msg: String = msg.into();
+        if msg.len() > MAX_DIAGNOSTIC_BYTES {
+            let mut cut = MAX_DIAGNOSTIC_BYTES;
+            while !msg.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let elided = msg.len() - cut;
+            msg.truncate(cut);
+            msg.push_str(&format!("...({} more bytes elided)", elided));
+        }
         self.errors.push(Diagnostic::error(msg, self.current_method_loc.clone()));
     }
 

@@ -381,7 +381,15 @@ public final class Typecheck {
             errors.add(format(msg, loc));
         }
 
+        /** N-321: cap on a typecheck message; mirrored in every tier. */
+        static final int MAX_DIAGNOSTIC_CHARS = 1024;
+
         private static String format(String msg, SourceLocation loc) {
+            if (msg.length() > MAX_DIAGNOSTIC_CHARS) {
+                int cut = MAX_DIAGNOSTIC_CHARS;
+                if (Character.isLowSurrogate(msg.charAt(cut))) cut--;
+                msg = msg.substring(0, cut) + "...(" + (msg.length() - cut) + " more bytes elided)";
+            }
             if (loc == null) return msg;
             if (loc.file() != null && !loc.file().isEmpty() && loc.line() > 0) {
                 return loc.file() + ":" + loc.line() + ":" + loc.column() + ": " + msg;

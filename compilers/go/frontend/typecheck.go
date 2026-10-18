@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -542,7 +543,25 @@ func newTypeChecker(contract *ContractNode) *typeChecker {
 	return tc
 }
 
+// N-321: a diagnostic may echo user-written type text of any length (a 4 MiB
+// annotation made a ~4 MiB error). Every tier caps a typecheck message at
+// MaxDiagnosticBytes and appends "...(N more bytes elided)"; real messages
+// are far shorter, so ordinary diagnostics are unchanged.
+const MaxDiagnosticBytes = 1024
+
+func capDiagnostic(msg string) string {
+	if len(msg) <= MaxDiagnosticBytes {
+		return msg
+	}
+	cut := MaxDiagnosticBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s...(%d more bytes elided)", msg[:cut], len(msg)-cut)
+}
+
 func (tc *typeChecker) addError(msg string) {
+	msg = capDiagnostic(msg)
 	loc := tc.currentStmtLoc
 	if loc == nil {
 		loc = tc.currentMethodLoc
@@ -551,6 +570,7 @@ func (tc *typeChecker) addError(msg string) {
 }
 
 func (tc *typeChecker) addErrorWithLoc(msg string, loc *SourceLocation) {
+	msg = capDiagnostic(msg)
 	tc.errors = append(tc.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: loc})
 }
 
