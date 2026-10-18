@@ -17,7 +17,8 @@ from __future__ import annotations
 from runar.sdk.contract import RunarContract
 from runar.sdk.ordinals import Inscription
 from runar.sdk.provider import MockProvider
-from runar.sdk.signer import MockSigner
+from runar.sdk.deployment import build_p2pkh_script
+from runar.sdk.local_signer import LocalSigner
 from runar.sdk.types import CallOptions, DeployOptions, OutputSpec, RunarArtifact, Utxo
 
 ARTIFACT_DICT = {
@@ -42,11 +43,13 @@ def _artifact() -> RunarArtifact:
 
 def test_multi_output_scripts_equal_single_output_locking_script():
     art = _artifact()
-    signer = MockSigner()
-    provider = MockProvider.always_ack('testnet')
+    # Default (validating) MockProvider: the deploy broadcast is checked, so the
+    # funding UTXO must be a REAL P2PKH the signer can spend.
+    signer = LocalSigner("00" * 31 + "05")
+    provider = MockProvider('testnet')
     provider.add_utxo(signer.get_address(), Utxo(
-        txid="00" * 32, output_index=0, satoshis=500_000,
-        script="76a914" + "00" * 20 + "88ac",
+        txid="11" * 32, output_index=0, satoshis=500_000,
+        script=build_p2pkh_script(signer.get_public_key()),
     ))
     ins = Inscription(content_type='text/plain', data='68656c6c6f')
     contract = RunarContract(art, [0]).with_inscription(ins)
