@@ -87,6 +87,24 @@ describe('F-050: unknown compiler id in a fixture allowlist fails closed', () =>
     await expect(runAllIrParityChecks(testsDir)).rejects.toThrow(/typo-allowlist.*"gp"/s);
   }, 60_000);
 
+  // N-193: the reader used to `catch { return null }` on a source.json that
+  // does not parse, which read as "no allowlist = every tier" - the same
+  // fail-open F-050 removed for a bad id. Proves: unparseable JSON, and a
+  // source.json that is a directory (unreadable), are rejected naming the
+  // fixture. Does not prove: anything about a parseable but wrongly shaped file.
+  it('reader rejects a malformed source.json', () => {
+    const { fixtureDir } = makeFixture(['go']);
+    writeFileSync(join(fixtureDir, 'source.json'), '{ "compilers": ["go"', 'utf-8');
+    expect(() => readFixtureCompilerAllowlist(fixtureDir)).toThrow(/typo-allowlist.*source\.json/s);
+  });
+
+  it('reader rejects an unreadable source.json', () => {
+    const { fixtureDir } = makeFixture(['go']);
+    rmSync(join(fixtureDir, 'source.json'));
+    mkdirSync(join(fixtureDir, 'source.json'));
+    expect(() => readFixtureCompilerAllowlist(fixtureDir)).toThrow(/typo-allowlist.*source\.json/s);
+  });
+
   it('every real fixture source.json still validates', () => {
     const dirs = readdirSync(REAL_TESTS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory());
     expect(dirs.length).toBeGreaterThan(0);

@@ -3148,8 +3148,13 @@ export function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> |
   let config: { compilers?: unknown };
   try {
     config = JSON.parse(readFileSync(configFile, 'utf-8')) as { compilers?: unknown };
-  } catch {
-    return null;
+  } catch (err) {
+    // N-193: fail closed. A source.json that cannot be read or parsed must not
+    // read as "no allowlist" (= every tier), the same fail-open F-050 removed.
+    throw new Error(
+      `conformance fixture '${basename(testDir)}': source.json is unreadable or malformed: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
   }
   if (!config.compilers || !Array.isArray(config.compilers)) return null;
   // F-050: fail closed. An id that names no real tier (a typo such as "gp")
