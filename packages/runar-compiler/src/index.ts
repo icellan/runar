@@ -255,7 +255,9 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let parseResult: ReturnType<typeof parse>;
   try {
     parseResult = parse(source, opts.fileName);
-    diagnostics.push(...parseResult.errors);
+    // N-310: not `push(...errors)` — a spread of ~10^5 parse diagnostics (a 4 MiB
+    // source of one repeated syntax error) overflows the JS stack.
+    for (const err of parseResult.errors) diagnostics.push(err);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
