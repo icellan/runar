@@ -119,6 +119,15 @@ type RunarContract struct {
 	serialisedOutputsSet bool
 }
 
+// InvalidConstructorArgError (N-329) is what NewRunarContract panics with when a
+// ByteString-family constructor arg is not an even-length hex string. Such an
+// arg used to be spliced into the locking script as raw text.
+type InvalidConstructorArgError struct {
+	Message string
+}
+
+func (e *InvalidConstructorArgError) Error() string { return e.Message }
+
 // NewRunarContract creates a new contract instance from a compiled artifact
 // and constructor arguments.
 //
@@ -139,6 +148,8 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 			expected, artifact.ContractName, len(constructorArgs),
 		))
 	}
+
+	checkByteStringCtorArgs(artifact, constructorArgs)
 
 	// Flatten any FixedArray constructor args into their underlying
 	// synthetic scalar slots so downstream encoding (which uses the
@@ -187,6 +198,60 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 	}
 
 	return c
+}
+
+// byteStringCtorTypes are the constructor param types whose arg is spliced
+// into the locking script as a push of hex-decoded bytes.
+var byteStringCtorTypes = map[string]bool{
+	"ByteString": true, "PubKey": true, "Sig": true, "Addr": true,
+	"Ripemd160": true, "Sha256": true, "Point": true, "P256Point": true,
+	"P384Point": true, "SigHashPreimage": true,
+}
+
+// checkByteStringCtorArgs (N-329) panics with *InvalidConstructorArgError when
+// a ByteString-family constructor arg is a string that is not an even-length
+// hex string. encodeArg treats a string as hex, so raw bytes (e.g. the 20 raw
+// bytes of runar.Alice.PubKeyHash) were emitted as a push header followed by
+// non-hex text: a corrupt locking script with no error. []byte args are always
+// encodable and pass. Args of any other Go type are left to encodeArg.
+func checkByteStringCtorArgs(artifact *RunarArtifact, args []interface{}) {
+	for i, param := range artifact.ABI.Constructor.Params {
+		if i >= len(args) {
+			return
+		}
+		typ := param.Type
+		values := []interface{}{args[i]}
+		if param.FixedArray != nil {
+			for strings.HasPrefix(typ, "FixedArray<") && strings.HasSuffix(typ, ">") {
+				inner := typ[len("FixedArray<") : len(typ)-1]
+				comma := strings.LastIndex(inner, ",")
+				if comma < 0 {
+					break
+				}
+				typ = strings.TrimSpace(inner[:comma])
+			}
+			values = flattenNestedValue(args[i], parseFixedArrayDims(param.Type))
+		}
+		if !byteStringCtorTypes[typ] {
+			continue
+		}
+		for _, v := range values {
+			var s string
+			switch t := v.(type) {
+			case string:
+				s = t
+			case ByteString:
+				s = string(t)
+			default:
+				continue
+			}
+			if !isHexBytes(s) {
+				panic(&InvalidConstructorArgError{Message: fmt.Sprintf(
+					"RunarContract: constructor arg '%s' (%s) of %s must be an even-length hex string",
+					param.Name, param.Type, artifact.ContractName)})
+			}
+		}
+	}
 }
 
 // flattenFixedArrayCtorArgs walks the user-facing (grouped) constructor

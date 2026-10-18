@@ -43,6 +43,14 @@ module Runar
     # wrong value.
     class MalformedScriptError < StandardError; end
 
+    # Raised by RunarContract.new when a ByteString-family constructor arg
+    # (ByteString, PubKey, Sig, Addr, Ripemd160, Sha256, Point, P256Point,
+    # P384Point, SigHashPreimage) is a String that is not an even-length hex
+    # string (N-329). The SDK treats such a String as hex when it splices it
+    # into the locking script, so raw bytes would otherwise build a corrupt
+    # script.
+    class InvalidConstructorArgError < ArgumentError; end
+
     # Raise ScriptSizeExceededError if `script_hex` (hex-encoded) exceeds
     # `limit` bytes. Hex is 2 chars per byte; tolerate odd-length defensively.
     def self.assert_script_hex_under_limit(script_hex, limit, context)

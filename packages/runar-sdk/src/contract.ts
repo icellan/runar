@@ -4,7 +4,7 @@
 
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import { InputLimits } from 'runar-ir-schema';
-import { assertScriptHexUnderLimit, MalformedScriptError, WitnessValueMissingError } from './errors.js';
+import { assertScriptHexUnderLimit, InvalidConstructorArgError, MalformedScriptError, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
 import { txToTransactionData } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
@@ -501,6 +501,8 @@ export class RunarContract {
         `RunarContract: expected ${expected} constructor args for ${artifact.contractName}, got ${constructorArgs.length}`,
       );
     }
+
+    checkByteStringCtorArgs(artifact, constructorArgs);
 
     // Initialize state from constructor args for stateful contracts.
     // Properties with initialValue use their default; others are matched
@@ -3089,6 +3091,52 @@ function regroupFixedArrayState(
     out[field.name] = rebuilt.value;
   }
   return out;
+}
+
+/**
+ * Constructor param types whose arg is spliced into the locking script as a
+ * push of hex-decoded bytes.
+ */
+const BYTE_STRING_CTOR_TYPES = new Set([
+  'ByteString', 'PubKey', 'Sig', 'Addr', 'Ripemd160', 'Sha256',
+  'Point', 'P256Point', 'P384Point', 'SigHashPreimage',
+]);
+
+/**
+ * N-329: refuse a ByteString-family constructor arg that is a string but not
+ * an even-length hex string. `encodeArg` treats every string as hex, so raw
+ * bytes (e.g. 20 raw Addr bytes) were emitted as a push header followed by
+ * non-hex text: a corrupt locking script with no error. Non-string args are
+ * left to `encodeArg`. Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+ */
+function checkByteStringCtorArgs(
+  artifact: RunarArtifact,
+  args: unknown[],
+): void {
+  const params = artifact.abi.constructor.params as ReadonlyArray<{ name: string; type: string; fixedArray?: unknown }>;
+  for (let i = 0; i < params.length && i < args.length; i++) {
+    const param = params[i]!;
+    let leafType = param.type;
+    let values: unknown[] = [args[i]];
+    if (param.fixedArray && Array.isArray(args[i])) {
+      const dims = parseFixedArrayDims(param.type);
+      values = dims.length > 0 ? flattenNested(args[i] as unknown[], dims) : (args[i] as unknown[]);
+      while (leafType.startsWith('FixedArray<') && leafType.endsWith('>')) {
+        const inner = leafType.slice('FixedArray<'.length, -1);
+        const comma = inner.lastIndexOf(',');
+        if (comma < 0) break;
+        leafType = inner.slice(0, comma).trim();
+      }
+    }
+    if (!BYTE_STRING_CTOR_TYPES.has(leafType)) continue;
+    for (const v of values) {
+      if (typeof v === 'string' && !isHexBytes(v)) {
+        throw new InvalidConstructorArgError(
+          `RunarContract: constructor arg '${param.name}' (${param.type}) of ${artifact.contractName} must be an even-length hex string`,
+        );
+      }
+    }
+  }
 }
 
 /**

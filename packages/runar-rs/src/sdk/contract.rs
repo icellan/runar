@@ -388,6 +388,8 @@ impl RunarContract {
             );
         }
 
+        check_byte_string_ctor_args(&artifact, &constructor_args);
+
         // Initialize state from constructor args for stateful contracts.
         // Properties with initial_value use their compile-time default;
         // others are matched to constructor args by their declaration
@@ -3074,6 +3076,56 @@ pub fn resolve_continuation_satoshis(
         .or(user_outputs_satoshis)
         .or(single_explicit_state_sats)
         .unwrap_or(current_utxo_satoshis)
+}
+
+/// Constructor param types whose arg is spliced into the locking script as a
+/// push of hex-decoded bytes.
+const BYTE_STRING_CTOR_TYPES: &[&str] = &[
+    "ByteString", "PubKey", "Sig", "Addr", "Ripemd160", "Sha256",
+    "Point", "P256Point", "P384Point", "SigHashPreimage",
+];
+
+/// N-329: refuse a ByteString-family constructor arg that is not an
+/// even-length hex string. `encode_arg` treats every `SdkValue::Bytes` as hex,
+/// so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
+/// followed by non-hex text: a corrupt locking script with no error. Panics
+/// (the constructor's existing refusal style) with the diagnostic shared by
+/// the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+fn check_byte_string_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
+    fn leaf_type(t: &str) -> &str {
+        let mut cur = t.trim();
+        while let Some(inner) = cur.strip_prefix("FixedArray<").and_then(|r| r.strip_suffix('>')) {
+            match inner.rfind(',') {
+                Some(i) => cur = inner[..i].trim(),
+                None => break,
+            }
+        }
+        cur
+    }
+    fn visit(v: &SdkValue, bad: &mut bool) {
+        match v {
+            SdkValue::Bytes(hex) => {
+                if !super::script_utils::is_hex_bytes(hex) {
+                    *bad = true;
+                }
+            }
+            SdkValue::Array(items) => items.iter().for_each(|i| visit(i, bad)),
+            _ => {}
+        }
+    }
+    for (param, arg) in artifact.abi.constructor.params.iter().zip(args) {
+        if !BYTE_STRING_CTOR_TYPES.contains(&leaf_type(&param.param_type)) {
+            continue;
+        }
+        let mut bad = false;
+        visit(arg, &mut bad);
+        if bad {
+            panic!(
+                "RunarContract: constructor arg '{}' ({}) of {} must be an even-length hex string",
+                param.name, param.param_type, artifact.contract_name
+            );
+        }
+    }
 }
 
 /// Encode an argument value as a Bitcoin Script push data element.

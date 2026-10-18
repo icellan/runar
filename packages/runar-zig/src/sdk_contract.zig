@@ -220,6 +220,9 @@ pub const ContractError = error{
     NotDeployed,
     MethodNotFound,
     ArgCountMismatch,
+    /// N-329: a ByteString-family constructor arg is not an even-length hex
+    /// string (it would be spliced into the locking script as raw text).
+    InvalidConstructorArg,
     NoProviderOrSigner,
     DeployFailed,
     CallFailed,
@@ -267,6 +270,42 @@ fn checkFixedWidthArgs(params: []const types.ABIParam, args: []const types.State
     }
 }
 
+/// Constructor param types whose arg is spliced into the locking script as a
+/// push of hex-decoded bytes.
+const BYTE_STRING_CTOR_TYPES = [_][]const u8{
+    "ByteString", "PubKey", "Sig",       "Addr",      "Ripemd160",
+    "Sha256",     "Point",  "P256Point", "P384Point", "SigHashPreimage",
+};
+
+fn isHexOrNonBytes(v: types.StateValue) bool {
+    return switch (v) {
+        .bytes => |b| script_utils.isHexBytes(b),
+        .array_value => |items| for (items) |i| {
+            if (!isHexOrNonBytes(i)) break false;
+        } else true,
+        else => true,
+    };
+}
+
+/// N-329: refuse a ByteString-family constructor arg that is `.bytes` but not
+/// an even-length hex string. `encodeArg` treats every `.bytes` as hex, so raw
+/// bytes (e.g. 20 raw Addr bytes) were emitted as a push header followed by
+/// non-hex text: a corrupt locking script with no error. Other value kinds are
+/// left to `encodeArg`. This tier returns the error tag
+/// `ContractError.InvalidConstructorArg`; the TS/Go/Python/Ruby/Java/Rust
+/// tiers raise the shared message.
+fn checkByteStringCtorArgs(params: []const types.ABIParam, args: []const types.StateValue) ContractError!void {
+    for (params, args) |p, a| {
+        const leaf = state_mod.unwrapFixedArrayLeaf(p.type_name);
+        var is_bytes_type = false;
+        for (BYTE_STRING_CTOR_TYPES) |t| {
+            if (std.mem.eql(u8, leaf, t)) is_bytes_type = true;
+        }
+        if (!is_bytes_type) continue;
+        if (!isHexOrNonBytes(a)) return ContractError.InvalidConstructorArg;
+    }
+}
+
 /// RunarContract is a runtime wrapper for a compiled Runar contract. It handles
 /// deployment, method invocation, state tracking, and script construction.
 pub const RunarContract = struct {
@@ -297,6 +336,7 @@ pub const RunarContract = struct {
     ) !RunarContract {
         const expected = artifact.abi.constructor.params.len;
         if (constructor_args.len != expected) return ContractError.ArgCountMismatch;
+        try checkByteStringCtorArgs(artifact.abi.constructor.params, constructor_args);
 
         // Clone constructor args
         var args = try allocator.alloc(types.StateValue, constructor_args.len);

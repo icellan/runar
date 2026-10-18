@@ -67,6 +67,7 @@ public final class RunarContract {
                     + artifact.contractName() + ", got " + constructorArgs.size()
             );
         }
+        checkByteStringCtorArgs(artifact, constructorArgs);
         this.constructorArgs = List.copyOf(constructorArgs);
         this.state = new HashMap<>();
         if (artifact.isStateful()) {
@@ -80,6 +81,50 @@ public final class RunarContract {
                 }
             }
         }
+    }
+
+    /**
+     * Constructor param types whose arg is spliced into the locking script as
+     * a push of hex-decoded bytes.
+     */
+    private static final java.util.Set<String> BYTE_STRING_CTOR_TYPES = java.util.Set.of(
+        "ByteString", "PubKey", "Sig", "Addr", "Ripemd160", "Sha256",
+        "Point", "P256Point", "P384Point", "SigHashPreimage");
+
+    /**
+     * N-329: refuse a ByteString-family constructor arg that is a {@link String}
+     * but not an even-length hex string. {@code encodeConstructorArg} treats
+     * every String as hex, so raw bytes (e.g. 20 raw Addr bytes) were emitted
+     * as a push header followed by non-hex text: a corrupt locking script with
+     * no error. Non-String args are left to the encoder. Same diagnostic in
+     * the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+     */
+    private static void checkByteStringCtorArgs(RunarArtifact artifact, List<Object> args) {
+        List<RunarArtifact.ABIParam> params = artifact.abi().constructor().params();
+        for (int i = 0; i < params.size() && i < args.size(); i++) {
+            RunarArtifact.ABIParam param = params.get(i);
+            String leaf = param.type().trim();
+            while (leaf.startsWith("FixedArray<") && leaf.endsWith(">")) {
+                String inner = leaf.substring("FixedArray<".length(), leaf.length() - 1);
+                int comma = inner.lastIndexOf(',');
+                if (comma < 0) break;
+                leaf = inner.substring(0, comma).trim();
+            }
+            if (!BYTE_STRING_CTOR_TYPES.contains(leaf)) continue;
+            if (!allHexOrNonString(args.get(i))) {
+                throw new InvalidConstructorArgException(
+                    "RunarContract: constructor arg '" + param.name() + "' (" + param.type()
+                        + ") of " + artifact.contractName() + " must be an even-length hex string");
+            }
+        }
+    }
+
+    private static boolean allHexOrNonString(Object v) {
+        if (v instanceof String s) return ScriptUtils.isHexBytes(s);
+        if (v instanceof List<?> l) {
+            for (Object o : l) if (!allHexOrNonString(o)) return false;
+        }
+        return true;
     }
 
     /**

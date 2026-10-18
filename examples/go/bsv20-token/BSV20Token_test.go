@@ -101,7 +101,7 @@ func TestBSV20Token_DeployInscription(t *testing.T) {
 	a := compileContract(t)
 	lim := "1000"
 	inscription := runar.BSV20Deploy("RUNAR", "21000000", &lim, nil)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestBSV20Token_DeployInscription_WithDecimals(t *testing.T) {
 	a := compileContract(t)
 	dec := "8"
 	inscription := runar.BSV20Deploy("USDT", "100000000", nil, &dec)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestBSV20Token_DeployInscription_WithDecimals(t *testing.T) {
 func TestBSV20Token_MintInscription(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV20Mint("RUNAR", "1000")
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestBSV20Token_MintInscription(t *testing.T) {
 func TestBSV20Token_TransferInscription(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV20Transfer("RUNAR", "50")
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestBSV20Token_TransferInscription(t *testing.T) {
 func TestBSV20Token_InscriptionFromUtxoRoundTrip(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV20Deploy("TEST", "1000", nil, nil)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}

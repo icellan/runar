@@ -11,7 +11,7 @@ from runar.sdk.types import (
 )
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
-from runar.sdk.errors import assert_script_hex_under_limit, MalformedScriptError, WitnessValueMissingError
+from runar.sdk.errors import assert_script_hex_under_limit, InvalidConstructorArgError, MalformedScriptError, WitnessValueMissingError
 from .unsound_primitives import assert_unsound_primitives_acknowledged
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
@@ -273,6 +273,8 @@ class RunarContract:
                 f"RunarContract: expected {expected} constructor args for "
                 f"{artifact.contract_name}, got {len(constructor_args)}"
             )
+
+        _check_byte_string_ctor_args(artifact, constructor_args)
 
         self.artifact = artifact
         self._constructor_args = list(constructor_args)
@@ -2459,6 +2461,39 @@ def _regroup_fixed_array_state(state: dict, state_fields: list) -> dict:
         rebuilt, _ = _regroup_nested(flat, dims)
         out[field.name] = rebuilt
     return out
+
+
+# Constructor param types whose arg is spliced into the locking script as a push
+# of hex-decoded bytes.
+_BYTE_STRING_CTOR_TYPES = frozenset({
+    'ByteString', 'PubKey', 'Sig', 'Addr', 'Ripemd160', 'Sha256',
+    'Point', 'P256Point', 'P384Point', 'SigHashPreimage',
+})
+
+
+def _check_byte_string_ctor_args(artifact: RunarArtifact, args: list) -> None:
+    """N-329: refuse a ByteString-family constructor arg that is a string but
+    not an even-length hex string. ``_encode_arg`` treats every string as hex,
+    so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
+    followed by non-hex text: a corrupt locking script with no error. Non-str
+    args (bytes, ints, ...) are left to ``_encode_arg``. Same diagnostic in the
+    TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+    """
+    for param, arg in zip(artifact.abi.constructor_params, args):
+        leaf_type = _unwrap_fixed_array_leaf_type(param.type)
+        if leaf_type not in _BYTE_STRING_CTOR_TYPES:
+            continue
+        if getattr(param, 'fixed_array', None) and isinstance(arg, (list, tuple)):
+            dims = _parse_fixed_array_dims(param.type)
+            values = _flatten_nested(arg, dims) if dims else list(arg)
+        else:
+            values = [arg]
+        for v in values:
+            if isinstance(v, str) and not is_hex_bytes(v):
+                raise InvalidConstructorArgError(
+                    f"RunarContract: constructor arg '{param.name}' ({param.type}) "
+                    f"of {artifact.contract_name} must be an even-length hex string"
+                )
 
 
 def _flatten_fixed_array_args(args: list, abi_params: list) -> list:

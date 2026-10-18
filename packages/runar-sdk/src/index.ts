@@ -50,7 +50,7 @@ export type {
 } from './multi-contract.js';
 
 // Typed SDK errors
-export { ScriptSizeExceededError, assertScriptHexUnderLimit } from './errors.js';
+export { ScriptSizeExceededError, InvalidConstructorArgError, assertScriptHexUnderLimit } from './errors.js';
 
 // Transaction building
 export { buildDeployTransaction, selectUtxos, estimateDeployFee } from './deployment.js';

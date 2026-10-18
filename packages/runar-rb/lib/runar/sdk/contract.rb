@@ -84,6 +84,8 @@ module Runar
                 "#{artifact.contract_name}, got #{actual}"
         end
 
+        check_byte_string_ctor_args(artifact, constructor_args)
+
         @artifact         = artifact
         @constructor_args = constructor_args.dup
         @state            = {}
@@ -2535,6 +2537,33 @@ module Runar
       # ---------------------------------------------------------------------------
       # Argument encoding
       # ---------------------------------------------------------------------------
+
+      # Constructor param types whose arg is spliced into the locking script as
+      # a push of hex-decoded bytes.
+      BYTE_STRING_CTOR_TYPES = %w[
+        ByteString PubKey Sig Addr Ripemd160 Sha256
+        Point P256Point P384Point SigHashPreimage
+      ].freeze
+
+      # N-329: refuse a ByteString-family constructor arg that is a String but
+      # not an even-length hex string. +encode_arg+ treats every String as hex,
+      # so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
+      # followed by non-hex text: a corrupt locking script with no error.
+      # Non-String args are left to +encode_arg+. Same diagnostic in the TS/Go/Python/
+      # Ruby/Java/Rust tiers; Zig returns an error tag.
+      def check_byte_string_ctor_args(artifact, args)
+        artifact.abi.constructor_params.zip(args).each do |param, arg|
+          next if param.nil?
+          next unless BYTE_STRING_CTOR_TYPES.include?(State.unwrap_fixed_array_leaf(param.type))
+
+          values = arg.is_a?(Array) ? arg.flatten : [arg]
+          next if values.all? { |v| !v.is_a?(String) || ScriptUtils.hex_bytes?(v.b) }
+
+          raise InvalidConstructorArgError,
+                "RunarContract: constructor arg '#{param.name}' (#{param.type}) " \
+                "of #{artifact.contract_name} must be an even-length hex string"
+        end
+      end
 
       # Encode a single method argument as Script push data.
       #

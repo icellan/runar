@@ -76,6 +76,15 @@ class MalformedScriptError(Exception):
     """
 
 
+class InvalidConstructorArgError(ValueError):
+    """Raised by ``RunarContract`` when a ByteString-family constructor arg
+    (ByteString, PubKey, Sig, Addr, Ripemd160, Sha256, Point, P256Point,
+    P384Point, SigHashPreimage) is a string that is not an even-length hex
+    string (N-329). The SDK treats such a string as hex when it splices it into
+    the locking script, so raw bytes would otherwise build a corrupt script.
+    """
+
+
 class WitnessValueMissingError(Exception):
     """Raised when a method call requires a caller-supplied intent-intrinsic
     witness value (auto-injected ``_prevOutScript_<i>`` or
