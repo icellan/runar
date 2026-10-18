@@ -1274,10 +1274,12 @@ const Parser = struct {
 
         // Optional type annotation
         var ti: ?RunarType = null;
+        var spelled: []const u8 = "";
         if (self.current.kind == .colon) {
             _ = self.bump();
             const tn = self.parseRustType();
             ti = types.typeNodeToRunarType(tn);
+            spelled = types.typeNodeName(tn);
         }
 
         // Initializer
@@ -1286,9 +1288,9 @@ const Parser = struct {
         _ = self.match(.semicolon);
 
         if (mutable) {
-            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         } else {
-            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         }
     }
 

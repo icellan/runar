@@ -833,6 +833,18 @@ const TypeChecker = struct {
         }
     }
 
+    /// N-323: a local annotated with a type name no tier recognises. Every
+    /// parser lowers an unrecognised name to `.unknown`, and `isSubtype` treats
+    /// `.unknown` as compatible with everything, so `let q: TTT = a;` used to
+    /// compile. The six peer tiers answer "type 'bigint' is not assignable to
+    /// type 'TTT'"; this reuses that wording, quoting the spelled name.
+    fn addUnknownAnnotationError(self: *TypeChecker, init_type: RunarType, spelled: []const u8) void {
+        self.addError("type '{s}' is not assignable to type '{s}'", .{
+            types.runarTypeToString(init_type),
+            if (spelled.len > 0) spelled else "unknown",
+        });
+    }
+
     fn checkStatements(self: *TypeChecker, stmts: []const Statement, env: *TypeEnv) void {
         for (stmts) |stmt| self.checkStatement(stmt, env);
     }
@@ -842,7 +854,9 @@ const TypeChecker = struct {
             .const_decl => |decl| {
                 const init_type = self.inferExprType(decl.value, env);
                 const decl_type = if (decl.type_info) |declared| blk: {
-                    if (!isSubtype(init_type, declared)) {
+                    if (declared == .unknown) {
+                        self.addUnknownAnnotationError(init_type, decl.type_name);
+                    } else if (!isSubtype(init_type, declared)) {
                         self.addError("type '{s}' is not assignable to type '{s}'", .{
                             types.runarTypeToString(init_type),
                             types.runarTypeToString(declared),
@@ -860,7 +874,9 @@ const TypeChecker = struct {
                 if (decl.value) |val| {
                     const init_type = self.inferExprType(val, env);
                     const decl_type = if (decl.type_info) |declared| blk: {
-                        if (!isSubtype(init_type, declared)) {
+                        if (declared == .unknown) {
+                            self.addUnknownAnnotationError(init_type, decl.type_name);
+                        } else if (!isSubtype(init_type, declared)) {
                             self.addError("type '{s}' is not assignable to type '{s}'", .{
                                 types.runarTypeToString(init_type),
                                 types.runarTypeToString(declared),
@@ -2314,6 +2330,61 @@ test "typeCheck: type mismatch in variable declaration" {
     defer result.deinit(allocator);
     try std.testing.expectEqual(1, result.errors.len);
     try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "not assignable") != null);
+}
+
+// N-323: a local annotated with an unrecognised type name (every parser lowers
+// it to `.unknown`, which `isSubtype` accepts against anything) compiled.
+// Proves the checker refuses an annotated `const`/`let` whose annotation is
+// `.unknown`, quoting the spelled name, and that an UNANNOTATED local (also
+// `.unknown` until inferred) is still accepted. Does not prove any parser
+// records the spelled name; conformance/negatives/n323-* covers the source path.
+test "typeCheck: N-323 local with unknown type annotation is refused" {
+    const allocator = std.testing.allocator;
+
+    const stmts = try allocator.alloc(Statement, 2);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "x", .type_info = .unknown, .type_name = "TTT", .value = .{ .literal_int = 42 } } };
+    stmts[1] = .{ .let_decl = .{ .name = "y", .type_info = .unknown, .type_name = "UUU", .value = .{ .literal_int = 1 } } };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "unlock", .is_public = true, .params = &.{}, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = &.{},
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(2, result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "type 'bigint' is not assignable to type 'TTT'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[1], "type 'bigint' is not assignable to type 'UUU'") != null);
+}
+
+test "typeCheck: N-323 unannotated local is still accepted" {
+    const allocator = std.testing.allocator;
+
+    const stmts = try allocator.alloc(Statement, 1);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "x", .value = .{ .literal_int = 42 } } };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "unlock", .is_public = true, .params = &.{}, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = &.{},
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(0, result.errors.len);
 }
 
 // N-234: a property initializer of the wrong literal family compiled

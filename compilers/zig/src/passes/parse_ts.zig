@@ -1452,10 +1452,12 @@ const Parser = struct {
 
         // Optional type annotation
         var ti: ?RunarType = null;
+        var spelled: []const u8 = "";
         if (self.current.kind == .colon) {
             _ = self.bump();
             const tn = self.parseTypeAnnotation();
             ti = typeNodeToRunarType(tn);
+            spelled = types.typeNodeName(tn);
         }
 
         // Initializer
@@ -1464,9 +1466,9 @@ const Parser = struct {
         if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
 
         if (mutable) {
-            return .{ .let_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .let_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         } else {
-            return .{ .const_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .const_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         }
     }
 

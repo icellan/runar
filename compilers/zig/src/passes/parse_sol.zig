@@ -1638,7 +1638,7 @@ const Parser = struct {
 
         // Solidity variables are mutable (let_decl)
         const ti = resolveSolType(type_name);
-        return .{ .let_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc } };
+        return .{ .let_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc, .type_name = type_name } };
     }
 
     fn parseExpressionStatement(self: *Parser) ?Statement {

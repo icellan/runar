@@ -1363,6 +1363,7 @@ const Parser = struct {
         const loc = self.currentSourceLoc();
         const type_node = self.parseType();
         const ti = types.typeNodeToRunarType(type_node);
+        const spelled = types.typeNodeName(type_node);
         if (self.current.kind != .ident) {
             self.addError("expected variable name");
             return null;
@@ -1377,13 +1378,13 @@ const Parser = struct {
         _ = self.match(.semicolon);
 
         if (value) |v| {
-            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = v, .source_loc = loc } };
+            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = v, .source_loc = loc, .type_name = spelled } };
         }
         // Uninitialised declaration — Java allows it but the Rúnar subset
         // requires an initialiser. Emit a soft error and fall back to a
         // let_decl so we keep parsing.
         self.addErrorFmt("local variable '{s}' must have an initializer", .{var_name});
-        return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = null, .source_loc = loc } };
+        return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = null, .source_loc = loc, .type_name = spelled } };
     }
 
     fn parseIfStmt(self: *Parser) ?Statement {

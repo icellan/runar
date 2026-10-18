@@ -1726,10 +1726,11 @@ const Parser = struct {
 
         // Type annotation (optional if initializer present)
         var ti: ?RunarType = null;
+        var spelled: []const u8 = "";
         if (self.current.kind != .assign and self.current.kind != .eof) {
             // There's a type before the =
             if (self.current.kind == .ident or self.current.kind == .lbracket or self.current.kind == .star) {
-                ti = self.parseGoType();
+                ti = self.parseGoTypeNamed(&spelled);
             }
         }
 
@@ -1737,11 +1738,11 @@ const Parser = struct {
         if (self.current.kind == .assign) {
             _ = self.bump(); // consume '='
             const val = self.parseExpression() orelse return null;
-            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         }
 
         // var with no initializer
-        return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = null, .source_loc = loc } };
+        return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = null, .source_loc = loc, .type_name = spelled } };
     }
 
     fn parseIfStmt(self: *Parser) ?Statement {

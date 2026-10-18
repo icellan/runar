@@ -836,13 +836,13 @@ const Parser = struct {
 
     /// N-046: `name = value` is an assignment when the method already bound
     /// `name`, otherwise a declaration.
-    fn bindLocal(self: *Parser, name: []const u8, type_info: ?RunarType, value: Expression, loc: types.SourceLocation) Statement {
+    fn bindLocal(self: *Parser, name: []const u8, type_info: ?RunarType, type_name: []const u8, value: Expression, loc: types.SourceLocation) Statement {
         if (self.declared_locals.contains(name)) {
             return .{ .assign = .{ .target = name, .value = value, .source_loc = loc, .target_is_property = false } };
         }
         self.declared_locals.put(self.allocator, name, {}) catch {};
         if (type_info) |ti| {
-            return .{ .let_decl = .{ .name = name, .type_info = ti, .value = value, .source_loc = loc } };
+            return .{ .let_decl = .{ .name = name, .type_info = ti, .value = value, .source_loc = loc, .type_name = type_name } };
         }
         return .{ .let_decl = .{ .name = name, .value = value, .source_loc = loc } };
     }
@@ -1857,10 +1857,10 @@ const Parser = struct {
                 if (self.match(.assign)) {
                     const val = self.parseExpression() orelse return null;
                     self.skipNewlines();
-                    return self.bindLocal(var_name, ti, val, loc);
+                    return self.bindLocal(var_name, ti, types.typeNodeName(tn), val, loc);
                 } else {
                     self.skipNewlines();
-                    return self.bindLocal(var_name, ti, .{ .literal_int = 0 }, loc);
+                    return self.bindLocal(var_name, ti, types.typeNodeName(tn), .{ .literal_int = 0 }, loc);
                 }
             }
         }
@@ -1907,7 +1907,7 @@ const Parser = struct {
                 // In Python, bare `name = expr` in method body is a variable
                 // declaration -- or, N-046, an assignment when the method
                 // already bound the name (Python is function-scoped).
-                return self.bindLocal(id, null, value, loc);
+                return self.bindLocal(id, null, "", value, loc);
             },
             .index_access => |ia| {
                 // self.arr[idx] = value — carry the full target so

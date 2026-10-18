@@ -1044,6 +1044,13 @@ const Parser = struct {
     }
 
     fn parseMoveTypeName(self: *Parser) RunarType {
+        var discard: []const u8 = "";
+        return self.parseMoveTypeNameNamed(&discard);
+    }
+
+    /// `parseMoveTypeName`, additionally reporting the type name as the author
+    /// spelled it (final path component), for diagnostics (N-323).
+    fn parseMoveTypeNameNamed(self: *Parser, out_name: *[]const u8) RunarType {
         // Handle & references in type position (skip them)
         if (self.current.kind == .ampersand) {
             _ = self.bump();
@@ -1084,6 +1091,7 @@ const Parser = struct {
             self.skipTypeArgs();
         }
 
+        out_name.* = name;
         return mapMoveType(name);
     }
 
@@ -1450,9 +1458,10 @@ const Parser = struct {
 
         // Optional type annotation
         var ti: ?RunarType = null;
+        var spelled: []const u8 = "";
         if (self.current.kind == .colon) {
             _ = self.bump();
-            ti = self.parseMoveTypeName();
+            ti = self.parseMoveTypeNameNamed(&spelled);
         }
 
         // Initializer
@@ -1468,9 +1477,9 @@ const Parser = struct {
         self.skipSemicolons();
 
         if (mutable) {
-            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         } else {
-            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = val orelse return null, .source_loc = loc } };
+            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = val orelse return null, .source_loc = loc, .type_name = spelled } };
         }
     }
 

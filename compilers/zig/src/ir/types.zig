@@ -257,8 +257,10 @@ pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, as
 // expr_stmt rather than a dedicated assert_stmt) anchored to the enclosing
 // method instead of their own line.
 pub const ExprStmt = struct { expr: Expression, source_loc: ?SourceLocation = null };
-pub const ConstDecl = struct { name: []const u8, type_info: ?RunarType = null, value: Expression, source_loc: ?SourceLocation = null };
-pub const LetDecl = struct { name: []const u8, type_info: ?RunarType = null, value: ?Expression = null, source_loc: ?SourceLocation = null };
+/// `type_name` is the annotation as the author spelled it (empty when none, or when
+/// the parser has no single spelled name). Only a diagnostic reads it: N-323.
+pub const ConstDecl = struct { name: []const u8, type_info: ?RunarType = null, value: Expression, source_loc: ?SourceLocation = null, type_name: []const u8 = "" };
+pub const LetDecl = struct { name: []const u8, type_info: ?RunarType = null, value: ?Expression = null, source_loc: ?SourceLocation = null, type_name: []const u8 = "" };
 pub const Assign = struct {
     target: []const u8,
     value: Expression,

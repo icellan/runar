@@ -1025,14 +1025,20 @@ const Parser = struct {
         _ = self.bump();
         const n = self.expect(.ident) orelse return null;
         var ti: ?RunarType = null;
-        if (self.current.kind == .colon) { _ = self.bump(); ti = typeNodeToRunarType(self.parseTypeNode()); }
+        var spelled: []const u8 = "";
+        if (self.current.kind == .colon) {
+            _ = self.bump();
+            const tn = self.parseTypeNode();
+            ti = typeNodeToRunarType(tn);
+            spelled = types.typeNodeName(tn);
+        }
         if (self.expect(.assign) == null) return null;
         const v = self.parseExpression() orelse return null;
         _ = self.expect(.semicolon);
         if (mutable) {
-            return Statement{ .let_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc } };
+            return Statement{ .let_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc, .type_name = spelled } };
         } else {
-            return Statement{ .const_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc } };
+            return Statement{ .const_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc, .type_name = spelled } };
         }
     }
 
