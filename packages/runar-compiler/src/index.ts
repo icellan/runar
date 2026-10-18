@@ -292,8 +292,9 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let validationResult: ReturnType<typeof validate>;
   try {
     validationResult = validate(parseResult.contract);
-    diagnostics.push(...validationResult.errors);
-    diagnostics.push(...validationResult.warnings);
+    // N-312: loops, not `push(...list)` — a spread of ~10^5 entries overflows the JS stack.
+    for (const d of validationResult.errors) diagnostics.push(d);
+    for (const d of validationResult.warnings) diagnostics.push(d);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
@@ -328,7 +329,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let typeCheckResult: ReturnType<typeof typecheck>;
   try {
     typeCheckResult = typecheck(parseResult.contract);
-    diagnostics.push(...typeCheckResult.errors);
+    for (const d of typeCheckResult.errors) diagnostics.push(d);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
@@ -363,7 +364,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let expandedContract: ContractNode;
   try {
     const expandResult = expandFixedArrays(parseResult.contract);
-    diagnostics.push(...expandResult.errors);
+    for (const d of expandResult.errors) diagnostics.push(d);
     expandedContract = expandResult.contract;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
