@@ -75,7 +75,7 @@ module Runar
       # @param artifact         [RunarArtifact] compiled contract artifact
       # @param constructor_args [Array]         constructor argument values
       # @raise [ArgumentError] when arg count does not match the ABI
-      def initialize(artifact, constructor_args)
+      def initialize(artifact, constructor_args, restoring: false)
         expected = artifact.abi.constructor_params.length
         actual   = constructor_args.length
         if actual != expected
@@ -84,7 +84,7 @@ module Runar
                 "#{artifact.contract_name}, got #{actual}"
         end
 
-        check_byte_string_ctor_args(artifact, constructor_args)
+        check_byte_string_ctor_args(artifact, constructor_args) unless restoring
 
         @artifact         = artifact
         @constructor_args = constructor_args.dup
@@ -951,7 +951,7 @@ module Runar
         # #119: recover the real constructor args baked into the deployed script
         # instead of 0 placeholders, so the ANF continuation formula and the
         # codesep-offset walk operate on the true values.
-        contract   = new(artifact, restore_constructor_args(artifact, output.script))
+        contract   = new(artifact, restore_constructor_args(artifact, output.script), restoring: true)
 
         stateful = !artifact.state_fields.empty?
         code_script = if stateful
@@ -1009,7 +1009,7 @@ module Runar
         end
         # #119: recover the real constructor args baked into the deployed script
         # instead of 0 placeholders (see restore_constructor_args).
-        contract   = new(artifact, restore_constructor_args(artifact, utxo.script))
+        contract   = new(artifact, restore_constructor_args(artifact, utxo.script), restoring: true)
 
         stateful = !artifact.state_fields.empty?
         code_script = if stateful
@@ -2560,19 +2560,21 @@ module Runar
         Point P256Point P384Point SigHashPreimage
       ].freeze
 
-      # N-329: refuse a ByteString-family constructor arg that is a String but
-      # not an even-length hex string. +encode_arg+ treats every String as hex,
-      # so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
-      # followed by non-hex text: a corrupt locking script with no error.
-      # Non-String args are left to +encode_arg+. Same diagnostic in the TS/Go/Python/
-      # Ruby/Java/Rust tiers; Zig returns an error tag.
+      # N-329 / N-330: a ByteString-family constructor arg must be an
+      # even-length hex String. +encode_arg+ treats every String as hex, so raw
+      # bytes (e.g. 20 raw Addr bytes) were emitted as a push header followed
+      # by non-hex text, and its +to_s+ fallback turned nil into "" and a
+      # Symbol or Float into text: corrupt locking scripts with no error. Ruby
+      # has no distinct raw-bytes type (a binary String is a String), so every
+      # non-String leaf is refused. Same diagnostic in the TS/Go/Python/Ruby/
+      # Java/Rust tiers; Zig returns an error tag.
       def check_byte_string_ctor_args(artifact, args)
         artifact.abi.constructor_params.zip(args).each do |param, arg|
           next if param.nil?
           next unless BYTE_STRING_CTOR_TYPES.include?(State.unwrap_fixed_array_leaf(param.type))
 
-          values = arg.is_a?(Array) ? arg.flatten : [arg]
-          next if values.all? { |v| !v.is_a?(String) || ScriptUtils.hex_bytes?(v.b) }
+          leaves = param.type.to_s.start_with?('FixedArray<') && arg.is_a?(Array) ? arg.flatten : [arg]
+          next if leaves.all? { |v| v.is_a?(String) && ScriptUtils.hex_bytes?(v.b) }
 
           raise InvalidConstructorArgError,
                 "RunarContract: constructor arg '#{param.name}' (#{param.type}) " \

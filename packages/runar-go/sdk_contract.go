@@ -138,6 +138,14 @@ func (e *InvalidConstructorArgError) Error() string { return e.Message }
 // sees a flat positional list matching the compiler's expanded
 // property order.
 func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *RunarContract {
+	return newRunarContract(artifact, constructorArgs, true)
+}
+
+// newRunarContract is NewRunarContract with the ByteString-family arg check
+// switchable. FromUtxo / FromTxId pass false: restoreConstructorArgs fills
+// params that have no constructor slot with an int64(0) placeholder, which is
+// an internal value, not user input (N-330).
+func newRunarContract(artifact *RunarArtifact, constructorArgs []interface{}, checkByteStringArgs bool) *RunarContract {
 	// The user passes one arg per grouped ABI parameter; for FixedArray
 	// params the arg is a (possibly nested) Go slice. Validate the
 	// grouped count first so errors are reported in user-facing terms.
@@ -149,7 +157,9 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 		))
 	}
 
-	checkByteStringCtorArgs(artifact, constructorArgs)
+	if checkByteStringArgs {
+		checkByteStringCtorArgs(artifact, constructorArgs)
+	}
 
 	// Flatten any FixedArray constructor args into their underlying
 	// synthetic scalar slots so downstream encoding (which uses the
@@ -213,7 +223,8 @@ var byteStringCtorTypes = map[string]bool{
 // hex string. encodeArg treats a string as hex, so raw bytes (e.g. the 20 raw
 // bytes of runar.Alice.PubKeyHash) were emitted as a push header followed by
 // non-hex text: a corrupt locking script with no error. []byte args are always
-// encodable and pass. Args of any other Go type are left to encodeArg.
+// encodable and pass. Any other Go type (nil, numbers, bools, structs) is
+// refused too (N-330): encodeArg would stringify it with %v.
 func checkByteStringCtorArgs(artifact *RunarArtifact, args []interface{}) {
 	for i, param := range artifact.ABI.Constructor.Params {
 		if i >= len(args) {
@@ -242,8 +253,14 @@ func checkByteStringCtorArgs(artifact *RunarArtifact, args []interface{}) {
 				s = t
 			case ByteString:
 				s = string(t)
-			default:
+			case []byte:
 				continue
+			default:
+				// N-330: nil, numbers, bools, structs ... would reach
+				// encodeArg's fmt.Sprintf("%v") arm and be spliced in as text.
+				panic(&InvalidConstructorArgError{Message: fmt.Sprintf(
+					"RunarContract: constructor arg '%s' (%s) of %s must be an even-length hex string",
+					param.Name, param.Type, artifact.ContractName)})
 			}
 			if !isHexBytes(s) {
 				panic(&InvalidConstructorArgError{Message: fmt.Sprintf(
@@ -2157,7 +2174,7 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) (*RunarContract, error) {
 	if err != nil {
 		return nil, fmt.Errorf("RunarContract.FromUtxo: %w", err)
 	}
-	contract := NewRunarContract(artifact, restoredArgs)
+	contract := newRunarContract(artifact, restoredArgs, false)
 
 	// Store the code portion of the on-chain script
 	if len(artifact.StateFields) > 0 {
@@ -2248,7 +2265,7 @@ func FromTxId(
 	if err != nil {
 		return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
 	}
-	contract := NewRunarContract(artifact, restoredArgs)
+	contract := newRunarContract(artifact, restoredArgs, false)
 
 	// Store the code portion of the on-chain script.
 	// Use opcode-aware walking to find the real OP_RETURN (not a 0x6a

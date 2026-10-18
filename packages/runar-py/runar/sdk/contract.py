@@ -266,7 +266,7 @@ class RunarContract:
     Handles deployment, method invocation, state tracking, and script construction.
     """
 
-    def __init__(self, artifact: RunarArtifact, constructor_args: list):
+    def __init__(self, artifact: RunarArtifact, constructor_args: list, *, _restoring: bool = False):
         expected = len(artifact.abi.constructor_params)
         if len(constructor_args) != expected:
             raise ValueError(
@@ -274,7 +274,8 @@ class RunarContract:
                 f"{artifact.contract_name}, got {len(constructor_args)}"
             )
 
-        _check_byte_string_ctor_args(artifact, constructor_args)
+        if not _restoring:
+            constructor_args = _check_byte_string_ctor_args(artifact, constructor_args)
 
         self.artifact = artifact
         self._constructor_args = list(constructor_args)
@@ -1732,7 +1733,9 @@ class RunarContract:
                 "RunarContract.from_utxo: script is not an even-length hex string"
             )
         restored_args = restore_constructor_args(artifact, utxo.script)
-        contract = cls(artifact, restored_args)
+        # N-330: restored args hold 0 placeholders for unslotted params; they
+        # are internal values, so the ByteString-family arg check is skipped.
+        contract = cls(artifact, restored_args, _restoring=True)
 
         if artifact.state_fields:
             last_op_return = find_last_op_return(utxo.script)
@@ -2471,29 +2474,42 @@ _BYTE_STRING_CTOR_TYPES = frozenset({
 })
 
 
-def _check_byte_string_ctor_args(artifact: RunarArtifact, args: list) -> None:
-    """N-329: refuse a ByteString-family constructor arg that is a string but
-    not an even-length hex string. ``_encode_arg`` treats every string as hex,
-    so raw bytes (e.g. 20 raw Addr bytes) were emitted as a push header
-    followed by non-hex text: a corrupt locking script with no error. Non-str
-    args (bytes, ints, ...) are left to ``_encode_arg``. Same diagnostic in the
-    TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+def _check_byte_string_ctor_args(artifact: RunarArtifact, args: list) -> list:
+    """N-329 / N-330: a ByteString-family constructor arg must be an
+    even-length hex string or raw bytes (``bytes`` / ``bytearray``).
+    ``_encode_arg`` treats every string as hex, so raw text (e.g. 20 raw Addr
+    bytes) was emitted as a push header followed by non-hex text, and its
+    ``str(value)`` fallback turned ``None`` into ``"None"``: corrupt locking
+    scripts with no error. Raw bytes are converted to their hex string (so the
+    script and any state built from the arg agree); every other kind is
+    refused. Returns the (possibly rewritten) args; the input is not mutated.
+    Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an
+    error tag.
     """
-    for param, arg in zip(artifact.abi.constructor_params, args):
+    out = list(args)
+    for i, (param, arg) in enumerate(zip(artifact.abi.constructor_params, args)):
         leaf_type = _unwrap_fixed_array_leaf_type(param.type)
         if leaf_type not in _BYTE_STRING_CTOR_TYPES:
             continue
-        if getattr(param, 'fixed_array', None) and isinstance(arg, (list, tuple)):
-            dims = _parse_fixed_array_dims(param.type)
-            values = _flatten_nested(arg, dims) if dims else list(arg)
-        else:
-            values = [arg]
-        for v in values:
-            if isinstance(v, str) and not is_hex_bytes(v):
-                raise InvalidConstructorArgError(
-                    f"RunarContract: constructor arg '{param.name}' ({param.type}) "
-                    f"of {artifact.contract_name} must be an even-length hex string"
-                )
+        is_fixed_array = bool(getattr(param, 'fixed_array', None))
+
+        def refuse():
+            raise InvalidConstructorArgError(
+                f"RunarContract: constructor arg '{param.name}' ({param.type}) "
+                f"of {artifact.contract_name} must be an even-length hex string"
+            )
+
+        def norm(v):
+            if isinstance(v, str):
+                return v if is_hex_bytes(v) else refuse()
+            if isinstance(v, (bytes, bytearray)):
+                return bytes(v).hex()
+            if is_fixed_array and isinstance(v, (list, tuple)):
+                return [norm(x) for x in v]
+            return refuse()
+
+        out[i] = norm(arg)
+    return out
 
 
 def _flatten_fixed_array_args(args: list, abi_params: list) -> list:

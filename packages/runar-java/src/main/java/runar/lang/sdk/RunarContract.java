@@ -67,7 +67,7 @@ public final class RunarContract {
                     + artifact.contractName() + ", got " + constructorArgs.size()
             );
         }
-        checkByteStringCtorArgs(artifact, constructorArgs);
+        constructorArgs = checkByteStringCtorArgs(artifact, constructorArgs);
         this.constructorArgs = List.copyOf(constructorArgs);
         this.state = new HashMap<>();
         if (artifact.isStateful()) {
@@ -92,18 +92,25 @@ public final class RunarContract {
         "Point", "P256Point", "P384Point", "SigHashPreimage");
 
     /**
-     * N-329: refuse a ByteString-family constructor arg that is a {@link String}
-     * but not an even-length hex string. {@code encodeConstructorArg} treats
-     * every String as hex, so raw bytes (e.g. 20 raw Addr bytes) were emitted
-     * as a push header followed by non-hex text: a corrupt locking script with
-     * no error. Non-String args are left to the encoder. Same diagnostic in
-     * the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+     * N-329 / N-330: a ByteString-family constructor arg must be an
+     * even-length hex {@link String} or raw {@code byte[]}. {@code
+     * encodeConstructorArg} treats every String as hex, so raw text (e.g. 20
+     * raw Addr bytes) was emitted as a push header followed by non-hex text,
+     * and its {@code String.valueOf} fallback turned a {@code byte[]} into
+     * {@code "[B@..."}: corrupt locking scripts with no error. A {@code
+     * byte[]} is converted to its hex string (so the script and any state
+     * built from the arg agree); every other kind, including null, is
+     * refused. Returns the (possibly rewritten) args; the input is not
+     * mutated. Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig
+     * returns an error tag.
      */
-    private static void checkByteStringCtorArgs(RunarArtifact artifact, List<Object> args) {
+    private static List<Object> checkByteStringCtorArgs(RunarArtifact artifact, List<Object> args) {
         List<RunarArtifact.ABIParam> params = artifact.abi().constructor().params();
+        List<Object> out = new java.util.ArrayList<>(args);
         for (int i = 0; i < params.size() && i < args.size(); i++) {
             RunarArtifact.ABIParam param = params.get(i);
             String leaf = param.type().trim();
+            boolean fixedArray = leaf.startsWith("FixedArray<");
             while (leaf.startsWith("FixedArray<") && leaf.endsWith(">")) {
                 String inner = leaf.substring("FixedArray<".length(), leaf.length() - 1);
                 int comma = inner.lastIndexOf(',');
@@ -111,20 +118,33 @@ public final class RunarContract {
                 leaf = inner.substring(0, comma).trim();
             }
             if (!BYTE_STRING_CTOR_TYPES.contains(leaf)) continue;
-            if (!allHexOrNonString(args.get(i))) {
+            Object norm = normalizeByteStringArg(args.get(i), fixedArray);
+            if (norm == REFUSED) {
                 throw new InvalidConstructorArgException(
                     "RunarContract: constructor arg '" + param.name() + "' (" + param.type()
                         + ") of " + artifact.contractName() + " must be an even-length hex string");
             }
+            out.set(i, norm);
         }
+        return out;
     }
 
-    private static boolean allHexOrNonString(Object v) {
-        if (v instanceof String s) return ScriptUtils.isHexBytes(s);
-        if (v instanceof List<?> l) {
-            for (Object o : l) if (!allHexOrNonString(o)) return false;
+    private static final Object REFUSED = new Object();
+
+    /** Hex string for an acceptable leaf, a rebuilt list for a FixedArray, else {@link #REFUSED}. */
+    private static Object normalizeByteStringArg(Object v, boolean fixedArray) {
+        if (v instanceof String s) return ScriptUtils.isHexBytes(s) ? s : REFUSED;
+        if (v instanceof byte[] b) return ScriptUtils.bytesToHex(b);
+        if (fixedArray && v instanceof List<?> l) {
+            List<Object> rebuilt = new java.util.ArrayList<>(l.size());
+            for (Object o : l) {
+                Object n = normalizeByteStringArg(o, true);
+                if (n == REFUSED) return REFUSED;
+                rebuilt.add(n);
+            }
+            return rebuilt;
         }
-        return true;
+        return REFUSED;
     }
 
     /**

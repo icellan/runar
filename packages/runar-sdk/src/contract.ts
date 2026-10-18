@@ -502,7 +502,10 @@ export class RunarContract {
       );
     }
 
-    checkByteStringCtorArgs(artifact, constructorArgs);
+    if (!restoringFromUtxo) {
+      constructorArgs = checkByteStringCtorArgs(artifact, constructorArgs);
+      this.constructorArgs = constructorArgs;
+    }
 
     // Initialize state from constructor args for stateful contracts.
     // Properties with initialValue use their default; others are matched
@@ -2783,10 +2786,19 @@ export class RunarContract {
     if (!isHexBytes(utxo.script)) {
       throw new MalformedScriptError('RunarContract.fromUtxo: script is not an even-length hex string');
     }
-    const contract = new RunarContract(
-      artifact,
-      restoreConstructorArgs(artifact, utxo.script),
-    );
+    // N-330: restoreConstructorArgs fills unslotted params with a `0n`
+    // placeholder, which the ByteString-family arg check would refuse. Those
+    // are internal values, not user input, so the check is skipped here.
+    let contract: RunarContract;
+    restoringFromUtxo = true;
+    try {
+      contract = new RunarContract(
+        artifact,
+        restoreConstructorArgs(artifact, utxo.script),
+      );
+    } finally {
+      restoringFromUtxo = false;
+    }
 
     if (artifact.stateFields && artifact.stateFields.length > 0) {
       const lastOpReturn = findLastOpReturn(utxo.script);
@@ -3093,6 +3105,9 @@ function regroupFixedArrayState(
   return out;
 }
 
+/** N-330: set only around the internal construction in `fromUtxo`. */
+let restoringFromUtxo = false;
+
 /**
  * Constructor param types whose arg is spliced into the locking script as a
  * push of hex-decoded bytes.
@@ -3103,40 +3118,46 @@ const BYTE_STRING_CTOR_TYPES = new Set([
 ]);
 
 /**
- * N-329: refuse a ByteString-family constructor arg that is a string but not
- * an even-length hex string. `encodeArg` treats every string as hex, so raw
- * bytes (e.g. 20 raw Addr bytes) were emitted as a push header followed by
- * non-hex text: a corrupt locking script with no error. Non-string args are
- * left to `encodeArg`. Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+ * N-329 / N-330: a ByteString-family constructor arg must be an even-length hex
+ * string or raw bytes (Uint8Array / Buffer). `encodeArg` treats every string as
+ * hex, so raw text (e.g. 20 raw Addr bytes) was emitted as a push header
+ * followed by non-hex text, and its `String(v)` fallback turned a Uint8Array
+ * into "1,2,3" and null/undefined into "null"/"undefined": corrupt locking
+ * scripts with no error. Raw bytes are converted to their hex string (so the
+ * script and any state built from the arg agree); every other kind is refused.
+ * Returns the (possibly rewritten) args; the caller's array is not mutated.
+ * Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
  */
 function checkByteStringCtorArgs(
   artifact: RunarArtifact,
   args: unknown[],
-): void {
+): unknown[] {
   const params = artifact.abi.constructor.params as ReadonlyArray<{ name: string; type: string; fixedArray?: unknown }>;
+  const out = args.slice();
   for (let i = 0; i < params.length && i < args.length; i++) {
     const param = params[i]!;
     let leafType = param.type;
-    let values: unknown[] = [args[i]];
-    if (param.fixedArray && Array.isArray(args[i])) {
-      const dims = parseFixedArrayDims(param.type);
-      values = dims.length > 0 ? flattenNested(args[i] as unknown[], dims) : (args[i] as unknown[]);
-      while (leafType.startsWith('FixedArray<') && leafType.endsWith('>')) {
-        const inner = leafType.slice('FixedArray<'.length, -1);
-        const comma = inner.lastIndexOf(',');
-        if (comma < 0) break;
-        leafType = inner.slice(0, comma).trim();
-      }
+    while (leafType.startsWith('FixedArray<') && leafType.endsWith('>')) {
+      const inner = leafType.slice('FixedArray<'.length, -1);
+      const comma = inner.lastIndexOf(',');
+      if (comma < 0) break;
+      leafType = inner.slice(0, comma).trim();
     }
     if (!BYTE_STRING_CTOR_TYPES.has(leafType)) continue;
-    for (const v of values) {
-      if (typeof v === 'string' && !isHexBytes(v)) {
-        throw new InvalidConstructorArgError(
-          `RunarContract: constructor arg '${param.name}' (${param.type}) of ${artifact.contractName} must be an even-length hex string`,
-        );
-      }
-    }
+    const refuse = (): never => {
+      throw new InvalidConstructorArgError(
+        `RunarContract: constructor arg '${param.name}' (${param.type}) of ${artifact.contractName} must be an even-length hex string`,
+      );
+    };
+    const norm = (v: unknown): unknown => {
+      if (typeof v === 'string') return isHexBytes(v) ? v : refuse();
+      if (v instanceof Uint8Array) return Array.from(v, (b) => b.toString(16).padStart(2, '0')).join('');
+      if (param.fixedArray && Array.isArray(v)) return v.map(norm);
+      return refuse();
+    };
+    out[i] = norm(args[i]);
   }
+  return out;
 }
 
 /**

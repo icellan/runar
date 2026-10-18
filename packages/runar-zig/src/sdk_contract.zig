@@ -277,13 +277,21 @@ const BYTE_STRING_CTOR_TYPES = [_][]const u8{
     "Sha256",     "Point",  "P256Point", "P384Point", "SigHashPreimage",
 };
 
-fn isHexOrNonBytes(v: types.StateValue) bool {
+/// N-330: only `.bytes` (hex) is a ByteString-family value, and an
+/// `.array_value` only for a FixedArray param. `.int` / `.big_int` / `.boolean`
+/// would be encoded as a script number or OP_0/OP_1; `.empty_sig` is a call-arg
+/// marker.
+fn isHexBytesValue(v: types.StateValue, fixed_array: bool) bool {
     return switch (v) {
         .bytes => |b| script_utils.isHexBytes(b),
-        .array_value => |items| for (items) |i| {
-            if (!isHexOrNonBytes(i)) break false;
-        } else true,
-        else => true,
+        .array_value => |items| blk: {
+            if (!fixed_array) break :blk false;
+            for (items) |i| {
+                if (!isHexBytesValue(i, true)) break :blk false;
+            }
+            break :blk true;
+        },
+        else => false,
     };
 }
 
@@ -302,7 +310,8 @@ fn checkByteStringCtorArgs(params: []const types.ABIParam, args: []const types.S
             if (std.mem.eql(u8, leaf, t)) is_bytes_type = true;
         }
         if (!is_bytes_type) continue;
-        if (!isHexOrNonBytes(a)) return ContractError.InvalidConstructorArg;
+        const is_fixed_array = std.mem.startsWith(u8, std.mem.trim(u8, p.type_name, " "), "FixedArray<");
+        if (!isHexBytesValue(a, is_fixed_array)) return ContractError.InvalidConstructorArg;
     }
 }
 

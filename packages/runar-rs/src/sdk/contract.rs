@@ -380,6 +380,14 @@ pub(crate) fn is_sdk_supplied_param(p: &AbiParam, is_stateful: bool) -> bool {
 impl RunarContract {
     /// Create a new RunarContract from an artifact and constructor arguments.
     pub fn new(artifact: RunarArtifact, constructor_args: Vec<SdkValue>) -> Self {
+        Self::new_inner(artifact, constructor_args, true)
+    }
+
+    /// `new` with the ByteString-family arg check switchable. `from_utxo`
+    /// passes `false`: `restore_constructor_args` fills params that have no
+    /// constructor slot with an `Int(0)` placeholder, which is an internal
+    /// value, not user input (N-330).
+    fn new_inner(artifact: RunarArtifact, constructor_args: Vec<SdkValue>, validate_byte_strings: bool) -> Self {
         let expected = artifact.abi.constructor.params.len();
         if constructor_args.len() != expected {
             panic!(
@@ -388,7 +396,9 @@ impl RunarContract {
             );
         }
 
-        check_byte_string_ctor_args(&artifact, &constructor_args);
+        if validate_byte_strings {
+            check_byte_string_ctor_args(&artifact, &constructor_args);
+        }
 
         // Initialize state from constructor args for stateful contracts.
         // Properties with initial_value use their compile-time default;
@@ -2648,7 +2658,7 @@ impl RunarContract {
         // wrong state continuation and codesep/OP_PUSH_TX offset — unspendable.
         let restored_args = restore_constructor_args(&artifact, &utxo.script)?;
 
-        let mut contract = RunarContract::new(artifact, restored_args);
+        let mut contract = RunarContract::new_inner(artifact, restored_args, false);
 
         // Store the code portion of the on-chain script.
         // Use opcode-aware walking to find the real OP_RETURN (not a 0x6a
@@ -3102,15 +3112,18 @@ fn check_byte_string_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
         }
         cur
     }
-    fn visit(v: &SdkValue, bad: &mut bool) {
+    // N-330: only `Bytes` (hex) is a ByteString-family value, and an `Array`
+    // only for a FixedArray param. Int / BigInt / Bool would be encoded as a
+    // script number or OP_0/OP_1; Auto / EmptySig are call-arg markers.
+    fn visit(v: &SdkValue, fixed_array: bool, bad: &mut bool) {
         match v {
             SdkValue::Bytes(hex) => {
                 if !super::script_utils::is_hex_bytes(hex) {
                     *bad = true;
                 }
             }
-            SdkValue::Array(items) => items.iter().for_each(|i| visit(i, bad)),
-            _ => {}
+            SdkValue::Array(items) if fixed_array => items.iter().for_each(|i| visit(i, true, bad)),
+            _ => *bad = true,
         }
     }
     for (param, arg) in artifact.abi.constructor.params.iter().zip(args) {
@@ -3118,7 +3131,7 @@ fn check_byte_string_ctor_args(artifact: &RunarArtifact, args: &[SdkValue]) {
             continue;
         }
         let mut bad = false;
-        visit(arg, &mut bad);
+        visit(arg, param.param_type.trim().starts_with("FixedArray<"), &mut bad);
         if bad {
             panic!(
                 "RunarContract: constructor arg '{}' ({}) of {} must be an even-length hex string",
