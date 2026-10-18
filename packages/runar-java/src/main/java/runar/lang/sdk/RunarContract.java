@@ -105,7 +105,15 @@ public final class RunarContract {
             // call() invocations see the same state the chain has.
             Map<String, Object> extracted =
                 StateSerializer.extractFromScript(artifact, utxo.scriptHex());
-            if (extracted != null) state.putAll(extracted);
+            // N-320 (C10, as in TS): no state section at all is a refusal, not
+            // constructor-initial values presented as live on-chain state.
+            if (extracted == null) {
+                throw new IllegalArgumentException(
+                    "RunarContract.fromUtxo: no state section (OP_RETURN) in the script, but "
+                        + artifact.contractName() + " declares " + artifact.stateFields().size()
+                        + " state field(s)");
+            }
+            state.putAll(extracted);
         }
     }
 
@@ -121,6 +129,11 @@ public final class RunarContract {
     public static RunarContract fromUtxo(RunarArtifact artifact, UTXO utxo) {
         if (artifact == null) throw new IllegalArgumentException("artifact is null");
         if (utxo == null) throw new IllegalArgumentException("utxo is null");
+        // N-320: the script is untrusted. Refuse anything that is not whole
+        // bytes of hex before any reader sees it — the N-317 rule.
+        if (utxo.scriptHex() == null || !ScriptUtils.isHexBytes(utxo.scriptHex())) {
+            throw new IllegalArgumentException("RunarContract.fromUtxo: script is not an even-length hex string");
+        }
         return new RunarContract(artifact, utxo);
     }
 

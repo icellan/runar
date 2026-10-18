@@ -941,6 +941,11 @@ module Runar
         end
 
         output     = tx.outputs[output_index]
+        # N-320: the script is untrusted. Refuse anything that is not whole
+        # bytes of hex before any reader sees it — the N-317 rule.
+        unless ScriptUtils.hex_bytes?(output.script)
+          raise MalformedScriptError, 'RunarContract.from_txid: script is not an even-length hex string'
+        end
         # #119: recover the real constructor args baked into the deployed script
         # instead of 0 placeholders, so the ANF continuation formula and the
         # codesep-offset walk operate on the true values.
@@ -969,7 +974,14 @@ module Runar
 
         if stateful
           state = State.extract_state_from_script(artifact, output.script)
-          contract.instance_variable_set(:@state, state) if state
+          # N-320 (C10, as in TS): no state section at all is a refusal, not
+          # constructor-initial values presented as live on-chain state.
+          if state.nil?
+            raise MalformedScriptError,
+                  "RunarContract.from_txid: no state section (OP_RETURN) in the script, but " \
+                  "#{artifact.contract_name} declares #{artifact.state_fields.length} state field(s)"
+          end
+          contract.instance_variable_set(:@state, state)
         end
 
         contract
@@ -988,6 +1000,11 @@ module Runar
       # @return [RunarContract]
       def self.from_utxo(artifact, utxo)
         utxo = normalize_utxo(utxo)
+        # N-320: the script is untrusted. Refuse anything that is not whole
+        # bytes of hex before any reader sees it — the N-317 rule.
+        unless ScriptUtils.hex_bytes?(utxo.script)
+          raise MalformedScriptError, 'RunarContract.from_utxo: script is not an even-length hex string'
+        end
         # #119: recover the real constructor args baked into the deployed script
         # instead of 0 placeholders (see restore_constructor_args).
         contract   = new(artifact, restore_constructor_args(artifact, utxo.script))
@@ -1017,7 +1034,14 @@ module Runar
 
         if stateful
           state = State.extract_state_from_script(artifact, utxo.script)
-          contract.instance_variable_set(:@state, state) if state
+          # N-320 (C10, as in TS): no state section at all is a refusal, not
+          # constructor-initial values presented as live on-chain state.
+          if state.nil?
+            raise MalformedScriptError,
+                  "RunarContract.from_utxo: no state section (OP_RETURN) in the script, but " \
+                  "#{artifact.contract_name} declares #{artifact.state_fields.length} state field(s)"
+          end
+          contract.instance_variable_set(:@state, state)
         end
 
         contract

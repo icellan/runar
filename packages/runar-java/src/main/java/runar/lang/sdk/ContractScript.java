@@ -426,10 +426,11 @@ public final class ContractScript {
         byte[] le = ScriptUtils.hexToBytes(leHex);
         boolean neg = (le[le.length - 1] & 0x80) != 0;
         le[le.length - 1] &= 0x7f;
-        BigInteger mag = BigInteger.ZERO;
-        for (int i = le.length - 1; i >= 0; i--) {
-            mag = mag.shiftLeft(8).or(BigInteger.valueOf(le[i] & 0xff));
-        }
+        // N-320: one conversion. Shifting a byte in at a time is quadratic: a
+        // 1 MiB constructor arg held fromUtxo past the CPU budget.
+        byte[] be = new byte[le.length];
+        for (int i = 0; i < le.length; i++) be[i] = le[le.length - 1 - i];
+        BigInteger mag = new BigInteger(1, be);
         return neg ? mag.negate() : mag;
     }
 

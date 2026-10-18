@@ -13,6 +13,8 @@
 
 import type { StateField, RunarArtifact } from 'runar-ir-schema';
 import { STATE_FIELD_WIDTHS } from 'runar-ir-schema';
+import { MalformedScriptError } from './errors.js';
+import { isHexBytes } from './script-utils.js';
 
 /**
  * Serialize a set of state values into a hex-encoded Bitcoin Script data
@@ -235,6 +237,11 @@ export function extractStateFromScript(
   artifact: RunarArtifact,
   scriptHex: string,
 ): Record<string, unknown> | null {
+  // N-320: the script is untrusted (fromUtxo / fromTxId). Refuse anything that
+  // is not whole bytes of hex before any reader sees it — the N-317 rule.
+  if (!isHexBytes(scriptHex)) {
+    throw new MalformedScriptError('extractStateFromScript: script is not an even-length hex string');
+  }
   if (!artifact.stateFields || artifact.stateFields.length === 0) {
     return null;
   }

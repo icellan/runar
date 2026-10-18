@@ -11,7 +11,7 @@ from runar.sdk.types import (
 )
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
-from runar.sdk.errors import assert_script_hex_under_limit, WitnessValueMissingError
+from runar.sdk.errors import assert_script_hex_under_limit, MalformedScriptError, WitnessValueMissingError
 from .unsound_primitives import assert_unsound_primitives_acknowledged
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
@@ -21,7 +21,7 @@ from runar.sdk.deployment import (
 from runar.sdk.calling import (
     build_call_transaction, insert_unlocking_script, resolve_input_sequence,
 )
-from runar.sdk.script_utils import restore_constructor_args
+from runar.sdk.script_utils import is_hex_bytes, restore_constructor_args
 from runar.sdk.state import (
     serialize_state, extract_state_from_script, find_last_op_return,
     encode_push_data, check_fixed_width_value,
@@ -1723,6 +1723,12 @@ class RunarContract:
         # placeholders make a restored stateful spend unspendable. Params with
         # no ctor slot (mutable state fields) fall back to 0 and are overwritten
         # by extract_state_from_script below.
+        # N-320: the script is untrusted. Refuse anything that is not whole
+        # bytes of hex before any reader sees it -- the N-317 rule.
+        if not is_hex_bytes(utxo.script):
+            raise MalformedScriptError(
+                "RunarContract.from_utxo: script is not an even-length hex string"
+            )
         restored_args = restore_constructor_args(artifact, utxo.script)
         contract = cls(artifact, restored_args)
 
@@ -1749,8 +1755,15 @@ class RunarContract:
 
         if artifact.state_fields:
             state = extract_state_from_script(artifact, utxo.script)
-            if state is not None:
-                contract._state = state
+            # N-320 (C10, as in TS): no state section at all is a refusal, not
+            # constructor-initial values presented as live on-chain state.
+            if state is None:
+                raise MalformedScriptError(
+                    f"RunarContract.from_utxo: no state section (OP_RETURN) in the "
+                    f"script, but {artifact.contract_name} declares "
+                    f"{len(artifact.state_fields)} state field(s)"
+                )
+            contract._state = state
 
         return contract
 

@@ -384,6 +384,12 @@ pub fn extract_state_from_script(
     artifact: &RunarArtifact,
     script_hex: &str,
 ) -> Result<Option<HashMap<String, SdkValue>>, String> {
+    // N-320: the script is untrusted (from_utxo / from_txid). Refuse anything
+    // that is not whole bytes of ASCII hex before any reader slices it — the
+    // N-317 rule; a non-ASCII char panicked the `&str` slicing below.
+    if !crate::sdk::script_utils::is_hex_bytes(script_hex) {
+        return Err("extract_state_from_script: script is not an even-length hex string".to_string());
+    }
     let Some(state_fields) = artifact.state_fields.as_ref() else {
         return Ok(None);
     };
@@ -413,11 +419,22 @@ pub fn extract_state_from_script(
 ///
 /// Returns the hex-char offset of the OP_RETURN, or None.
 pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
+    // N-320: read bytes, not `&str` slices — slicing off a UTF-8 char
+    // boundary panicked on a non-ASCII script. A non-hex pair reads as 0, as
+    // `from_str_radix(..).unwrap_or(0)` did.
+    let hex = script_hex.as_bytes();
+    let byte_at = |i: usize| -> usize {
+        let digit = |b: u8| (b as char).to_digit(16);
+        match (digit(hex[i]), digit(hex[i + 1])) {
+            (Some(h), Some(l)) => (h * 16 + l) as usize,
+            _ => 0,
+        }
+    };
     let mut offset = 0;
-    let len = script_hex.len();
+    let len = hex.len();
 
     while offset + 2 <= len {
-        let opcode = u8::from_str_radix(&script_hex[offset..offset + 2], 16).unwrap_or(0);
+        let opcode = byte_at(offset);
 
         if opcode == 0x6a {
             // OP_RETURN at a real opcode boundary. Everything after is
@@ -425,26 +442,26 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
             return Some(offset);
         } else if opcode >= 0x01 && opcode <= 0x4b {
             // Direct push: opcode is the number of bytes
-            offset += 2 + opcode as usize * 2;
+            offset += 2 + opcode * 2;
         } else if opcode == 0x4c {
             // OP_PUSHDATA1: next 1 byte is the length
             if offset + 4 > len { break; }
-            let push_len = u8::from_str_radix(&script_hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
+            let push_len = byte_at(offset + 2);
             offset += 4 + push_len * 2;
         } else if opcode == 0x4d {
             // OP_PUSHDATA2: next 2 bytes (LE) are the length
             if offset + 6 > len { break; }
-            let lo = u8::from_str_radix(&script_hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
-            let hi = u8::from_str_radix(&script_hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
+            let lo = byte_at(offset + 2);
+            let hi = byte_at(offset + 4);
             let push_len = lo | (hi << 8);
             offset += 6 + push_len * 2;
         } else if opcode == 0x4e {
             // OP_PUSHDATA4: next 4 bytes (LE) are the length
             if offset + 10 > len { break; }
-            let b0 = u8::from_str_radix(&script_hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
-            let b1 = u8::from_str_radix(&script_hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
-            let b2 = u8::from_str_radix(&script_hex[offset + 6..offset + 8], 16).unwrap_or(0) as usize;
-            let b3 = u8::from_str_radix(&script_hex[offset + 8..offset + 10], 16).unwrap_or(0) as usize;
+            let b0 = byte_at(offset + 2);
+            let b1 = byte_at(offset + 4);
+            let b2 = byte_at(offset + 6);
+            let b3 = byte_at(offset + 8);
             let push_len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
             offset += 10 + push_len * 2;
         } else {

@@ -2083,6 +2083,11 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) (*RunarContract, error) {
 	// (issue #119). readonly ctor params feed the state-continuation formula and
 	// adjustCodeSepOffset; zeros there yield the wrong continuation and the
 	// wrong OP_CODESEPARATOR offset, making restored stateful spends unspendable.
+	// N-320: the script is untrusted. Refuse anything that is not whole bytes
+	// of hex before any reader sees it — the N-317 rule.
+	if !isHexBytes(utxo.Script) {
+		return nil, &MalformedScriptError{Message: "RunarContract.FromUtxo: script is not an even-length hex string"}
+	}
 	restoredArgs, err := restoreConstructorArgs(artifact, utxo.Script)
 	if err != nil {
 		return nil, fmt.Errorf("RunarContract.FromUtxo: %w", err)
@@ -2131,9 +2136,14 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) (*RunarContract, error) {
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.FromUtxo: %w", err)
 		}
-		if state != nil {
-			contract.state = state
+		// N-320 (C10, as in TS): no state section at all is a refusal, not
+		// constructor-initial values presented as live on-chain state.
+		if state == nil {
+			return nil, &MalformedScriptError{Message: fmt.Sprintf(
+				"RunarContract.FromUtxo: no state section (OP_RETURN) in the script, but %s declares %d state field(s)",
+				artifact.ContractName, len(artifact.StateFields))}
 		}
+		contract.state = state
 	}
 
 	return contract, nil
@@ -2164,6 +2174,11 @@ func FromTxId(
 	// Recover the real baked-in constructor args from the deployed script (issue
 	// #119) — see FromUtxo. Params without a constructor slot (mutable state
 	// fields) fall back to 0 and are overwritten by ExtractStateFromScript.
+	// N-320: the script is untrusted. Refuse anything that is not whole bytes
+	// of hex before any reader sees it — the N-317 rule.
+	if !isHexBytes(output.Script) {
+		return nil, &MalformedScriptError{Message: "RunarContract.FromTxId: script is not an even-length hex string"}
+	}
 	restoredArgs, err := restoreConstructorArgs(artifact, output.Script)
 	if err != nil {
 		return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
@@ -2211,9 +2226,14 @@ func FromTxId(
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
 		}
-		if state != nil {
-			contract.state = state
+		// N-320 (C10, as in TS): no state section at all is a refusal, not
+		// constructor-initial values presented as live on-chain state.
+		if state == nil {
+			return nil, &MalformedScriptError{Message: fmt.Sprintf(
+				"RunarContract.FromTxId: no state section (OP_RETURN) in the script, but %s declares %d state field(s)",
+				artifact.ContractName, len(artifact.StateFields))}
 		}
+		contract.state = state
 	}
 
 	return contract, nil

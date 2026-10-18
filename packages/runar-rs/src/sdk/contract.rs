@@ -2636,6 +2636,11 @@ impl RunarContract {
         artifact: RunarArtifact,
         utxo: &Utxo,
     ) -> Result<Self, String> {
+        // N-320: the script is untrusted. Refuse anything that is not whole
+        // bytes of ASCII hex before any reader slices it — the N-317 rule.
+        if !crate::sdk::script_utils::is_hex_bytes(&utxo.script) {
+            return Err("RunarContract::from_utxo: script is not an even-length hex string".to_string());
+        }
         // Recover the real constructor args baked into the deployed script
         // (issue #119). Filling zeros made restored stateful spends compute the
         // wrong state continuation and codesep/OP_PUSH_TX offset — unspendable.
@@ -2685,7 +2690,16 @@ impl RunarContract {
             if !state_fields.is_empty() {
                 match extract_state_from_script(&contract.artifact, &utxo.script) {
                     Ok(Some(state)) => contract.state = state,
-                    Ok(None) => {}
+                    // N-320 (C10, as in TS): no state section at all is a
+                    // refusal, not constructor-initial values presented as
+                    // live on-chain state.
+                    Ok(None) => {
+                        return Err(format!(
+                            "RunarContract::from_utxo: no state section (OP_RETURN) in the script, but {} declares {} state field(s)",
+                            contract.artifact.contract_name,
+                            state_fields.len()
+                        ))
+                    }
                     Err(e) => return Err(format!("RunarContract::from_utxo: {e}")),
                 }
             }

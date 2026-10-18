@@ -167,8 +167,11 @@ export function decodeScriptNumber(dataHex: string): bigint {
   for (let i = 0; i < dataHex.length; i += 2) bytes.push(parseInt(dataHex.slice(i, i + 2), 16));
   const negative = (bytes[bytes.length - 1]! & 0x80) !== 0;
   bytes[bytes.length - 1]! &= 0x7f;
-  let result = 0n;
-  for (let i = bytes.length - 1; i >= 0; i--) result = (result << 8n) | BigInt(bytes[i]!);
+  // N-320: one BigInt parse of the big-endian hex. Shifting a byte in at a
+  // time is quadratic: a 1 MiB constructor arg held fromUtxo for minutes.
+  let beHex = '';
+  for (let i = bytes.length - 1; i >= 0; i--) beHex += bytes[i]!.toString(16).padStart(2, '0');
+  const result = BigInt('0x' + beHex);
   if (result === 0n) return 0n;
   return negative ? -result : result;
 }

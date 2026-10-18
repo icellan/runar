@@ -1,6 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const types = @import("sdk_types.zig");
+const script_utils = @import("sdk_script_utils.zig");
 
 // ---------------------------------------------------------------------------
 // State serialization — encode/decode state values as Bitcoin Script push data
@@ -120,6 +121,9 @@ pub fn extractStateFromScript(
     artifact: *const types.RunarArtifact,
     script_hex: []const u8,
 ) !?[]types.StateValue {
+    // N-320: the script is untrusted (fromUtxo). Refuse anything that is not
+    // whole bytes of hex before any reader sees it — the N-317 rule.
+    if (!script_utils.isHexBytes(script_hex)) return error.MalformedScript;
     if (artifact.state_fields.len == 0) return null;
 
     const op_return_pos = findLastOpReturn(script_hex);

@@ -68,12 +68,7 @@ public final class ScriptUtils {
     public static DecodedPush decodePushDataState(String hex, int offset) {
         need(hex, offset, 2, "push opcode");
         int opcode;
-        try {
-            opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(
-                "deserializeState: non-hex byte at offset " + (offset / 2) + " in the state section");
-        }
+        opcode = hexByteAt(hex, offset, "deserializeState");
         if (opcode <= 75) {
             int dataLen = opcode * 2;
             need(hex, offset, 2 + dataLen, "push payload");
@@ -81,15 +76,15 @@ public final class ScriptUtils {
         }
         if (opcode == 0x4c) {
             need(hex, offset, 4, "OP_PUSHDATA1 length prefix");
-            int length = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
+            int length = hexByteAt(hex, offset + 2, "deserializeState");
             int dataLen = length * 2;
             need(hex, offset, 4 + dataLen, "OP_PUSHDATA1 payload");
             return new DecodedPush(hex.substring(offset + 4, offset + 4 + dataLen), 4 + dataLen);
         }
         if (opcode == 0x4d) {
             need(hex, offset, 6, "OP_PUSHDATA2 length prefix");
-            int lo = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int hi = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
+            int lo = hexByteAt(hex, offset + 2, "deserializeState");
+            int hi = hexByteAt(hex, offset + 4, "deserializeState");
             int length = lo | (hi << 8);
             int dataLen = length * 2;
             need(hex, offset, 6 + dataLen, "OP_PUSHDATA2 payload");
@@ -97,10 +92,10 @@ public final class ScriptUtils {
         }
         if (opcode == 0x4e) {
             need(hex, offset, 10, "OP_PUSHDATA4 length prefix");
-            int b0 = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int b1 = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
-            int b2 = Integer.parseInt(hex.substring(offset + 6, offset + 8), 16);
-            int b3 = Integer.parseInt(hex.substring(offset + 8, offset + 10), 16);
+            int b0 = hexByteAt(hex, offset + 2, "deserializeState");
+            int b1 = hexByteAt(hex, offset + 4, "deserializeState");
+            int b2 = hexByteAt(hex, offset + 6, "deserializeState");
+            int b3 = hexByteAt(hex, offset + 8, "deserializeState");
             // N-317: unsigned, in long. As a signed int, b3 >= 0x40 overflowed
             // dataLen negative, slipped past need and threw a raw
             // StringIndexOutOfBoundsException.
@@ -116,6 +111,29 @@ public final class ScriptUtils {
             "deserializeState: byte 0x%02x at offset %d is not a push opcode; "
                 + "the state section is malformed",
             opcode, offset / 2));
+    }
+
+    /**
+     * N-320: reads the byte at hex offset {@code at} as two ASCII hex digits,
+     * else throws {@link IllegalArgumentException}. {@code Integer.parseInt}
+     * accepts a leading '+' or '-', so "-1" read as -1 — a negative push length
+     * that slipped past {@link #need} and threw StringIndexOutOfBoundsException
+     * — and its NumberFormatException is not the typed refusal either.
+     */
+    private static int hexByteAt(String hex, int at, String what) {
+        int hi = at >= 0 && at < hex.length() ? hexDigit(hex.charAt(at)) : -1;
+        int lo = at >= 0 && at + 1 < hex.length() ? hexDigit(hex.charAt(at + 1)) : -1;
+        if (hi < 0 || lo < 0) {
+            throw new IllegalArgumentException(what + ": non-hex byte at hex offset " + at);
+        }
+        return hi * 16 + lo;
+    }
+
+    private static int hexDigit(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
     }
 
     /**
@@ -204,12 +222,7 @@ public final class ScriptUtils {
     public static DecodedPush decodePushData(String hex, int offset) {
         need(hex, offset, 2, "push opcode");
         int opcode;
-        try {
-            opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(
-                "decodePushData: non-hex byte at hex offset " + offset);
-        }
+        opcode = hexByteAt(hex, offset, "decodePushData");
         if (opcode >= 0x51 && opcode <= 0x60) {  // OP_1..OP_16
             return new DecodedPush(String.format("%02x", opcode - 0x50), 2);
         }
@@ -223,15 +236,15 @@ public final class ScriptUtils {
         }
         if (opcode == 0x4c) {
             need(hex, offset, 4, "OP_PUSHDATA1 length prefix");
-            int length = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
+            int length = hexByteAt(hex, offset + 2, "decodePushData");
             int dataLen = length * 2;
             need(hex, offset, 4 + dataLen, "OP_PUSHDATA1 payload");
             return new DecodedPush(hex.substring(offset + 4, offset + 4 + dataLen), 4 + dataLen);
         }
         if (opcode == 0x4d) {
             need(hex, offset, 6, "OP_PUSHDATA2 length prefix");
-            int lo = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int hi = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
+            int lo = hexByteAt(hex, offset + 2, "decodePushData");
+            int hi = hexByteAt(hex, offset + 4, "decodePushData");
             int length = lo | (hi << 8);
             int dataLen = length * 2;
             need(hex, offset, 6 + dataLen, "OP_PUSHDATA2 payload");
@@ -239,10 +252,10 @@ public final class ScriptUtils {
         }
         if (opcode == 0x4e) {
             need(hex, offset, 10, "OP_PUSHDATA4 length prefix");
-            int b0 = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int b1 = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
-            int b2 = Integer.parseInt(hex.substring(offset + 6, offset + 8), 16);
-            int b3 = Integer.parseInt(hex.substring(offset + 8, offset + 10), 16);
+            int b0 = hexByteAt(hex, offset + 2, "decodePushData");
+            int b1 = hexByteAt(hex, offset + 4, "decodePushData");
+            int b2 = hexByteAt(hex, offset + 6, "decodePushData");
+            int b3 = hexByteAt(hex, offset + 8, "decodePushData");
             // N-317: unsigned, in long. As a signed int, b3 >= 0x40 overflowed
             // dataLen negative, slipped past need and threw a raw
             // StringIndexOutOfBoundsException.
@@ -314,26 +327,26 @@ public final class ScriptUtils {
         int length = scriptHex.length();
         while (offset + 2 <= length) {
             int at = (int) offset;
-            int opcode = Integer.parseInt(scriptHex.substring(at, at + 2), 16);
+            int opcode = hexByteAt(scriptHex, at, "findLastOpReturn");
             if (opcode == 0x6a) return at;
             if (opcode >= 0x01 && opcode <= 0x4b) {
                 offset += 2 + opcode * 2;
             } else if (opcode == 0x4c) {
                 if (offset + 4 > length) break;
-                int pushLen = Integer.parseInt(scriptHex.substring(at + 2, at + 4), 16);
+                int pushLen = hexByteAt(scriptHex, at + 2, "findLastOpReturn");
                 offset += 4 + pushLen * 2;
             } else if (opcode == 0x4d) {
                 if (offset + 6 > length) break;
-                int lo = Integer.parseInt(scriptHex.substring(at + 2, at + 4), 16);
-                int hi = Integer.parseInt(scriptHex.substring(at + 4, at + 6), 16);
+                int lo = hexByteAt(scriptHex, at + 2, "findLastOpReturn");
+                int hi = hexByteAt(scriptHex, at + 4, "findLastOpReturn");
                 int pushLen = lo | (hi << 8);
                 offset += 6 + pushLen * 2;
             } else if (opcode == 0x4e) {
                 if (offset + 10 > length) break;
-                int b0 = Integer.parseInt(scriptHex.substring(at + 2, at + 4), 16);
-                int b1 = Integer.parseInt(scriptHex.substring(at + 4, at + 6), 16);
-                int b2 = Integer.parseInt(scriptHex.substring(at + 6, at + 8), 16);
-                int b3 = Integer.parseInt(scriptHex.substring(at + 8, at + 10), 16);
+                int b0 = hexByteAt(scriptHex, at + 2, "findLastOpReturn");
+                int b1 = hexByteAt(scriptHex, at + 4, "findLastOpReturn");
+                int b2 = hexByteAt(scriptHex, at + 6, "findLastOpReturn");
+                int b3 = hexByteAt(scriptHex, at + 8, "findLastOpReturn");
                 long pushLen = (b0 | (b1 << 8) | (b2 << 16)) + ((long) b3 << 24);
                 offset += 10 + pushLen * 2;
             } else {

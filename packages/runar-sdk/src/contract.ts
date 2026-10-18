@@ -4,7 +4,7 @@
 
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import { InputLimits } from 'runar-ir-schema';
-import { assertScriptHexUnderLimit, WitnessValueMissingError } from './errors.js';
+import { assertScriptHexUnderLimit, MalformedScriptError, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
 import { txToTransactionData } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
@@ -14,7 +14,7 @@ import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction, resolveInputSequence } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn, assertFixedWidthValue } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
-import { buildP2PKHScript, extractConstructorArgs } from './script-utils.js';
+import { buildP2PKHScript, extractConstructorArgs, isHexBytes } from './script-utils.js';
 import { computeNewStateAndDataOutputs } from './anf-interpreter.js';
 import type { OrderedOutputEntry } from './anf-interpreter.js';
 import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
@@ -2776,6 +2776,11 @@ export class RunarContract {
     artifact: RunarArtifact,
     utxo: { txid: string; outputIndex: number; satoshis: number; script: string },
   ): RunarContract {
+    // N-320: the script is untrusted. Refuse anything that is not whole bytes
+    // of hex before any reader sees it — the N-317 rule.
+    if (!isHexBytes(utxo.script)) {
+      throw new MalformedScriptError('RunarContract.fromUtxo: script is not an even-length hex string');
+    }
     const contract = new RunarContract(
       artifact,
       restoreConstructorArgs(artifact, utxo.script),
@@ -2818,7 +2823,8 @@ export class RunarContract {
       // deploy-time defaults as if they were live on-chain state. Fail
       // loudly instead of fabricating plausible-looking state.
       if (state === null) {
-        throw new Error(
+        // N-320: typed, so every tier classifies this script the same way.
+        throw new MalformedScriptError(
           `RunarContract.fromUtxo: could not extract state for ${artifact.contractName} — ` +
             `no state section (OP_RETURN) found in the UTXO script, but the artifact declares ` +
             `${artifact.stateFields.length} state field(s). Refusing to silently present ` +

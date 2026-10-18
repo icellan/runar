@@ -1,6 +1,7 @@
 """State serialization — encode/decode state values as raw bytes matching NUM2BIN format."""
 
 from __future__ import annotations
+from runar.sdk.errors import MalformedScriptError
 from runar.sdk.types import RunarArtifact, StateField
 
 
@@ -197,6 +198,14 @@ def deserialize_state(fields: list[StateField], script_hex: str) -> dict:
 
 def extract_state_from_script(artifact: RunarArtifact, script_hex: str) -> dict | None:
     """Extract state values from a full locking script hex."""
+    # N-320: the script is untrusted (from_utxo / from_txid). Refuse anything
+    # that is not whole bytes of hex before any reader sees it -- the N-317
+    # rule. Imported here: script_utils imports this module.
+    from runar.sdk.script_utils import is_hex_bytes
+    if not is_hex_bytes(script_hex):
+        raise MalformedScriptError(
+            "extract_state_from_script: script is not an even-length hex string"
+        )
     if not artifact.state_fields:
         return None
     op_return_pos = find_last_op_return(script_hex)
@@ -204,6 +213,9 @@ def extract_state_from_script(artifact: RunarArtifact, script_hex: str) -> dict 
         return None
     state_hex = script_hex[op_return_pos + 2:]
     return deserialize_state(artifact.state_fields, state_hex)
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def find_last_op_return(script_hex: str) -> int:
@@ -224,11 +236,21 @@ def find_last_op_return(script_hex: str) -> int:
 
     Returns the hex-char offset, or -1 if not found.
     """
+    def byte_at(i: int) -> int:
+        # N-320: a typed refusal, not the ValueError int(.., 16) raised on a
+        # non-hex pair (and int() also took '+a' or ' a' as a byte).
+        pair = script_hex[i:i + 2]
+        if len(pair) != 2 or not all(ch in _HEX_DIGITS for ch in pair):
+            raise MalformedScriptError(
+                f"find_last_op_return: non-hex byte at hex offset {i}"
+            )
+        return int(pair, 16)
+
     offset = 0
     length = len(script_hex)
 
     while offset + 2 <= length:
-        opcode = int(script_hex[offset:offset + 2], 16)
+        opcode = byte_at(offset)
 
         if opcode == 0x6A:
             # OP_RETURN at a real opcode boundary. Everything after is
@@ -239,19 +261,19 @@ def find_last_op_return(script_hex: str) -> int:
         elif opcode == 0x4C:
             if offset + 4 > length:
                 break
-            push_len = int(script_hex[offset + 2:offset + 4], 16)
+            push_len = byte_at(offset + 2)
             offset += 4 + push_len * 2
         elif opcode == 0x4D:
             if offset + 6 > length:
                 break
-            lo = int(script_hex[offset + 2:offset + 4], 16)
-            hi = int(script_hex[offset + 4:offset + 6], 16)
+            lo = byte_at(offset + 2)
+            hi = byte_at(offset + 4)
             push_len = lo | (hi << 8)
             offset += 6 + push_len * 2
         elif opcode == 0x4E:
             if offset + 10 > length:
                 break
-            b = bytes.fromhex(script_hex[offset + 2:offset + 10])
+            b = bytes(byte_at(offset + k) for k in (2, 4, 6, 8))
             push_len = int.from_bytes(b, 'little')
             offset += 10 + push_len * 2
         else:

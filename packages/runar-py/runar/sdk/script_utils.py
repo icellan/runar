@@ -97,9 +97,9 @@ def _decode_script_number(data_hex: str) -> int:
     negative = (byte_list[-1] & 0x80) != 0
     byte_list[-1] &= 0x7F
 
-    result = 0
-    for i in range(len(byte_list) - 1, -1, -1):
-        result = (result << 8) | byte_list[i]
+    # N-320: one conversion. Shifting a byte in at a time is quadratic: a
+    # 1 MiB constructor arg held from_utxo for ~90 s.
+    result = int.from_bytes(bytes(byte_list), 'little')
 
     if result == 0:
         return 0

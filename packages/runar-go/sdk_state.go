@@ -322,6 +322,11 @@ func asInterfaceSlice(value interface{}) []interface{} {
 // hex, given the artifact. Returns nil if the artifact has no state fields
 // or the script doesn't contain a recognizable state section.
 func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) (map[string]interface{}, error) {
+	// N-320: the script is untrusted (FromUtxo / FromTxId). Refuse anything
+	// that is not whole bytes of hex before any reader sees it — the N-317 rule.
+	if !isHexBytes(scriptHex) {
+		return nil, &MalformedScriptError{Message: "ExtractStateFromScript: script is not an even-length hex string"}
+	}
 	if len(artifact.StateFields) == 0 {
 		return nil, nil
 	}

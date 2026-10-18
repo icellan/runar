@@ -287,6 +287,7 @@ test {
     _ = @import("sdk_n316_matches_artifact_slot_only_test.zig");
     _ = @import("sdk_n317_hostile_utxo_scripts_test.zig");
     _ = @import("sdk_n318_matches_artifact_codesep_value_test.zig");
+    _ = @import("sdk_n320_hostile_state_paths_test.zig");
     _ = @import("sdk_satcounter_continuation_test.zig");
     _ = @import("sdk_f024_continuation_amount_test.zig");
     _ = @import("sdk_n189_scriptcode_intent_test.zig");

@@ -93,8 +93,9 @@ module Runar
         negative = (bytes.last & 0x80) != 0
         bytes[-1] &= 0x7F
 
-        result = 0
-        bytes.reverse_each { |b| result = (result << 8) | b }
+        # N-320: one conversion. Shifting a byte in at a time is quadratic: a
+        # 1 MiB constructor arg held from_utxo past the CPU budget.
+        result = bytes.reverse.pack('C*').unpack1('H*').to_i(16)
 
         return 0 if result.zero?
 

@@ -10,6 +10,8 @@
 # The public helpers encode_push_data and encode_script_int are also provided
 # for callers that need to hand-craft push operations outside of state encoding.
 
+require_relative 'errors'
+
 module Runar
   module SDK
     module State
@@ -376,6 +378,13 @@ module Runar
       # @param full_locking_script_hex [String] complete locking script as hex
       # @return [Hash, nil] decoded state hash, or nil if no OP_RETURN / no state fields
       def extract_state_from_script(artifact, full_locking_script_hex)
+        # N-320: the script is untrusted (from_utxo / from_txid). Refuse anything
+        # that is not whole bytes of hex before any reader sees it — the N-317
+        # rule (ScriptUtils.hex_bytes?; script_utils requires this file).
+        unless full_locking_script_hex.length.even? && full_locking_script_hex.match?(/\A\h*\z/)
+          raise Runar::SDK::MalformedScriptError,
+                'extract_state_from_script: script is not an even-length hex string'
+        end
         return nil if artifact.state_fields.nil? || artifact.state_fields.empty?
 
         op_return_pos = find_last_op_return(full_locking_script_hex)

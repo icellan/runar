@@ -3160,6 +3160,9 @@ pub const RunarContract = struct {
     ) ![]types.StateValue {
         const params = artifact.abi.constructor.params;
         var out = try allocator.alloc(types.StateValue, params.len);
+        // N-320: a hostile script makes extractConstructorArgs fail; free the
+        // slice instead of leaking it on that path.
+        errdefer allocator.free(out);
         if (params.len == 0) return out;
 
         var extracted = try script_utils.extractConstructorArgs(artifact, script_hex, allocator);
@@ -3187,6 +3190,10 @@ pub const RunarContract = struct {
         artifact: *types.RunarArtifact,
         utxo: types.UTXO,
     ) !RunarContract {
+        // N-320: the script is untrusted. Refuse anything that is not whole
+        // bytes of hex before any reader sees it — the N-317 rule.
+        if (!script_utils.isHexBytes(utxo.script)) return error.MalformedScript;
+
         // Recover the real baked-in constructor args from the deployed script so
         // a restored contract operates on the true values rather than 0
         // placeholders (issue #119).
@@ -3198,6 +3205,7 @@ pub const RunarContract = struct {
             .constructor_args = restored_args,
             .state = &.{},
         };
+        errdefer contract.deinit();
 
         // Extract code script from UTXO
         if (artifact.state_fields.len > 0) {
@@ -3229,9 +3237,10 @@ pub const RunarContract = struct {
 
         // Deserialize state for stateful contracts
         if (artifact.state_fields.len > 0) {
-            if (try state_mod.extractStateFromScript(allocator, artifact, utxo.script)) |state_vals| {
-                contract.state = state_vals;
-            }
+            // N-320 (C10, as in TS): no state section at all is a refusal, not
+            // constructor-initial values presented as live on-chain state.
+            contract.state = (try state_mod.extractStateFromScript(allocator, artifact, utxo.script)) orelse
+                return error.MalformedScript;
         }
 
         return contract;

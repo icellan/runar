@@ -117,6 +117,11 @@ public final class StateSerializer {
 
     /** Extracts state from a full locking script. Returns {@code null} if absent. */
     public static Map<String, Object> extractFromScript(RunarArtifact artifact, String scriptHex) {
+        // N-320: the script is untrusted (fromUtxo / fromTxId). Refuse anything
+        // that is not whole bytes of hex before any reader sees it — the N-317 rule.
+        if (!ScriptUtils.isHexBytes(scriptHex)) {
+            throw new IllegalArgumentException("extractFromScript: script is not an even-length hex string");
+        }
         if (!artifact.isStateful()) return null;
         int opReturnPos = ScriptUtils.findLastOpReturn(scriptHex);
         if (opReturnPos < 0) return null;
