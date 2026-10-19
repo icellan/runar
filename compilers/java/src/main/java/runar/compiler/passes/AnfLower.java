@@ -145,6 +145,9 @@ public final class AnfLower {
         "sha256", "ripemd160", "hash160", "hash256",
         "cat", "substr", "num2bin", "reverseBytes", "left", "right",
         "int2str", "toByteString", "pack",
+        // N-345: these return ByteString too; missing here, `===` on their
+        // results compiled to OP_NUMEQUAL, which equates 0100 with 01.
+        "split", "buildChangeOutput", "sha256Compress", "sha256Finalize",
         "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
         "blake3Compress", "blake3Hash",
         "p256Add", "p256Mul", "p256MulGen", "p256Negate", "p256EncodeCompressed",

@@ -3416,6 +3416,9 @@ fn is_byte_type(type_name: &str) -> bool {
 const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
     "sha256", "ripemd160", "hash160", "hash256", "cat", "num2bin", "int2str",
     "reverseBytes", "substr", "left", "right",
+    // N-345: these return ByteString too; missing here, `===` on their results
+    // compiled to OP_NUMEQUAL (and `+` to OP_ADD), which equates 0100 with 01.
+    "toByteString", "pack", "split", "buildChangeOutput",
     "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
     "sha256Compress", "sha256Finalize", "blake3Compress", "blake3Hash",
     "p256Add", "p256Mul", "p256MulGen", "p256Negate", "p256EncodeCompressed",

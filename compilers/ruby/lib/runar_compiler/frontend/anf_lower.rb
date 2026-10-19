@@ -75,6 +75,7 @@ module RunarCompiler
     BYTE_RETURNING_FUNCTIONS = %w[
       sha256 ripemd160 hash160 hash256 cat substr num2bin reverseBytes
       left right int2str toByteString pack ecAdd ecMul ecMulGen ecNegate
+      split buildChangeOutput sha256Compress sha256Finalize
       ecMakePoint ecEncodeCompressed blake3Compress blake3Hash
       p256Add p256Mul p256MulGen p256Negate p256EncodeCompressed
       p384Add p384Mul p384MulGen p384Negate p384EncodeCompressed

@@ -2943,6 +2943,9 @@ const BYTE_RETURNING_EXTRACTORS = [
 const BYTE_RETURNING_FUNCTIONS = new Set<string>([
   'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
   'reverseBytes', 'substr', 'left', 'right',
+  // N-345: these return ByteString too; missing here, `===` on their results
+  // compiled to OP_NUMEQUAL (and `+` to OP_ADD), which equates 0100 with 01.
+  'toByteString', 'pack', 'split', 'buildChangeOutput', 'sha256Compress', 'sha256Finalize',
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
   'p256Add', 'p256Mul', 'p256MulGen', 'p256Negate', 'p256EncodeCompressed',
   'p384Add', 'p384Mul', 'p384MulGen', 'p384Negate', 'p384EncodeCompressed',

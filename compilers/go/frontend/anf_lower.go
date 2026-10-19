@@ -101,6 +101,10 @@ var byteReturningFunctions = map[string]bool{
 	"int2str":              true,
 	"toByteString":         true,
 	"pack":                 true,
+	// N-345: these return ByteString too; missing here, `===` on their
+	// results compiled to OP_NUMEQUAL, which equates 0100 with 01.
+	"split":                true,
+	"buildChangeOutput":    true,
 	"ecAdd":                true,
 	"ecMul":                true,
 	"ecMulGen":             true,

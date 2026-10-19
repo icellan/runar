@@ -212,6 +212,10 @@ fn isByteReturningFunction(name: []const u8) bool {
         .{ "num2bin", {} },      .{ "reverseBytes", {} }, .{ "left", {} },
         .{ "right", {} },        .{ "int2str", {} },      .{ "toByteString", {} },
         .{ "pack", {} },         .{ "ecAdd", {} },        .{ "ecMul", {} },
+        // N-345: these return ByteString too; missing here, `===` on their
+        // results compiled to OP_NUMEQUAL, which equates 0100 with 01.
+        .{ "split", {} },        .{ "buildChangeOutput", {} },
+        .{ "sha256Compress", {} }, .{ "sha256Finalize", {} },
         .{ "ecMulGen", {} },     .{ "ecNegate", {} },     .{ "ecMakePoint", {} },
         .{ "ecEncodeCompressed", {} },
         .{ "blake3Compress", {} }, .{ "blake3Hash", {} },

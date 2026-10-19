@@ -162,6 +162,12 @@ _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
     "int2str",
     "toByteString",
     "pack",
+    # N-345: these return ByteString too; missing here, `===` on their results
+    # compiled to OP_NUMEQUAL (and `+` to OP_ADD), which equates 0100 with 01.
+    "split",
+    "buildChangeOutput",
+    "sha256Compress",
+    "sha256Finalize",
     "ecAdd",
     "ecMul",
     "ecMulGen",
