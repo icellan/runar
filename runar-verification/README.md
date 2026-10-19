@@ -31,11 +31,10 @@ pipeline. The package is useful in two roles:
 
 Default `pipelineGolden` is the fast gate and currently reports 72/91
 fixtures byte-exact (69 baseline + 3 live-regenerated crypto anchors).
-Three fixtures — `shift-ops`, `bitwise-ops` and `oversize-bigint-shift` —
-sit in `lowerDivergencePending`: the real compilers emit a minimality
-normalisation (OP_BIN2NUM at numeric reads of byte-array results) that this
-model does not, so it correctly fails to match their goldens. The compilers
-are right and the model lags.
+`lowerDivergencePending` is empty (`tests/PipelineGolden.lean:1150`): `shift-ops`,
+`bitwise-ops` and `oversize-bigint-shift` are in `baselineMatches` (listed at
+lines 869, 903, 916) and are byte-exact. They were once tracked as a
+minimality-normalisation (OP_BIN2NUM) divergence; that is historical.
 The crypto-heavy fixtures are counted only through stored
 Lean-produced constants, not by comparing `expected-script.hex` to
 itself. They remain visible as the `cryptoAxiomPending` bucket because
