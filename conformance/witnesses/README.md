@@ -48,9 +48,9 @@ Schema:
   own args.
 - Every fixture MUST have ≥1 `accept` and ≥1 `reject` (near-miss) spend, ENFORCED
   in code by `coverage-claims.test.ts` — not just documented here. A few
-  contracts have only tautological asserts (`x >= 0 || x < 0`) or are
-  anyone-can-spend, so no rejecting witness exists; those set a top-level
-  `"acceptOnly": true` field (see `bitwise-ops.json` / `shift-ops.json`) as an
+  contracts take no caller-controlled input or are anyone-can-spend, so no
+  rejecting witness exists; those set a top-level `"acceptOnly": true` field
+  (see `real-crypto/ec-unit.json`, which records why in `acceptOnlyReason`) as an
   explicit, machine-checked opt-out — a silently absent reject spend fails the
   gate. `coverage-claims.test.ts` also flags a spec that sets `acceptOnly` but
   actually has a reject spend (a stale opt-out).

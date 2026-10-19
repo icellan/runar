@@ -1,0 +1,54 @@
+{
+  "fixture": "bitwise-ops",
+  "kind": "stateless-signed",
+  "note": "F-167: the contract used to assert only tautologies (`x >= 0 || x < 0`, `assert(true)`), so no input could make it fail and the golden pinned bytes that constrained nothing. The caller now supplies the expected shift / AND / OR / XOR results and the contract checks them; `~` is checked by double inversion and De Morgan's law, which hold under OP_INVERT's byte semantics as well as integer semantics (OP_INVERT on 12 leaves 0xf3 = -115 on chain, not -13). Every expected value below is worked out by hand from the source with a = 12 (0x0c), b = 10 (0x0a) — one-byte operands whose results stay minimal and below 0x80 — not taken from compiler output. No signature is involved; this spec runs the fixture's compiled bytes through @bsv/sdk's consensus Spend.validate() for an accept AND a wrong-value near-miss reject.",
+  "constructorArgs": { "a": "12n", "b": "10n" },
+  "spends": [
+    {
+      "method": "testShift",
+      "args": ["48n", "6n"],
+      "expect": "accept",
+      "note": "0x0c << 2 = 0x30 = 48; 0x0c >> 1 = 0x06 = 6"
+    },
+    {
+      "method": "testShift",
+      "args": ["49n", "6n"],
+      "expect": "reject",
+      "note": "near-miss: wrong precomputed left-shift result (49 != 48) — OP_NUMEQUALVERIFY fails"
+    },
+    {
+      "method": "testShift",
+      "args": ["48n", "7n"],
+      "expect": "reject",
+      "note": "near-miss: wrong precomputed right-shift result (7 != 6) — the final OP_NUMEQUAL leaves false"
+    },
+    {
+      "method": "testShift",
+      "args": ["24n", "6n"],
+      "expect": "reject",
+      "note": "near-miss: 24 is 12 << 1, what a shift lowering that dropped or mis-pushed the count would produce"
+    },
+    {
+      "method": "testBitwise",
+      "args": ["8n", "14n", "6n"],
+      "expect": "accept",
+      "note": "0x0c & 0x0a = 0x08; 0x0c | 0x0a = 0x0e; 0x0c ^ 0x0a = 0x06; ~0xf3 = 0x0c; ~0x0e = 0xf1 = 0xf3 & 0xf5"
+    },
+    {
+      "method": "testBitwise",
+      "args": ["14n", "8n", "6n"],
+      "expect": "reject",
+      "note": "near-miss: AND and OR results swapped — what an OP_AND/OP_OR mix-up would produce"
+    },
+    {
+      "method": "testBitwise",
+      "args": ["8n", "14n", "7n"],
+      "expect": "reject",
+      "note": "near-miss: wrong precomputed XOR result (7 != 6)"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "e3be0961596d9c1cb429ba2010bd73eb1cf68dd8db38d46267cd515847936b46",
+    "expected-ir.json": "79901c336fa3814d98d4b2a06145365f2f4d1429aeb0e6230df99dc4dfd1a356"
+  }
+}

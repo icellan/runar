@@ -10,12 +10,12 @@ class ShiftOps < Runar::SmartContract
     @a = a
   end
 
-  # Apply left shift and right shift, then sanity-check the results.
-  runar_public
-  def test_shift
+  # Apply left shift and right shift, then check the caller-supplied results.
+  runar_public expected_left: Bigint, expected_right: Bigint
+  def test_shift(expected_left, expected_right)
     left = @a << 3
     right = @a >> 2
-    assert left >= 0 || left < 0
-    assert right >= 0 || right < 0
+    assert left == expected_left
+    assert right == expected_right
   end
 end

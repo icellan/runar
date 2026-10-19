@@ -2,6 +2,7 @@ const std = @import("std");
 const runar = @import("runar");
 
 const Auction = @import("auction/Auction.runar.zig").Auction;
+const BitwiseOps = @import("bitwise-ops/BitwiseOps.runar.zig").BitwiseOps;
 const Blake3Test = @import("blake3/Blake3Test.runar.zig").Blake3Test;
 const BSV20Token = @import("bsv20-token/BSV20Token.runar.zig").BSV20Token;
 const BSV21Token = @import("bsv21-token/BSV21Token.runar.zig").BSV21Token;
@@ -21,6 +22,7 @@ const BoundedCounter = @import("property-initializers/BoundedCounter.runar.zig")
 // SchnorrZKP omitted — see examples/zig/schnorr-zkp/SchnorrZKP_test.zig
 // for the BUG-001 rationale (native i64 Bigint can't hold the 256-bit
 // secp256k1 group order embedded in the malleability gate).
+const ShiftOps = @import("shift-ops/ShiftOps.runar.zig").ShiftOps;
 const Sha256CompressTest = @import("sha256-compress/Sha256CompressTest.runar.zig").Sha256CompressTest;
 const Sha256FinalizeTest = @import("sha256-finalize/Sha256FinalizeTest.runar.zig").Sha256FinalizeTest;
 const sphincs_fixtures = @import("sphincs-wallet/fixtures.zig");
@@ -70,6 +72,10 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "bsv21-token-wrong-sig")) return probeBSV21TokenWrongSig();
     if (std.mem.eql(u8, probe_case, "ordinal-nft-wrong-pubkey")) return probeOrdinalNFTWrongPubkey();
     if (std.mem.eql(u8, probe_case, "ordinal-nft-wrong-sig")) return probeOrdinalNFTWrongSig();
+    if (std.mem.eql(u8, probe_case, "bitwise-ops-wrong-shift")) return probeBitwiseOpsWrongShift();
+    if (std.mem.eql(u8, probe_case, "bitwise-ops-wrong-bitwise")) return probeBitwiseOpsWrongBitwise();
+    if (std.mem.eql(u8, probe_case, "shift-ops-wrong-left")) return probeShiftOpsWrongLeft();
+    if (std.mem.eql(u8, probe_case, "shift-ops-wrong-right")) return probeShiftOpsWrongRight();
     if (std.mem.eql(u8, probe_case, "blake3-hash-mismatch")) return probeBlake3HashMismatch();
     if (std.mem.eql(u8, probe_case, "blake3-compress-mismatch")) return probeBlake3CompressMismatch();
     if (std.mem.eql(u8, probe_case, "sha256-compress-mismatch")) return probeSha256CompressMismatch();
@@ -242,6 +248,27 @@ fn probeFunctionPatternsWrongOwner() !void {
 fn probeFunctionPatternsOverdraw() !void {
     var contract = FunctionPatterns.init(runar.ALICE.pubKey, 1000);
     contract.withdraw(runar.signTestMessage(runar.ALICE), 980, 500);
+}
+
+// F-167: a wrong caller-supplied result must trip the contract's assert.
+fn probeBitwiseOpsWrongShift() !void {
+    const c = BitwiseOps.init(12, 10);
+    c.testShift(49, 6);
+}
+
+fn probeBitwiseOpsWrongBitwise() !void {
+    const c = BitwiseOps.init(12, 10);
+    c.testBitwise(14, 8, 6);
+}
+
+fn probeShiftOpsWrongLeft() !void {
+    const c = ShiftOps.init(12);
+    c.testShift(97, 3);
+}
+
+fn probeShiftOpsWrongRight() !void {
+    const c = ShiftOps.init(12);
+    c.testShift(96, 2);
 }
 
 fn probeMathDemoOverdraw() !void {

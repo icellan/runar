@@ -11,25 +11,25 @@ contract BitwiseOps is SmartContract {
         b = _b;
     }
 
-    /// @notice Verify shift operators compile and run.
-    function testShift() public {
+    /// @notice Check the caller-supplied shift results.
+    function testShift(bigint expectedLeft, bigint expectedRight) public {
         bigint left = this.a << 2;
         bigint right = this.a >> 1;
-        require(left >= 0 || left < 0);
-        require(right >= 0 || right < 0);
-        require(true);
+        require(left == expectedLeft);
+        require(right == expectedRight);
     }
 
-    /// @notice Verify bitwise operators compile and run.
-    function testBitwise() public {
+    /// @notice Check the caller-supplied AND/OR/XOR results; `~` is checked by
+    /// double inversion and De Morgan's law (see the TS source for why).
+    function testBitwise(bigint expectedAnd, bigint expectedOr, bigint expectedXor) public {
         bigint andResult = this.a & this.b;
         bigint orResult = this.a | this.b;
         bigint xorResult = this.a ^ this.b;
         bigint notResult = ~this.a;
-        require(andResult >= 0 || andResult < 0);
-        require(orResult >= 0 || orResult < 0);
-        require(xorResult >= 0 || xorResult < 0);
-        require(notResult >= 0 || notResult < 0);
-        require(true);
+        require(andResult == expectedAnd);
+        require(orResult == expectedOr);
+        require(xorResult == expectedXor);
+        require(~notResult == this.a);
+        require(~(this.a | this.b) == (notResult & ~this.b));
     }
 }

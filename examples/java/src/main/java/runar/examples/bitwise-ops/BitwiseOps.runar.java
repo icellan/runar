@@ -29,19 +29,21 @@ class BitwiseOps extends SmartContract {
         this.b = b;
     }
 
-    /** Verifies shift operators compile and run. */
+    /** Checks the caller-supplied shift results. */
     @Public
-    void testShift() {
+    void testShift(Bigint expectedLeft, Bigint expectedRight) {
         Bigint left = this.a.shl(Bigint.TWO);
         Bigint right = this.a.shr(Bigint.ONE);
-        assertThat(left.ge(Bigint.ZERO) || left.lt(Bigint.ZERO));
-        assertThat(right.ge(Bigint.ZERO) || right.lt(Bigint.ZERO));
-        assertThat(true);
+        assertThat(left.eq(expectedLeft));
+        assertThat(right.eq(expectedRight));
     }
 
-    /** Verifies bitwise operators compile and run. */
+    /**
+     * Checks the caller-supplied AND/OR/XOR results; NOT is checked by double
+     * inversion and De Morgan's law (see the TS source for why).
+     */
     @Public
-    void testBitwise() {
+    void testBitwise(Bigint expectedAnd, Bigint expectedOr, Bigint expectedXor) {
         Bigint andResult = this.a.and(this.b);
         Bigint orResult = this.a.or(this.b);
         Bigint xorResult = this.a.xor(this.b);
@@ -50,10 +52,10 @@ class BitwiseOps extends SmartContract {
         // `x.not()` to UnaryExpr(BIT_NOT, x), matching the canonical TS
         // contract's `~this.a`.
         Bigint notResult = this.a.not();
-        assertThat(andResult.ge(Bigint.ZERO) || andResult.lt(Bigint.ZERO));
-        assertThat(orResult.ge(Bigint.ZERO) || orResult.lt(Bigint.ZERO));
-        assertThat(xorResult.ge(Bigint.ZERO) || xorResult.lt(Bigint.ZERO));
-        assertThat(notResult.ge(Bigint.ZERO) || notResult.lt(Bigint.ZERO));
-        assertThat(true);
+        assertThat(andResult.eq(expectedAnd));
+        assertThat(orResult.eq(expectedOr));
+        assertThat(xorResult.eq(expectedXor));
+        assertThat(notResult.not().eq(this.a));
+        assertThat(this.a.or(this.b).not().eq(notResult.and(this.b.not())));
     }
 }

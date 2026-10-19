@@ -8,11 +8,11 @@ pub struct ShiftOps {
 }
 
 impl ShiftOps {
-    /// Apply left shift and right shift, then sanity-check the results.
-    pub fn test_shift(&self) {
+    /// Apply left shift and right shift, then check the caller-supplied results.
+    pub fn test_shift(&self, expected_left: Bigint, expected_right: Bigint) {
         let left = self.a << 3;
         let right = self.a >> 2;
-        assert!(left >= 0 || left < 0);
-        assert!(right >= 0 || right < 0);
+        assert!(left == expected_left);
+        assert!(right == expected_right);
     }
 }
