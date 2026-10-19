@@ -47,7 +47,15 @@ const G_HEX = bigintToHex32(GEN_X) + bigintToHex32(GEN_Y);
 // Value resolution helpers
 // ---------------------------------------------------------------------------
 
-type ValueMap = Map<string, ANFValue>;
+/**
+ * Binding name -> its value as already rewritten in the current sweep, plus
+ * the method's rebound names (F-269, see `canonicalName`).
+ */
+class ValueMap extends Map<string, ANFValue> {
+  constructor(readonly rebound: ReadonlySet<string>) {
+    super();
+  }
+}
 
 function isCallTo(value: ANFValue, func: string): value is Call {
   return value.kind === 'call' && value.func === func;
@@ -74,9 +82,71 @@ function isGeneratorPoint(value: ANFValue): boolean {
   return isConstHex(value, G_HEX);
 }
 
-/** Resolve a binding name to its value, following through the map */
+/**
+ * F-269 (user decision R77): the binding an argument ultimately names,
+ * following `load_const "@ref:<x>"` aliases — the ones pass 04 emits for
+ * `const y = <expr>` and the ones R1/R2/R3/R7 below leave behind. Without
+ * this every alias read as an opaque constant and no rule could see through it.
+ *
+ * Returns `null` when the argument has no position-independent identity:
+ * ANF reuses a local's name when the source reassigns it (`a = q` emits a
+ * second `a = @ref:..`, at top level or inside an if/loop arm), so a REBOUND
+ * name means different values at different sites. Two uses of a rebound `a`
+ * are not "the same $x", and an operand lifted out of an earlier binding
+ * (`nx = ecNegate(a)`) and re-emitted later would read `a`'s new value
+ * (attempt 2: `let a = p; const nx = ecNegate(a); a = q; ecAdd(a, nx)` folded
+ * to O). A cycle (only hand-written `--ir` can make one) is `null` too.
+ *
+ * A hop is never taken INTO a rebound name: the chain stops at the last
+ * name bound once, which is itself a fixed value (`const y = a` captured the
+ * `a` of its own position), so `y` is its own canonical name and its value is
+ * the opaque alias — nothing is resolved through `a`.
+ *
+ * Matching only. Rewrites still emit the literal names they matched.
+ */
+function canonicalName(argName: string, valueMap: ValueMap): string | null {
+  if (valueMap.rebound.has(argName)) return null;
+  const seen = new Set<string>([argName]);
+  let cur = argName;
+  for (;;) {
+    const v = valueMap.get(cur);
+    if (!v || v.kind !== 'load_const' || typeof v.value !== 'string'
+        || v.value.length <= 5 || !v.value.startsWith('@ref:')) {
+      return cur;
+    }
+    const next = v.value.slice(5);
+    if (valueMap.rebound.has(next)) return cur;
+    if (seen.has(next)) return null;
+    seen.add(next);
+    cur = next;
+  }
+}
+
+/**
+ * F-269: do two arguments name the same binding, through aliases? (R8, R8r,
+ * R11's `$x` / `$p`.) Never for a name without a fixed identity (`null`).
+ */
+function sameBinding(a: string, b: string, valueMap: ValueMap): boolean {
+  const ca = canonicalName(a, valueMap);
+  return ca !== null && ca === canonicalName(b, valueMap);
+}
+
+/**
+ * F-269 attempt 2: may a name lifted out of an earlier binding be emitted at
+ * the current site? Only when it denotes one value everywhere (R7, R9).
+ */
+function isStable(name: string, valueMap: ValueMap): boolean {
+  return canonicalName(name, valueMap) !== null;
+}
+
+/**
+ * Resolve a binding name to its value, following `@ref:` aliases (F-269).
+ * A rebound name or a cycle resolves to nothing: its value depends on the
+ * site, and the map holds only the latest top-level one.
+ */
 function resolveArg(argName: string, valueMap: ValueMap): ANFValue | undefined {
-  return valueMap.get(argName);
+  const c = canonicalName(argName, valueMap);
+  return c === null ? undefined : valueMap.get(c);
 }
 
 /** Check if a resolved arg represents the infinity point (zero-scalar ecMulGen or direct constant) */
@@ -136,6 +206,33 @@ function collectUsedNames(method: ANFMethod, properties: readonly { name: string
   };
   walk(method.body);
   return used;
+}
+
+/**
+ * F-269: every name bound more than once in the method — binding names at any
+ * depth (if/loop arms included) and loop iteration variables. ANF is not
+ * single-assignment for source locals (a reassignment re-emits the local's
+ * name), so `canonicalName` never resolves an alias through one of these.
+ * Rewrites never change the answer: they replace a value in place or mint a
+ * fresh name.
+ */
+function collectReboundNames(method: ANFMethod): Set<string> {
+  const seen = new Set<string>();
+  const rebound = new Set<string>();
+  const bind = (name: string): void => {
+    if (seen.has(name)) rebound.add(name);
+    else seen.add(name);
+  };
+  const walk = (bindings: readonly ANFBinding[]): void => {
+    for (const bnd of bindings) {
+      bind(bnd.name);
+      const v = bnd.value;
+      if (v.kind === 'if') { walk(v.then); walk(v.else); }
+      if (v.kind === 'loop') { bind(v.iterVar); walk(v.body); }
+    }
+  };
+  walk(method.body);
+  return rebound;
 }
 
 /**
@@ -296,7 +393,8 @@ function tryRewrite(
 
       // Rule 9: ecMul(ecMul(p, k1), k2) → ecMul(p, k1*k2)
       const pointVal = resolveArg(pointArg, valueMap);
-      if (pointVal && isCallTo(pointVal, 'ecMul') && pointVal.args.length === 2) {
+      if (pointVal && isCallTo(pointVal, 'ecMul') && pointVal.args.length === 2
+          && isStable(pointVal.args[0]!, valueMap)) {
         const innerPoint = pointVal.args[0]!;
         const innerScalar = pointVal.args[1]!;
         const k1Val = resolveArg(innerScalar, valueMap);
@@ -339,7 +437,7 @@ function tryRewrite(
       // Rule 8: ecAdd(x, ecNegate(x)) → INFINITY, keeping the adder's y = 0 abort (N-251)
       const rightVal = resolveArg(rightArg, valueMap);
       if (rightVal && isCallTo(rightVal, 'ecNegate') && rightVal.args.length === 1) {
-        if (rightVal.args[0] === leftArg) {
+        if (sameBinding(rightVal.args[0]!, leftArg, valueMap)) {
           emitNegCancelGate(binding.name, leftArg, newBindings, usedNames);
           return makeLoadConst(INFINITY_HEX);
         }
@@ -361,10 +459,13 @@ function tryRewrite(
       // order is the thing that decides output bytes when they ever do.
       //
       // Name equality, not value equality, exactly as Rule 8 above: $x must
-      // bind to the same ANF binding on both sides.
+      // bind to the same ANF binding on both sides (through aliases, F-269).
+      // The gate reads the ecNegate operand: the name the JSON's `$x` binds
+      // first, as the Go engine binds it, which only differs from rightArg
+      // when an alias stands between them.
       if (leftVal && isCallTo(leftVal, 'ecNegate') && leftVal.args.length === 1) {
-        if (leftVal.args[0] === rightArg) {
-          emitNegCancelGate(binding.name, rightArg, newBindings, usedNames);
+        if (sameBinding(leftVal.args[0]!, rightArg, valueMap)) {
+          emitNegCancelGate(binding.name, leftVal.args[0]!, newBindings, usedNames);
           return makeLoadConst(INFINITY_HEX);
         }
       }
@@ -388,7 +489,7 @@ function tryRewrite(
       if (leftVal && rightVal && isCallTo(leftVal, 'ecMul') && isCallTo(rightVal, 'ecMul')
           && leftVal.args.length === 2 && rightVal.args.length === 2) {
         // Check same point argument
-        if (leftVal.args[0] === rightVal.args[0]) {
+        if (sameBinding(leftVal.args[0]!, rightVal.args[0]!, valueMap)) {
           const k1Val = resolveArg(leftVal.args[1]!, valueMap);
           const k2Val = resolveArg(rightVal.args[1]!, valueMap);
           const k1 = k1Val ? getConstInt(k1Val) : undefined;
@@ -411,7 +512,9 @@ function tryRewrite(
       if (!innerVal) return null;
 
       // Rule 7: ecNegate(ecNegate(x)) → x
-      if (isCallTo(innerVal, 'ecNegate') && innerVal.args.length === 1) {
+      // F-269 attempt 2: x is lifted out of the inner binding and re-emitted
+      // here, so it must denote the same value at both sites.
+      if (isCallTo(innerVal, 'ecNegate') && innerVal.args.length === 1 && isStable(innerVal.args[0]!, valueMap)) {
         return { kind: 'load_const', value: `@ref:${innerVal.args[0]!}` } as ANFValue;
       }
 
@@ -431,8 +534,12 @@ function tryRewrite(
  * the bindings before it as already rewritten in this sweep. Returns null when
  * no rule fired.
  */
-function optimizeBodyOnce(body: readonly ANFBinding[], usedNames: Set<string>): ANFBinding[] | null {
-  const valueMap: ValueMap = new Map();
+function optimizeBodyOnce(
+  body: readonly ANFBinding[],
+  usedNames: Set<string>,
+  rebound: ReadonlySet<string>,
+): ANFBinding[] | null {
+  const valueMap = new ValueMap(rebound);
   const result: ANFBinding[] = [];
   let changed = false;
 
@@ -476,11 +583,12 @@ function optimizeBodyOnce(body: readonly ANFBinding[], usedNames: Set<string>): 
  */
 function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string }[]): ANFMethod {
   const usedNames = collectUsedNames(method, properties);
+  const rebound = collectReboundNames(method);
   let body: ANFBinding[] = method.body;
   let anyChanged = false;
 
   for (;;) {
-    const next = optimizeBodyOnce(body, usedNames);
+    const next = optimizeBodyOnce(body, usedNames, rebound);
     if (next === null) break;
     body = next;
     anyChanged = true;

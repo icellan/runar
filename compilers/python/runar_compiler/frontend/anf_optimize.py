@@ -106,8 +106,45 @@ def _collect_used_names(method: ANFMethod, properties) -> set[str]:
     return used
 
 
+class _ValueMap(dict):
+    """Binding name -> value, plus the method's rebound names (F-269, see _canonical)."""
+
+    def __init__(self, rebound: set[str]):
+        super().__init__()
+        self.rebound = rebound
+
+
+def _collect_rebound_names(method: ANFMethod) -> set[str]:
+    """F-269: every name bound more than once in the method -- binding names at
+    any depth (if/loop arms included) and loop iteration variables (the TS
+    collectReboundNames). _canonical never resolves an alias through one."""
+    seen: set[str] = set()
+    rebound: set[str] = set()
+
+    def bind(name: str) -> None:
+        if name in seen:
+            rebound.add(name)
+        else:
+            seen.add(name)
+
+    def walk(bindings) -> None:
+        for b in bindings:
+            bind(b.name)
+            v = b.value
+            if v.kind == "if":
+                walk(v.then or [])
+                walk(v.else_ or [])
+            elif v.kind == "loop":
+                if v.iter_var is not None:
+                    bind(v.iter_var)
+                walk(v.body or [])
+
+    walk(method.body)
+    return rebound
+
+
 def _optimize_method(method: ANFMethod, properties) -> None:
-    value_map: dict[str, ANFValue] = {}
+    value_map = _ValueMap(_collect_rebound_names(method))
     used_names = _collect_used_names(method, properties)
     changed = True
     while changed:
@@ -189,7 +226,10 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
     # Rule 7: ecNegate(ecNegate(x)) -> x
     if func == "ecNegate" and len(args) == 1:
         inner = _resolve(args[0], vm)
-        if inner is not None and inner.kind == "call" and inner.func == "ecNegate" and inner.args and len(inner.args) == 1:
+        # F-269 attempt 2: x is lifted out of the inner binding and re-emitted
+        # here, so it must denote one value at both sites.
+        if (inner is not None and inner.kind == "call" and inner.func == "ecNegate" and inner.args
+                and len(inner.args) == 1 and _stable(inner.args[0], vm)):
             return _make_ref(inner.args[0])
 
     # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
@@ -214,14 +254,18 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
         neg = _resolve(args[0], vm)
         if neg is not None and neg.kind == "call" and neg.func == "ecNegate" and neg.args and len(neg.args) == 1:
             if _same_binding(args[1], neg.args[0], vm):
-                _emit_neg_cancel_gate(name, args[1], vm, prelude, used_names)
+                # The gate reads the ecNegate operand: the name the JSON's `$x`
+                # binds first, as the Go engine binds it (differs from args[1]
+                # only through an alias, F-269).
+                _emit_neg_cancel_gate(name, neg.args[0], vm, prelude, used_names)
                 return _make_const_hex(INFINITY_HEX)
 
     # Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
     if func == "ecMul" and len(args) == 2:
         inner = _resolve(args[0], vm)
         k2 = _get_const_int(args[1], vm)
-        if inner is not None and k2 is not None and inner.kind == "call" and inner.func == "ecMul" and inner.args and len(inner.args) == 2:
+        if (inner is not None and k2 is not None and inner.kind == "call" and inner.func == "ecMul" and inner.args
+                and len(inner.args) == 2 and _stable(inner.args[0], vm)):
             k1 = _get_const_int(inner.args[1], vm)
             if k1 is not None:
                 combined = (k1 * k2) % CURVE_N
@@ -267,19 +311,16 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
 # ---------------------------------------------------------------------------
 
 def _resolve(name: str, vm: dict[str, ANFValue]) -> Optional[ANFValue]:
-    """Resolve a binding name to its ANFValue, following @ref: aliases."""
-    seen: set[str] = set()
-    current = name
-    while current in vm:
-        if current in seen:
-            break
-        seen.add(current)
-        val = vm[current]
-        if val.kind == "load_param" and val.name is not None and val.name.startswith("@ref:"):
-            current = val.name[5:]
-            continue
-        return val
-    return vm.get(current)
+    """Resolve a binding name to its ANFValue, following @ref: aliases (F-269).
+    None for a name with no fixed identity (see _canonical)."""
+    c = _canonical(name, vm)
+    return None if c is None else vm.get(c)
+
+
+def _stable(name: str, vm: dict[str, ANFValue]) -> bool:
+    """F-269 attempt 2: may a name lifted out of an earlier binding be emitted
+    at the current site? Only when it denotes one value (R7, R9)."""
+    return _canonical(name, vm) is not None
 
 
 def _is_infinity(name: str, vm: dict[str, ANFValue]) -> bool:
@@ -313,24 +354,46 @@ def _get_const_int(name: str, vm: dict[str, ANFValue]) -> Optional[int]:
 
 
 def _same_binding(a: str, b: str, vm: dict[str, ANFValue]) -> bool:
-    """Check if two binding names refer to the same underlying value."""
-    return _canonical(a, vm) == _canonical(b, vm)
+    """Check if two binding names refer to the same underlying value. Never for
+    a name with no fixed identity."""
+    ca = _canonical(a, vm)
+    return ca is not None and ca == _canonical(b, vm)
 
 
-def _canonical(name: str, vm: dict[str, ANFValue]) -> str:
-    """Follow @ref: chains to get the canonical binding name."""
-    seen: set[str] = set()
+def _canonical(name: str, vm: dict[str, ANFValue]) -> Optional[str]:
+    """F-269 (user decision R77): the binding `name` ultimately names, following
+    load_const "@ref:<x>" aliases -- pass 04's `const y = <expr>` and the ones
+    R1/R2/R3/R7 leave behind (the TS canonicalName in anf-ec.ts).
+
+    None when `name` has no position-independent identity: ANF re-emits a
+    local's name when the source reassigns it (top level or in an if/loop
+    arm), so a REBOUND name means different values at different sites. Two
+    uses of one are not "the same $x", and nothing lifted out of an earlier
+    binding may name one (F-269 attempt 2). An alias cycle (only hand-written
+    --ir) is None too. A hop is never taken INTO a rebound name: the chain
+    stops at the last name bound once, which is itself a fixed value, and its
+    value is the opaque alias. Matching only -- rewrites emit the literal names
+    they matched.
+
+    This used to look for the alias on `load_param` values, a kind pass 04
+    never gives one, so it never followed anything."""
+    rebound = getattr(vm, "rebound", set())
+    if name in rebound:
+        return None
+    seen: set[str] = {name}
     current = name
-    while current in vm:
-        if current in seen:
-            break
-        seen.add(current)
-        val = vm[current]
-        if val.kind == "load_param" and val.name is not None and val.name.startswith("@ref:"):
-            current = val.name[5:]
-            continue
-        break
-    return current
+    while True:
+        val = vm.get(current)
+        if (val is None or val.kind != "load_const" or not isinstance(val.const_string, str)
+                or len(val.const_string) <= 5 or not val.const_string.startswith("@ref:")):
+            return current
+        nxt = val.const_string[5:]
+        if nxt in rebound:
+            return current
+        if nxt in seen:
+            return None
+        seen.add(nxt)
+        current = nxt
 
 
 # ---------------------------------------------------------------------------

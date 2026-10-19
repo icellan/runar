@@ -105,11 +105,26 @@
       },
       "expect": "reject",
       "note": "ATTACK (forced near-miss): pt = other = (5, 0), an off-curve point with y = 0. The tangent 3x^2 / 2y has no denominator; before N-110 inv(0) = 0 made the script return (p - 10, 0) and this exact spend was ACCEPTED. Now the adder OP_VERIFYs NOT(cond AND px != 0 AND py == 0) and the script aborts. The TestContract interpreter models the same abort (N-110), so source and script agree"
+    },
+    {
+      "method": "checkNegateRoundtrip",
+      "args": [],
+      "expect": "accept",
+      "note": "F-269: pt = G. checkNegateRoundtrip's ecNegate(neg1) is now rewritten by R7 (ec-negate-negate) THROUGH the pass-04 alias neg1 = @ref:t1 to an alias of this.pt; the inner ecNegate(this.pt) stays (calls are never dead-code-eliminated). This spend executes that rewritten method on the real Spend engine: -(-G) = G"
+    },
+    {
+      "method": "checkNegateRoundtrip",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc300000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss), F-269: non-canonical pt = (p+1, 2), x >= p. R7 elides the OUTER ecNegate only; the inner ecNegate(this.pt) that checks width and canonicity is kept, so the rewritten script must still abort here exactly as the unoptimized one does (an elided operand check would accept: -(-pt) has the same bytes as pt)"
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "eaba19061fd2896d8a9a2fca5359bb3bd926ba58360d3fb19afcbb88c6984731",
-    "expected-ir.json": "9ec2a00b5110348007801efc6986ceb64db8c26026667bffd5e728a5fe37f2fa"
+    "expected-script.hex": "4f538ac521f88b40c6dc3e347f1b892ae48bfde20169c76e7b49f787040e17cf",
+    "expected-ir.json": "5630a2f7b9d5a0d7d8e58201815c38151419ab7686ef6c50d2f03f15693f6d32"
   },
-  "goldenHashesNote": "N-110 moved expected-script.hex only (+24 bytes: 12 per ecAdd call, two calls): affineAdd now aborts when it doubles a point with y = 0 other than O, instead of returning (p - 2x, 0) through inv(0) = 0. expected-ir.json is unmoved. The checkAdd spends above re-execute the new bytes on @bsv/sdk Spend: honest doubling and chord accept with independently computed coordinates, the y = 0 doubling that the previous script accepted is rejected. All seven tiers produce these bytes (conformance golden STRICT and multi-format, both fold modes). Previous note: N-104 moved both goldens: checkMulIdentity's ecMul(pt, 1n) rewrite now carries ecMul's operand gate (t2_inf, t2_isinf, t2_oncurve, t2_ok, t2_gate in expected-ir.json; +877 bytes of script). Nothing else in the fixture changed. The pin is self-invalidating: any later change to either golden must come back through this witness, whose spends re-execute the fixture's compiled locking script on the real @bsv/sdk Spend engine. All seven tiers produce these bytes (conformance multi-format, both fold modes)."
+  "goldenHashesNote": "F-269 (user decision R77) moved both goldens: the EC optimizer now resolves operands through @ref: aliases (through names bound once in the method only), so in checkNegateRoundtrip `neg2 = ecNegate(neg1)` with `neg1 = @ref:t1`, `t1 = ecNegate(this.pt)` is rewritten by R7 to `t2 = @ref:t0` (-1091 script bytes: one ecNegate expansion; no other method changes). The two checkNegateRoundtrip spends above execute the rewritten method on @bsv/sdk Spend: -(-G) = G accepts, and a non-canonical pt is still rejected because the inner ecNegate's width/canonicity check is kept. The script compiled fold-ON (what this oracle runs) is byte-identical to the fold-OFF golden for this fixture, so these spends run the golden's own bytes. All seven tiers produce these bytes (conformance golden STRICT and multi-format, both fold modes). Previous pins: expected-script.hex eaba19061fd2896d8a9a2fca5359bb3bd926ba58360d3fb19afcbb88c6984731, expected-ir.json 9ec2a00b5110348007801efc6986ceb64db8c26026667bffd5e728a5fe37f2fa. Previous note: N-110 moved expected-script.hex only (+24 bytes: 12 per ecAdd call, two calls): affineAdd now aborts when it doubles a point with y = 0 other than O, instead of returning (p - 2x, 0) through inv(0) = 0. expected-ir.json is unmoved. The checkAdd spends above re-execute the new bytes on @bsv/sdk Spend: honest doubling and chord accept with independently computed coordinates, the y = 0 doubling that the previous script accepted is rejected. All seven tiers produce these bytes (conformance golden STRICT and multi-format, both fold modes). Previous note: N-104 moved both goldens: checkMulIdentity's ecMul(pt, 1n) rewrite now carries ecMul's operand gate (t2_inf, t2_isinf, t2_oncurve, t2_ok, t2_gate in expected-ir.json; +877 bytes of script). Nothing else in the fixture changed. The pin is self-invalidating: any later change to either golden must come back through this witness, whose spends re-execute the fixture's compiled locking script on the real @bsv/sdk Spend engine. All seven tiers produce these bytes (conformance multi-format, both fold modes)."
 }

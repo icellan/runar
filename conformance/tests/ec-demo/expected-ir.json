@@ -737,20 +737,10 @@
           }
         },
         {
-          "name": "neg1",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t1"
-          }
-        },
-        {
           "name": "t2",
           "value": {
-            "args": [
-              "neg1"
-            ],
-            "func": "ecNegate",
-            "kind": "call"
+            "kind": "load_const",
+            "value": "@ref:t0"
           }
         },
         {

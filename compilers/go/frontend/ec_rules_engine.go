@@ -10,10 +10,12 @@
 //
 //   match forms:
 //     "$name"                    pattern variable (binds on first use,
-//                                must equal on repeat use)
+//                                must equal on repeat use — the same
+//                                binding through @ref: aliases, F-269)
 //     0, 1, ...                  integer literal (matches load_const bigint)
 //     { "func": F, "args": [...] }   nested call; resolves the arg through
-//                                the ANF value map
+//                                the ANF value map, following @ref:
+//                                aliases (F-269, canonicalName)
 //     { "const": "INFINITY" | "G" }  named constant (matches load_const
 //                                with the corresponding hex payload)
 //
@@ -349,7 +351,7 @@ type ecBindings map[string]string
 
 // matchRule attempts to match rule against binding b. Returns bindings on
 // success.
-func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue) (ecBindings, bool) {
+func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue, rebound map[string]bool) (ecBindings, bool) {
 	if rule.Match.Call == nil {
 		// Top-level must be a call pattern — rules cannot match a bare
 		// variable or constant at the root.
@@ -367,7 +369,7 @@ func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue) (e
 	}
 	binds := ecBindings{}
 	for i, pat := range rule.Match.Call.Args {
-		if !matchPatternArg(pat, v.Args[i], lookup, binds) {
+		if !matchPatternArg(pat, v.Args[i], false, lookup, rebound, binds) {
 			return nil, false
 		}
 	}
@@ -376,38 +378,58 @@ func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue) (e
 
 // matchPatternArg matches a pattern against the value referenced by argName.
 // For nested-call patterns, resolves argName through lookup and matches the
-// resulting value.
-func matchPatternArg(pat ecPattern, argName string, lookup map[string]*ir.ANFValue, binds ecBindings) bool {
+// resulting value. Every lookup follows @ref: aliases (F-269, canonicalName);
+// a pattern variable still binds the LITERAL argument name, so a rewrite
+// emits the names it matched.
+//
+// F-269 attempt 2: a name without a fixed identity (rebound, or an alias
+// cycle; see canonicalName) never satisfies a repeated $var, and a $var bound
+// INSIDE a nested call pattern must have one — that name is lifted out of an
+// earlier binding and the replace template or gate may emit it at this later
+// site, where a rebound name already holds a different value (R7's $x, R9's
+// $p, R8r's $x; R9/R10's nested scalars only need a constant, which an
+// unstable name never resolves to anyway).
+func matchPatternArg(pat ecPattern, argName string, nested bool, lookup map[string]*ir.ANFValue, rebound map[string]bool, binds ecBindings) bool {
 	switch {
 	case pat.Var != "":
 		if prev, ok := binds[pat.Var]; ok {
 			// Same-var must bind to the same underlying argument. We check
-			// both the literal arg name and, failing that, whether both
-			// arguments resolve to the same constant value — this matters
-			// for rule 11 ($p appears twice).
-			if prev == argName {
+			// the binding both names reach through aliases and, failing
+			// that, whether both arguments resolve to the same constant
+			// value — this matters for rule 11 ($p appears twice).
+			cp, okP := canonicalName(prev, lookup, rebound)
+			ca, okA := canonicalName(argName, lookup, rebound)
+			if !okP || !okA {
+				return false
+			}
+			if cp == ca {
 				return true
 			}
-			return sameResolvedValue(prev, argName, lookup)
+			return sameResolvedValue(cp, ca, lookup)
+		}
+		if nested {
+			if _, ok := canonicalName(argName, lookup, rebound); !ok {
+				return false
+			}
 		}
 		binds[pat.Var] = argName
 		return true
 
 	case pat.IntLit != nil:
-		v := lookup[argName]
+		v := resolveValue(argName, lookup, rebound)
 		if v == nil || v.Kind != "load_const" || v.ConstBigInt == nil {
 			return false
 		}
 		return v.ConstBigInt.Cmp(pat.IntLit) == 0
 
 	case pat.ConstName == "INFINITY":
-		return isInfinityOrZeroMulGen(argName, lookup)
+		return isInfinityOrZeroMulGen(argName, lookup, rebound)
 
 	case pat.ConstName == "G":
-		return isGOrOneMulGen(argName, lookup)
+		return isGOrOneMulGen(argName, lookup, rebound)
 
 	case pat.Call != nil:
-		v := lookup[argName]
+		v := resolveValue(argName, lookup, rebound)
 		if v == nil || v.Kind != "call" || v.Func != pat.Call.Func {
 			return false
 		}
@@ -415,7 +437,7 @@ func matchPatternArg(pat ecPattern, argName string, lookup map[string]*ir.ANFVal
 			return false
 		}
 		for i, sub := range pat.Call.Args {
-			if !matchPatternArg(sub, v.Args[i], lookup, binds) {
+			if !matchPatternArg(sub, v.Args[i], true, lookup, rebound, binds) {
 				return false
 			}
 		}
@@ -424,8 +446,58 @@ func matchPatternArg(pat ecPattern, argName string, lookup map[string]*ir.ANFVal
 	return false
 }
 
-// sameResolvedValue reports whether two arg names refer to the same value —
-// either by name, or both being load_const with the same payload.
+// canonicalName returns the binding argName ultimately names, following
+// load_const "@ref:<x>" aliases — pass 04's `const y = <expr>` and the ones
+// alias-producing rules leave behind (F-269, user decision R77; the TS
+// anf-ec.ts canonicalName).
+//
+// ok is false when argName has no position-independent identity: ANF re-emits
+// a local's name when the source reassigns it (top level or in an if/loop
+// arm), so a REBOUND name means different values at different sites, and the
+// lookup (last-wins over the whole body) holds only one of them. Two uses of
+// a rebound name are not "the same $x", and nothing lifted out of an earlier
+// binding may name one. An alias cycle (only hand-written --ir) is not ok
+// either. A hop is never taken INTO a rebound name: the chain stops at the
+// last name bound once, which is itself a fixed value (`const y = a` captured
+// the `a` of its own position), and its value is the opaque alias.
+func canonicalName(argName string, lookup map[string]*ir.ANFValue, rebound map[string]bool) (string, bool) {
+	if rebound[argName] {
+		return "", false
+	}
+	seen := map[string]bool{argName: true}
+	cur := argName
+	for {
+		v := lookup[cur]
+		if v == nil || v.Kind != "load_const" || v.ConstString == nil || len(*v.ConstString) <= 5 || (*v.ConstString)[:5] != "@ref:" {
+			return cur, true
+		}
+		next := (*v.ConstString)[5:]
+		if rebound[next] {
+			return cur, true
+		}
+		if seen[next] {
+			return "", false
+		}
+		seen[next] = true
+		cur = next
+	}
+}
+
+// resolveValue is the value argName resolves to through aliases, or nil when
+// it has no fixed identity (canonicalName's ok == false).
+func resolveValue(argName string, lookup map[string]*ir.ANFValue, rebound map[string]bool) *ir.ANFValue {
+	c, ok := canonicalName(argName, lookup, rebound)
+	if !ok {
+		return nil
+	}
+	return lookup[c]
+}
+
+// sameResolvedValue reports whether two canonical arg names refer to the same
+// value — either by name, or both being load_const with the same payload.
+// An "@ref:" payload is a NAME, not a value: two aliases of one rebound name
+// carry the same string while holding different values (F-269 attempt 2 /
+// N-353), so it never makes two bindings equal.
 func sameResolvedValue(a, b string, lookup map[string]*ir.ANFValue) bool {
 	if a == b {
 		return true
@@ -439,6 +511,9 @@ func sameResolvedValue(a, b string, lookup map[string]*ir.ANFValue) bool {
 		return false
 	}
 	if va.ConstString != nil && vb.ConstString != nil {
+		if len(*va.ConstString) >= 5 && (*va.ConstString)[:5] == "@ref:" {
+			return false
+		}
 		return *va.ConstString == *vb.ConstString
 	}
 	if va.ConstBigInt != nil && vb.ConstBigInt != nil {
@@ -449,8 +524,8 @@ func sameResolvedValue(a, b string, lookup map[string]*ir.ANFValue) bool {
 
 // isInfinityOrZeroMulGen matches either a load_const INFINITY or an
 // ecMulGen(0) call — both are representations of the point at infinity.
-func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue) bool {
-	v := lookup[name]
+func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue, rebound map[string]bool) bool {
+	v := resolveValue(name, lookup, rebound)
 	if v == nil {
 		return false
 	}
@@ -458,7 +533,7 @@ func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 		return true
 	}
 	if v.Kind == "call" && v.Func == "ecMulGen" && len(v.Args) == 1 {
-		inner := lookup[v.Args[0]]
+		inner := resolveValue(v.Args[0], lookup, rebound)
 		if inner != nil && inner.Kind == "load_const" && inner.ConstBigInt != nil && inner.ConstBigInt.Sign() == 0 {
 			return true
 		}
@@ -467,8 +542,8 @@ func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 }
 
 // isGOrOneMulGen matches either a load_const G or an ecMulGen(1) call.
-func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
-	v := lookup[name]
+func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue, rebound map[string]bool) bool {
+	v := resolveValue(name, lookup, rebound)
 	if v == nil {
 		return false
 	}
@@ -476,7 +551,7 @@ func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 		return true
 	}
 	if v.Kind == "call" && v.Func == "ecMulGen" && len(v.Args) == 1 {
-		inner := lookup[v.Args[0]]
+		inner := resolveValue(v.Args[0], lookup, rebound)
 		if inner != nil && inner.Kind == "load_const" && inner.ConstBigInt != nil && inner.ConstBigInt.Cmp(big.NewInt(1)) == 0 {
 			return true
 		}
@@ -503,7 +578,7 @@ func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 // tier for the same source, which conformance invariant 2 forbids. Rather
 // than let a byte-level divergence hide behind "both are correct", the
 // engine now declines the rewrite exactly where the other tiers decline it.
-func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANFValue) bool {
+func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANFValue, rebound map[string]bool) bool {
 	if rule.Replace.Call == nil {
 		return true
 	}
@@ -511,10 +586,10 @@ func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANF
 		if a.Op == nil {
 			continue
 		}
-		if resolveConstBigInt(binds[a.Op.Lhs], lookup) == nil {
+		if resolveConstBigInt(binds[a.Op.Lhs], lookup, rebound) == nil {
 			return false
 		}
-		if resolveConstBigInt(binds[a.Op.Rhs], lookup) == nil {
+		if resolveConstBigInt(binds[a.Op.Rhs], lookup, rebound) == nil {
 			return false
 		}
 	}
@@ -523,7 +598,7 @@ func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANF
 
 // applyReplace mutates b.Value according to the rule's replace template.
 // Returns any extra bindings to insert before b.
-func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool) []ir.ANFBinding {
+func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) []ir.ANFBinding {
 	r := rule.Replace
 	switch {
 	case r.Var != "":
@@ -547,7 +622,7 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 			case a.Var != "":
 				callArgs = append(callArgs, binds[a.Var])
 			case a.Op != nil:
-				helperName, helperBinding := buildOpHelper(b, rule, a.Op, binds, lookup, used)
+				helperName, helperBinding := buildOpHelper(b, rule, a.Op, binds, lookup, used, rebound)
 				extra = append(extra, helperBinding)
 				callArgs = append(callArgs, helperName)
 				// Register immediately so subsequent helpers (if any) see it
@@ -572,14 +647,14 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 // the fold — and therefore the mod-n reduction — unconditional here, and what
 // keeps this engine byte-compatible with the six hand-written tiers, none of
 // which fires a scalar-fusing rule on runtime operands.
-func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool) (string, ir.ANFBinding) {
+func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) (string, ir.ANFBinding) {
 	lhsName := binds[op.Lhs]
 	rhsName := binds[op.Rhs]
 	// N-112: `<binding>_k`, the TS anf-ec.ts freshName(`${binding.name}_k`, usedNames).
 	helperName := nextTempName(b.Name+"_k", lookup, used)
 
-	lhsVal := resolveConstBigInt(lhsName, lookup)
-	rhsVal := resolveConstBigInt(rhsName, lookup)
+	lhsVal := resolveConstBigInt(lhsName, lookup, rebound)
+	rhsVal := resolveConstBigInt(rhsName, lookup, rebound)
 	if lhsVal == nil || rhsVal == nil {
 		panic(fmt.Sprintf("ec rule %q: buildOpHelper reached with non-constant operands (%q, %q) — opOperandsAreConst should have declined the rule", rule.Name, lhsName, rhsName))
 	}
@@ -608,26 +683,26 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 
 // applyECRules tries each rule in order on binding b. Returns any extra
 // bindings and whether a rewrite occurred.
-func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool) ([]ir.ANFBinding, bool) {
+func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) ([]ir.ANFBinding, bool) {
 	for _, rule := range ecRules {
 		if !ruleAppliesToGo(rule) {
 			continue
 		}
-		binds, ok := matchRule(rule, b, lookup)
+		binds, ok := matchRule(rule, b, lookup, rebound)
 		if !ok {
 			continue
 		}
 		// Checked BEFORE applyReplace: applyReplace mutates b.Value and
 		// registers helper bindings in lookup, so there is no way to back out
 		// of it once started.
-		if !opOperandsAreConst(rule, binds, lookup) {
+		if !opOperandsAreConst(rule, binds, lookup, rebound) {
 			continue
 		}
 		var gate []ir.ANFBinding
 		if rule.Gate != nil {
 			gate = emitOperandGate(rule.Gate.Of, b.Name, binds[rule.Gate.Operand], lookup, used)
 		}
-		extra := applyReplace(rule, b, binds, lookup, used)
+		extra := applyReplace(rule, b, binds, lookup, used, rebound)
 		return append(gate, extra...), true
 	}
 	return nil, false

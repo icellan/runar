@@ -116,6 +116,99 @@ fn collectBindingNames(used: *std.StringHashMap(void), bindings: []const types.A
     }
 }
 
+/// F-269: every name bound more than once in the method -- binding names at
+/// any depth (if/loop arms included) and loop iteration variables (the TS
+/// `collectReboundNames`). `ValueMap.canonical` never resolves through one.
+fn collectReboundNames(
+    seen: *std.StringHashMap(void),
+    rebound: *std.StringHashMap(void),
+    bindings: []const types.ANFBinding,
+) !void {
+    for (bindings) |b| {
+        try bindName(seen, rebound, b.name);
+        switch (b.value) {
+            .@"if" => |iv| {
+                try collectReboundNames(seen, rebound, iv.then);
+                try collectReboundNames(seen, rebound, iv.@"else");
+            },
+            .loop => |lv| {
+                try bindName(seen, rebound, lv.iter_var);
+                try collectReboundNames(seen, rebound, lv.body);
+            },
+            else => {},
+        }
+    }
+}
+
+fn bindName(seen: *std.StringHashMap(void), rebound: *std.StringHashMap(void), name: []const u8) !void {
+    if (seen.contains(name)) {
+        try rebound.put(name, {});
+    } else {
+        try seen.put(name, {});
+    }
+}
+
+/// Binding name -> its value as already rewritten in the current sweep, plus
+/// the method's rebound names. `get` follows `@ref:` aliases (F-269).
+const ValueMap = struct {
+    map: std.StringHashMap(types.ANFValue),
+    rebound: *const std.StringHashMap(void),
+
+    fn put(self: *ValueMap, name: []const u8, value: types.ANFValue) !void {
+        try self.map.put(name, value);
+    }
+
+    /// F-269 (user decision R77): the binding `name` ultimately names,
+    /// following load_const "@ref:<x>" aliases -- pass 04's
+    /// `const y = <expr>` and the ones R1/R2/R3/R7 leave behind (the TS
+    /// `canonicalName` in anf-ec.ts).
+    ///
+    /// null when `name` has no position-independent identity: ANF re-emits a
+    /// local's name when the source reassigns it (top level or in an if/loop
+    /// arm), so a REBOUND name means different values at different sites. Two
+    /// uses of one are not "the same $x", and nothing lifted out of an earlier
+    /// binding may name one (F-269 attempt 2). An alias cycle (only
+    /// hand-written `compile-ir` input) is null too: an acyclic chain visits
+    /// each binding at most once, so more hops than the map holds IS a cycle
+    /// -- the TS seen-set, without an allocation. A hop is never taken INTO a
+    /// rebound name: the chain stops at the last name bound once, which is
+    /// itself a fixed value, and its value is the opaque alias. Matching only:
+    /// rewrites emit the literal names they matched.
+    fn canonical(self: *ValueMap, name: []const u8) ?[]const u8 {
+        if (self.rebound.contains(name)) return null;
+        var cur = name;
+        var hops: usize = 0;
+        while (true) {
+            const v = self.map.get(cur) orelse return cur;
+            const s = switch (v) {
+                .load_const => |lc| switch (lc.value) {
+                    .string => |str| str,
+                    else => return cur,
+                },
+                else => return cur,
+            };
+            if (s.len <= 5 or !std.mem.startsWith(u8, s, "@ref:")) return cur;
+            const next = s[5..];
+            hops += 1;
+            if (self.rebound.contains(next)) return cur;
+            if (eql(next, name) or hops > self.map.count()) return null;
+            cur = next;
+        }
+    }
+
+    /// The value `name` resolves to, through aliases; null for a name with
+    /// no fixed identity.
+    fn get(self: *ValueMap, name: []const u8) ?types.ANFValue {
+        return self.map.get(self.canonical(name) orelse return null);
+    }
+
+    /// F-269 attempt 2: may a name lifted out of an earlier binding be
+    /// emitted at the current site? Only when it denotes one value (R7, R9).
+    fn stable(self: *ValueMap, name: []const u8) bool {
+        return self.canonical(name) != null;
+    }
+};
+
 fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []const types.ANFProperty) !types.ANFMethod {
     var body = try allocator.alloc(types.ANFBinding, method.body.len);
     @memcpy(body, method.body);
@@ -125,12 +218,19 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
     defer used_names.deinit();
     try collectUsedNames(&used_names, method, properties);
 
+    // F-269: names bound more than once; alias resolution never passes one.
+    var rebound_seen = std.StringHashMap(void).init(allocator);
+    defer rebound_seen.deinit();
+    var rebound = std.StringHashMap(void).init(allocator);
+    defer rebound.deinit();
+    try collectReboundNames(&rebound_seen, &rebound, method.body);
+
     // Fixed-point iteration: keep applying rules until nothing changes.
     var changed = true;
     while (changed) {
         changed = false;
-        var value_map = std.StringHashMap(types.ANFValue).init(allocator);
-        defer value_map.deinit();
+        var value_map = ValueMap{ .map = std.StringHashMap(types.ANFValue).init(allocator), .rebound = &rebound };
+        defer value_map.map.deinit();
 
         var new_body = std.ArrayListUnmanaged(types.ANFBinding).empty;
         defer new_body.deinit(allocator);
@@ -197,7 +297,7 @@ fn tryOptimize(
     allocator: Allocator,
     name: []const u8,
     v: types.ANFValue,
-    vm: *std.StringHashMap(types.ANFValue),
+    vm: *ValueMap,
     used: *std.StringHashMap(void),
     prelude: *std.ArrayListUnmanaged(types.ANFBinding),
 ) ?types.ANFValue {
@@ -247,7 +347,9 @@ fn tryOptimize(
     // Rule 7: ecNegate(ecNegate(x)) -> x
     if (eql(func, "ecNegate") and args.len == 1) {
         if (resolveCall(args[0], vm)) |ic| {
-            if (eql(ic.func, "ecNegate") and ic.args.len == 1)
+            // F-269 attempt 2: x is lifted out of the inner binding and
+            // re-emitted here, so it must denote one value at both sites.
+            if (eql(ic.func, "ecNegate") and ic.args.len == 1 and vm.stable(ic.args[0]))
                 return makeRef(allocator, ic.args[0]);
         }
     }
@@ -275,7 +377,10 @@ fn tryOptimize(
     if (eql(func, "ecAdd") and args.len == 2) {
         if (resolveCall(args[0], vm)) |nc| {
             if (eql(nc.func, "ecNegate") and nc.args.len == 1 and sameBinding(args[1], nc.args[0], vm)) {
-                if (!emitOperandGate(allocator, .neg_cancel, name, args[1], vm, used, prelude)) return null;
+                // The gate reads the ecNegate operand: the name the JSON's `$x`
+                // binds first, as the Go engine binds it (differs from args[1]
+                // only through an alias, F-269).
+                if (!emitOperandGate(allocator, .neg_cancel, name, nc.args[0], vm, used, prelude)) return null;
                 return makeConstHex(INFINITY_HEX);
             }
         }
@@ -287,7 +392,7 @@ fn tryOptimize(
             var k2 = k2_loaded;
             defer k2.deinit();
             if (resolveCall(args[0], vm)) |ic| {
-                if (eql(ic.func, "ecMul") and ic.args.len == 2) {
+                if (eql(ic.func, "ecMul") and ic.args.len == 2 and vm.stable(ic.args[0])) {
                     if (getConstBig(allocator, ic.args[1], vm)) |k1_loaded| {
                         var k1 = k1_loaded;
                         defer k1.deinit();
@@ -355,12 +460,12 @@ fn tryOptimize(
 // Helpers -- value inspection
 // ============================================================================
 
-fn resolve(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) ?types.ANFValue {
+fn resolve(name: []const u8, vm: *ValueMap) ?types.ANFValue {
     return vm.get(name);
 }
 
 /// Resolve a binding name and return the inner ANFCall if it is a call, else null.
-fn resolveCall(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) ?types.ANFCall {
+fn resolveCall(name: []const u8, vm: *ValueMap) ?types.ANFCall {
     const val = resolve(name, vm) orelse return null;
     return switch (val) {
         .call => |call| call,
@@ -368,7 +473,7 @@ fn resolveCall(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) ?types.
     };
 }
 
-fn isInfinity(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
+fn isInfinity(name: []const u8, vm: *ValueMap) bool {
     const val = resolve(name, vm) orelse return false;
     return switch (val) {
         .load_const => |lc| switch (lc.value) {
@@ -379,7 +484,7 @@ fn isInfinity(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
     };
 }
 
-fn isGenerator(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
+fn isGenerator(name: []const u8, vm: *ValueMap) bool {
     const val = resolve(name, vm) orelse return false;
     return switch (val) {
         .load_const => |lc| switch (lc.value) {
@@ -390,7 +495,7 @@ fn isGenerator(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
     };
 }
 
-fn isConstInt(allocator: Allocator, name: []const u8, n: i128, vm: *std.StringHashMap(types.ANFValue)) bool {
+fn isConstInt(allocator: Allocator, name: []const u8, n: i128, vm: *ValueMap) bool {
     var v = getConstBig(allocator, name, vm) orelse return false;
     defer v.deinit();
     const got = v.toConst().toInt(i128) catch return false;
@@ -405,7 +510,7 @@ fn isConstInt(allocator: Allocator, name: []const u8, n: i128, vm: *std.StringHa
 /// silently decline for exactly the operands that matter.
 ///
 /// Caller owns the returned value and must `deinit` it.
-fn getConstBig(allocator: Allocator, name: []const u8, vm: *std.StringHashMap(types.ANFValue)) ?const_arith.Big {
+fn getConstBig(allocator: Allocator, name: []const u8, vm: *ValueMap) ?const_arith.Big {
     const val = resolve(name, vm) orelse return null;
     const lc = switch (val) {
         .load_const => |c| c,
@@ -414,9 +519,11 @@ fn getConstBig(allocator: Allocator, name: []const u8, vm: *std.StringHashMap(ty
     return (const_arith.load(allocator, lc.value) catch return null) orelse null;
 }
 
-fn sameBinding(a: []const u8, b: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
-    _ = vm;
-    return eql(a, b);
+/// F-269: do two arguments name the same binding, through aliases? (R8, R8r, R11.)
+fn sameBinding(a: []const u8, b: []const u8, vm: *ValueMap) bool {
+    const ca = vm.canonical(a) orelse return false;
+    const cb = vm.canonical(b) orelse return false;
+    return eql(ca, cb);
 }
 
 // ============================================================================
@@ -482,7 +589,7 @@ fn emitOperandGate(
     of: GateOf,
     base: []const u8,
     q: []const u8,
-    vm: *std.StringHashMap(types.ANFValue),
+    vm: *ValueMap,
     used: *std.StringHashMap(void),
     prelude: *std.ArrayListUnmanaged(types.ANFBinding),
 ) bool {
@@ -561,7 +668,7 @@ fn freshConstName(
     allocator: Allocator,
     base: []const u8,
     value: types.ConstValue,
-    vm: *std.StringHashMap(types.ANFValue),
+    vm: *ValueMap,
     used: *std.StringHashMap(void),
     prelude: *std.ArrayListUnmanaged(types.ANFBinding),
 ) ?[]const u8 {

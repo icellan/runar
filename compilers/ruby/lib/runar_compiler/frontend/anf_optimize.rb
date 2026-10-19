@@ -167,8 +167,51 @@ module RunarCompiler
       end
       private_class_method :collect_used_names
 
+      # Binding name -> value, plus the method's rebound names (F-269, see
+      # +canonical+).
+      class ValueMap < Hash
+        attr_reader :rebound
+
+        def initialize(rebound)
+          super()
+          @rebound = rebound
+        end
+      end
+
+      # F-269: every name bound more than once in the method -- binding names
+      # at any depth (if/loop arms included) and loop iteration variables (the
+      # TS collectReboundNames). +canonical+ never resolves through one.
+      def self.collect_rebound_names(method)
+        seen = Set.new
+        rebound = Set.new
+        bind = lambda do |name|
+          if seen.include?(name)
+            rebound << name
+          else
+            seen << name
+          end
+        end
+        walk = lambda do |bindings|
+          (bindings || []).each do |b|
+            bind.call(b.name)
+            v = b.value
+            case v.kind
+            when "if"
+              walk.call(v.then)
+              walk.call(v.else_)
+            when "loop"
+              bind.call(v.iter_var) if v.iter_var
+              walk.call(v.body)
+            end
+          end
+        end
+        walk.call(method.body)
+        rebound
+      end
+      private_class_method :collect_rebound_names
+
       def self.optimize_method(method, properties)
-        value_map = {}
+        value_map = ValueMap.new(collect_rebound_names(method))
         used_names = collect_used_names(method, properties)
         changed = true
         while changed
@@ -253,7 +296,10 @@ module RunarCompiler
         # Rule 7: ecNegate(ecNegate(x)) -> x
         if func == "ecNegate" && args.size == 1
           inner = resolve(args[0], vm)
-          if inner && inner.kind == "call" && inner.func == "ecNegate" && inner.args && inner.args.size == 1
+          # F-269 attempt 2: x is lifted out of the inner binding and
+          # re-emitted here, so it must denote one value at both sites.
+          if inner && inner.kind == "call" && inner.func == "ecNegate" && inner.args && inner.args.size == 1 &&
+             stable?(inner.args[0], vm)
             return make_ref(inner.args[0])
           end
         end
@@ -283,7 +329,10 @@ module RunarCompiler
           neg = resolve(args[0], vm)
           if neg && neg.kind == "call" && neg.func == "ecNegate" && neg.args && neg.args.size == 1
             if same_binding?(args[1], neg.args[0], vm)
-              emit_neg_cancel_gate(name, args[1], vm, prelude, used_names)
+              # The gate reads the ecNegate operand: the name the JSON's `$x`
+              # binds first, as the Go engine binds it (differs from args[1]
+              # only through an alias, F-269).
+              emit_neg_cancel_gate(name, neg.args[0], vm, prelude, used_names)
               return make_const_hex(INFINITY_HEX)
             end
           end
@@ -293,7 +342,8 @@ module RunarCompiler
         if func == "ecMul" && args.size == 2
           inner = resolve(args[0], vm)
           k2 = get_const_int(args[1], vm)
-          if inner && k2 && inner.kind == "call" && inner.func == "ecMul" && inner.args && inner.args.size == 2
+          if inner && k2 && inner.kind == "call" && inner.func == "ecMul" && inner.args && inner.args.size == 2 &&
+             stable?(inner.args[0], vm)
             k1 = get_const_int(inner.args[1], vm)
             if k1
               combined = (k1 * k2) % CURVE_N
@@ -349,23 +399,16 @@ module RunarCompiler
       # Helpers -- value inspection
       # -----------------------------------------------------------------
 
-      # Resolve a binding name to its ANFValue.
+      # Resolve a binding name to its ANFValue, following @ref: aliases
+      # (F-269, +canonical+).
       #
-      # R-263: this used to carry an alias-chasing loop guarded on
-      # `val.kind == "load_param" && val.name.start_with?("@ref:")`. No such
-      # value exists. Aliases are created as load_const carrying the reference
-      # in `const_string` (see make_alias below, and anf_lower's
-      # `_make_load_const_string("@ref:...")`); `load_param` values carry real
-      # parameter names like "txPreimage". The branch could not fire, and the
-      # loop around it did nothing but walk one step and return.
-      #
-      # Not repaired into a working chase, which would be a behaviour change:
-      # the TypeScript reference's `resolveArg` is a plain map lookup too, so
-      # following aliases here would enable rewrites no other tier performs.
-      # Where alias-following genuinely belongs, dce.rb:98 already does it
-      # correctly, through `const_string`.
+      # R-263 removed a chase guarded on an impossible `load_param` shape and
+      # kept this a plain lookup because the TypeScript reference was one too.
+      # F-269 (user decision R77) made every tier follow aliases; they are
+      # load_const values carrying the reference in `const_string`.
       def self.resolve(name, vm)
-        vm[name]
+        c = canonical(name, vm)
+        c.nil? ? nil : vm[c]
       end
       private_class_method :resolve
 
@@ -399,17 +442,47 @@ module RunarCompiler
       private_class_method :get_const_int
 
       def self.same_binding?(a, b, vm)
-        canonical(a, vm) == canonical(b, vm)
+        ca = canonical(a, vm)
+        !ca.nil? && ca == canonical(b, vm)
       end
       private_class_method :same_binding?
 
-      # The canonical binding name.
+      # F-269 attempt 2: may a name lifted out of an earlier binding be emitted
+      # at the current site? Only when it denotes one value (R7, R9).
+      def self.stable?(name, vm)
+        !canonical(name, vm).nil?
+      end
+      private_class_method :stable?
+
+      # F-269 (user decision R77): the binding +name+ ultimately names,
+      # following load_const "@ref:<x>" aliases -- pass 04's
+      # `const y = <expr>` and the ones R1/R2/R3/R7 leave behind (the TS
+      # canonicalName in anf-ec.ts).
       #
-      # R-263: the @ref: chain this claimed to follow was guarded on the same
-      # impossible `load_param` shape as `resolve` above, so every call already
-      # returned its argument unchanged.
-      def self.canonical(name, _vm)
-        name
+      # nil when +name+ has no position-independent identity: ANF re-emits a
+      # local's name when the source reassigns it (top level or in an if/loop
+      # arm), so a REBOUND name means different values at different sites. Two
+      # uses of one are not "the same $x", and nothing lifted out of an earlier
+      # binding may name one (F-269 attempt 2). An alias cycle (only
+      # hand-written --ir) is nil too. A hop is never taken INTO a rebound
+      # name: the chain stops at the last name bound once, which is itself a
+      # fixed value, and its value is the opaque alias. Matching only --
+      # rewrites emit the literal names they matched.
+      def self.canonical(name, vm)
+        rebound = vm.respond_to?(:rebound) ? vm.rebound : Set.new
+        return nil if rebound.include?(name)
+        seen = Set[name]
+        current = name
+        loop do
+          val = vm[current]
+          s = val && val.kind == "load_const" ? val.const_string : nil
+          return current unless s.is_a?(String) && s.length > 5 && s.start_with?("@ref:")
+          nxt = s[5..]
+          return current if rebound.include?(nxt)
+          return nil if seen.include?(nxt)
+          seen << nxt
+          current = nxt
+        end
       end
       private_class_method :canonical
 

@@ -42,6 +42,9 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
 	// F-086: names a minted helper binding must avoid (params, properties,
 	// nested bindings — the lookup below only covers top-level bindings).
 	used := collectUsedNames(method, properties)
+	// F-269: names bound more than once; alias resolution never passes
+	// through one (see canonicalName in ec_rules_engine.go).
+	rebound := collectReboundNames(method)
 
 	// Build a lookup map from binding name to its value.
 	lookup := make(map[string]*ir.ANFValue)
@@ -58,7 +61,7 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
 
 		for i := range method.Body {
 			b := &method.Body[i]
-			extra, ok := optimizeBindingECWithInserts(b, lookup, used)
+			extra, ok := optimizeBindingECWithInserts(b, lookup, used, rebound)
 			if ok {
 				changed = true
 				anyChanged = true
@@ -115,16 +118,16 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
 // generic rule engine. Adding a new rule to the JSON file makes it active
 // without any changes here, provided it's tagged "go" (or untagged) and
 // fits the engine's match/replace grammar.
-func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool) ([]ir.ANFBinding, bool) {
+func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) ([]ir.ANFBinding, bool) {
 	v := &b.Value
 	if v.Kind != "call" {
 		return nil, false
 	}
-	return applyECRules(b, lookup, used)
+	return applyECRules(b, lookup, used, rebound)
 }
 
-func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool) bool {
-	_, ok := optimizeBindingECWithInserts(b, lookup, used)
+func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) bool {
+	_, ok := optimizeBindingECWithInserts(b, lookup, used, rebound)
 	return ok
 }
 
@@ -163,6 +166,41 @@ func collectUsedNames(method *ir.ANFMethod, properties []ir.ANFProperty) map[str
 	return used
 }
 
+// collectReboundNames returns every name bound more than once in the method —
+// binding names at any depth (if/loop arms included) and loop iteration
+// variables (F-269, the TS anf-ec.ts collectReboundNames). ANF is not
+// single-assignment for source locals: a reassignment re-emits the local's
+// name, so an alias chain through such a name can land on a value the alias
+// never held. canonicalName never resolves through one.
+func collectReboundNames(method *ir.ANFMethod) map[string]bool {
+	seen := make(map[string]bool)
+	rebound := make(map[string]bool)
+	bind := func(name string) {
+		if seen[name] {
+			rebound[name] = true
+		} else {
+			seen[name] = true
+		}
+	}
+	var walk func(bindings []ir.ANFBinding)
+	walk = func(bindings []ir.ANFBinding) {
+		for i := range bindings {
+			b := &bindings[i]
+			bind(b.Name)
+			switch b.Value.Kind {
+			case "if":
+				walk(b.Value.Then)
+				walk(b.Value.Else)
+			case "loop":
+				bind(b.Value.IterVar)
+				walk(b.Value.Body)
+			}
+		}
+	}
+	walk(method.Body)
+	return rebound
+}
+
 // nextTempName generates a unique temp binding name not already in lookup nor
 // in used (F-086), and reserves it in used. Used by the rule engine when
 // emitting synthetic helper bindings. N-112: same scheme as TS anf-ec.ts
@@ -187,10 +225,10 @@ func nextTempName(base string, lookup map[string]*ir.ANFValue, used map[string]b
 // ---------------------------------------------------------------------------
 
 // resolveConstBigInt returns the big.Int value if the named binding is a
-// load_const bigint. Used by the rule engine for compile-time folding of
+// load_const bigint, through @ref: aliases (F-269). Used by the rule engine for compile-time folding of
 // scalar arithmetic in replace templates.
-func resolveConstBigInt(name string, lookup map[string]*ir.ANFValue) *big.Int {
-	v := lookup[name]
+func resolveConstBigInt(name string, lookup map[string]*ir.ANFValue, rebound map[string]bool) *big.Int {
+	v := resolveValue(name, lookup, rebound)
 	if v == nil || v.Kind != "load_const" {
 		return nil
 	}

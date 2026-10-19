@@ -57,7 +57,82 @@ const G_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f
 // Value resolution helpers (uses owned ANFValue map for borrow-checker safety)
 // ---------------------------------------------------------------------------
 
-type ValueMap = HashMap<String, ANFValue>;
+/// Binding name -> its value as already rewritten in the current pass, plus
+/// the method's rebound names. `get` follows `@ref:` aliases (F-269, see
+/// `canonical`), so every rule resolves through them.
+struct ValueMap {
+    values: HashMap<String, ANFValue>,
+    rebound: HashSet<String>,
+}
+
+impl ValueMap {
+    fn new(rebound: HashSet<String>) -> Self {
+        ValueMap { values: HashMap::new(), rebound }
+    }
+
+    fn insert(&mut self, name: String, value: ANFValue) {
+        self.values.insert(name, value);
+    }
+
+    /// F-269 (user decision R77): the binding `arg` ultimately names,
+    /// following `load_const "@ref:<x>"` aliases — pass 04's
+    /// `const y = <expr>` and the ones R1/R2/R3/R7 leave behind. The TS
+    /// `canonicalName` in anf-ec.ts.
+    ///
+    /// `None` when `arg` has no position-independent identity: ANF re-emits a
+    /// local's name when the source reassigns it (top level or in an if/loop
+    /// arm), so a REBOUND name means different values at different sites. Two
+    /// uses of one are not "the same $x", and nothing lifted out of an earlier
+    /// binding may name one (F-269 attempt 2). An alias cycle (only
+    /// hand-written `--ir`) is `None` too. A hop is never taken INTO a rebound
+    /// name: the chain stops at the last name bound once, which is itself a
+    /// fixed value, and its value is the opaque alias. Matching only —
+    /// rewrites emit the literal names they matched.
+    fn canonical(&self, arg: &str) -> Option<String> {
+        if self.rebound.contains(arg) {
+            return None;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(arg.to_string());
+        let mut cur = arg.to_string();
+        loop {
+            let next = match self.values.get(&cur) {
+                Some(ANFValue::LoadConst { value: serde_json::Value::String(s) })
+                    if s.len() > 5 && s.starts_with("@ref:") => s[5..].to_string(),
+                _ => return Some(cur),
+            };
+            if self.rebound.contains(&next) {
+                return Some(cur);
+            }
+            if seen.contains(&next) {
+                return None;
+            }
+            seen.insert(next.clone());
+            cur = next;
+        }
+    }
+
+    /// The value `name` resolves to, through aliases; `None` for a name with
+    /// no fixed identity.
+    fn get(&self, name: &str) -> Option<&ANFValue> {
+        self.values.get(&self.canonical(name)?)
+    }
+
+    /// Do two arguments name the same binding, through aliases? (R8, R8r, R11.)
+    /// Never for a name with no fixed identity.
+    fn same(&self, a: &str, b: &str) -> bool {
+        match (self.canonical(a), self.canonical(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    /// F-269 attempt 2: may a name lifted out of an earlier binding be
+    /// emitted at the current site? Only when it denotes one value (R7, R9).
+    fn stable(&self, name: &str) -> bool {
+        self.canonical(name).is_some()
+    }
+}
 
 fn is_call_to<'a>(value: &'a ANFValue, func_name: &str) -> Option<&'a Vec<String>> {
     match value {
@@ -215,6 +290,37 @@ fn collect_used_names(method: &ANFMethod, properties: &[ANFProperty]) -> HashSet
     used.extend(method.params.iter().map(|p| p.name.clone()));
     walk(&method.body, &mut used);
     used
+}
+
+/// F-269: every name bound more than once in the method — binding names at
+/// any depth (if/loop arms included) and loop iteration variables (the TS
+/// `collectReboundNames`). `ValueMap::canonical` never resolves through one.
+fn collect_rebound_names(method: &ANFMethod) -> HashSet<String> {
+    fn bind(name: &str, seen: &mut HashSet<String>, rebound: &mut HashSet<String>) {
+        if !seen.insert(name.to_string()) {
+            rebound.insert(name.to_string());
+        }
+    }
+    fn walk(bindings: &[ANFBinding], seen: &mut HashSet<String>, rebound: &mut HashSet<String>) {
+        for b in bindings {
+            bind(&b.name, seen, rebound);
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, seen, rebound);
+                    walk(else_branch, seen, rebound);
+                }
+                ANFValue::Loop { body, iter_var, .. } => {
+                    bind(iter_var, seen, rebound);
+                    walk(body, seen, rebound);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut rebound = HashSet::new();
+    walk(&method.body, &mut seen, &mut rebound);
+    rebound
 }
 
 /// F-086: `base` when the method does not use it (every non-colliding program
@@ -375,7 +481,7 @@ fn try_rewrite(
             // Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2)
             if let Some(point_val) = value_map.get(point_arg.as_str()) {
                 if let Some(inner_args) = is_call_to(point_val, "ecMul") {
-                    if inner_args.len() == 2 {
+                    if inner_args.len() == 2 && value_map.stable(&inner_args[0]) {
                         let inner_point = inner_args[0].clone();
                         let inner_scalar = inner_args[1].clone();
                         if let Some(inner_scalar_val) = value_map.get(inner_scalar.as_str()) {
@@ -424,7 +530,7 @@ fn try_rewrite(
             // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
             if let Some(right_val) = value_map.get(right_arg.as_str()) {
                 if let Some(negate_args) = is_call_to(right_val, "ecNegate") {
-                    if negate_args.len() == 1 && negate_args[0] == *left_arg {
+                    if negate_args.len() == 1 && value_map.same(&negate_args[0], left_arg) {
                         emit_neg_cancel_gate(&binding.name, left_arg, extra_bindings, used_names);
                         return Some(make_load_const_hex(INFINITY_HEX));
                     }
@@ -441,11 +547,13 @@ fn try_rewrite(
             //
             // Placed after Rule 8 and before Rules 10/11 to match the JSON's
             // rule order, which is the order the Go engine tries them in.
-            // Name equality, not value equality, exactly as Rule 8 above.
+            // Name equality, not value equality, exactly as Rule 8 above
+            // (through aliases, F-269). The gate reads the ecNegate operand —
+            // the name the JSON's `$x` binds first, as the Go engine binds it.
             if let Some(left_val) = value_map.get(left_arg.as_str()) {
                 if let Some(negate_args) = is_call_to(left_val, "ecNegate") {
-                    if negate_args.len() == 1 && negate_args[0] == *right_arg {
-                        emit_neg_cancel_gate(&binding.name, right_arg, extra_bindings, used_names);
+                    if negate_args.len() == 1 && value_map.same(&negate_args[0], right_arg) {
+                        emit_neg_cancel_gate(&binding.name, &negate_args[0], extra_bindings, used_names);
                         return Some(make_load_const_hex(INFINITY_HEX));
                     }
                 }
@@ -492,7 +600,7 @@ fn try_rewrite(
                 {
                     if left_mul_args.len() == 2
                         && right_mul_args.len() == 2
-                        && left_mul_args[0] == right_mul_args[0]
+                        && value_map.same(&left_mul_args[0], &right_mul_args[0])
                     {
                         let point_name = left_mul_args[0].clone();
                         let k1_name = left_mul_args[1].clone();
@@ -532,7 +640,9 @@ fn try_rewrite(
 
             // Rule 7: ecNegate(ecNegate(x)) -> x
             if let Some(negate_args) = is_call_to(inner_val, "ecNegate") {
-                if negate_args.len() == 1 {
+                // F-269 attempt 2: x is lifted out of the inner binding and
+                // re-emitted here, so it must denote one value at both sites.
+                if negate_args.len() == 1 && value_map.stable(&negate_args[0]) {
                     return Some(make_alias(&negate_args[0]));
                 }
             }
@@ -583,12 +693,13 @@ fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMet
     let mut body = method.body.clone();
     let mut changed = false;
     let mut used_names = collect_used_names(method, properties);
+    let rebound = collect_rebound_names(method);
 
     // Same cap-free shape as the Go tier: every rule strictly reduces the
     // number of EC calls or replaces a call with a constant, so the loop
     // terminates.
     loop {
-        let (next, pass_changed) = optimize_method_ec_once(&body, &mut used_names);
+        let (next, pass_changed) = optimize_method_ec_once(&body, &mut used_names, &rebound);
         body = next;
         if !pass_changed {
             break;
@@ -610,8 +721,12 @@ fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMet
 }
 
 /// One rewrite pass over `body`. Returns the new body and whether it changed.
-fn optimize_method_ec_once(body: &[ANFBinding], used_names: &mut HashSet<String>) -> (Vec<ANFBinding>, bool) {
-    let mut value_map: ValueMap = HashMap::new();
+fn optimize_method_ec_once(
+    body: &[ANFBinding],
+    used_names: &mut HashSet<String>,
+    rebound: &HashSet<String>,
+) -> (Vec<ANFBinding>, bool) {
+    let mut value_map = ValueMap::new(rebound.clone());
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 

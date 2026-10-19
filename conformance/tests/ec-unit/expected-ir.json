@@ -123,10 +123,9 @@
           "name": "t8",
           "value": {
             "args": [
-              "g",
               "t7"
             ],
-            "func": "ecMul",
+            "func": "ecMulGen",
             "kind": "call"
           }
         },
@@ -190,14 +189,71 @@
           }
         },
         {
-          "name": "t14",
+          "name": "t14_px",
           "value": {
             "args": [
-              "g",
-              "neg"
+              "g"
             ],
-            "func": "ecAdd",
+            "func": "ecPointX",
             "kind": "call"
+          }
+        },
+        {
+          "name": "t14_py",
+          "value": {
+            "args": [
+              "g"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t14_zero",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t14_pxz",
+          "value": {
+            "kind": "bin_op",
+            "left": "t14_px",
+            "op": "===",
+            "right": "t14_zero"
+          }
+        },
+        {
+          "name": "t14_pynz",
+          "value": {
+            "kind": "bin_op",
+            "left": "t14_py",
+            "op": "!==",
+            "right": "t14_zero"
+          }
+        },
+        {
+          "name": "t14_ok",
+          "value": {
+            "kind": "bin_op",
+            "left": "t14_pxz",
+            "op": "||",
+            "right": "t14_pynz"
+          }
+        },
+        {
+          "name": "t14_gate",
+          "value": {
+            "kind": "assert",
+            "value": "t14_ok"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_const",
+            "value": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
           }
         },
         {

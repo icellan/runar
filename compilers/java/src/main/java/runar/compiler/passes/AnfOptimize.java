@@ -177,12 +177,14 @@ public final class AnfOptimize {
         // a refusal.
         List<AnfBinding> body = new ArrayList<>(method.body());
         Set<String> usedNames = collectUsedNames(method, properties);
+        // F-269: names bound more than once; alias resolution never passes one.
+        Set<String> reboundNames = collectReboundNames(method);
         boolean converged = false;
         for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
             // value_map maps binding name → its current ANFValue. We rebuild
             // the body in order, allowing each subsequent binding to see the
             // optimized form of earlier ones.
-            Map<String, AnfValue> valueMap = new LinkedHashMap<>();
+            Map<String, AnfValue> valueMap = new ValueMap(reboundNames);
             List<AnfBinding> next = new ArrayList<>(body.size());
             boolean changed = false;
             for (AnfBinding b : body) {
@@ -240,6 +242,47 @@ public final class AnfOptimize {
         for (AnfParam p : orEmpty(method.params())) used.add(p.name());
         collectBindingNames(orEmpty(method.body()), used);
         return used;
+    }
+
+    /**
+     * Binding name to its current value, plus the method's rebound names
+     * (F-269, see {@link #canonical}).
+     */
+    private static final class ValueMap extends LinkedHashMap<String, AnfValue> {
+        private static final long serialVersionUID = 1L;
+        final Set<String> rebound;
+
+        ValueMap(Set<String> rebound) {
+            this.rebound = rebound;
+        }
+    }
+
+    /**
+     * F-269: every name bound more than once in the method — binding names at
+     * any depth (if/loop arms included) and loop iteration variables (the TS
+     * {@code collectReboundNames}). {@link #canonical} never resolves through
+     * one.
+     */
+    private static Set<String> collectReboundNames(AnfMethod method) {
+        Set<String> seen = new HashSet<>();
+        Set<String> rebound = new HashSet<>();
+        collectReboundNames(orEmpty(method.body()), seen, rebound);
+        return rebound;
+    }
+
+    private static void collectReboundNames(List<AnfBinding> bindings, Set<String> seen, Set<String> rebound) {
+        for (AnfBinding b : bindings) {
+            if (!seen.add(b.name())) rebound.add(b.name());
+            AnfValue v = b.value();
+            if (v instanceof If ifv) {
+                collectReboundNames(orEmpty(ifv.thenBranch()), seen, rebound);
+                collectReboundNames(orEmpty(ifv.elseBranch()), seen, rebound);
+            }
+            if (v instanceof Loop lp) {
+                if (lp.iterVar() != null && !seen.add(lp.iterVar())) rebound.add(lp.iterVar());
+                collectReboundNames(orEmpty(lp.body()), seen, rebound);
+            }
+        }
     }
 
     private static void collectBindingNames(List<AnfBinding> bindings, Set<String> used) {
@@ -304,7 +347,10 @@ public final class AnfOptimize {
         // Rule 7: ecNegate(ecNegate(x)) -> x
         if ("ecNegate".equals(func) && args.size() == 1) {
             AnfValue inner = resolveValue(args.get(0), vm);
-            if (inner instanceof Call ic && "ecNegate".equals(ic.func()) && ic.args() != null && ic.args().size() == 1) {
+            // F-269 attempt 2: x is lifted out of the inner binding and
+            // re-emitted here, so it must denote one value at both sites.
+            if (inner instanceof Call ic && "ecNegate".equals(ic.func()) && ic.args() != null && ic.args().size() == 1
+                    && stable(ic.args().get(0), vm)) {
                 return makeRef(ic.args().get(0));
             }
         }
@@ -332,7 +378,10 @@ public final class AnfOptimize {
             AnfValue neg = resolveValue(args.get(0), vm);
             if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
                 if (sameBinding(args.get(1), nc.args().get(0), vm)) {
-                    emitNegCancelGate(name, args.get(1), vm, prelude, usedNames);
+                    // The gate reads the ecNegate operand: the name the JSON's
+                    // `$x` binds first, as the Go engine binds it (differs from
+                    // args[1] only through an alias, F-269).
+                    emitNegCancelGate(name, nc.args().get(0), vm, prelude, usedNames);
                     return makeConstHex(INFINITY_HEX);
                 }
             }
@@ -342,7 +391,8 @@ public final class AnfOptimize {
             AnfValue inner = resolveValue(args.get(0), vm);
             BigInteger k2 = getConstInt(args.get(1), vm);
             if (inner instanceof Call ic && "ecMul".equals(ic.func())
-                    && ic.args() != null && ic.args().size() == 2 && k2 != null) {
+                    && ic.args() != null && ic.args().size() == 2 && k2 != null
+                    && stable(ic.args().get(0), vm)) {
                 BigInteger k1 = getConstInt(ic.args().get(1), vm);
                 if (k1 != null) {
                     BigInteger combined = k1.multiply(k2).mod(CURVE_N);
@@ -392,34 +442,61 @@ public final class AnfOptimize {
     // ---------- value-inspection helpers (port of Python helpers) ----------
 
     /**
-     * Resolve a binding name to its current ANFValue.
-     *
-     * <p>Match Python's narrow behavior: do NOT follow {@code @ref:} aliases
-     * (those are encoded as {@code load_const} in Java's ANF, and Python's
-     * {@code _resolve} only follows {@code load_param}-encoded aliases — which
-     * Java never emits). The optimizer therefore only fires when the literal
-     * value is directly bound to {@code name}, not when it's bound through
-     * an alias chain. This is what preserves byte-identical ANF parity with
-     * the canonical TS golden — the canonical pipeline does not eagerly
-     * collapse alias chains in the optimizer either.
+     * Resolve a binding name to its current ANFValue, following {@code @ref:}
+     * aliases (F-269, {@link #canonical}).
      */
     private static AnfValue resolveValue(String name, Map<String, AnfValue> vm) {
-        return vm.get(name);
+        String c = canonical(name, vm);
+        return c == null ? null : vm.get(c);
     }
 
     /**
-     * Canonical name for {@code sameBinding} comparisons. Matches
-     * {@link #resolveValue}'s narrow behavior: only follows {@code @ref:}
-     * aliases when they are encoded in the same load-param form Python's
-     * canonical pipeline produces (which Java never emits), so this reduces
-     * to identity in practice.
+     * F-269 attempt 2: may a name lifted out of an earlier binding be emitted
+     * at the current site? Only when it denotes one value (R7, R9).
+     */
+    private static boolean stable(String name, Map<String, AnfValue> vm) {
+        return canonical(name, vm) != null;
+    }
+
+    /**
+     * F-269 (user decision R77): the binding {@code name} ultimately names,
+     * following {@code load_const "@ref:<x>"} aliases — pass 04's
+     * {@code const y = <expr>} and the ones R1/R2/R3/R7 leave behind (the TS
+     * {@code canonicalName} in anf-ec.ts). It used to be the identity: the
+     * port copied Python's alias chase, which looked for the alias on a
+     * {@code load_param} value no tier emits.
+     *
+     * <p>{@code null} when {@code name} has no position-independent
+     * identity: ANF re-emits a local's name when the source reassigns it (top
+     * level or in an if/loop arm), so a REBOUND name means different values
+     * at different sites. Two uses of one are not "the same $x", and nothing
+     * lifted out of an earlier binding may name one (F-269 attempt 2). An
+     * alias cycle (only hand-written {@code --ir}) is {@code null} too. A hop
+     * is never taken INTO a rebound name: the chain stops at the last name
+     * bound once, which is itself a fixed value, and its value is the opaque
+     * alias. Matching only — rewrites emit the literal names they matched.
      */
     private static String canonical(String name, Map<String, AnfValue> vm) {
-        return name;
+        Set<String> rebound = vm instanceof ValueMap m ? m.rebound : Set.of();
+        if (rebound.contains(name)) return null;
+        Set<String> seen = new HashSet<>();
+        seen.add(name);
+        String cur = name;
+        while (true) {
+            AnfValue v = vm.get(cur);
+            if (!(v instanceof LoadConst lc) || !(lc.value() instanceof BytesConst bs)) return cur;
+            String s = bs.hex();
+            if (s == null || s.length() <= 5 || !s.startsWith("@ref:")) return cur;
+            String next = s.substring(5);
+            if (rebound.contains(next)) return cur;
+            if (!seen.add(next)) return null;
+            cur = next;
+        }
     }
 
     private static boolean sameBinding(String a, String b, Map<String, AnfValue> vm) {
-        return canonical(a, vm).equals(canonical(b, vm));
+        String ca = canonical(a, vm);
+        return ca != null && ca.equals(canonical(b, vm));
     }
 
     private static boolean isInfinity(String name, Map<String, AnfValue> vm) {
