@@ -359,6 +359,27 @@ func TestFoldConstants_StringEquality(t *testing.T) {
 	assertLoadConstBool(t, result.Methods[0].Body[2], true)
 }
 
+// F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true on-chain
+// and the fold must say so. Proves the Go folder's verdict on mixed-case hex;
+// not the emitted script (conformance/negatives/f160-bytestring-case-fold-parity
+// pins every tier's bytes, and the TS optimizer test executes them).
+func TestFoldConstants_StringEqualityIgnoresHexCase(t *testing.T) {
+	for _, tc := range []struct {
+		op   string
+		want bool
+	}{{"===", true}, {"!==", false}} {
+		p := makeTestANFProgram([]ir.ANFMethod{
+			makeTestMethod("m", []ir.ANFBinding{
+				b("t0", mkStr("aa")),
+				b("t1", mkStr("AA")),
+				b("t2", binOp(tc.op, "t0", "t1")),
+			}),
+		})
+		result := foldConstantsOnly(p)
+		assertLoadConstBool(t, result.Methods[0].Body[2], tc.want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Unary operations
 // ---------------------------------------------------------------------------

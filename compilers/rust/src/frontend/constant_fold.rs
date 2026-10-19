@@ -114,8 +114,10 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
                     Some(ConstValue::Str(format!("{}{}", a, b)))
                 }
             }
-            "===" => Some(ConstValue::Bool(a == b)),
-            "!==" => Some(ConstValue::Bool(a != b)),
+            // F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+            // ignores case, so 'aa' === 'AA' is true on-chain.
+            "===" => Some(ConstValue::Bool(hex_equal(a, b))),
+            "!==" => Some(ConstValue::Bool(!hex_equal(a, b))),
             _ => None,
         };
     }
@@ -133,6 +135,16 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
 
 fn is_valid_hex(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Compares two ByteString literals as bytes: case-insensitively when both
+/// are hex, by exact text otherwise.
+fn hex_equal(a: &str, b: &str) -> bool {
+    if is_valid_hex(a) && is_valid_hex(b) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +973,23 @@ mod tests {
         ])]);
         let r = fold_constants_only(&p);
         assert_load_const_bool(&r.methods[0].body[2].value, true);
+    }
+
+    /// F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true
+    /// on-chain and the fold must say so. Proves the Rust folder's verdict on
+    /// mixed-case hex; not the emitted script (conformance/negatives/
+    /// f160-bytestring-case-fold-parity pins every tier's bytes).
+    #[test]
+    fn test_fold_string_equality_ignores_hex_case() {
+        for (op, want) in [("===", true), ("!==", false)] {
+            let p = make_program(vec![make_method("m", vec![
+                b("t0", mk_str("aa")),
+                b("t1", mk_str("AA")),
+                b("t2", bin_op(op, "t0", "t1")),
+            ])]);
+            let r = fold_constants_only(&p);
+            assert_load_const_bool(&r.methods[0].body[2].value, want);
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -306,6 +306,20 @@ class TestStringOps:
         r = fold_constants(p)
         _assert_load_const_bool(r.methods[0].body[2].value, True)
 
+    def test_fold_string_equality_ignores_hex_case(self):
+        # F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true
+        # on-chain and the fold must say so. Proves the Python folder's verdict
+        # on mixed-case hex; not the emitted script (conformance/negatives/
+        # f160-bytestring-case-fold-parity pins every tier's bytes).
+        for op, want in (("===", True), ("!==", False)):
+            p = _make_program([_make_method("m", [
+                _b("t0", _mk_str("aa")),
+                _b("t1", _mk_str("AA")),
+                _b("t2", _bin_op(op, "t0", "t1")),
+            ])])
+            r = fold_constants(p)
+            _assert_load_const_bool(r.methods[0].body[2].value, want)
+
 
 # ---------------------------------------------------------------------------
 # 6. Unary operations

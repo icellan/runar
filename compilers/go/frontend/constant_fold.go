@@ -173,10 +173,12 @@ func evalBinOp(op string, left, right *constValue) *constValue {
 				return nil
 			}
 			return &constValue{kind: constString, s: left.s + right.s}
+		// F-160: OP_EQUAL compares the DECODED bytes and hex decoding ignores
+		// case, so 'aa' === 'AA' is true on-chain.
 		case "===":
-			return &constValue{kind: constBool, b: left.s == right.s}
+			return &constValue{kind: constBool, b: hexEqual(left.s, right.s)}
 		case "!==":
-			return &constValue{kind: constBool, b: left.s != right.s}
+			return &constValue{kind: constBool, b: !hexEqual(left.s, right.s)}
 		}
 		return nil
 	}
@@ -196,6 +198,15 @@ var hexRegexp = regexp.MustCompile(`^[0-9a-fA-F]*$`)
 
 func isValidHex(s string) bool {
 	return hexRegexp.MatchString(s)
+}
+
+// hexEqual compares two ByteString literals as bytes: case-insensitively when
+// both are hex, by exact text otherwise.
+func hexEqual(a, b string) bool {
+	if isValidHex(a) && isValidHex(b) {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // ---------------------------------------------------------------------------

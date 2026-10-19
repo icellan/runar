@@ -308,6 +308,67 @@ describe('Optimizer: Constant Folding', () => {
       const folded = foldConstants(program);
       expect(folded.methods[0]!.body[2]!.value).toEqual({ kind: 'load_const', value: true });
     });
+
+    // F-160: ByteString equality is OP_EQUAL over the DECODED bytes, and hex
+    // decoding is case-insensitive, so 'aa' and 'AA' push the same byte. The
+    // folder compared the hex source text, folded `'aa' === 'AA'` to false and
+    // compiled the else arm under fold-ON while the fold-OFF script runs the
+    // then arm.
+    // What this proves: the folder answers `===` / `!==` on mixed-case hex the
+    // way OP_EQUAL does, and on the real @bsv/sdk interpreter (ScriptVM) the
+    // fold-ON and fold-OFF scripts of the same source accept exactly the same
+    // unlocking input (x = 1, the then arm) and reject the same one (x = 2).
+    // What it does NOT prove: the six peer tiers (each has its own unit case,
+    // and conformance/negatives/f160-bytestring-case-fold-parity.test.ts pins
+    // every tier's fold-ON bytes), or ByteString comparisons the folder does
+    // not reach (a local bound to a literal is an `@ref:` alias it does not
+    // follow).
+    it('folds ByteString equality over decoded bytes, ignoring hex case (F-160)', () => {
+      const fold = (op: '===' | '!==') => foldConstants(makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_const', value: 'aa' }),
+          b('t1', { kind: 'load_const', value: 'AA' }),
+          b('t2', { kind: 'bin_op', op, left: 't0', right: 't1' }),
+        ]),
+      ])).methods[0]!.body[2]!.value;
+      expect(fold('===')).toEqual({ kind: 'load_const', value: true });
+      expect(fold('!==')).toEqual({ kind: 'load_const', value: false });
+    });
+
+    it("fold-ON and fold-OFF scripts of `'aa' === 'AA'` select the same arm on-chain (F-160)", () => {
+      const source = `import { SmartContract, assert } from 'runar-lang';
+
+class CaseFold extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public unlock(x: bigint) {
+    if ('aa' === 'AA') {
+      assert(x === 1n);
+    } else {
+      assert(x === 2n);
+    }
+  }
+}
+`;
+      const bytes = (hex: string) => Uint8Array.from(hex.match(/../g)!.map((h) => Number.parseInt(h, 16)));
+      const hexFor = (disableConstantFolding: boolean): string => {
+        const r = compile(source, { fileName: 'CaseFold.runar.ts', disableConstantFolding });
+        expect(r.success).toBe(true);
+        return r.scriptHex!;
+      };
+      // Unlocking script: OP_1 (x = 1, the then arm) or OP_2 (x = 2, the else arm).
+      const accepts = (locking: string, unlocking: string) =>
+        new ScriptVM().execute(bytes(unlocking), bytes(locking)).success;
+      const off = hexFor(true);
+      const on = hexFor(false);
+      // The fold-OFF script is the on-chain truth: OP_EQUAL over 0xaa / 0xaa.
+      expect(accepts(off, '51')).toBe(true);
+      expect(accepts(off, '52')).toBe(false);
+      expect(accepts(on, '51')).toBe(true);
+      expect(accepts(on, '52')).toBe(false);
+    });
   });
 
   // ---------------------------------------------------------------------------

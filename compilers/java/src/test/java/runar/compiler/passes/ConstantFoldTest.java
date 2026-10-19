@@ -288,6 +288,26 @@ class ConstantFoldTest {
         assertTrue(findBinding(m, "t2").value() instanceof BinOp);
     }
 
+    /**
+     * F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true
+     * on-chain and the fold must say so. Proves the Java folder's verdict on
+     * mixed-case hex; not the emitted script
+     * (conformance/negatives/f160-bytestring-case-fold-parity pins every
+     * tier's bytes).
+     */
+    @Test
+    void byteStringEqualityIgnoresHexCase() {
+        for (String op : List.of("===", "!==")) {
+            List<AnfBinding> body = List.of(
+                bytesConst("t0", "aa"),
+                bytesConst("t1", "AA"),
+                bind("t2", new BinOp(op, "t0", "t1", "bytes"))
+            );
+            AnfMethod m = soleMethod(ConstantFold.run(singleMethodProgram(body)));
+            assertEquals("===".equals(op), boolVal(findBinding(m, "t2").value()), op);
+        }
+    }
+
     // ---------------------------------------------------------------
     // Builtin math calls
     // ---------------------------------------------------------------

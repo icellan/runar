@@ -102,8 +102,10 @@ module RunarCompiler
           when "+"
             return nil unless valid_hex?(a_s) && valid_hex?(b_s)
             return ["str", a_s + b_s]
-          when "===" then return ["bool", a_s == b_s]
-          when "!==" then return ["bool", a_s != b_s]
+          # F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+          # ignores case, so 'aa' === 'AA' is true on-chain.
+          when "===" then return ["bool", hex_equal?(a_s, b_s)]
+          when "!==" then return ["bool", !hex_equal?(a_s, b_s)]
           else
             return nil
           end
@@ -129,6 +131,15 @@ module RunarCompiler
         /\A[0-9a-fA-F]*\z/.match?(s)
       end
       private_class_method :valid_hex?
+
+      # Compares two ByteString literals as bytes: case-insensitively when both
+      # are hex, by exact text otherwise.
+      def self.hex_equal?(a, b)
+        return a.downcase == b.downcase if valid_hex?(a) && valid_hex?(b)
+
+        a == b
+      end
+      private_class_method :hex_equal?
 
       # -----------------------------------------------------------------
       # Unary operation evaluation

@@ -152,10 +152,12 @@ def _eval_bin_op(op: str, left: ConstValue, right: ConstValue) -> ConstValue | N
             if not _is_valid_hex(a_s) or not _is_valid_hex(b_s):
                 return None
             return ("str", a_s + b_s)
+        # F-160: OP_EQUAL compares the DECODED bytes and hex decoding ignores
+        # case, so 'aa' === 'AA' is true on-chain.
         if op == "===":
-            return ("bool", a_s == b_s)
+            return ("bool", _hex_equal(a_s, b_s))
         if op == "!==":
-            return ("bool", a_s != b_s)
+            return ("bool", not _hex_equal(a_s, b_s))
         return None
 
     # Cross-type equality
@@ -169,6 +171,14 @@ def _eval_bin_op(op: str, left: ConstValue, right: ConstValue) -> ConstValue | N
 
 def _is_valid_hex(s: str) -> bool:
     return all(c in "0123456789abcdefABCDEF" for c in s)
+
+
+def _hex_equal(a: str, b: str) -> bool:
+    """Compare two ByteString literals as bytes: case-insensitively when both
+    are hex, by exact text otherwise."""
+    if _is_valid_hex(a) and _is_valid_hex(b):
+        return a.lower() == b.lower()
+    return a == b
 
 
 # ---------------------------------------------------------------------------

@@ -104,8 +104,11 @@ function evalBinOp(op: string, left: ConstValue, right: ConstValue): ConstValue 
         // Validate both operands are valid hex before concatenating
         if (!/^[0-9a-fA-F]*$/.test(left) || !/^[0-9a-fA-F]*$/.test(right)) return null;
         return left + right; // concatenation
-      case '===': return left === right;
-      case '!==': return left !== right;
+      // F-160: OP_EQUAL compares the DECODED bytes and hex decoding ignores
+      // case, so 'aa' === 'AA' is true on-chain. Compare hex case-insensitively;
+      // anything that is not hex keeps the exact text comparison.
+      case '===': return hexEqual(left, right);
+      case '!==': return !hexEqual(left, right);
       default: return null;
     }
   }
@@ -115,6 +118,13 @@ function evalBinOp(op: string, left: ConstValue, right: ConstValue): ConstValue 
   if (op === '!==') return true;
 
   return null;
+}
+
+function hexEqual(left: string, right: string): boolean {
+  if (/^[0-9a-fA-F]*$/.test(left) && /^[0-9a-fA-F]*$/.test(right)) {
+    return left.toLowerCase() === right.toLowerCase();
+  }
+  return left === right;
 }
 
 // ---------------------------------------------------------------------------

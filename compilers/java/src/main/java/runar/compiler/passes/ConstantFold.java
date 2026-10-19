@@ -361,8 +361,10 @@ public final class ConstantFold {
                 case "+":
                     if (!isValidHex(left.strVal()) || !isValidHex(right.strVal())) return null;
                     return ConstSlot.ofStr(left.strVal() + right.strVal());
-                case "===": return ConstSlot.ofBool(left.strVal().equals(right.strVal()));
-                case "!==": return ConstSlot.ofBool(!left.strVal().equals(right.strVal()));
+                // F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+                // ignores case, so 'aa' === 'AA' is true on-chain.
+                case "===": return ConstSlot.ofBool(hexEqual(left.strVal(), right.strVal()));
+                case "!==": return ConstSlot.ofBool(!hexEqual(left.strVal(), right.strVal()));
                 default: return null;
             }
         }
@@ -371,6 +373,13 @@ public final class ConstantFold {
         if ("===".equals(op)) return ConstSlot.ofBool(false);
         if ("!==".equals(op)) return ConstSlot.ofBool(true);
         return null;
+    }
+
+    /** Compares two ByteString literals as bytes: case-insensitively when both
+     *  are hex, by exact text otherwise. */
+    private static boolean hexEqual(String a, String b) {
+        if (isValidHex(a) && isValidHex(b)) return a.equalsIgnoreCase(b);
+        return a.equals(b);
     }
 
     private static boolean isValidHex(String s) {

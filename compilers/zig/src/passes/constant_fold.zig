@@ -159,8 +159,10 @@ fn evalBinOp(allocator: Allocator, op: []const u8, left: ConstValue, right: Cons
     // String (ByteString) operations
     if (left == .string and right == .string) {
         return switch (tag) {
-            .op_strict_eq => .{ .boolean = std.mem.eql(u8, left.string, right.string) },
-            .op_strict_neq => .{ .boolean = !std.mem.eql(u8, left.string, right.string) },
+            // F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+            // ignores case, so 'aa' === 'AA' is true on-chain.
+            .op_strict_eq => .{ .boolean = hexEqual(left.string, right.string) },
+            .op_strict_neq => .{ .boolean = !hexEqual(left.string, right.string) },
             // String concatenation: we cannot allocate in a pure evaluator, skip
             else => null,
         };
@@ -172,6 +174,20 @@ fn evalBinOp(allocator: Allocator, op: []const u8, left: ConstValue, right: Cons
         .op_strict_neq => .{ .boolean = true },
         else => null,
     };
+}
+
+/// Compares two ByteString literals as bytes: case-insensitively when both
+/// are hex, by exact text otherwise.
+fn hexEqual(a: []const u8, b: []const u8) bool {
+    if (isHex(a) and isHex(b)) return std.ascii.eqlIgnoreCase(a, b);
+    return std.mem.eql(u8, a, b);
+}
+
+fn isHex(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 // ============================================================================
@@ -1585,6 +1601,30 @@ test "fold string inequality: different strings" {
     const result = try foldBindings(allocator, &bindings, &env);
     defer allocator.free(result);
     try expectConst(.{ .boolean = true }, result[2]);
+}
+
+// F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true on-chain
+// and the fold must say so. Proves the Zig folder's verdict on mixed-case hex;
+// not the emitted script (conformance/negatives/f160-bytestring-case-fold-parity
+// pins every tier's bytes).
+test "fold string equality ignores hex case (F-160)" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { op: []const u8, want: bool }{
+        .{ .op = "===", .want = true },
+        .{ .op = "!==", .want = false },
+    };
+    for (cases) |tc| {
+        var env = ConstEnv.init(allocator);
+        defer env.deinit();
+        const bindings = [_]ANFBinding{
+            makeBinding("a", makeLoadConst(.{ .string = "aa" })),
+            makeBinding("b", makeLoadConst(.{ .string = "AA" })),
+            makeBinding("c", .{ .bin_op = .{ .op = tc.op, .left = "a", .right = "b" } }),
+        };
+        const result = try foldBindings(allocator, &bindings, &env);
+        defer allocator.free(result);
+        try expectConst(.{ .boolean = tc.want }, result[2]);
+    }
 }
 
 // --- Loop body folding ---
