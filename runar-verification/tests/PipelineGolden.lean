@@ -4,7 +4,7 @@ open RunarVerification ANF Pipeline
 
 /-! ## Stored Lean compileHex output for the cryptoAxiomPending bucket
 
-The 15 cryptoAxiomPending fixtures are kept in a separate bucket because
+The cryptoAxiomPending fixtures (15 when this section was written; 22 now) are kept in a separate bucket because
 their end-to-end proofs still rely on crypto assumptions. This section
 stores the pre-computed Lean `compileHex` output as a `String` constant per
 fixture, so default-mode `pipelineGolden` can compare each constant
@@ -29,7 +29,7 @@ against `expected-script.hex` without rerunning live compilation.
 
 Empirical timing: even the smallest cryptoAxiomPending fixture
 (post-quantum-slhdsa, 377KB hex) takes >25 min on M-series mac.
-A full regen of all 15 fixtures is a multi-hour batch.
+A full regen of all the cryptoAxiomPending fixtures (15 when written; 22 now) is a multi-hour batch.
 
 ### How to (re)generate
 
@@ -503,7 +503,7 @@ from this change to any lowered byte, for any fixture, so no anchor can have
 moved -- rather than 20 separate claims about 20 fixtures, this is one claim
 about the dependency graph, and it is checkable with grep.
 
-Corroborated by the run: the byte-exact count is 58/74 both before and after
+Corroborated by the run (historical counts, at that change): the byte-exact count was 58/74 both before and after
 the change, and every bucket size is unchanged.
 -/
 def modelFingerprintAdopted : String := "v1:63f:7123098b:67ec0d0f674afeaa"
@@ -754,7 +754,7 @@ number. It is pinned from both sides:
 
   * a compile-time `example` (below, next to the bucket-sum check) forces it to
     equal `baselineMatches.length + (cryptoAxiomPending.length -
-    cryptoAnchorGaps.length)` — 39 live baseline fixtures plus the crypto anchors
+    cryptoAnchorGaps.length)` — every `baselineMatches` fixture (69 now) plus the crypto anchors
     that are not declared inert — so editing a bucket without rebaselining the
     number fails to COMPILE; and
   * `main` requires default-mode `matched` to equal it EXACTLY (not just "≥"), so
@@ -762,7 +762,12 @@ number. It is pinned from both sides:
     direction. An increase is a drift too: it means a fixture became byte-exact
     or an anchor came back to life without the buckets being updated.
 -/
--- 57 = baselineMatches (49) + (cryptoAxiomPending (20) - cryptoAnchorGaps (12)).
+-- HISTORY of `expectedByteExact`. Each count from here to the `def` below was
+-- true only at the change that wrote it (the last entry, 72, is the current
+-- one); do not read the earlier ones as bucket sizes. The CURRENT values are `expectedByteExact` = 72 =
+-- baselineMatches (69) + (cryptoAxiomPending (22) - cryptoAnchorGaps (19)), over
+-- `expectedFixtureTotal` = 91 = 69 + 22 + lowerDivergencePending (0).
+-- (historical) 57 = baselineMatches (49) + (cryptoAxiomPending (20) - cryptoAnchorGaps (12)).
 --
 -- Main's gate stood at 44; rebasing the Lean model onto `sinkBelow` lifted it
 -- to 57. `shift-ops`, `bitwise-ops` and `oversize-bigint-shift` were briefly
@@ -771,11 +776,11 @@ number. It is pinned from both sides:
 -- byte-array results). That is historical: the `rawSlots` thread closed it, all
 -- three are back in `baselineMatches` and byte-exact, and `lowerDivergencePending`
 -- is empty.
--- 64 = baselineMatches (61) + (cryptoAxiomPending (21) - cryptoAnchorGaps (18)).
+-- (historical) 64 = baselineMatches (61) + (cryptoAxiomPending (21) - cryptoAnchorGaps (18)).
 --
 -- byte-builtins (int2str / reverseBytes / split NIP) and math-demo
 -- (R-169 pow domain guard + 256-round min-clamped sqrt).
--- 65 = baselineMatches (62) + (cryptoAxiomPending (21) - cryptoAnchorGaps (18)).
+-- (historical) 65 = baselineMatches (62) + (cryptoAxiomPending (21) - cryptoAnchorGaps (18)).
 --
 -- 2026-09-29 (N-037, measured): N-016 added `property-shadow` (byte-exact,
 -- baselineMatches). F-024 (25095825) restamped 22 stateful goldens with the
