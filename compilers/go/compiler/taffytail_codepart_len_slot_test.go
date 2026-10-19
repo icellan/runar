@@ -88,18 +88,23 @@ func compileN051OrFatal(t *testing.T, source, fileName string) *Artifact {
 	return result.Artifact
 }
 
-// pinRuns returns the byte offset of the 4-byte length field of every
-// verify_code_part_len run (either comparison opcode) in a script.
-func pinRuns(script string) (equality, lowerBound []int) {
-	for i := 0; i+18 <= len(script); i += 2 {
-		if script[i:i+4] != "7604" || script[i+12:i+14] != "81" || script[i+16:i+18] != "69" {
+// pinRuns returns the BYTE offset of the 4-byte length field of every
+// verify_code_part_len run (either comparison opcode) in a script. It walks
+// decodeScriptOps, so a run hidden inside a pushed payload is never reported:
+// the five opcodes must be OP_DUP, a 4-byte direct push (whose payload is the
+// length field), OP_BIN2NUM, cmp, OP_VERIFY.
+func pinRuns(t *testing.T, script string) (equality, lowerBound []int) {
+	t.Helper()
+	ops := decodeScriptOps(t, script)
+	for i := 0; i+5 <= len(ops); i++ {
+		if ops[i].code != 0x76 || ops[i+1].code != 0x04 || ops[i+2].code != 0x81 || ops[i+4].code != 0x69 {
 			continue
 		}
-		switch script[i+14 : i+16] {
-		case "9c":
-			equality = append(equality, i/2+2)
-		case "a2":
-			lowerBound = append(lowerBound, i/2+2)
+		switch ops[i+3].code {
+		case 0x9c:
+			equality = append(equality, ops[i+1].offset+1)
+		case 0xa2:
+			lowerBound = append(lowerBound, ops[i+1].offset+1)
 		}
 	}
 	return
@@ -147,10 +152,37 @@ func TestHasOpSequence_RejectsNibbleAndPushDataMatches(t *testing.T) {
 	}
 }
 
+// N-357: proves pinRuns only reports verify_code_part_len runs that are real
+// opcodes: the nine bytes 76 04 LL LL LL LL 81 9c 69 hidden inside a pushed
+// payload are not a pin, while the same run at opcode level is, and is
+// reported at the BYTE offset of its length field (what codePartLenSlots
+// records). Does not prove anything about what the compiler emits.
+func TestPinRuns_IgnoresPushDataAndReportsByteOffsets(t *testing.T) {
+	for name, c := range map[string]struct{ cmp, kind string }{
+		"equality":    {"9c", "eq"},
+		"lower bound": {"a2", "lb"},
+	} {
+		r := "7604aabbccdd81" + c.cmp + "69"
+		hidden := "09" + r // PUSH9 [run]
+		eq, lb := pinRuns(t, hidden)
+		if len(eq) != 0 || len(lb) != 0 {
+			t.Errorf("%s inside push data: pinRuns = %v / %v, want none", name, eq, lb)
+		}
+		eq, lb = pinRuns(t, "51"+r) // OP_1 then the genuine run
+		got := eq
+		if c.kind == "lb" {
+			got = lb
+		}
+		if len(got) != 1 || got[0] != 3 {
+			t.Errorf("%s genuine run: pinRuns = %v / %v, want one hit at byte offset 3", name, eq, lb)
+		}
+	}
+}
+
 func TestN051_TaffyTail_PinIsEqualityWithDeployTimeSlot(t *testing.T) {
 	art := compileN051OrFatal(t, taffyTailVaultSource, "TaffyTailVault.runar.ts")
 
-	equality, lowerBound := pinRuns(art.Script)
+	equality, lowerBound := pinRuns(t, art.Script)
 	if len(lowerBound) != 0 {
 		t.Fatalf("script still carries a lower-bound (81 a2 69) pin at byte offset(s) %v", lowerBound)
 	}
@@ -201,7 +233,7 @@ func TestN051_TaffyTail_PinIsEqualityWithDeployTimeSlot(t *testing.T) {
 func TestN051_FixedWidthReadonlyArgs_KeepNoSlot(t *testing.T) {
 	art := compileN051OrFatal(t, fixedWidthVaultSource, "FixedWidthVault.runar.ts")
 
-	equality, lowerBound := pinRuns(art.Script)
+	equality, lowerBound := pinRuns(t, art.Script)
 	if len(lowerBound) != 0 {
 		t.Fatalf("unexpected lower-bound pin at %v", lowerBound)
 	}
