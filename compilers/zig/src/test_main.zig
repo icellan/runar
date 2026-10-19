@@ -45,6 +45,7 @@ test {
     _ = @import("tests/n180_call_depth_limit.zig");
     _ = @import("tests/n264_composite_nesting.zig");
     _ = @import("tests/n280_composite_nesting_memory.zig");
+    _ = @import("tests/n343_composite_nesting_work.zig");
     _ = @import("tests/n266_locktime_bfs_perf.zig");
     _ = @import("tests/n279_private_call_depth.zig");
     _ = @import("tests/f026_int_literal.zig");

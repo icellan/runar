@@ -94,8 +94,9 @@ describe('N-264 seven-tier composite call depth x nesting', () => {
   // N-280: Zig's stack lowering kept a copy of every nested if-arm per
   // enclosing if on its compile arena — past 8 GB at D=32, OOM-killed at
   // D=127. Fixed, the ReleaseSafe CLI compiles D=127 (15,240 nested ifs) to
-  // Go's bytes at a 1.16 GB peak RSS (Go: 1.03 GB) in about 50 s: compile
-  // time is still quadratic in nesting depth, hence the wider spawn timeout.
+  // Go's bytes at a 1.16 GB peak RSS (Go: 1.03 GB). It took about 50 s while
+  // compile time was quadratic in nesting depth, hence the wider spawn
+  // timeout; since N-343 it takes under a second (Go: about 3 s).
   // Like the cases above, it checks the zig tier when it is built (always in
   // CI, which the first case enforces).
   it('D=127 x 120: zig compiles it to Go\'s bytes (N-280)', () => {

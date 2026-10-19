@@ -22,9 +22,9 @@
 //! Does not prove: D=127. The fixed ReleaseSafe CLI compiles it to Go's bytes
 //! (conformance/negatives/n264-composite-nesting-parity.test.ts pins the
 //! digest), but the Debug CLI this suite usually builds is too slow for it.
-//! Nor compile TIME, which is still quadratic in nesting depth: each level
-//! re-runs the peephole over, and copies, its already-optimized subtree. Nor
-//! the other tiers. Fails, rather than passes, where the platform reports no
+//! Nor compile TIME, which was also quadratic in nesting depth (each level
+//! re-ran the peephole over, and copied, its already-optimized subtree);
+//! tests/n343_composite_nesting_work.zig bounds that. Nor the other tiers. Fails, rather than passes, where the platform reports no
 //! rusage.
 
 const std = @import("std");

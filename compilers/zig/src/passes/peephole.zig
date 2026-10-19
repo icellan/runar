@@ -14,6 +14,12 @@ const Allocator = std.mem.Allocator;
 
 const max_iterations = 100;
 
+/// N-343: instructions read by `runOnePassWithLocs`, summed over every pass of
+/// every call. A work counter for tests (src/tests/n343_composite_nesting_work.zig)
+/// that bound the optimizer's total work by the size of the program; nothing
+/// in the compiler reads it.
+pub var ops_visited: usize = 0;
+
 // ============================================================================
 // Matching helpers
 // ============================================================================
@@ -186,6 +192,10 @@ pub fn optimize(allocator: Allocator, methods: []const types.StackMethod) ![]typ
 pub const OptOut = struct {
     insts: []Inst,
     locs: []?types.SourceLocation,
+    /// N-343: the last pass changed nothing, so the result is a fixed point —
+    /// one more run would return it unchanged. False when `max_iterations`
+    /// stopped the loop instead.
+    converged: bool = true,
 };
 
 /// Run the iterative peephole pass while keeping a parallel
@@ -234,10 +244,14 @@ pub fn optimizeOpsAndLocsSplit(
         buf_a_locs.appendAssumeCapacity(loc);
     }
 
+    var converged = false;
     var iteration: usize = 0;
     while (iteration < max_iterations) : (iteration += 1) {
         const changed = try runOnePassWithLocs(allocator, value_allocator, buf_a_insts.items, buf_a_locs.items, &buf_b_insts, &buf_b_locs);
-        if (!changed) break;
+        if (!changed) {
+            converged = true;
+            break;
+        }
         const tmp_i = buf_a_insts;
         buf_a_insts = buf_b_insts;
         buf_b_insts = tmp_i;
@@ -250,7 +264,7 @@ pub fn optimizeOpsAndLocsSplit(
     @memcpy(insts, buf_a_insts.items);
     const locs = try allocator.alloc(?types.SourceLocation, buf_a_locs.items.len);
     @memcpy(locs, buf_a_locs.items);
-    return .{ .insts = insts, .locs = locs };
+    return .{ .insts = insts, .locs = locs, .converged = converged };
 }
 
 fn runOnePassWithLocs(
@@ -263,6 +277,7 @@ fn runOnePassWithLocs(
 ) !bool {
     out_insts.clearRetainingCapacity();
     out_locs.clearRetainingCapacity();
+    ops_visited += ops.len;
     var changed = false;
 
     var i: usize = 0;

@@ -40,6 +40,11 @@ const Opcode = types.Opcode;
 /// (R-169).
 const pow_exponent_limit: u32 = 32;
 
+/// N-343: instructions copied while a branch arm is optimized and spliced
+/// into its enclosing stream, summed over every conditional lowered. A work counter for tests
+/// (src/tests/n343_composite_nesting_work.zig); nothing in the compiler reads it.
+pub var spliced_insts: usize = 0;
+
 // ============================================================================
 // StackMap — tracks named variables at stack positions
 // ============================================================================
@@ -676,6 +681,59 @@ const LoopTask = struct {
     }
 };
 
+/// N-343: a sealed run of a `LowerCtx`'s instruction stream, owned by
+/// `inst_allocator`. A context's stream is its `sealed` list followed by
+/// its open `instructions` tail. Splicing a branch arm into its parent links
+/// the arm's chunks in rather than copying them, so an instruction is copied
+/// into a buffer once for the arm it was emitted in and once more when the
+/// method is flattened, not once per enclosing `if`. No chunk is empty.
+const Chunk = struct {
+    insts: []types.StackInstruction,
+    locs: []?types.SourceLocation,
+    next: ?*Chunk = null,
+    /// Set on the one-instruction `OP_IF` chunk of a conditional whose arms
+    /// both reached a peephole fixed point: this chunk through `frozen_end`
+    /// (its `OP_ENDIF` chunk) is the whole `OP_IF … OP_ENDIF` span, and no
+    /// peephole pass can change it, so `optimizeArm` steps over it. See
+    /// `optimizeArm` for why that is exact.
+    frozen_end: ?*Chunk = null,
+};
+
+/// A linked list of chunks; `head == null` iff it is empty.
+const ChunkList = struct {
+    head: ?*Chunk = null,
+    tail: ?*Chunk = null,
+
+    fn append(list: *ChunkList, c: *Chunk) void {
+        if (list.tail) |t| t.next = c else list.head = c;
+        list.tail = c;
+    }
+
+    fn appendList(list: *ChunkList, other: ChunkList) void {
+        const h = other.head orelse return;
+        if (list.tail) |t| t.next = h else list.head = h;
+        list.tail = other.tail;
+    }
+
+    fn deinit(list: *ChunkList, allocator: Allocator) void {
+        var it = list.head;
+        while (it) |c| {
+            it = c.next;
+            allocator.free(c.insts);
+            allocator.free(c.locs);
+            allocator.destroy(c);
+        }
+        list.* = .{};
+    }
+};
+
+/// N-343: one branch arm after `optimizeArm`. `converged` is false when the
+/// peephole's iteration cap, not a fixed point, ended some part of it.
+const ArmOut = struct {
+    chunks: ChunkList,
+    converged: bool,
+};
+
 const LowerCtx = struct {
     allocator: Allocator,
     /// N-280: owns `instructions`, `instruction_source_locs` and the arms'
@@ -688,6 +746,9 @@ const LowerCtx = struct {
     /// `LowerCtx`: `lower` dupes the method's final list into `allocator`
     /// before `deinit`.
     inst_allocator: Allocator = std.heap.smp_allocator,
+    /// N-343: the part of the stream sealed off before the last spliced
+    /// conditional, on `inst_allocator`. `instructions` is what follows it.
+    sealed: ChunkList = .{},
     instructions: std.ArrayListUnmanaged(types.StackInstruction),
     /// Parallel to `instructions`: source location for each emitted instruction.
     instruction_source_locs: std.ArrayListUnmanaged(?types.SourceLocation),
@@ -754,6 +815,7 @@ const LowerCtx = struct {
     }
 
     fn deinit(self: *LowerCtx) void {
+        self.sealed.deinit(self.inst_allocator);
         self.instructions.deinit(self.inst_allocator);
         self.instruction_source_locs.deinit(self.inst_allocator);
         self.stack.deinit(self.allocator);
@@ -861,29 +923,72 @@ const LowerCtx = struct {
         try self.stack.push(self.allocator, next);
     }
 
-    /// Splice a branch arm's instruction stream into this context.
-    ///
-    /// The arm's source locations come with it. `emit` maintains
-    /// `instructions` and `instruction_source_locs` as two arrays of equal
-    /// length read by index, and this is the only other writer: appending the
-    /// instructions alone left the arrays desynchronised from the first
-    /// conditional onward, so `emitArtifact` zipped each later opcode against
-    /// some earlier opcode's location. `IfElse.runar.ts` mapped its then-arm's
-    /// `OP_DUP OP_NIP` (line 14) to line 18.
-    fn appendInstructions(
-        self: *LowerCtx,
-        insts: []const types.StackInstruction,
-        locs: []const ?types.SourceLocation,
-    ) !void {
-        std.debug.assert(insts.len == locs.len);
-        try self.instructions.appendSlice(self.inst_allocator, insts);
-        try self.instruction_source_locs.appendSlice(self.inst_allocator, locs);
+    /// N-343: move the open `instructions` tail onto the end of `sealed` as
+    /// one chunk. The two arrays travel together: `emit` keeps them equal in
+    /// length and read by index, and a chunk carries both, so the source
+    /// locations stay attached to their instructions (`IfElse.runar.ts` once
+    /// mapped its then-arm's `OP_DUP OP_NIP` to line 18 when they did not).
+    fn sealTail(self: *LowerCtx) !void {
+        std.debug.assert(self.instructions.items.len == self.instruction_source_locs.items.len);
+        if (self.instructions.items.len == 0) return;
+        const c = try self.inst_allocator.create(Chunk);
+        errdefer self.inst_allocator.destroy(c);
+        const insts = try self.instructions.toOwnedSlice(self.inst_allocator);
+        errdefer self.inst_allocator.free(insts);
+        const locs = try self.instruction_source_locs.toOwnedSlice(self.inst_allocator);
+        c.* = .{ .insts = insts, .locs = locs };
+        self.sealed.append(c);
+    }
+
+    /// The context's whole stream, flattened into one pair of slices on
+    /// `allocator` (`lower` hands them to the method).
+    fn flattenStream(self: *LowerCtx, allocator: Allocator) !struct {
+        insts: []types.StackInstruction,
+        locs: []?types.SourceLocation,
+    } {
+        try self.sealTail();
+        var n: usize = 0;
+        var it = self.sealed.head;
+        while (it) |c| : (it = c.next) n += c.insts.len;
+        const insts = try allocator.alloc(types.StackInstruction, n);
+        errdefer allocator.free(insts);
+        const locs = try allocator.alloc(?types.SourceLocation, n);
+        var at: usize = 0;
+        it = self.sealed.head;
+        while (it) |c| : (it = c.next) {
+            @memcpy(insts[at..][0..c.insts.len], c.insts);
+            @memcpy(locs[at..][0..c.locs.len], c.locs);
+            at += c.insts.len;
+        }
+        return .{ .insts = insts, .locs = locs };
     }
 
     /// N-100: run the peephole over ONE branch arm, while the arm is still a
-    /// separate instruction stream. See the call site in `lowerIfExprImpl` for
+    /// separate instruction stream. See the call site in `lowerIfTail` for
     /// why the `else` clause's existence has to be decided on the optimized
-    /// body.
+    /// body. Consumes the arm's stream.
+    ///
+    /// N-343: a nested conditional that was already optimized as part of an
+    /// inner arm, and whose arms both converged, is stepped over instead of
+    /// being optimized again — re-scanning (and re-copying) it at every
+    /// enclosing level made compile time quadratic in nesting depth. The
+    /// pieces between such spans are optimized one at a time. This returns
+    /// exactly what optimizing the arm's flattened stream would:
+    ///   - No peephole rule matches `OP_IF`, `OP_ELSE` or `OP_ENDIF` at any
+    ///     window position (every position of every rule requires a literal
+    ///     push, a canonical-bool producer, or one of a fixed set of other
+    ///     opcodes). A window that reaches one of them never fires, so a pass
+    ///     over a stream is the concatenation of independent passes over the
+    ///     runs between those opcodes, and running the fixed-point loop on the
+    ///     whole stream gives each run exactly the passes it would get alone:
+    ///     until it stops changing, or `max_iterations`.
+    ///   - A frozen span starts with `OP_IF`, ends with `OP_ENDIF`, and every
+    ///     run inside it is already a fixed point, so the loop leaves it
+    ///     unchanged, and splitting the arm at the span's ends splits it only
+    ///     at those opcodes.
+    /// A conditional is frozen only when every piece of both its arms
+    /// converged; one stopped by the iteration cap is still optimized again by
+    /// the enclosing arm, as before.
     ///
     /// `peephole.optimizeOpsAndLocs` carries the arbitrary-precision constant
     /// folder's
@@ -893,18 +998,64 @@ const LowerCtx = struct {
     /// `UnsupportedOperation` rather than widening `LowerError`, and logged so
     /// it cannot vanish silently.
     fn optimizeArm(
-        ctx: *const LowerCtx,
+        ctx: *LowerCtx,
         arm_label: []const u8,
         bind_name: []const u8,
-    ) LowerError!peephole.OptOut {
+    ) LowerError!ArmOut {
+        try ctx.sealTail();
+        const ia = ctx.inst_allocator;
+        var in = ctx.sealed;
+        ctx.sealed = .{};
+        defer in.deinit(ia);
+        var out: ArmOut = .{ .chunks = .{}, .converged = true };
+        errdefer out.chunks.deinit(ia);
+
+        var piece_insts: std.ArrayListUnmanaged(types.StackInstruction) = .empty;
+        defer piece_insts.deinit(ia);
+        var piece_locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty;
+        defer piece_locs.deinit(ia);
+
+        var prev: ?*Chunk = null;
+        var it = in.head;
+        while (true) {
+            const c = it;
+            if (c == null or c.?.frozen_end != null) {
+                if (piece_insts.items.len > 0) {
+                    try optimizePiece(ctx, &out, piece_insts.items, piece_locs.items, arm_label, bind_name);
+                    piece_insts.clearRetainingCapacity();
+                    piece_locs.clearRetainingCapacity();
+                }
+                const start = c orelse break;
+                // Move the frozen span, start..frozen_end, from `in` to `out`.
+                const end = start.frozen_end.?;
+                it = end.next;
+                if (prev) |p| p.next = end.next else in.head = end.next;
+                if (in.tail == end) in.tail = prev;
+                end.next = null;
+                out.chunks.appendList(.{ .head = start, .tail = end });
+                continue;
+            }
+            spliced_insts += c.?.insts.len;
+            try piece_insts.appendSlice(ia, c.?.insts);
+            try piece_locs.appendSlice(ia, c.?.locs);
+            prev = c;
+            it = c.?.next;
+        }
+        return out;
+    }
+
+    fn optimizePiece(
+        ctx: *const LowerCtx,
+        out: *ArmOut,
+        insts: []const types.StackInstruction,
+        locs: []const ?types.SourceLocation,
+        arm_label: []const u8,
+        bind_name: []const u8,
+    ) LowerError!void {
+        const ia = ctx.inst_allocator;
         // N-280: buffers on the freeing allocator, folded values on the arena.
-        return peephole.optimizeOpsAndLocsSplit(
-            ctx.inst_allocator,
-            ctx.allocator,
-            ctx.instructions.items,
-            ctx.instruction_source_locs.items,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
+        const opt = peephole.optimizeOpsAndLocsSplit(ia, ctx.allocator, insts, locs) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
             else => {
                 std.log.warn(
                     "stack lowering: peephole failed on the {s}-arm of conditional '{s}': {s}",
@@ -913,6 +1064,19 @@ const LowerCtx = struct {
                 return LowerError.UnsupportedOperation;
             },
         };
+        if (!opt.converged) out.converged = false;
+        if (opt.insts.len == 0) {
+            ia.free(opt.insts);
+            ia.free(opt.locs);
+            return;
+        }
+        const c = ia.create(Chunk) catch |err| {
+            ia.free(opt.insts);
+            ia.free(opt.locs);
+            return err;
+        };
+        c.* = .{ .insts = opt.insts, .locs = opt.locs };
+        out.chunks.append(c);
     }
 
     fn cloneVoidMap(
@@ -5911,28 +6075,30 @@ const LowerCtx = struct {
         // just measured: dropping the `OP_ELSE` while appending the unoptimized
         // body would splice that body onto the end of the THEN arm.
         //
-        // Both `OptOut`s are freed once `appendInstructions` has COPIED their
-        // elements into `self.instructions`; the compile path runs on an arena,
-        // but `lowerIfExpr` is also exercised directly under the leak-checking
-        // test allocator.
-        const then_arm = try optimizeArm(then_ctx, "then", bind_name);
-        defer {
-            self.inst_allocator.free(then_arm.insts);
-            self.inst_allocator.free(then_arm.locs);
-        }
-        const else_arm = try optimizeArm(else_ctx, "else", bind_name);
-        defer {
-            self.inst_allocator.free(else_arm.insts);
-            self.inst_allocator.free(else_arm.locs);
-        }
+        // N-343: the optimized arms' chunks are LINKED into this context's
+        // stream, not copied, with `OP_IF`, `OP_ELSE` and `OP_ENDIF` each a
+        // chunk of their own so the span can be marked frozen. Each arm's
+        // chunks are owned here until linked in, and freed on an error.
+        var then_arm = try optimizeArm(then_ctx, "then", bind_name);
+        defer then_arm.chunks.deinit(self.inst_allocator);
+        var else_arm = try optimizeArm(else_ctx, "else", bind_name);
+        defer else_arm.chunks.deinit(self.inst_allocator);
 
+        try self.sealTail();
         try self.emitOp(.op_if);
-        try self.appendInstructions(then_arm.insts, then_arm.locs);
-        if (else_arm.insts.len > 0) {
+        try self.sealTail();
+        const if_chunk = self.sealed.tail.?;
+        self.sealed.appendList(then_arm.chunks);
+        then_arm.chunks = .{};
+        if (else_arm.chunks.head != null) {
             try self.emitOp(.op_else);
-            try self.appendInstructions(else_arm.insts, else_arm.locs);
+            try self.sealTail();
+            self.sealed.appendList(else_arm.chunks);
+            else_arm.chunks = .{};
         }
         try self.emitOp(.op_endif);
+        try self.sealTail();
+        if (then_arm.converged and else_arm.converged) if_chunk.frozen_end = self.sealed.tail.?;
 
         // Transfer ownership of push_data buffers allocated by the branch
         // contexts to self, so the `push_data` slices we just copied into
@@ -6775,8 +6941,9 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
             try ctx.emitOp(.op_1);
         }
 
-        const instructions = try allocator.dupe(types.StackInstruction, ctx.instructions.items);
-        const src_locs = try allocator.dupe(?types.SourceLocation, ctx.instruction_source_locs.items);
+        const flat = try ctx.flattenStream(allocator);
+        const instructions = flat.insts;
+        const src_locs = flat.locs;
         try methods.append(allocator, .{
             .name = method.name,
             .instructions = instructions,
