@@ -20,19 +20,21 @@
  * mutation-corpus and analyzer gates, and all four merge-base-diffing lint
  * gates (golden-provenance, wire-format, their self-tests aside).
  *
- * Rather than blindly wiring ~60 more commands into `test:ci` — several need
- * a merge-base this isn't a PR, and NONE of this was executed here to
- * confirm it would pass (the remediation rules forbid a "confident wrong
- * fix") — this pins the measured gap, categorized by why it exists, and
+ * N-283 did not blindly wire ~60 more commands into `test:ci` (several need
+ * a merge-base this isn't a PR, and none had been executed to confirm they
+ * pass). N-290 then ran every `addable-locally` command once and wired all
+ * of them into the `test:ci-local` chain; the bucket is now empty. This pins the measured gap, categorized by why it exists, and
  * rewords the contract (README.md / CONTRIBUTING.md) to point at this test
  * instead of promising an unconditional mirror. The `addable-locally`
- * category (no merge-base, no network, no service — just never wired) is
- * the follow-up candidate: every line in it could be added to `test:ci`
- * without first needing a merge-base or a running node.
+ * category (no merge-base, no network, no service — just never wired) was
+ * wired into `test:ci` by N-290 and is now empty.
  *
  * Categories:
  *   - addable-locally:      nothing blocks running it in a plain local clone;
  *                           simply never wired into a `pnpm run` chain.
+ *                           EMPTY since N-290 (all wired into `test:ci-local`).
+ *   - not-actually-local:   looked addable-locally but cannot run as a plain
+ *                           local step; see the per-line reason in the list.
  *   - needs-merge-base:     the gate diffs `<base>...HEAD`; there is no base
  *                           outside a PR/push/merge_group event.
  *   - transitive-via-turbo: not literally the same text, but `turbo run
@@ -66,9 +68,9 @@
  * direction where `test:ci` runs something (seven per-tier wallet-client
  * commands) that CI runs NOTHING like, by design (env-gated, skip clean).
  *
- * What this test does not prove: that any of the `addable-locally` lines
- * WOULD pass if wired into `test:ci` — several were never executed as part
- * of this remediation. It does not prove the `transitive-via-turbo` /
+ * What this test does not prove: that the wired `test:ci-local` commands pass
+ * on every machine — it diffs TEXT only; each was run once, green, for N-290.
+ * It does not prove the `transitive-via-turbo` /
  * `transitive-via-script` claims by executing turbo or gradle; those are
  * verified by reading the dependency declarations (turbo.json `dependsOn`,
  * the named package's own scripts) once and cited in the comments, not
@@ -362,72 +364,33 @@ function isCoveredLocally(line: string): boolean {
  * equivalent in `pnpm run test:ci`'s expansion. Formatted "<job> :: <cmd>"
  * so a job rename shows up as a diff instead of silently re-keying.
  *
- * Grouped by category (see module comment); `addable-locally` is the
- * follow-up candidate — none of these need a merge-base, a network fetch,
- * or a running node, they are just never wired into any `pnpm run` chain.
+ * Grouped by category (see module comment).
  */
+/**
+ * N-290: every `addable-locally` command was run once locally and wired into
+ * `pnpm run test:ci` (the `test:ci-local` chain in package.json), so this
+ * bucket is empty. A command that FAILS locally must NOT be wired and must
+ * not be skipped silently: it goes in `not-actually-local` below with a
+ * comment naming the finding.
+ */
+const ADDABLE_LOCALLY: string[] = [];
+
 const EXPECTED_UNCOVERED: string[] = [
-  // --- addable-locally --------------------------------------------------
-  'lint-no-silent-skips :: bash scripts/bump-version.sh --check',
-  'golden-provenance-gate :: node conformance/scripts/check-golden-provenance.mjs --self-test',
-  'go-only-crypto-vectors :: node conformance/scripts/check-bn254-pairing-invariants.mjs',
-  'go-only-crypto-vectors :: node conformance/scripts/check-bn254-pairing-invariants.mjs --self-test',
-  'go-only-crypto-vectors :: tests/generate-vectors/verify-reproducible.sh',
-  'wire-format-must-move-golden :: pnpm run wire-format-audit:self-test',
-  'sdk-envelope-fixtures :: cd conformance && npx tsx sdk-envelope/validate-fixtures.ts',
-  'sdk-bip143-fixtures :: cd conformance && npx tsx sdk-bip143/generate-fixtures.ts --check',
-  'ts-compiler :: cd compilers/rust && cargo build --release',
-  'ts-compiler :: cd compilers/go && go build ./...',
-  'ts-compiler :: cd compilers/go && go build -o runar-go .',
-  'ts-compiler :: cd compilers/zig && zig build -Doptimize=ReleaseSafe',
-  'ts-compiler :: cd compilers/java && gradle jar --no-daemon',
-  'ts-compiler :: cd conformance && npx tsx fuzz-regressions/replay.ts',
-  'ts-compiler :: cd conformance && npx tsx fuzz-regressions/replay.ts --check-no-deletions --base origin/main',
-  'go-compiler :: cd compilers/go && go build ./...',
-  'go-compiler :: cd compilers/go && go build -o runar-go .',
-  'go-compiler :: cd compilers/go && go test -race -timeout 10m .',
-  'go-compiler :: cd compilers/go && go test -race -timeout 10m ./frontend ./ir',
-  'go-compiler :: cd compilers/go && go test -race -timeout 20m ./compiler',
-  'go-compiler :: cd compilers/go && go test -timeout 20m ./codegen',
-  'rust-compiler :: cd compilers/rust && cargo build --release',
-  'rust-compiler :: cd compilers/rust && cargo test',
-  'python-compiler :: cd compilers/go && go build -o runar-go .',
-  'python-compiler :: cd compilers/python && PYTHONPATH=../../packages/runar-py python3 -m pytest tests -v',
-  'zig-compiler :: cd compilers/go && go build -o runar-go .',
-  'zig-compiler :: cd compilers/zig && zig build conformance',
-  'zig-compiler :: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline',
-  'ruby-compiler :: cd compilers/go && go build -o runar-go .',
-  'ruby-compiler :: cd compilers/ruby && bundle exec rake test',
-  'go-sdk :: cd packages/runar-go && go test ./...',
-  'rust-sdk :: cd packages/runar-rs && cargo test',
-  'python-sdk :: cd packages/runar-py && python3 -m pytest',
-  'ruby-sdk :: cd packages/runar-rb && bundle exec rspec',
+  ...ADDABLE_LOCALLY,
+  // --- not-actually-local (looked addable-locally; wiring it for N-290
+  //     found a real reason it cannot run as a plain local step) ----------
+  // CI's dependency-install step for the Ruby examples. It reaches out to
+  // rubygems.org when the locked gems are not already vendored — the same
+  // class of network-capable setup step SETUP_EXCLUDE drops for
+  // `pnpm install` / `npm ci` / `pip install` (it slips through that
+  // `^`-anchored filter only because of the merged `cd DIR && ` prefix).
   'ruby-sdk :: cd examples/ruby && bundle install',
-  'ruby-sdk :: cd examples/ruby && bundle exec rspec **/*_spec.rb',
-  'java-sdk :: cd packages/runar-java && gradle test --no-daemon',
-  'java-sdk :: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon',
-  'conformance :: pnpm run conformance:typecheck',
-  'conformance :: npx vitest run conformance/anf-scope.test.ts conformance/corpus-completeness.test.ts conformance/go-only-executing-coverage.test.ts conformance/fixture-count-doc.test.ts conformance/split-stack-desync.test.ts conformance/ci-predicate-sweep.test.ts conformance/codepart-pin conformance/dce conformance/source-map conformance/subtype-parity conformance/sdk-vertical conformance/sdk-call conformance/sdk-output/runner/sdk-runner-refusal-build-isolation.test.ts conformance/sdk-output/runner/sdk-output-coverage-audit.test.ts conformance/runner/__tests__ conformance/anf-interpreter/num2bin-engine-parity.test.ts conformance/anf-interpreter/driver-gate.test.ts conformance/wire-primitives.test.ts conformance/analyzer/__tests__ conformance/ir-roundtrip conformance/fuzz-regressions',
-  'conformance :: cd conformance && npx vitest run negatives',
-  'conformance :: cd conformance && npx vitest run go-only-parity',
-  'conformance :: cd conformance && npx vitest run closed-findings',
-  'conformance :: cd conformance && npx vitest run preimage-binding',
-  'conformance :: cd conformance && npx vitest run witnesses',
-  'conformance :: npx vitest run conformance/mutation',
-  'conformance :: npx tsx conformance/analyzer/run.ts',
-  'conformance :: npx tsx conformance/scripts/check-derived-artifacts.ts --check',
-  'conformance-anf-parity :: cd conformance/anf-interpreter/drivers/rust && cargo build --release',
-  'conformance-anf-parity :: cd conformance/anf-interpreter/drivers/java && gradle fatJar --no-daemon',
-  'conformance-anf-parity :: cd conformance/anf-interpreter/drivers/zig && zig build -Doptimize=ReleaseSafe',
-  'decompiler-roundtrip :: pnpm --filter runar-decompiler run coverage',
-  'decompiler-roundtrip :: pnpm run decompiler:fingerprints:check',
-  'decompiler-roundtrip :: pnpm run decompiler:templates:check',
-  'sdk-conformance :: cd conformance/sdk-output/tools/rs-sdk-tool && cargo build --release',
-  'sdk-conformance :: cd conformance/sdk-output/tools/zig-sdk-tool && zig build -Doptimize=ReleaseFast',
-  'sdk-conformance :: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon',
-  'sdk-conformance :: cd conformance && npx tsx sdk-output/generate-inputs.ts --check',
-  'sdk-conformance :: cd conformance && npx tsx sdk-vertical/runner/vertical-runner.ts',
-  'script-execution :: cd conformance && go test -v -timeout 1200s .',
+  // Cross-compiles compilers/zig for CI's upload-artifact step. build.zig's
+  // only executable installs to the fixed path zig-out/bin/runar-zig whatever
+  // -Dtarget is, so running this on a non-linux-x86_64 dev machine would
+  // overwrite the native binary every other wired step shells out to, for an
+  // artifact nothing local consumes.
+  'zig-compiler :: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline',
   // --- needs-merge-base (the gate diffs <base>...HEAD; no base outside a
   //     PR/push/merge_group event) ----------------------------------------
   'golden-provenance-gate :: GOLDEN_GATE_BASE="${base}" node conformance/scripts/check-golden-provenance.mjs',
@@ -489,6 +452,14 @@ describe('N-283: pnpm test:ci vs .github/workflows/ci.yml — the measured drift
         'line, and update README.md/CONTRIBUTING.md if the count they cite changed) or the parser ' +
         'regressed (false "covered").',
     ).toEqual([]);
+  });
+
+  it('the addable-locally bucket is empty: every no-merge-base/no-network/no-service ci.yml command is wired into test:ci (N-290)', () => {
+    // N-283 pinned ~60 commands as "addable-locally" without running them.
+    // N-290 wired each one into `pnpm run test:ci` (via test:ci-local) after
+    // running it once. This proves the bucket is empty; it does NOT prove the
+    // wired commands pass on every machine (that is only shown by running them).
+    expect(ADDABLE_LOCALLY, 'commands still not run by pnpm test:ci although they need no merge-base/network/service').toEqual([]);
   });
 
   it('EXPECTED_UNCOVERED has no duplicate entries', () => {
