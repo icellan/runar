@@ -133,6 +133,7 @@ test {
     _ = @import("tests/n199_lost_directive.zig");
     _ = @import("tests/n093_native_directives.zig");
     _ = @import("tests/f064_ts_unsupported_statement.zig");
+    _ = @import("tests/n346_ts_as_assertion.zig");
     _ = @import("tests/n105_scriptbytes.zig");
     _ = @import("tests/n105_output_shape.zig");
     _ = @import("tests/n099_ternary_branch_types.zig");

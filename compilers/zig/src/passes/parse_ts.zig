@@ -1882,8 +1882,16 @@ const Parser = struct {
     fn parseComparison(self: *Parser) ?Expression {
         var left = self.parseShift() orelse return null;
         while (self.current.kind == .lt or self.current.kind == .lt_eq or
-            self.current.kind == .gt or self.current.kind == .gt_eq)
+            self.current.kind == .gt or self.current.kind == .gt_eq or self.checkIdent("as"))
         {
+            // N-346: `expr as T` is a type assertion. It binds at the
+            // relational level (left-associative with `<`/`>`), and the TS
+            // reference parses it as its operand and drops the type.
+            if (self.checkIdent("as")) {
+                _ = self.bump();
+                _ = self.parseTypeAnnotation();
+                continue;
+            }
             const op: BinOperator = switch (self.current.kind) {
                 .lt => .lt,
                 .lt_eq => .lte,
