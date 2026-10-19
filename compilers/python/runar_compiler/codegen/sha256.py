@@ -64,6 +64,15 @@ K = [
 ]
 
 
+def _clone_op(op: "StackOp") -> "StackOp":
+    """Shallow copy of a cached StackOp (F-193): ``emit_op`` stamps ``source_loc``
+    on the op it is handed, so a cached op must never be handed out directly or
+    the first call site's location sticks to it for the life of the process."""
+    clone = type(op).__new__(type(op))
+    clone.__dict__.update(op.__dict__)
+    return clone
+
+
 def _u32_to_le(n: int) -> bytes:
     """Encode a uint32 as 4-byte little-endian."""
     return bytes([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff])
@@ -85,8 +94,9 @@ class _Emitter:
         self.ops.append(sop)
 
     def e_raw(self, sop: "StackOp") -> None:
-        """Push a raw op without depth tracking (for splicing pre-generated ops)."""
-        self.ops.append(sop)
+        """Push a raw op without depth tracking (for splicing pre-generated ops).
+        The op is copied: spliced ops come from the shared compress cache (F-193)."""
+        self.ops.append(_clone_op(sop))
 
     def oc(self, code: str) -> None:
         self._e(_make_stack_op(op="opcode", code=code))
@@ -495,7 +505,7 @@ def emit_sha256_compress(emit: Callable[["StackOp"], None]) -> None:
     Stack on exit:  [..., newState(32 BE)]
     Aborts unless the state is 32 bytes and the block 64 bytes (F-114)."""
     for op in _get_guarded_compress_ops():
-        emit(op)
+        emit(_clone_op(op))
 
 
 def emit_sha256_finalize(emit: Callable[["StackOp"], None]) -> None:

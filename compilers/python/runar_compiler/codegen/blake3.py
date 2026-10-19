@@ -29,6 +29,15 @@ if TYPE_CHECKING:
 # Lazy imports to avoid circular dependency with stack.py
 # ---------------------------------------------------------------------------
 
+def _clone_op(op: "StackOp") -> "StackOp":
+    """Shallow copy of a cached StackOp (F-193): ``emit_op`` stamps ``source_loc``
+    on the op it is handed, so a cached op must never be handed out directly or
+    the first call site's location sticks to it for the life of the process."""
+    clone = type(op).__new__(type(op))
+    clone.__dict__.update(op.__dict__)
+    return clone
+
+
 def _make_stack_op(*, op: str, **kwargs) -> "StackOp":
     from runar_compiler.codegen.stack import StackOp
     return StackOp(op=op, **kwargs)
@@ -635,7 +644,7 @@ def emit_blake3_compress(emit: Callable[["StackOp"], None]) -> None:
     a little-endian word. Uses block_len=64, counter=0, flags=11.
     """
     for op in _get_compress_ops():
-        emit(op)
+        emit(_clone_op(op))
 
 
 def emit_blake3_hash(emit: Callable[["StackOp"], None]) -> None:
