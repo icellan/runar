@@ -764,24 +764,13 @@ number. It is pinned from both sides:
 -/
 -- 57 = baselineMatches (49) + (cryptoAxiomPending (20) - cryptoAnchorGaps (12)).
 --
--- Main's gate stood at 44; rebasing the Lean model onto `sinkBelow` lifts it to
--- 57. It is NOT the 60 the pre-rebase branch recorded, and the three-fixture
--- gap is named rather than absorbed: `shift-ops`, `bitwise-ops` and
--- `oversize-bigint-shift` were dropped from `baselineMatches` because the
--- model's minimality normalisation diverges from the real compilers'.
---
--- NEW-004 inserts one OP_BIN2NUM (0x81) at every NUMERIC READ of a byte-array
--- result — shift-ops 27 -> 31 bytes, bitwise-ops 96 -> 108 — because
--- OP_LSHIFT/OP_RSHIFT/OP_AND/OP_XOR/OP_INVERT preserve operand width and can
--- leave a non-minimal buffer that the next numeric consumer rejects under
--- requireMinimal. The real compilers emit it; this model does not, so it
--- reproduces the PRE-NEW-004 bytes for those two fixtures and correctly fails
--- to match their goldens.
---
--- This is a MODEL gap, not a compiler gap: the shipped bytes are the fixed
--- ones. Porting the normalisation into Stack/Lower.lean is the way to take
--- this to 60 — re-adding the fixtures to baselineMatches without it would be
--- claiming a match the model does not produce.
+-- Main's gate stood at 44; rebasing the Lean model onto `sinkBelow` lifted it
+-- to 57. `shift-ops`, `bitwise-ops` and `oversize-bigint-shift` were briefly
+-- absent from `baselineMatches` while the model lagged the compilers'
+-- NEW-004 minimality normalisation (an OP_BIN2NUM at numeric reads of
+-- byte-array results). That is historical: the `rawSlots` thread closed it, all
+-- three are back in `baselineMatches` and byte-exact, and `lowerDivergencePending`
+-- is empty.
 -- 64 = baselineMatches (61) + (cryptoAxiomPending (21) - cryptoAnchorGaps (18)).
 --
 -- byte-builtins (int2str / reverseBytes / split NIP) and math-demo
@@ -1129,21 +1118,10 @@ post-`OP_ENDIF` stale-slot reconcile); `assert-false-guard` (the
 `branched-readonly-len`, `terminal-varlen-read`, `cond-write-multi-field`,
 `oracle-price`; and finally `multisig` (the `arrayElems` thread).
 -/
--- Fixtures whose goldens the real compilers produce but this model does not,
--- because the model's lowering diverges from the reference — tracked here so
--- the bucket inventory stays complete and the gap is visible rather than
--- silently missing from every list.
---
--- All three entries are the same minimality-normalisation divergence: the compilers insert
--- one OP_BIN2NUM (0x81) at every NUMERIC READ of a byte-array result, because
--- OP_LSHIFT / OP_RSHIFT / OP_AND / OP_XOR / OP_INVERT preserve operand width
--- and can leave a non-minimal buffer that the next numeric consumer rejects
--- under requireMinimal (deployed-and-unspendable, which is why the fix
--- shipped). shift-ops 27 -> 31 bytes, bitwise-ops 96 -> 108. This model still
--- emits the PRE-fix bytes, so it correctly fails to match those goldens.
---
--- The compilers are right and the model lags. Porting the normalisation into
--- Stack/Lower.lean moves both back to baselineMatches and the gate 58 -> 60.
+-- Historically this bucket held fixtures whose goldens the real compilers
+-- produced but this model did not. It is empty: `shift-ops`, `bitwise-ops` and
+-- `oversize-bigint-shift` (once a minimality-normalisation / OP_BIN2NUM
+-- divergence) are byte-exact members of `baselineMatches`.
 --
 -- Empty after byte-builtins (int2str / reverseBytes / split NIP) and
 -- math-demo (R-169 pow guard + 256-round min-clamped sqrt) promoted.
