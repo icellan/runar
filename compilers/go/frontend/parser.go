@@ -97,7 +97,12 @@ func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 		}
 	}
 	// TypeScript surface: honours @sighash / @embedAlways directly.
-	return Parse(source, fileName)
+	result := Parse(source, fileName)
+	// N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+	if result != nil {
+		result.Errors = append(result.Errors, checkConstReassignment(result.Contract)...)
+	}
+	return result
 }
 
 // Directive markers for the fail-closed guard. `@embedAlways` is word-boundary

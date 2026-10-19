@@ -82,6 +82,8 @@ public final class TsParser {
         // F-213: measures (A) and (B). Counted to match the TS reference's
         // ts-morph mapping (tsChildNesting in passes/01-parse.ts).
         ContractNode contract = SourceNesting.guard(p::parseContract, ParseException::new);
+        // N-342: `const` locals cannot be reassigned.
+        p.errors.addAll(ConstReassign.check(contract, p.constDecls, filename));
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("\n", p.errors));
         }
@@ -540,6 +542,9 @@ public final class TsParser {
         final List<CommentInfo> comments;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-342: the declarations read as {@code const} (the AST keeps no mutability). */
+        final java.util.Set<VariableDeclStatement> constDecls =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         /** F-213 measure (A): parse nesting. */
         final SourceNesting.Counter nest = new SourceNesting.Counter();
         boolean fatal = false;
@@ -1371,12 +1376,8 @@ public final class TsParser {
 
         Statement parseVariableDecl(SourceLocation locArg) throws ParseException {
             Token keyword = advance();
-            // mutability tracked indirectly: VariableDeclStatement records type/init only;
-            // 'let' vs 'const' is enforced upstream (validate pass) — but the AST shape
-            // here matches the Python parser which does record it. The Java AST does
-            // not carry a mutable flag, so we drop it.
-            // (Reference: VariableDeclStatement record has no mutable field.)
-            // 'let'/'const' equally produce VariableDeclStatement.
+            // The Java AST's VariableDeclStatement carries no mutable flag, so
+            // `const` is remembered by identity in constDecls (N-342).
 
             Token nameTok = expect(TOK_IDENT);
             String varName = nameTok.value;
@@ -1395,7 +1396,9 @@ public final class TsParser {
             }
 
             match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
-            return new VariableDeclStatement(varName, typeNode, init, locArg);
+            VariableDeclStatement decl = new VariableDeclStatement(varName, typeNode, init, locArg);
+            if (keyword.value.equals("const")) constDecls.add(decl);
+            return decl;
         }
 
         Statement parseIf(SourceLocation locArg) throws ParseException {

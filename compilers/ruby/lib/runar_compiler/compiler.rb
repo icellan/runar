@@ -183,7 +183,11 @@ module RunarCompiler
       Frontend.parse_python(source, file_name)
     elsif lower.end_with?(".runar.ts")
       require_relative "frontend/parser_ts"
-      Frontend.parse_ts(source, file_name)
+      require_relative "frontend/const_reassign"
+      result = Frontend.parse_ts(source, file_name)
+      # N-342: +const+ locals cannot be reassigned (+.runar.ts+ only).
+      result.errors.concat(Frontend::ConstReassign.check(result.contract)) unless result.contract.nil?
+      result
     elsif lower.end_with?(".runar.sol")
       require_relative "frontend/parser_sol"
       Frontend.parse_sol(source, file_name)

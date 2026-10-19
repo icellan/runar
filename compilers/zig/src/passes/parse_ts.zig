@@ -22,6 +22,7 @@ const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const loop_condition = @import("loop_condition.zig");
+const const_reassign = @import("const_reassign.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
 const input_limits = @import("../frontend/input_limits.zig");
@@ -105,7 +106,9 @@ pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) 
     }
     // N-121: likewise the first `?.`.
     const oc_errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.OPTIONAL_CHAINING, t.optional_chain);
-    const errs = lex_diag.prepend(allocator, oc_errs, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    const lex_errs = lex_diag.prepend(allocator, oc_errs, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    // N-342: `const` locals cannot be reassigned.
+    const errs = if (r.contract) |c| const_reassign.check(allocator, file_name, c, lex_errs) else lex_errs;
     return .{ .contract = r.contract, .errors = errs };
 }
 
@@ -1551,9 +1554,12 @@ const Parser = struct {
         // A header with no condition at all keeps the `true` default; a
         // condition that is not a comparison sets it false below.
         var cond_tests_iter: bool = true;
+        // N-342: a `const` initializer cannot be advanced by the loop's `i++`.
+        var init_is_const_decl: bool = false;
 
         // Initializer: let/const varname = expr
         if (self.checkIdent("let") or self.checkIdent("const") or self.checkIdent("var")) {
+            init_is_const_decl = self.checkIdent("const");
             _ = self.bump();
             if (self.current.kind == .ident) {
                 var_name = self.bump().text;
@@ -1648,7 +1654,22 @@ const Parser = struct {
         // cannot represent.
         var update: ?*const Statement = null;
         if (self.current.kind != .rparen) {
-            if (self.parseExpression()) |e| update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
+            if (self.parseExpression()) |e| {
+                update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
+                if (init_is_const_decl) {
+                    const operand: ?Expression = switch (e) {
+                        .increment => |x| x.operand,
+                        .decrement => |x| x.operand,
+                        else => null,
+                    };
+                    if (operand) |o| switch (o) {
+                        .identifier => |n| if (std.mem.eql(u8, n, var_name)) {
+                            self.addErrorFmt(const_reassign.MESSAGE_FMT, .{var_name});
+                        },
+                        else => {},
+                    };
+                }
+            }
         } else {
             // N-132: the TS reference refuses an empty update slot in its parser.
             self.addErrorAt(for_tok, "For loop must have an update expression");

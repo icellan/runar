@@ -59,6 +59,7 @@ import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
 import { extractSighashDirective, lostDirectiveMessage } from './sighash-directive.js';
 import { normalizeLoopConditions } from './loop-condition.js';
+import { checkConstReassignment } from './const-reassign.js';
 import { OPCODES } from './06-emit.js';
 import { SourceNestingError, withNestingLimit } from './source-limits.js';
 import {
@@ -208,7 +209,10 @@ function parseDispatch(source: string, fileName?: string): ParseResult {
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
-  return withNestingLimit(file, () => parseTsSurface(source, file, errors));
+  const result = withNestingLimit(file, () => parseTsSurface(source, file, errors));
+  // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+  if (result.contract) result.errors.push(...checkConstReassignment(result.contract));
+  return result;
 }
 
 /** The `.runar.ts` surface: ts-morph parse, then conversion to the Rúnar AST. */

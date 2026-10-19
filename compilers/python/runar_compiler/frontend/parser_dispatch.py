@@ -120,7 +120,12 @@ def _parse_source_dispatch(source: str, file_name: str) -> ParseResult:
         return parse_python(source, file_name)
     elif lower.endswith(".runar.ts"):
         from runar_compiler.frontend.parser_ts import parse_ts
-        return parse_ts(source, file_name)
+        result = parse_ts(source, file_name)
+        # N-342: ``const`` locals cannot be reassigned (``.runar.ts`` only).
+        if result.contract is not None:
+            from runar_compiler.frontend.const_reassign import check_const_reassignment
+            result.errors.extend(check_const_reassignment(result.contract))
+        return result
     elif lower.endswith(".runar.sol"):
         from runar_compiler.frontend.parser_sol import parse_sol
         return parse_sol(source, file_name)

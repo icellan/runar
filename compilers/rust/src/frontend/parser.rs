@@ -2325,7 +2325,13 @@ fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
         }
     }
     // Default: TypeScript parser
-    parse(source, file_name)
+    let mut result = parse(source, file_name);
+    // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+    if let Some(contract) = result.contract.as_ref() {
+        let errs = super::const_reassign::check_const_reassignment(contract);
+        result.errors.extend(errs);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
