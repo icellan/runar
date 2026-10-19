@@ -413,8 +413,8 @@ func TestEmit_OPPickEncodesTo79(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmitMethod failed: %v", err)
 	}
-	if !strings.Contains(result.ScriptHex, "79") {
-		t.Errorf("pick (OP_PICK) should produce hex containing '79', got: %s", result.ScriptHex)
+	if !scriptHasOpcode(t, result.ScriptHex, 0x79) {
+		t.Errorf("pick (OP_PICK) should emit opcode 0x79, got: %s", result.ScriptHex)
 	}
 }
 
@@ -431,8 +431,72 @@ func TestEmit_OPRollEncodesTo7a(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmitMethod failed: %v", err)
 	}
-	if !strings.Contains(result.ScriptHex, "7a") {
-		t.Errorf("roll (OP_ROLL) should produce hex containing '7a', got: %s", result.ScriptHex)
+	if !scriptHasOpcode(t, result.ScriptHex, 0x7a) {
+		t.Errorf("roll (OP_ROLL) should emit opcode 0x7a, got: %s", result.ScriptHex)
+	}
+}
+
+// scriptOpcodes hex-decodes a script and returns its opcode bytes, skipping
+// direct-push and OP_PUSHDATA1/2/4 payloads. Unlike strings.Contains on the
+// hex, a match can never straddle a nibble boundary ("a7a8" contains "7a")
+// or sit inside pushed data. Same walk as decodeScriptOps in
+// compilers/go/compiler (a different package, so duplicated minimally).
+func scriptOpcodes(t *testing.T, scriptHex string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(scriptHex)
+	if err != nil {
+		t.Fatalf("script is not valid hex: %v", err)
+	}
+	var ops []byte
+	for i := 0; i < len(b); {
+		c := b[i]
+		ops = append(ops, c)
+		n := 1
+		switch {
+		case c >= 0x01 && c <= 0x4b:
+			n += int(c)
+		case c == 0x4c && i+1 < len(b):
+			n += 1 + int(b[i+1])
+		case c == 0x4d && i+2 < len(b):
+			n += 2 + int(b[i+1]) + int(b[i+2])<<8
+		case c == 0x4e && i+4 < len(b):
+			n += 4 + int(b[i+1]) + int(b[i+2])<<8 + int(b[i+3])<<16 + int(b[i+4])<<24
+		}
+		i += n
+	}
+	return ops
+}
+
+func scriptHasOpcode(t *testing.T, scriptHex string, code byte) bool {
+	t.Helper()
+	for _, c := range scriptOpcodes(t, scriptHex) {
+		if c == code {
+			return true
+		}
+	}
+	return false
+}
+
+// Proves scriptHasOpcode is opcode-aligned where the old
+// strings.Contains(hex, "79"/"7a") checks were not. Does not prove anything
+// about the emitter itself (the Pick/Roll tests above do).
+func TestScriptHasOpcode_RejectsNibbleAndPushDataMatches(t *testing.T) {
+	cases := []struct{ name, hex string }{
+		{"nibble straddle 7a", "a7a8"},    // OP_?? 0xa7 0xa8: "7a" spans the byte boundary
+		{"nibble straddle 79", "9798"},    // 0x97 0x98: "79" spans the byte boundary
+		{"inside push data 79", "027900"}, // PUSH2 0x79 0x00
+		{"inside push data 7a", "027a00"}, // PUSH2 0x7a 0x00
+	}
+	for _, c := range cases {
+		if !strings.Contains(c.hex, "79") && !strings.Contains(c.hex, "7a") {
+			t.Fatalf("%s: crafted hex must fool the old substring check", c.name)
+		}
+		if scriptHasOpcode(t, c.hex, 0x79) || scriptHasOpcode(t, c.hex, 0x7a) {
+			t.Errorf("%s: %s must not be reported as containing OP_PICK/OP_ROLL", c.name, c.hex)
+		}
+	}
+	if !scriptHasOpcode(t, "5279", 0x79) || !scriptHasOpcode(t, "537a", 0x7a) {
+		t.Errorf("genuine OP_PICK/OP_ROLL must be found")
 	}
 }
 

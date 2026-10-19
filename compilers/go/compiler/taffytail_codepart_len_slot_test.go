@@ -105,6 +105,48 @@ func pinRuns(script string) (equality, lowerBound []int) {
 	return
 }
 
+// hasOpSequence reports whether seq appears as consecutive opcodes (push
+// payloads skipped by decodeScriptOps), so a hex substring that straddles a
+// nibble boundary or sits inside pushed data is not a match.
+func hasOpSequence(ops []scriptOp, seq ...byte) bool {
+	for i := 0; i+len(seq) <= len(ops); i++ {
+		ok := true
+		for j, c := range seq {
+			if ops[i+j].code != c {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Proves hasOpSequence is opcode-aligned where strings.Contains(hex,
+// "81a269") was not: the crafted scripts contain the substring yet no
+// OP_BIN2NUM OP_GREATERTHANOREQUAL OP_VERIFY opcode run. Does not prove
+// anything about what the compiler emits.
+func TestHasOpSequence_RejectsNibbleAndPushDataMatches(t *testing.T) {
+	const needle = "81a269"
+	crafted := map[string]string{
+		"inside push data": "0481a26900", // PUSH4 [81 a2 69 00]
+		"nibble straddle":  "f81a2690",   // opcodes f8 1a 26 90: "81a269" spans bytes
+	}
+	for name, h := range crafted {
+		if !strings.Contains(h, needle) {
+			t.Fatalf("%s: crafted hex must fool the old substring check", name)
+		}
+		if hasOpSequence(decodeScriptOps(t, h), 0x81, 0xa2, 0x69) {
+			t.Errorf("%s: %s must not be reported as containing the opcode run", name, h)
+		}
+	}
+	if !hasOpSequence(decodeScriptOps(t, "5281a26951"), 0x81, 0xa2, 0x69) {
+		t.Errorf("genuine opcode run must be found")
+	}
+}
+
 func TestN051_TaffyTail_PinIsEqualityWithDeployTimeSlot(t *testing.T) {
 	art := compileN051OrFatal(t, taffyTailVaultSource, "TaffyTailVault.runar.ts")
 
@@ -112,7 +154,7 @@ func TestN051_TaffyTail_PinIsEqualityWithDeployTimeSlot(t *testing.T) {
 	if len(lowerBound) != 0 {
 		t.Fatalf("script still carries a lower-bound (81 a2 69) pin at byte offset(s) %v", lowerBound)
 	}
-	if strings.Contains(art.Script, "81a269") {
+	if hasOpSequence(decodeScriptOps(t, art.Script), 0x81, 0xa2, 0x69) {
 		t.Fatalf("script still contains the OP_BIN2NUM OP_GREATERTHANOREQUAL OP_VERIFY sequence")
 	}
 	if len(equality) != 1 {
