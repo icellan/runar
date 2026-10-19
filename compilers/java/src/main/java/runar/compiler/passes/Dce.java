@@ -199,7 +199,14 @@ public final class Dce {
      * {@code compilers/python/runar_compiler/frontend/dce.py}.
      */
     public static void collectRefs(AnfValue v, Set<String> used) {
-        if (v instanceof LoadParam || v instanceof LoadProp || v instanceof GetStateScript) {
+        if (v instanceof LoadParam lp) {
+            // N-356: a reassigned parameter is bound under its own name and
+            // read back as `load_param <name>`; count the read so DCE keeps
+            // the rebinding. Matches TS collectRefsFromValue.
+            if (lp.name() != null) used.add(lp.name());
+            return;
+        }
+        if (v instanceof LoadProp || v instanceof GetStateScript) {
             return;
         }
         if (v instanceof LoadConst lc) {

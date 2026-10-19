@@ -162,8 +162,10 @@ func isReferencedExternally(b *ir.ANFBinding, ownRefs map[string]bool, refCount 
 func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 	switch v.Kind {
 	case "load_param":
-		// Do NOT track @ref: targets here — matches TS collectRefsFromValue
-		// which breaks on load_param without collecting refs.
+		// N-356: a reassigned parameter is bound under its own name and read
+		// back as `load_param <name>`; count the read so DCE keeps the
+		// rebinding. Matches TS collectRefsFromValue.
+		refs[v.Name] = true
 	case "load_prop":
 		// references the property by name, not a binding
 	case "load_const":

@@ -186,9 +186,11 @@ fn is_referenced_externally(
 /// Collect all referenced binding names from a value.
 pub fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
     match value {
-        ANFValue::LoadParam { .. } => {
-            // Do NOT track @ref: targets here — matches TS collectRefsFromValue
-            // which breaks on load_param without collecting refs.
+        ANFValue::LoadParam { name } => {
+            // N-356: a reassigned parameter is bound under its own name and
+            // read back as `load_param <name>`; count the read so DCE keeps
+            // the rebinding. Matches TS collectRefsFromValue.
+            refs.insert(name.clone());
         }
         ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {}
         // raw_script — opaque byte span, no SSA operand refs. Stack effect is

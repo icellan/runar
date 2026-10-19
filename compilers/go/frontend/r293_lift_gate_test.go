@@ -130,6 +130,10 @@ func ownRefsOf(v *ir.ANFValue) map[string]bool {
 		refs[v.Cond] = true
 	case "loop":
 		// A loop reads nothing at its own position.
+	case "load_param":
+		// Reads a parameter / loop variable slot, not an SSA binding. DCE's
+		// collectValueRefs counts the name since N-356 (a reassigned
+		// parameter is a binding of that name), but here it is no ref.
 	default:
 		collectValueRefs(v, refs)
 	}

@@ -201,7 +201,10 @@ fn isReferencedExternally(
 /// Walk an ANFValue and collect all binding name references.
 fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
     switch (v) {
-        .load_param => return,
+        // N-356: a reassigned parameter is bound under its own name and read
+        // back as `load_param <name>`; count the read so DCE keeps the
+        // rebinding. Matches TS collectRefsFromValue.
+        .load_param => |lp| try used.put(lp.name, {}),
         .load_const => |lc| {
             switch (lc.value) {
                 .string => |s| {

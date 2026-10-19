@@ -104,6 +104,13 @@ function returnsLastBinding(method: ANFMethod): boolean {
 export function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
   switch (value.kind) {
     case 'load_param':
+      // N-356: a reassigned parameter (`p = q`) is bound under the
+      // parameter's own name, and every later read stays `load_param p`,
+      // which stack lowering resolves by name to that binding. Count the read
+      // as a reference, or the rebinding is deleted and the read falls back to
+      // the caller's argument. A name with no binding is a no-op here.
+      refs.add(value.name);
+      break;
     case 'load_prop':
     case 'get_state_script':
       break;

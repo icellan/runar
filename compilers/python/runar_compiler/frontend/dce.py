@@ -207,8 +207,11 @@ def collect_refs(v: ANFValue, used: set[str]) -> None:
         raise UnknownANFKindError(v.kind, "constant-fold.collectRefsFromValue")
 
     if v.kind == "load_param":
-        # Do NOT track @ref: targets here — matches TS collectRefsFromValue
-        # which breaks on load_param without collecting refs.
+        # N-356: a reassigned parameter is bound under its own name and read
+        # back as `load_param <name>`; count the read so DCE keeps the
+        # rebinding. Matches TS collectRefsFromValue.
+        if v.name is not None:
+            used.add(v.name)
         return
     if v.kind == "load_const":
         # Track @ref: aliases in load_const values to prevent DCE

@@ -187,7 +187,12 @@ module RunarCompiler
       # (which would cause DCE to drop a live binding).
       def self.collect_refs(v, used)
         case v.kind
-        when "load_param", "load_prop", "get_state_script"
+        when "load_param"
+          # N-356: a reassigned parameter is bound under its own name and read
+          # back as `load_param <name>`; count the read so DCE keeps the
+          # rebinding. Matches TS collectRefsFromValue.
+          used.add(v.name) if v.name
+        when "load_prop", "get_state_script"
           # No refs.
         when "load_const"
           if v.const_string && v.const_string.start_with?("@ref:")
