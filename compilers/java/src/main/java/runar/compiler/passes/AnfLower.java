@@ -64,6 +64,7 @@ import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PropertyAccessExpr;
 import runar.compiler.ir.ast.PropertyNode;
 import runar.compiler.ir.ast.ReturnStatement;
+import runar.compiler.ir.ast.SourceLocation;
 import runar.compiler.ir.ast.Statement;
 import runar.compiler.ir.ast.TernaryExpr;
 import runar.compiler.ir.ast.TypeNode;
@@ -3174,13 +3175,17 @@ public final class AnfLower {
         final String propName;
         final List<AnfBinding> valueBindings;
         final String valueRef;
+        /** F-188: location of the branch's original update_prop statement (may be null). */
+        final SourceLocation updateLoc;
 
-        UpdateBranch(List<AnfBinding> csb, String cr, String pn, List<AnfBinding> vb, String vr) {
+        UpdateBranch(List<AnfBinding> csb, String cr, String pn, List<AnfBinding> vb, String vr,
+                     SourceLocation updateLoc) {
             this.condSetupBindings = csb;
             this.condRef = cr;
             this.propName = pn;
             this.valueBindings = vb;
             this.valueRef = vr;
+            this.updateLoc = updateLoc;
         }
     }
 
@@ -3224,7 +3229,8 @@ public final class AnfLower {
         return true;
     }
 
-    private record BranchUpdate(String propName, List<AnfBinding> valueBindings, String valueRef) {}
+    private record BranchUpdate(String propName, List<AnfBinding> valueBindings, String valueRef,
+                                SourceLocation updateLoc) {}
 
     private static BranchUpdate extractBranchUpdate(List<AnfBinding> bindings) {
         if (bindings.isEmpty()) return null;
@@ -3232,7 +3238,7 @@ public final class AnfLower {
         if (!(last.value() instanceof UpdateProp up)) return null;
         List<AnfBinding> valueBindings = new ArrayList<>(bindings.subList(0, bindings.size() - 1));
         if (!allBindingsSideEffectFree(valueBindings)) return null;
-        return new BranchUpdate(up.name(), valueBindings, up.value());
+        return new BranchUpdate(up.name(), valueBindings, up.value(), last.sourceLoc());
     }
 
     private static boolean isAssertFalseElse(List<AnfBinding> bindings) {
@@ -3278,7 +3284,7 @@ public final class AnfLower {
         List<UpdateBranch> branches = new ArrayList<>();
         branches.add(new UpdateBranch(
             new ArrayList<>(), ifCond, thenUpdate.propName(),
-            thenUpdate.valueBindings(), thenUpdate.valueRef()
+            thenUpdate.valueBindings(), thenUpdate.valueRef(), thenUpdate.updateLoc()
         ));
 
         if (elseBindings.isEmpty()) return null;
@@ -3300,7 +3306,7 @@ public final class AnfLower {
             newSetup.addAll(inner.get(0).condSetupBindings);
             UpdateBranch first = inner.get(0);
             inner.set(0, new UpdateBranch(newSetup, first.condRef, first.propName,
-                first.valueBindings, first.valueRef));
+                first.valueBindings, first.valueRef, first.updateLoc));
             branches.addAll(inner);
             return branches;
         }
@@ -3309,7 +3315,7 @@ public final class AnfLower {
         if (elseUpdate != null) {
             branches.add(new UpdateBranch(
                 new ArrayList<>(), null, elseUpdate.propName(),
-                elseUpdate.valueBindings(), elseUpdate.valueRef()
+                elseUpdate.valueBindings(), elseUpdate.valueRef(), elseUpdate.updateLoc()
             ));
             return branches;
         }
@@ -3476,6 +3482,11 @@ public final class AnfLower {
                 continue;
             }
 
+            // F-188: the rewrite replaces this located `if`; keep its location
+            // on the shared condition temporaries, and each branch's own update
+            // statement location on that branch's synthesized bindings.
+            final SourceLocation ifLoc = binding.sourceLoc();
+
             // Transform: flatten into conditional assignments.
             Map<String, String> nameMap = new LinkedHashMap<>();
             List<String> condRefs = new ArrayList<>();
@@ -3484,7 +3495,8 @@ public final class AnfLower {
                 for (AnfBinding csb : branch.condSetupBindings) {
                     String newName = "t" + (nextIdx[0]++);
                     nameMap.put(csb.name(), newName);
-                    result.add(new AnfBinding(newName, remapValueRefs(csb.value(), nameMap), null));
+                    result.add(new AnfBinding(newName, remapValueRefs(csb.value(), nameMap),
+                        csb.sourceLoc() != null ? csb.sourceLoc() : ifLoc));
                 }
                 if (branch.condRef != null) {
                     condRefs.add(nameMap.getOrDefault(branch.condRef, branch.condRef));
@@ -3505,7 +3517,7 @@ public final class AnfLower {
                     if (condRefs.get(j) == null) continue;
                     String negName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(negName,
-                        new UnaryOp("!", condRefs.get(j), null), null));
+                        new UnaryOp("!", condRefs.get(j), null), ifLoc));
                     negatedConds.add(negName);
                 }
                 String andRef = negatedConds.get(0);
@@ -3513,13 +3525,13 @@ public final class AnfLower {
                 for (int j = 1; j < limit; j++) {
                     String andName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(andName,
-                        new BinOp("&&", andRef, negatedConds.get(j), null), null));
+                        new BinOp("&&", andRef, negatedConds.get(j), null), ifLoc));
                     andRef = andName;
                 }
                 if (condRefs.get(i) != null) {
                     String finalName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(finalName,
-                        new BinOp("&&", andRef, condRefs.get(i), null), null));
+                        new BinOp("&&", andRef, condRefs.get(i), null), ifLoc));
                     effectiveConds.add(finalName);
                 } else {
                     effectiveConds.add(andRef);
@@ -3548,26 +3560,28 @@ public final class AnfLower {
                 for (int i = 1; i < condRefs.size(); i++) {
                     String orName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(orName,
-                        new BinOp("||", orRef, condRefs.get(i), null), null));
+                        new BinOp("||", orRef, condRefs.get(i), null), ifLoc));
                     orRef = orName;
                 }
                 result.add(new AnfBinding("t" + (nextIdx[0]++),
-                    new Assert(orRef), null));
+                    new Assert(orRef), ifLoc));
             }
 
             // Emit load_old, conditional if-expression, update_prop per branch.
             for (int i = 0; i < branches.size(); i++) {
                 UpdateBranch branch = branches.get(i);
+                final SourceLocation branchLoc = branch.updateLoc != null ? branch.updateLoc : ifLoc;
 
                 String oldPropRef = "t" + (nextIdx[0]++);
-                result.add(new AnfBinding(oldPropRef, new LoadProp(branch.propName), null));
+                result.add(new AnfBinding(oldPropRef, new LoadProp(branch.propName), branchLoc));
 
                 Map<String, String> branchMap = new LinkedHashMap<>(nameMap);
                 List<AnfBinding> thenBindings = new ArrayList<>();
                 for (AnfBinding vb : branch.valueBindings) {
                     String newName = "t" + (nextIdx[0]++);
                     branchMap.put(vb.name(), newName);
-                    thenBindings.add(new AnfBinding(newName, remapValueRefs(vb.value(), branchMap), null));
+                    thenBindings.add(new AnfBinding(newName, remapValueRefs(vb.value(), branchMap),
+                        vb.sourceLoc() != null ? vb.sourceLoc() : branchLoc));
                 }
 
                 // An arm's VALUE is its LAST binding. valueBindings is
@@ -3590,21 +3604,21 @@ public final class AnfLower {
                     || !thenBindings.get(thenBindings.size() - 1).name().equals(mappedValueRef)) {
                     String valueName = "t" + (nextIdx[0]++);
                     thenBindings.add(new AnfBinding(valueName,
-                        makeLoadConstString("@ref:" + mappedValueRef), null));
+                        makeLoadConstString("@ref:" + mappedValueRef), branchLoc));
                 }
 
                 String keepName = "t" + (nextIdx[0]++);
                 List<AnfBinding> elseBindings = new ArrayList<>();
                 elseBindings.add(new AnfBinding(keepName,
-                    new LoadConst(new BytesConst("@ref:" + oldPropRef)), null));
+                    new LoadConst(new BytesConst("@ref:" + oldPropRef)), branchLoc));
 
                 String condIfRef = "t" + (nextIdx[0]++);
                 result.add(new AnfBinding(condIfRef,
-                    new If(effectiveConds.get(i), thenBindings, elseBindings), null));
+                    new If(effectiveConds.get(i), thenBindings, elseBindings), branchLoc));
 
                 String updateName = "t" + (nextIdx[0]++);
                 result.add(new AnfBinding(updateName,
-                    new UpdateProp(branch.propName, condIfRef), null));
+                    new UpdateProp(branch.propName, condIfRef), branchLoc));
             }
         }
 
