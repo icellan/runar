@@ -678,6 +678,16 @@ const LoopTask = struct {
 
 const LowerCtx = struct {
     allocator: Allocator,
+    /// N-280: owns `instructions`, `instruction_source_locs` and the arms'
+    /// peephole buffers. `allocator` is the compile ARENA, which never frees:
+    /// every `if` arm's flattened list, its peephole copies and its splice
+    /// into the parent stayed resident, one copy of each nested instruction
+    /// per enclosing `if` — memory quadratic in nesting depth (1.65 GB RSS
+    /// at 960 nested ifs, past 8 GB at 3,840). On a freeing allocator each
+    /// arm's buffers are released once spliced. Nothing outlives its
+    /// `LowerCtx`: `lower` dupes the method's final list into `allocator`
+    /// before `deinit`.
+    inst_allocator: Allocator = std.heap.smp_allocator,
     instructions: std.ArrayListUnmanaged(types.StackInstruction),
     /// Parallel to `instructions`: source location for each emitted instruction.
     instruction_source_locs: std.ArrayListUnmanaged(?types.SourceLocation),
@@ -744,8 +754,8 @@ const LowerCtx = struct {
     }
 
     fn deinit(self: *LowerCtx) void {
-        self.instructions.deinit(self.allocator);
-        self.instruction_source_locs.deinit(self.allocator);
+        self.instructions.deinit(self.inst_allocator);
+        self.instruction_source_locs.deinit(self.inst_allocator);
         self.stack.deinit(self.allocator);
         self.last_uses.deinit(self.allocator);
         self.local_bindings.deinit(self.allocator);
@@ -784,8 +794,8 @@ const LowerCtx = struct {
     // ========================================================================
 
     fn emit(self: *LowerCtx, inst: types.StackInstruction) !void {
-        try self.instructions.append(self.allocator, inst);
-        try self.instruction_source_locs.append(self.allocator, self.current_source_loc);
+        try self.instructions.append(self.inst_allocator, inst);
+        try self.instruction_source_locs.append(self.inst_allocator, self.current_source_loc);
     }
 
     fn emitOp(self: *LowerCtx, op: Opcode) !void {
@@ -866,8 +876,8 @@ const LowerCtx = struct {
         locs: []const ?types.SourceLocation,
     ) !void {
         std.debug.assert(insts.len == locs.len);
-        try self.instructions.appendSlice(self.allocator, insts);
-        try self.instruction_source_locs.appendSlice(self.allocator, locs);
+        try self.instructions.appendSlice(self.inst_allocator, insts);
+        try self.instruction_source_locs.appendSlice(self.inst_allocator, locs);
     }
 
     /// N-100: run the peephole over ONE branch arm, while the arm is still a
@@ -883,13 +893,14 @@ const LowerCtx = struct {
     /// `UnsupportedOperation` rather than widening `LowerError`, and logged so
     /// it cannot vanish silently.
     fn optimizeArm(
-        allocator: Allocator,
         ctx: *const LowerCtx,
         arm_label: []const u8,
         bind_name: []const u8,
     ) LowerError!peephole.OptOut {
-        return peephole.optimizeOpsAndLocs(
-            allocator,
+        // N-280: buffers on the freeing allocator, folded values on the arena.
+        return peephole.optimizeOpsAndLocsSplit(
+            ctx.inst_allocator,
+            ctx.allocator,
             ctx.instructions.items,
             ctx.instruction_source_locs.items,
         ) catch |err| switch (err) {
@@ -5904,15 +5915,15 @@ const LowerCtx = struct {
         // elements into `self.instructions`; the compile path runs on an arena,
         // but `lowerIfExpr` is also exercised directly under the leak-checking
         // test allocator.
-        const then_arm = try optimizeArm(self.allocator, then_ctx, "then", bind_name);
+        const then_arm = try optimizeArm(then_ctx, "then", bind_name);
         defer {
-            self.allocator.free(then_arm.insts);
-            self.allocator.free(then_arm.locs);
+            self.inst_allocator.free(then_arm.insts);
+            self.inst_allocator.free(then_arm.locs);
         }
-        const else_arm = try optimizeArm(self.allocator, else_ctx, "else", bind_name);
+        const else_arm = try optimizeArm(else_ctx, "else", bind_name);
         defer {
-            self.allocator.free(else_arm.insts);
-            self.allocator.free(else_arm.locs);
+            self.inst_allocator.free(else_arm.insts);
+            self.inst_allocator.free(else_arm.locs);
         }
 
         try self.emitOp(.op_if);

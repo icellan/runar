@@ -200,6 +200,20 @@ pub fn optimizeOpsAndLocs(
     ops: []const Inst,
     src_locs: []const ?types.SourceLocation,
 ) !OptOut {
+    return optimizeOpsAndLocsSplit(allocator, allocator, ops, src_locs);
+}
+
+/// `optimizeOpsAndLocs` with the working buffers and the returned slices on
+/// `allocator`, and the payloads of folded pushes -- which the returned
+/// instructions reference -- on `value_allocator` (N-280: stack lowering
+/// frees an arm's buffers once spliced, but the folded values must live as
+/// long as the compile).
+pub fn optimizeOpsAndLocsSplit(
+    allocator: Allocator,
+    value_allocator: Allocator,
+    ops: []const Inst,
+    src_locs: []const ?types.SourceLocation,
+) !OptOut {
     var buf_a_insts = std.ArrayListUnmanaged(Inst).empty;
     defer buf_a_insts.deinit(allocator);
     var buf_a_locs = std.ArrayListUnmanaged(?types.SourceLocation).empty;
@@ -222,7 +236,7 @@ pub fn optimizeOpsAndLocs(
 
     var iteration: usize = 0;
     while (iteration < max_iterations) : (iteration += 1) {
-        const changed = try runOnePassWithLocs(allocator, buf_a_insts.items, buf_a_locs.items, &buf_b_insts, &buf_b_locs);
+        const changed = try runOnePassWithLocs(allocator, value_allocator, buf_a_insts.items, buf_a_locs.items, &buf_b_insts, &buf_b_locs);
         if (!changed) break;
         const tmp_i = buf_a_insts;
         buf_a_insts = buf_b_insts;
@@ -241,6 +255,7 @@ pub fn optimizeOpsAndLocs(
 
 fn runOnePassWithLocs(
     allocator: Allocator,
+    value_allocator: Allocator,
     ops: []const Inst,
     src_locs: []const ?types.SourceLocation,
     out_insts: *std.ArrayListUnmanaged(Inst),
@@ -255,7 +270,7 @@ fn runOnePassWithLocs(
         const head_loc = if (i < src_locs.len) src_locs[i] else null;
         // Window 4
         if (i + 4 <= ops.len) {
-            if (try tryWindow4(allocator, ops[i..][0..4])) |replacement| {
+            if (try tryWindow4(value_allocator, ops[i..][0..4])) |replacement| {
                 for (replacement) |inst| {
                     if (inst) |r| {
                         try out_insts.append(allocator, r);
@@ -269,7 +284,7 @@ fn runOnePassWithLocs(
         }
         // Window 3
         if (i + 3 <= ops.len) {
-            if (try tryWindow3(allocator, ops[i..][0..3])) |replacement| {
+            if (try tryWindow3(value_allocator, ops[i..][0..3])) |replacement| {
                 for (replacement) |inst| {
                     if (inst) |r| {
                         try out_insts.append(allocator, r);

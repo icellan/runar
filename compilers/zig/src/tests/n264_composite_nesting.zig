@@ -16,13 +16,12 @@
 //! Proves: this tier compiles D=32 x 120 (3,840 nested ifs), byte-identical to
 //! Go. A stack overflow kills this whole test binary rather than failing one
 //! test.
-//! Does not prove: the deepest admissible chain, D=127 x 120. This tier no
-//! longer overflows on it, but splicing each optimized arm's flat instruction
-//! list into its parent copies every nested instruction once per enclosing if,
-//! and the compile arena keeps every copy: memory grows quadratically with
-//! D*K (1.6 GB at D=8 before N-264 as well), and D=127 exhausts memory. That is
-//! a separate defect from the stack overflow this item fixes. Nor does it
-//! prove the other tiers (conformance/negatives/
+//! Does not prove: the deepest admissible chain, D=127 x 120. Its memory
+//! blow-up (the compile arena kept a copy of every spliced arm per enclosing
+//! if) is N-280's, bounded in tests/n280_composite_nesting_memory.zig; D=127
+//! itself is pinned against the CLI in conformance/negatives/
+//! n264-composite-nesting-parity.test.ts, too slow for this Debug suite. Nor
+//! does it prove the other tiers (conformance/negatives/
 //! n264-composite-nesting-parity.test.ts drives all seven CLIs), or that Go's
 //! deep output is right beyond agreeing with every tier at D=8.
 
@@ -30,7 +29,7 @@ const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
 /// remediation-logs/N-180/compgen.py, verbatim.
-fn comp(w: std.mem.Allocator, d: usize, k: usize) ![]const u8 {
+pub fn comp(w: std.mem.Allocator, d: usize, k: usize) ![]const u8 {
     var b: std.ArrayListUnmanaged(u8) = .empty;
     try b.appendSlice(w, "import { SmartContract, assert } from 'runar-lang';\nclass P extends SmartContract {\n readonly t: bigint;\n constructor(t: bigint) { super(t); this.t = t; }\n");
     for (0..d) |i| {
