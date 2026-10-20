@@ -167,3 +167,39 @@ test {
     _ = @import("./compiler-directives/Directives_test.zig");
     _ = @import("./compiler-directives/EmbedTags_test.zig");
 }
+
+// F-294: the `test {}` block above is a hand-maintained import list, so a new
+// `<dir>/<Name>_test.zig` that nobody added to it registers nothing and the
+// build still reports success. This walks every example directory and fails
+// naming each `*_test.zig` whose `@import` line is missing from this file.
+// Proves: no on-disk test file under examples/zig is unregistered.
+// Does not prove: that every `.runar.zig` contract HAS a test file (some
+// directories have none) or that a registered file contains any `test` blocks.
+test "every example *_test.zig is imported by the test root" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const root_source = @embedFile("examples_test.zig");
+
+    var missing: usize = 0;
+    var root = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    var dirs = root.iterate();
+    while (try dirs.next(io)) |d| {
+        if (d.kind != .directory) continue;
+        if (std.mem.eql(u8, d.name, "zig-out") or std.mem.eql(u8, d.name, "zig-pkg") or
+            std.mem.startsWith(u8, d.name, ".")) continue;
+        var sub = try root.openDir(io, d.name, .{ .iterate = true });
+        defer sub.close(io);
+        var files = sub.iterate();
+        while (try files.next(io)) |f| {
+            if (f.kind != .file or !std.mem.endsWith(u8, f.name, "_test.zig")) continue;
+            const needle = try std.fmt.allocPrint(allocator, "@import(\"./{s}/{s}\")", .{ d.name, f.name });
+            defer allocator.free(needle);
+            if (std.mem.indexOf(u8, root_source, needle) == null) {
+                std.debug.print("F-294: {s}/{s} is not imported by examples_test.zig\n", .{ d.name, f.name });
+                missing += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing);
+}
