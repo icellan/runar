@@ -40,6 +40,17 @@
  *     `reason`; any NEW violation, or drift in an already-recorded one,
  *     fails the gate.
  *
+ *  4. The emitted mappings satisfy the F-293 whole-map shape rule against
+ *     the LIVE TS reference map of the same fixture
+ *     (`independent-oracle.ts#checkAgainstReference`), with the same
+ *     exact-count pins in `anchor-known-issues.json` as the committed-golden
+ *     gate in `independent-oracle.test.ts` (N-370). Without this, a
+ *     regression in a live compile that was not re-stamped into a golden
+ *     was invisible to this runner. The reference is compiled live even
+ *     under `--tier=<other>`; if it cannot be produced, a non-TS tier fails
+ *     closed. The TS tier is its own reference, so it can only be checked
+ *     against its (empty) pin.
+ *
  * The line/column numbers are deliberately tier-specific (each tier
  * compiles its own surface syntax — `.runar.ts` for TypeScript,
  * `.runar.go` for Go, etc.) so the goldens differ by design.
@@ -55,7 +66,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkSourceAnchors, evaluateAgainstKnownIssues, loadKnownIssues } from './independent-oracle.js';
+import {
+  checkAgainstReference,
+  checkSourceAnchors,
+  evaluateAgainstKnownIssues,
+  evaluateShapeAgainstKnownIssues,
+  loadKnownIssues,
+  type KnownIssueEntry,
+} from './independent-oracle.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
@@ -432,6 +450,42 @@ export function decideExitCode(failed: number, _update: boolean): number {
   return failed > 0 ? 1 : 0;
 }
 
+/**
+ * The F-293 whole-map shape decision for one LIVE (fixture, tier) map against
+ * the LIVE TS reference map of the same fixture. Exported so the decision can
+ * be unit-tested without spawning the real compilers. A missing reference
+ * (`null`) fails closed for every tier but TS, which is its own reference.
+ *
+ * N-370: run.ts used to compile every pair live but apply only the
+ * per-mapping anchor rule; the shape rule ran over committed goldens only.
+ */
+export function decideLiveShape(
+  fixture: string,
+  tier: string,
+  sm: SourceMap,
+  ref: SourceMap | null,
+  knownIssues: KnownIssueEntry[],
+): { ok: boolean; reason: string } {
+  if (ref === null) {
+    if (tier === 'ts') return { ok: true, reason: 'TS is the reference' };
+    return { ok: false, reason: `${fixture}/${tier}: the live TS reference map is unavailable, so the whole-map shape rule cannot be checked` };
+  }
+  return evaluateShapeAgainstKnownIssues(fixture, tier, checkAgainstReference(sm, ref), knownIssues);
+}
+
+/** Compile `fixture` with the TS tier into a scratch file and parse the map; null on any failure. */
+function liveReferenceMap(fixture: Fixture, sources: Record<string, string>): SourceMap | null {
+  const ts = TIERS[0]!;
+  const src = sources[ts.ext];
+  if (!src || !existsSync(src) || !ts.available()) return null;
+  const outDir = join(__dirname, fixture, ts.name);
+  mkdirSync(outDir, { recursive: true });
+  const tmp = join(outDir, '.tmp-source-map.json');
+  const r = ts.run(src, tmp);
+  if (!r.ok) return null;
+  try { return JSON.parse(readFileSync(tmp, 'utf-8')) as SourceMap; } catch { return null; }
+}
+
 function main() {
   const args = process.argv.slice(2);
   const update = args.includes('--update');
@@ -446,6 +500,7 @@ function main() {
   for (const fixture of FIXTURES) {
     if (fixtureFilter && fixture !== fixtureFilter) continue;
     const sources = loadFixtureSources(fixture);
+    let liveRef: SourceMap | null | undefined; // lazily compiled once per fixture
     for (const tier of TIERS) {
       if (tierFilter && tier.name !== tierFilter) continue;
       if (!tier.available()) {
@@ -482,10 +537,14 @@ function main() {
       const anchorReport = checkSourceAnchors(sm, REPO_ROOT);
       const anchorEval = evaluateAgainstKnownIssues(fixture, tier.name, anchorReport, knownIssues);
 
+      // F-293 whole-map shape rule against the LIVE TS reference (N-370).
+      if (liveRef === undefined) liveRef = liveReferenceMap(fixture, sources);
+      const shapeEval = decideLiveShape(fixture, tier.name, sm, liveRef, knownIssues);
+
       // Golden comparison (byte-identical) or update.
       let byteIdentical: boolean | undefined;
       if (update) {
-        if (decideGoldenWrite(structural.ok, anchorEval.ok)) {
+        if (decideGoldenWrite(structural.ok, anchorEval.ok && shapeEval.ok)) {
           writeFileSync(goldenPath, emitted);
           byteIdentical = true;
         } else {
@@ -497,7 +556,7 @@ function main() {
           outcomes.push({
             fixture, tier: tier.name, byteIdentical: false,
             structural: structural.ok ? 'ok' : 'fail', structuralReasons: structural.reasons,
-            anchor: anchorEval.ok ? 'ok' : 'fail', anchorReason: anchorEval.reason,
+            anchor: anchorEval.ok && shapeEval.ok ? 'ok' : 'fail', anchorReason: anchorEval.ok ? shapeEval.reason : anchorEval.reason,
             notes: 'golden missing — run with --update',
           });
           failed++;
@@ -506,11 +565,11 @@ function main() {
         byteIdentical = golden === emitted;
       }
 
-      if (!byteIdentical || !structural.ok || !anchorEval.ok) failed++;
+      if (!byteIdentical || !structural.ok || !anchorEval.ok || !shapeEval.ok) failed++;
       outcomes.push({
         fixture, tier: tier.name, byteIdentical,
         structural: structural.ok ? 'ok' : 'fail', structuralReasons: structural.reasons,
-        anchor: anchorEval.ok ? 'ok' : 'fail', anchorReason: anchorEval.reason,
+        anchor: anchorEval.ok && shapeEval.ok ? 'ok' : 'fail', anchorReason: anchorEval.ok ? shapeEval.reason : anchorEval.reason,
         notes: update && !byteIdentical ? 'refused to write golden: fails its own structural/anchor checks' : undefined,
       });
     }

@@ -175,8 +175,11 @@ swallow several anchors the reference keeps apart) and **extraMappings** (an
 opcode the reference leaves unmapped is compiler-synthesized and must not be
 mapped onto a user line). Finer tiers are allowed. Current non-zero
 signatures are pinned in `anchor-known-issues.json` (Rust `if-else` ->
-N-222; Zig `if-else` and `stateful-counter` -> new). Not wired into `run.ts`
-(live-compile path), and the TS reference cannot flag itself.
+N-222; Zig `if-else` and `stateful-counter` -> new). `run.ts` applies the
+same rule to every LIVE compile against the live TS map of the same fixture
+(`decideLiveShape`, N-370), with the same pins; the live TS map is compiled
+even under `--tier=<other>`, and a non-TS tier fails closed if it cannot be
+produced. The TS reference cannot flag itself.
 
 ### Residual limitations (things this oracle cannot independently validate)
 
