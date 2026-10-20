@@ -1309,6 +1309,13 @@ function parseExpression(
     case SyntaxKind.AsExpression: {
       // Type assertions: ignore the type part and just parse the expression
       const asExpr = node.asKindOrThrow(SyntaxKind.AsExpression);
+      // N-359: `number` is not a Rúnar type, so an assertion may not smuggle it
+      // past the declaration-site refusal. Every other asserted type (including
+      // `const`) stays erased, as in all seven tiers.
+      const assertedType = asExpr.getTypeNode();
+      if (assertedType && (assertedType.getKind() === SyntaxKind.NumberKeyword || assertedType.getText().trim() === 'number')) {
+        parseTypeNode(assertedType, file, errors);
+      }
       return parseExpression(asExpr.getExpression(), file, errors);
     }
 

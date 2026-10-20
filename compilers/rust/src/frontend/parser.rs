@@ -1581,8 +1581,22 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
         },
 
         Expr::TsAs(as_expr) => {
-            // Type assertions: ignore the type, parse the expression
+            // Type assertions: ignore the type, parse the expression. N-359:
+            // `number` is not a Rúnar type, so an assertion may not smuggle it
+            // past the declaration-site refusal; every other asserted type is
+            // erased, as in the other six tiers.
+            if let TsType::TsKeywordType(kw) = &*as_expr.type_ann {
+                if matches!(kw.kind, TsKeywordTypeKind::TsNumberKeyword) {
+                    parse_type_node(&as_expr.type_ann, file, errors);
+                }
+            }
             parse_expression(&as_expr.expr, file, errors)
+        }
+
+        Expr::TsConstAssertion(c) => {
+            // `expr as const`: the assertion is erased (N-359, parity with the
+            // other six tiers).
+            parse_expression(&c.expr, file, errors)
         }
 
         Expr::TsNonNull(nn) => {
