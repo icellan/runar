@@ -30,6 +30,22 @@ const SPHINCSWallet = @import("sphincs-wallet/SPHINCSWallet.runar.zig").SPHINCSW
 const StateCovenant = @import("state-covenant/StateCovenant.runar.zig").StateCovenant;
 const state_covenant_witness = @import("state-covenant/witness.zig");
 const Counter = @import("stateful-counter/Counter.runar.zig").Counter;
+const AnnotatedVault = @import("annotated-vault/AnnotatedVault.runar.zig").AnnotatedVault;
+const CountdownLoop = @import("countdown-loop/CountdownLoop.runar.zig").CountdownLoop;
+const LoopShapes = @import("loop-shapes/LoopShapes.runar.zig").LoopShapes;
+const ParamShadowBranchArm = @import("param-shadow-branch-arm/ParamShadowBranchArm.runar.zig").ParamShadowBranchArm;
+const PropertyShadow = @import("property-shadow/PropertyShadow.runar.zig").PropertyShadow;
+const R1K1Wallet = @import("r1-k1-wallet/R1K1Wallet.runar.zig").R1K1Wallet;
+const Selector = @import("selector/Selector.runar.zig").Selector;
+const SingleCounter = @import("sighash-single-stateful/SingleCounter.runar.zig").SingleCounter;
+const StatefulWOTSGate = @import("stateful-wots-gate/StatefulWOTSGate.runar.zig").StatefulWOTSGate;
+const TerminalVarlenRead = @import("terminal-varlen-read/TerminalVarlenRead.runar.zig").TerminalVarlenRead;
+const WalletToken = @import("token-wallet-naive-INSECURE/WalletToken.runar.zig").WalletToken;
+const SLHDSANaive128f = @import("post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f.runar.zig").PostQuantumSLHDSANaiveInsecure128f;
+const SLHDSANaive192f = @import("post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f.runar.zig").PostQuantumSLHDSANaiveInsecure192f;
+const SLHDSANaive192s = @import("post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s.runar.zig").PostQuantumSLHDSANaiveInsecure192s;
+const SLHDSANaive256f = @import("post-quantum-slhdsa-naive-INSECURE-256f/PostQuantumSLHDSANaiveInsecure256f.runar.zig").PostQuantumSLHDSANaiveInsecure256f;
+const SLHDSANaive256s = @import("post-quantum-slhdsa-naive-INSECURE-256s/PostQuantumSLHDSANaiveInsecure256s.runar.zig").PostQuantumSLHDSANaiveInsecure256s;
 const TicTacToe = @import("tic-tac-toe/TicTacToe.runar.zig").TicTacToe;
 const FungibleTokenExample = @import("token-ft/FungibleTokenExample.runar.zig").FungibleToken;
 const NFTExample = @import("token-nft/NFTExample.runar.zig").SimpleNFT;
@@ -141,7 +157,122 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "state-covenant-wrong-babybear-proof")) return probeStateCovenantWrongBabyBearProof();
     if (std.mem.eql(u8, probe_case, "state-covenant-wrong-merkle-proof")) return probeStateCovenantWrongMerkleProof();
     if (std.mem.eql(u8, probe_case, "state-covenant-wrong-batch-hash")) return probeStateCovenantWrongBatchHash();
+    if (std.mem.eql(u8, probe_case, "annotated-vault-wrong-sig")) return probeAnnotatedVaultWrongSig();
+    if (std.mem.eql(u8, probe_case, "countdown-loop-wrong-target")) return probeCountdownLoopWrongTarget();
+    if (std.mem.eql(u8, probe_case, "loop-shapes-wrong-target")) return probeLoopShapesWrongTarget();
+    if (std.mem.eql(u8, probe_case, "param-shadow-branch-arm-flagged-wrong-count")) return probeParamShadowFlaggedWrongCount();
+    if (std.mem.eql(u8, probe_case, "property-shadow-wrong-target")) return probePropertyShadowWrongTarget();
+    if (std.mem.eql(u8, probe_case, "property-shadow-count-not-greater")) return probePropertyShadowCountNotGreater();
+    if (std.mem.eql(u8, probe_case, "r1-k1-wallet-wrong-k1-key")) return probeR1K1WrongKey();
+    if (std.mem.eql(u8, probe_case, "r1-k1-wallet-wrong-k1-sig")) return probeR1K1WrongSig();
+    if (std.mem.eql(u8, probe_case, "selector-out-of-range")) return probeSelectorOutOfRange();
+    if (std.mem.eql(u8, probe_case, "sighash-single-stateful-reset-zero")) return probeSingleCounterResetZero();
+    if (std.mem.eql(u8, probe_case, "stateful-wots-gate-tampered-sig")) return probeStatefulWOTSGateTamperedSig();
+    if (std.mem.eql(u8, probe_case, "terminal-varlen-read-too-short")) return probeTerminalVarlenReadTooShort();
+    if (std.mem.eql(u8, probe_case, "token-wallet-transfer-wrong-sig")) return probeWalletTokenTransferWrongSig();
+    if (std.mem.eql(u8, probe_case, "token-wallet-transfer-short-addr")) return probeWalletTokenTransferShortAddr();
+    if (std.mem.eql(u8, probe_case, "token-wallet-merge-wrong-sig")) return probeWalletTokenMergeWrongSig();
+    if (std.mem.eql(u8, probe_case, "token-wallet-merge-other-holder")) return probeWalletTokenMergeOtherHolder();
+    if (std.mem.eql(u8, probe_case, "token-wallet-merge-negative-supply")) return probeWalletTokenMergeNegativeSupply();
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-128f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive128f);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-192f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive192f);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-192s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive192s);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-256f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256f);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-256s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256s);
     return error.UnknownProbeCase;
+}
+
+fn probeAnnotatedVaultWrongSig() !void {
+    const c = AnnotatedVault.init("", runar.ALICE.pubKey, 5);
+    c.withdraw(runar.signTestMessage(runar.BOB));
+}
+
+fn probeCountdownLoopWrongTarget() !void {
+    CountdownLoop.init(15).verify(0);
+}
+
+fn probeLoopShapesWrongTarget() !void {
+    LoopShapes.init(19).verify(0);
+}
+
+fn probeParamShadowFlaggedWrongCount() !void {
+    var c = ParamShadowBranchArm.init(1);
+    c.set(4, true);
+}
+
+fn probePropertyShadowWrongTarget() !void {
+    var c = PropertyShadow.init(6, 1);
+    c.bump(4);
+}
+
+fn probePropertyShadowCountNotGreater() !void {
+    var c = PropertyShadow.init(6, 0);
+    c.bump(5);
+}
+
+fn probeR1K1WrongKey() !void {
+    const c = R1K1Wallet.init(runar.hash160("r1"), runar.hash160(runar.ALICE.pubKey));
+    c.recoverK1(runar.signTestMessage(runar.BOB), runar.BOB.pubKey);
+}
+
+fn probeR1K1WrongSig() !void {
+    const c = R1K1Wallet.init(runar.hash160("r1"), runar.hash160(runar.ALICE.pubKey));
+    c.recoverK1(runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
+}
+
+fn probeSelectorOutOfRange() !void {
+    var c = Selector.init(1, 2);
+    c.set(2, 7);
+}
+
+fn probeSingleCounterResetZero() !void {
+    var c = SingleCounter.init(0);
+    c.reset();
+}
+
+fn probeStatefulWOTSGateTamperedSig() !void {
+    const seed = [_]u8{0x42} ** 32;
+    const pub_seed = [_]u8{0x13} ** 32;
+    const wots_pub_key = runar.testing.wotsPublicKeyFromSeed(&seed, &pub_seed);
+    var wots_sig = runar.testing.wotsSignDeterministic("gate-message", &seed, &pub_seed);
+    wots_sig[17] ^= 0xff;
+    var c = StatefulWOTSGate.init(4);
+    c.advance("gate-message", &wots_sig, &wots_pub_key);
+}
+
+fn probeTerminalVarlenReadTooShort() !void {
+    const c = TerminalVarlenRead.init("hello");
+    c.reveal(5);
+}
+
+fn probeWalletTokenTransferWrongSig() !void {
+    const c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.transfer(runar.signTestMessage(runar.BOB), runar.hash160(runar.BOB.pubKey));
+}
+
+fn probeWalletTokenTransferShortAddr() !void {
+    const c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.transfer(runar.signTestMessage(runar.ALICE), runar.hash160(runar.BOB.pubKey)[0..19]);
+}
+
+fn probeWalletTokenMergeWrongSig() !void {
+    var c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.merge(runar.signTestMessage(runar.BOB), 50, runar.ALICE.pubKey);
+}
+
+fn probeWalletTokenMergeOtherHolder() !void {
+    var c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.merge(runar.signTestMessage(runar.ALICE), 50, runar.BOB.pubKey);
+}
+
+fn probeWalletTokenMergeNegativeSupply() !void {
+    var c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.merge(runar.signTestMessage(runar.ALICE), -1, runar.ALICE.pubKey);
+}
+
+fn probeSLHDSANaiveMalformedSig(comptime Contract: type) !void {
+    const c = Contract.init("slhdsa-pub-key-bytes-fake");
+    c.spend("message", "not-a-signature");
 }
 
 fn payoutOutput(amount: i64, pub_key: []const u8) []const u8 {

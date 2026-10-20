@@ -166,6 +166,39 @@ test {
     _ = @import("./post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure_test.zig");
     _ = @import("./compiler-directives/Directives_test.zig");
     _ = @import("./compiler-directives/EmbedTags_test.zig");
+    _ = @import("./all-readonly-cleanstack/AllReadonlyCleanstack_test.zig");
+    _ = @import("./annotated-vault/AnnotatedVault_test.zig");
+    _ = @import("./asm-raw-script/Anyone_test.zig");
+    _ = @import("./branch-merged-locals/BranchMergedLocals_test.zig");
+    _ = @import("./branched-readonly-len/BranchedReadonlyLen_test.zig");
+    _ = @import("./byte-builtins/ByteBuiltins_test.zig");
+    _ = @import("./cond-write-multi-field/CondWriteMultiField_test.zig");
+    _ = @import("./conditional-data-output/ConditionalDataOutput_test.zig");
+    _ = @import("./countdown-loop/CountdownLoop_test.zig");
+    _ = @import("./fixed-array-index/ArrayIndex_test.zig");
+    _ = @import("./fixed-array-write/ArrayWrite_test.zig");
+    _ = @import("./go-dsl-bytestring-literal/GoDslBytestringLiteral_test.zig");
+    _ = @import("./integer-boundary/IntegerBoundary_test.zig");
+    _ = @import("./intent-current-block-height/IntentCurrentBlockHeight_test.zig");
+    _ = @import("./intent-output-p2pkh/IntentOutputP2PKH_test.zig");
+    _ = @import("./intent-prev-output-script/IntentPrevOutputScript_test.zig");
+    _ = @import("./loop-shapes/LoopShapes_test.zig");
+    _ = @import("./p256-encode-negate/P256EncodeNegate_test.zig");
+    _ = @import("./p384-encode-negate/P384EncodeNegate_test.zig");
+    _ = @import("./param-shadow-branch-arm/ParamShadowBranchArm_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-256f/PostQuantumSLHDSANaiveInsecure256f_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-256s/PostQuantumSLHDSANaiveInsecure256s_test.zig");
+    _ = @import("./property-shadow/PropertyShadow_test.zig");
+    _ = @import("./r1-k1-wallet/R1K1Wallet_test.zig");
+    _ = @import("./selector/Selector_test.zig");
+    _ = @import("./sighash-single-stateful/SingleCounter_test.zig");
+    _ = @import("./state-covenant-mechanics/StateCovenantMechanics_test.zig");
+    _ = @import("./stateful-wots-gate/StatefulWOTSGate_test.zig");
+    _ = @import("./terminal-varlen-read/TerminalVarlenRead_test.zig");
+    _ = @import("./token-wallet-naive-INSECURE/WalletToken_test.zig");
 }
 
 // F-294: the `test {}` block above is a hand-maintained import list, so a new
