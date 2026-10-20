@@ -258,7 +258,7 @@ const SETUP_EXCLUDE =
  * `VAR=value` env assignments) count as "gates" worth diffing; `if`, `fi`,
  * `files=(...)`, bare `echo`, etc. are glue, not tests. */
 const KNOWN_CMD =
-  /^(bash|node|npx|pnpm|go|cargo|python3?|ruby|bundle|zig|gradle|rake|lake|git|curl|tsx|sh|\$\w+)\b|^[\w./-]+\.sh\b/;
+  /^(bash|node|npx|pnpm|go|cargo|python3?|ruby|bundle|zig|gradle|rake|lake|git|curl|tsx|sh|\$\w+)\b|^\.\/gradlew\b|^[\w./-]+\.sh\b/;
 
 function stripEnvPrefix(line: string): string {
   let s = line;
@@ -409,7 +409,7 @@ const EXPECTED_UNCOVERED: string[] = [
   'script-execution :: pnpm run build',
   // --- transitive-via-script (a sibling command in the same job already
   //     performs this as a side effect) -----------------------------------
-  'java-compiler :: cd compilers/java && gradle build --no-daemon',
+  'java-compiler :: cd compilers/java && ./gradlew build --no-daemon',
 ];
 
 describe('N-283: pnpm test:ci vs .github/workflows/ci.yml — the measured drift', () => {

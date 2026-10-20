@@ -437,6 +437,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Rust compiler (for cross-compiler tests)
         run: cd compilers/rust && cargo build --release
@@ -451,7 +452,7 @@ jobs:
       - name: Build Zig compiler (for cross-compiler tests)
         run: cd compilers/zig && zig build -Doptimize=ReleaseSafe
       - name: Build Java compiler jar (for cross-compiler tests)
-        run: cd compilers/java && gradle jar --no-daemon
+        run: cd compilers/java && ./gradlew jar --no-daemon
       # ---- turbo build-output cache (shared by every job that runs
       #      `pnpm run build`) -------------------------------------------------
       # Seven jobs in this workflow (plus four in fuzzer-nightly.yml and one in
@@ -711,11 +712,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Java compiler
-        run: cd compilers/java && gradle build --no-daemon
+        run: cd compilers/java && ./gradlew build --no-daemon
       - name: Java compiler unit tests
-        run: cd compilers/java && gradle test --no-daemon
+        run: cd compilers/java && ./gradlew test --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: runar-java
@@ -882,11 +884,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
       - name: SDK tests
-        run: cd packages/runar-java && gradle test --no-daemon
+        run: cd packages/runar-java && ./gradlew test --no-daemon
       - name: Example tests
-        run: cd examples/java && gradle test --no-daemon
+        run: cd examples/java && ./gradlew test --no-daemon
       - name: Build conformance SDK driver
         run: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon
 
@@ -1273,6 +1278,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
       # Read-only restore of the turbo build-output cache (see the ts-compiler
       # job's writer step for the staleness argument). This job runs in parallel
       # with ts-compiler, so it restores the newest prior entry via restore-keys
@@ -1565,6 +1572,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
       # Read-only restore of the turbo build-output cache written by the
       # ts-compiler job (this job `needs:` it). See that job's writer step for
       # the staleness argument.
@@ -1706,6 +1715,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       # Read-only restore of the turbo build-output cache written by the
       # ts-compiler job (this job `needs:` it). See that job's writer step for
@@ -1773,7 +1783,7 @@ jobs:
         timeout-minutes: 5
 
       - name: Java integration tests
-        run: cd integration/java && gradle test -Drunar.integration=true --no-daemon
+        run: cd integration/java && ./gradlew test -Drunar.integration=true --no-daemon
         timeout-minutes: 35
 
       - name: Install end-to-end Ruby deps

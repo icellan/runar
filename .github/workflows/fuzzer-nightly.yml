@@ -116,6 +116,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
 
       # ----- TypeScript workspace install + build (so the fuzzer can
@@ -144,7 +145,7 @@ jobs:
       - name: Build Zig compiler
         run: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline
       - name: Build Java compiler jar
-        run: cd compilers/java && gradle jar --no-daemon
+        run: cd compilers/java && ./gradlew jar --no-daemon
 
       # ----- PR merge gate (GAP-001): fixed-seed fold-OFF run hard-fails (the
       # ----- fuzzer's own exit(1)) on any cross-tier hex divergence. A FIXED

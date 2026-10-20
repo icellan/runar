@@ -86,6 +86,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
 
       # ----- Lean toolchain (elan + lake) -----
@@ -132,7 +133,7 @@ jobs:
       - name: Build Zig compiler
         run: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline
       - name: Build Java compiler jar
-        run: cd compilers/java && gradle jar --no-daemon
+        run: cd compilers/java && ./gradlew jar --no-daemon
       - name: Build Lean verifier (lake build pipelineGolden)
         working-directory: runar-verification
         run: lake build && lake build pipelineGolden
