@@ -20,7 +20,7 @@ import { buildSourceTiers, compileHex, judge } from './tier-harness.js';
  *
  * What this proves: every available tier's one-shot CLI refuses each `as number`
  * shape (assertion on an identifier, bare inside assert(), and chained through
- * `as bigint`) with a diagnostic naming `number` (grading is discrimination, not prose: go words it "invalid TypeScript integer literal 'number'", the other six "'number' type is not allowed in Rúnar contracts"), and
+ * `as bigint`) with the canonical "'number' type is not allowed in Rúnar contracts; use 'bigint' instead" (N-365: go used to say "invalid TypeScript integer literal 'number'" because its numeric-literal pre-check matched the `number` keyword token; the diagnostic must also carry no "integer literal" line), so does a `y: number` declaration, and
  * compiles `5n as const` to exactly the bytes of the same contract written with
  * a plain `5n`, so the const assertion is erased and does not change the AST.
  * The accepted control `x as bigint` keeps compiling (N-346 covers the wider
@@ -50,12 +50,16 @@ const DIR = mkdtempSync(join(tmpdir(), 'n359-ts-as-number-'));
 const tiers = buildSourceTiers().filter((t) => t.cmd !== null);
 const ts = tiers.find((t) => t.id === 'ts');
 
-const NUMBER_RE = /number/;
+// N-365: the CANONICAL wording, in every tier (python spells the brand without the accent).
+const NUMBER_RE = /'number' type is not allowed in R[úu]nar contracts; use 'bigint' instead/;
+// N-365: go used to also print this for the `number` keyword token (its numeric-literal pre-check matched it).
+const MISLEADING_RE = /integer literal/;
 
 const REFUSED: Array<{ name: string; body: string }> = [
   { name: 'AsNumber', body: 'const y = x as number; assert(y > 0n);' },
   { name: 'AsNumberBare', body: 'assert(x as number > 0n);' },
   { name: 'AsNumberChained', body: 'const y = x as number as bigint; assert(y > 0n);' },
+  { name: 'DeclNumber', body: 'const y: number = 1n; assert(x > 0n);' },
 ];
 
 const ACCEPTED: Array<{ name: string; withAs: string; plain: string }> = [
@@ -81,10 +85,11 @@ describe('N-359: `as number` is refused and `as const` is accepted in every .run
     const file = join(DIR, `${c.name}.runar.ts`);
     writeFileSync(file, contract(c.name, c.body));
     for (const tier of tiers) {
-      it(`${tier.id} refuses ${c.name} with a diagnostic naming number`, () => {
+      it(`${tier.id} refuses ${c.name} with the canonical number diagnostic and no literal complaint`, () => {
         const r = judge(tier, file);
         expect(r.verdict).toBe('rejected');
         expect(r.diag).toMatch(NUMBER_RE);
+        expect(r.diag).not.toMatch(MISLEADING_RE);
       }, tier.timeoutMs);
     }
   }

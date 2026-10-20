@@ -280,7 +280,9 @@ type parseContext struct {
 func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 	coveredTo := -1
 	tsWalk(root, func(n *sitter.Node) bool {
-		if n.Type() == "number" && int(n.StartByte()) >= coveredTo {
+		// IsNamed: the anonymous `number` keyword token of a `: number` /
+		// `as number` type shares this node type but is not a literal (N-365).
+		if n.Type() == "number" && n.IsNamed() && int(n.StartByte()) >= coveredTo {
 			start, end := int(n.StartByte()), int(n.EndByte())
 			for end < len(p.source) && isNumberContinue(p.source[end]) {
 				end++
@@ -892,7 +894,7 @@ func (p *parseContext) parseTypeExpr(node *sitter.Node) TypeNode {
 		case "void":
 			return PrimitiveType{Name: "void"}
 		case "number":
-			p.addError("use 'bigint' instead of 'number' in Rúnar contracts")
+			p.addError("'number' type is not allowed in Rúnar contracts; use 'bigint' instead")
 			return PrimitiveType{Name: "bigint"}
 		}
 		return CustomType{Name: text}
@@ -1628,7 +1630,11 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		return Identifier{Name: "super"}
 
 	case "as_expression":
-		// Type assertion: ignore type, parse expression
+		// Type assertion: ignore type, parse expression -- except that an
+		// asserted `number` is refused like a `: number` annotation (N-365).
+		if t := node.Child(int(node.ChildCount()) - 1); t != nil && t.Type() == "predefined_type" && p.nodeText(t) == "number" {
+			p.parseTypeExpr(t)
+		}
 		return p.parseExpression(node.Child(0))
 
 	case "non_null_expression":

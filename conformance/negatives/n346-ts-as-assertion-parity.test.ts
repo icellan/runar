@@ -19,8 +19,8 @@ import { buildSourceTiers, compileHex } from './tier-harness.js';
  * inside super()) every available tier compiles the `as` contract to exactly
  * the bytes the TS tier compiles the same contract with the assertion removed,
  * so the assertion is erased and does not change the AST.
- * What it does NOT prove: execution of those bytes, `as number` (go/python/ruby/java/zig refuse it, TS accepts: open
- * divergence), `as const` (rust refuses it), or the non-.runar.ts surfaces.
+ * What it does NOT prove: execution of those bytes, `as number` / `as const` (both closed in N-359: every tier refuses
+ * `as number` and accepts `as const`; see n359-ts-as-number-const-parity.test.ts), or the non-.runar.ts surfaces.
  */
 
 const contract = (name: string, body: string, superArg: string) => `import { SmartContract, assert, checkSig, sha256 } from 'runar-lang';
