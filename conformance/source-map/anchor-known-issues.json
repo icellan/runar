@@ -38,7 +38,50 @@
     "    (new violations, or a pair regressing from clean) fails the gate.",
     "  - Entries are removed (not zeroed out) once the underlying generator",
     "    bug is fixed, so a clean pair goes back to being unconditionally",
-    "    enforced rather than silently pinned at violationCount: 0."
+    "    enforced rather than silently pinned at violationCount: 0.",
+    "",
+    "F-293 whole-map signature (independent-oracle.ts#checkAgainstReference):",
+    "  `mergedAnchors` / `extraMappings` pin, per (fixture, tier), how the tier's",
+    "  map compares to the TS reference map of the same fixture (opcode N is the",
+    "  same opcode in every tier by hex parity). mergedAnchors = reference",
+    "  anchors a single tier anchor swallows; extraMappings = opcodes the tier",
+    "  maps that the reference leaves unmapped (compiler-synthesized). Both",
+    "  default to 0 when omitted and are matched EXACTLY, so a generator fix",
+    "  that lands without removing its entry fails, as does a regression."
   ],
-  "knownIssues": []
+  "knownIssues": [
+    {
+      "fixture": "if-else",
+      "tier": "rs",
+      "violationCount": 0,
+      "trackedCount": 20,
+      "totalCount": 20,
+      "mergedAnchors": 2,
+      "extraMappings": 6,
+      "reason": "Rust maps branch-body opcodes (10..26, spanning the then and else bodies and the if condition) onto the single line of the enclosing `if` instead of each body statement, merging 3 reference anchors into one and mapping 6 opcodes the TS reference leaves unmapped. Every mapping is individually valid, so the per-mapping rules cannot see it.",
+      "tracking": "N-222"
+    },
+    {
+      "fixture": "if-else",
+      "tier": "zig",
+      "violationCount": 0,
+      "trackedCount": 17,
+      "totalCount": 17,
+      "mergedAnchors": 0,
+      "extraMappings": 3,
+      "reason": "Zig maps 3 opcodes (0, 17, 23) that the TS reference leaves unmapped: the if-branch bookkeeping ops are anchored to the `if` line. Not an anchor-validity defect; pinned so it cannot grow.",
+      "tracking": "NEW (reported to dispatcher by F-293; no finding id yet)"
+    },
+    {
+      "fixture": "stateful-counter",
+      "tier": "zig",
+      "violationCount": 0,
+      "trackedCount": 432,
+      "totalCount": 432,
+      "mergedAnchors": 0,
+      "extraMappings": 422,
+      "reason": "Zig maps 432 opcodes against the TS reference's 10: ~420 compiler-injected stateful preamble opcodes (from opcode 7) are all anchored to a single user position (12:20), a 43x mapping-count explosion that the per-mapping rules certify as clean. The reference leaves these synthesized opcodes unmapped.",
+      "tracking": "NEW (reported to dispatcher by F-293; no finding id yet)"
+    }
+  ]
 }

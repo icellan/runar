@@ -164,6 +164,20 @@ file via `evaluateAgainstKnownIssues`:
   to fully-untracked) is also a hard failure, forcing a deliberate,
   reviewed allowlist update rather than a silent pass-through.
 
+### Whole-map check against the TS reference (F-293)
+
+`checkSourceAnchors` is per-mapping, so N identical valid positions pass as
+well as one. `checkAgainstReference` adds two exact, tier-independent
+whole-map rules relative to the TS tier (hex parity makes opcode N the same
+opcode in every tier, so only the partition of opcodes into anchors is
+compared, never coordinates): **mergedAnchors** (a tier anchor must not
+swallow several anchors the reference keeps apart) and **extraMappings** (an
+opcode the reference leaves unmapped is compiler-synthesized and must not be
+mapped onto a user line). Finer tiers are allowed. Current non-zero
+signatures are pinned in `anchor-known-issues.json` (Rust `if-else` ->
+N-222; Zig `if-else` and `stateful-counter` -> new). Not wired into `run.ts`
+(live-compile path), and the TS reference cannot flag itself.
+
 ### Residual limitations (things this oracle cannot independently validate)
 
 - It confirms a mapped position is a *plausible* token anchor, not that
