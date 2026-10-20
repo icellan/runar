@@ -316,9 +316,7 @@ func bn254FieldMulConst(t *BN254Tracker, aName string, c int64, resultName strin
 				e(StackOp{Op: "push", Value: bigIntPush(c)})
 				e(StackOp{Op: "opcode", Code: "OP_MUL"})
 			}
-			e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-			e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-			e(StackOp{Op: "opcode", Code: "OP_PICK"})
+			t.emitFetchQ(e, 1)
 			e(StackOp{Op: "opcode", Code: "OP_MOD"})
 		})
 		return
