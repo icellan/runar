@@ -937,7 +937,13 @@ fn run_method(
         if implicit.contains(&param.name.as_str()) && !caller_bound {
             continue;
         }
-        if let Some(sv) = args.get(&param.name) {
+        // N-360: a property-named public param the method reassigns is bound
+        // in the ANF under its `<name>@local` slot; the caller's args (and the
+        // ABI) use the source name.
+        let bound = args
+            .get(&param.name)
+            .or_else(|| param.name.strip_suffix("@local").and_then(|source| args.get(source)));
+        if let Some(sv) = bound {
             env.insert(param.name.clone(), Val::from_sdk(sv));
         }
     }

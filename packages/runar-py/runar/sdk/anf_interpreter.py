@@ -688,6 +688,11 @@ def _run_method(
             continue
         if pname in args:
             env[pname] = args[pname]
+        elif pname.endswith('@local') and pname[: -len('@local')] in args:
+            # N-360: a property-named public param the method reassigns is
+            # bound in the ANF under its ``<name>@local`` slot; the caller's
+            # args (and the ABI) use the source name.
+            env[pname] = args[pname[: -len('@local')]]
 
     # Track state mutations, data outputs, and raw outputs.
     # ``raw_outputs`` collects ``add_raw_output`` entries; the simulator does

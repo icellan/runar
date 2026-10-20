@@ -568,8 +568,13 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             if (isByteType(param.type_info)) try method_ctx.markByteTyped(param.name);
             // N-016: a private helper's parameter is not part of any ABI, so
             // one that shadows a property is bound under the collision-proof
-            // local name. (A PUBLIC parameter keeps its ABI name.)
-            if (!method.is_public and method_ctx.isProperty(param.name)) {
+            // local name. (A PUBLIC parameter keeps its ABI name.) N-360: a
+            // public one the body REASSIGNS is renamed too — its rebinding is
+            // merged out of an if by name, where a property result of the same
+            // name would capture it. The ABI keeps the source name either way.
+            if (method_ctx.isProperty(param.name) and
+                (!method.is_public or statementsReassign(method.body, param.name)))
+            {
                 try method_ctx.renamed_private_params.put(allocator, param.name, try method_ctx.localName(param.name));
             }
         }
@@ -653,7 +658,9 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             var aug_params: std.ArrayListUnmanaged(ParamNode) = .empty;
             for (method.params) |param| {
                 if (!std.mem.eql(u8, param.type_name, "StatefulContext")) {
-                    try aug_params.append(allocator, param);
+                    var slotted = param;
+                    slotted.name = method_ctx.paramSlot(param.name);
+                    try aug_params.append(allocator, slotted);
                 }
             }
             if (needs_change_output) {
@@ -1426,6 +1433,26 @@ const LowerCtx = struct {
         return self.renamed_private_params.get(name) orelse name;
     }
 
+    /// N-360: the binding a WRITE to the bare identifier `name` rebinds — the
+    /// local's binding when a local of that name is in scope, else a renamed
+    /// parameter's slot (it is read from there), else the name itself.
+    fn writeTarget(self: *const LowerCtx, name: []const u8) []const u8 {
+        const local = self.localTarget(name);
+        if (self.isLocal(local)) return local;
+        if (self.isParam(name)) return self.paramSlot(name);
+        return local;
+    }
+
+    /// N-360: whether `name` is the `load_param` slot of one of this method's
+    /// parameters.
+    fn isParamSlot(self: *const LowerCtx, name: []const u8) bool {
+        var it = self.param_names.keyIterator();
+        while (it.next()) |key| {
+            if (std.mem.eql(u8, self.paramSlot(key.*), name)) return true;
+        }
+        return false;
+    }
+
     fn subContext(self: *LowerCtx) Allocator.Error!LowerCtx {
         var sub = LowerCtx.init(self.allocator, self.contract);
         sub.counter = self.counter;
@@ -1658,6 +1685,67 @@ fn collectStatementReads(ctx: *LowerCtx, stmt: Statement, out: *NameSet) LowerEr
     }
 }
 
+/// N-360: whether any statement writes the bare identifier `name` — an
+/// assignment to it, or a `++` / `--` of it — anywhere, nested blocks included.
+fn statementsReassign(stmts: []const Statement, name: []const u8) bool {
+    for (stmts) |s| {
+        if (statementReassigns(s, name)) return true;
+    }
+    return false;
+}
+
+fn statementReassigns(stmt: Statement, name: []const u8) bool {
+    return switch (stmt) {
+        .const_decl => |d| expressionReassigns(d.value, name),
+        .let_decl => |d| if (d.value) |v| expressionReassigns(v, name) else false,
+        .assign => |a| (!a.target_is_property and std.mem.eql(u8, a.target, name)) or
+            (if (a.index_target) |ia| expressionReassigns(ia.index, name) else false) or
+            expressionReassigns(a.value, name),
+        .if_stmt => |s| expressionReassigns(s.condition, name) or
+            statementsReassign(s.then_body, name) or
+            (if (s.else_body) |eb| statementsReassign(eb, name) else false),
+        .for_stmt => |s| (if (s.update) |u| statementReassigns(u.*, name) else false) or
+            statementsReassign(s.body, name),
+        .assert_stmt => |s| expressionReassigns(s.condition, name),
+        .expr_stmt => |s| expressionReassigns(s.expr, name),
+        .return_stmt => |maybe_expr| if (maybe_expr) |e| expressionReassigns(e, name) else false,
+    };
+}
+
+fn expressionReassigns(expr: Expression, name: []const u8) bool {
+    return switch (expr) {
+        .binary_op => |b| expressionReassigns(b.left, name) or expressionReassigns(b.right, name),
+        .unary_op => |u| expressionReassigns(u.operand, name),
+        .call => |c| blk: {
+            for (c.args) |a| {
+                if (expressionReassigns(a, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .method_call => |m| blk: {
+            for (m.args) |a| {
+                if (expressionReassigns(a, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .ternary => |t| expressionReassigns(t.condition, name) or
+            expressionReassigns(t.then_expr, name) or
+            expressionReassigns(t.else_expr, name),
+        .index_access => |ia| expressionReassigns(ia.object, name) or expressionReassigns(ia.index, name),
+        .increment => |i| (i.operand == .identifier and std.mem.eql(u8, i.operand.identifier, name)) or
+            expressionReassigns(i.operand, name),
+        .decrement => |d| (d.operand == .identifier and std.mem.eql(u8, d.operand.identifier, name)) or
+            expressionReassigns(d.operand, name),
+        .array_literal => |elements| blk: {
+            for (elements) |e| {
+                if (expressionReassigns(e, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 /// Collect every identifier an expression reads.
 fn collectExpressionReads(ctx: *LowerCtx, expr: Expression, out: *NameSet) LowerError!void {
     switch (expr) {
@@ -1781,7 +1869,7 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
                     .value = value_ref,
                 } });
             } else if (rebinds) {
-                try ctx.emitNamed(local, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
+                try ctx.emitNamed(ctx.writeTarget(assign.target), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
                 _ = try lowerExprToRef(ctx, .{ .identifier = assign.target });
             }
@@ -3049,7 +3137,7 @@ fn lowerIncrementExpr(ctx: *LowerCtx, inc: *const types.IncrementExpr) LowerErro
     // If operand is a named variable, update it
     switch (inc.operand) {
         .identifier => |name| {
-            try ctx.emitNamed(ctx.localTarget(name), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
+            try ctx.emitNamed(ctx.writeTarget(name), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
         },
         .property_access => |pa| {
             if (isReadonlyProperty(ctx.contract.properties, pa.property)) {
@@ -3079,7 +3167,7 @@ fn lowerDecrementExpr(ctx: *LowerCtx, dec: *const types.DecrementExpr) LowerErro
     // If operand is a named variable, update it
     switch (dec.operand) {
         .identifier => |name| {
-            try ctx.emitNamed(ctx.localTarget(name), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
+            try ctx.emitNamed(ctx.writeTarget(name), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
         },
         .property_access => |pa| {
             if (isReadonlyProperty(ctx.contract.properties, pa.property)) {
@@ -3147,7 +3235,8 @@ fn collectBranchMergedLocals(
         var arm: std.ArrayListUnmanaged([]const u8) = .empty;
         defer arm.deinit(ctx.allocator);
         for (branch.bindings.items) |b| {
-            if (!ctx.isLocal(b.name)) continue;
+            // N-360: a reassigned parameter merges like a local (by its slot name).
+            if (!ctx.isLocal(b.name) and !ctx.isParamSlot(b.name)) continue;
             var seen = false;
             for (arm.items, 0..) |existing, i| {
                 if (std.mem.eql(u8, existing, b.name)) {

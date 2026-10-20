@@ -1049,7 +1049,13 @@ module RunarCompiler
     program.methods.each do |method|
       next if method.name == "constructor"
 
-      params = method.params.map { |p| ABIParam.new(name: p.name, type: p.type) }
+      # N-360: a reassigned property-named public param is bound in the ANF
+      # under its `<name>@local` slot; the ABI keeps the source name the
+      # caller passes.
+      params = method.params.map do |p|
+        name = method.is_public && p.name.end_with?("@local") ? p.name.delete_suffix("@local") : p.name
+        ABIParam.new(name: name, type: p.type)
+      end
 
       # For stateful contracts, mark public methods without a continuation as
       # terminal. N-038: a SIGHASH_SINGLE method continues without _changePKH,

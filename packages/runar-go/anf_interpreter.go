@@ -527,6 +527,15 @@ type MockPreimageAmount struct {
 	ScriptCode string
 }
 
+// renamedParamSource (N-360) returns the source name of a param bound under
+// its `<name>@local` slot.
+func renamedParamSource(name string) (string, bool) {
+	if strings.HasSuffix(name, "@local") {
+		return strings.TrimSuffix(name, "@local"), true
+	}
+	return "", false
+}
+
 // continuationArg reports whether an implicit param is one the caller may bind
 // (F-024 / R14): `_newAmount` when supplied, and `txPreimage` when supplied as
 // a MockPreimageAmount. The others stay skipped.
@@ -613,6 +622,13 @@ func runMethod(
 		}
 		if v, ok := args[param.Name]; ok {
 			env[param.Name] = v
+		} else if source, renamed := renamedParamSource(param.Name); renamed {
+			// N-360: a property-named public param the method reassigns is
+			// bound in the ANF under its `<name>@local` slot; the caller's args
+			// (and the ABI) use the source name.
+			if v, ok := args[source]; ok {
+				env[param.Name] = v
+			}
 		}
 	}
 

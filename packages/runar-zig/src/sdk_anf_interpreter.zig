@@ -689,6 +689,13 @@ fn runMethod(
         if (isImplicitParam(param.name) and !caller_bound) continue;
         if (args.get(param.name)) |val| {
             try env.put(param.name, val);
+        } else if (std.mem.endsWith(u8, param.name, "@local")) {
+            // N-360: a property-named public param the method reassigns is
+            // bound in the ANF under its `<name>@local` slot; the caller's args
+            // (and the ABI) use the source name.
+            if (args.get(param.name[0 .. param.name.len - "@local".len])) |val| {
+                try env.put(param.name, val);
+            }
         }
     }
 

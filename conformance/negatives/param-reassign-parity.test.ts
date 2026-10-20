@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Tier, buildSourceTiers } from './tier-harness.js';
+import { runStatefulSpend } from '../../packages/runar-testing/src/oracle/real-crypto-execution.js';
 import { isCiEnv } from '../env.js';
 
 /**
@@ -26,20 +27,36 @@ import { isCiEnv } from '../env.js';
  * lived. Why not a conformance fixture: the item forbids one (a fixture also
  * needs a provenance-gated golden).
  *
+ * N-360: the pinned 1420 / 1404 bytes were themselves wrong. All seven tiers
+ * agreed on them, and the PR spend they build commits the UNINCREMENTED
+ * argument — `increment(5, 1)` from state 0 was rejected on the real Spend
+ * engine with the honest continuation (count = 6) and accepted with the stale
+ * one (count = 5). The property-named parameter was bound under the
+ * property's own name. It is now bound under its `count@local` slot whenever
+ * the method reassigns it, and the pins below are the corrected bytes (PR
+ * 1414 hex, ShadowParam 1398 hex). Byte agreement alone could not see the old
+ * miscompile, so the PR spend is now also executed.
+ *
  * What this proves: every available tier's CLI (fold-ON default) compiles the
  * PR contract in each of the seven brace surfaces, the stateless SL contract,
  * and the N-023 ShadowParam .runar.java probe to the same bytes, and those
  * bytes are pinned (sha256 / literal) so all seven drifting together still
- * fails.
- * What it does NOT prove: on-chain spend behaviour of those bytes, fold-OFF
+ * fails; and the TS-compiled PR contract, deployed and spent on @bsv/sdk's
+ * Spend engine with real signatures, accepts the honest continuation state
+ * and rejects the stale-argument (5) and untouched (0) states — which, with
+ * the 7-tier pin, covers every tier's bytes.
+ * What it does NOT prove: execution of the ShadowParam / SL bytes, fold-OFF
  * output (compilers/zig/src/tests/param_reassignment.zig pins Zig's fold-OFF
  * bytes, which are the same), or the .runar.py / .runar.rb surfaces, whose
  * parsers lower a first assignment as a declaration and never reached the
  * defective arm.
  */
 
-const PR_SHA256 = '342abda71c4eed6f75a655b86db86e98cd2357eec9861ae69df6b2aab2fa507d';
-const SHADOW_PARAM_SHA256 = 'efbe11c00856b75de6e6ca9e0e54812a17c7633c594c1065c64e0ecf098ee2e4';
+/** N-360: PR 1414 hex chars (was 1420), ShadowParam 1398 (was 1404). */
+const PR_SHA256 = 'a8300f31ee8ab63c3f0a7b617e9dd91f9e37c4f753ab84496911b80fef5728ee';
+const PR_HEX_LEN = 1414;
+const SHADOW_PARAM_SHA256 = 'b9ede9c014e89373bedf983b487da17286e915bccaeb50e1fd3546da4d6f57e1';
+const SHADOW_PARAM_HEX_LEN = 1398;
 const SL_HEX = '788b7852937c9d0000a07777';
 
 const PR_SOURCES: Record<string, string> = {
@@ -235,20 +252,55 @@ describe('N-129 parameter reassignment — seven-tier positive parity', () => {
   for (const [name, src] of Object.entries(PR_SOURCES)) {
     for (const tier of TIERS) {
       it(`${tier.id} compiles ${name} to the TS reference bytes`, () => {
-        expect(sha256(compileHex(tier, write(name, src)))).toBe(PR_SHA256);
+        const hex = compileHex(tier, write(name, src));
+        expect(hex.length).toBe(PR_HEX_LEN);
+        expect(sha256(hex)).toBe(PR_SHA256);
       });
     }
   }
 
   for (const tier of TIERS) {
     it(`${tier.id} compiles the N-023 ShadowParam.runar.java probe to the TS reference bytes`, () => {
-      expect(sha256(compileHex(tier, write('ShadowParam.runar.java', SHADOW_PARAM_JAVA)))).toBe(
-        SHADOW_PARAM_SHA256,
-      );
+      const hex = compileHex(tier, write('ShadowParam.runar.java', SHADOW_PARAM_JAVA));
+      expect(hex.length).toBe(SHADOW_PARAM_HEX_LEN);
+      expect(sha256(hex)).toBe(SHADOW_PARAM_SHA256);
     });
 
     it(`${tier.id} keeps a stateless parameter rebind (neither dropped nor a readonly write)`, () => {
       expect(compileHex(tier, write('SL.runar.ts', SL_TS))).toBe(SL_HEX);
     });
+  }
+});
+
+/**
+ * N-360: the PR spend, executed. `increment(count = 5, x = 1)` from deployed
+ * state 0 must continue with count = 6. An attacker-built continuation that
+ * keeps the argument (5) or the old state (0) must be rejected by the script.
+ */
+describe('N-129 / N-360 PR spend executes correctly on @bsv/sdk', () => {
+  const spend = (attackerNewState?: Record<string, bigint>) =>
+    runStatefulSpend({
+      source: PR_SOURCES['PR.runar.ts']!,
+      fileName: 'PR.runar.ts',
+      method: 'increment',
+      args: [5n, 1n],
+      constructorArgs: [0n],
+      signerKey: 'alice',
+      ...(attackerNewState ? { attackerNewState } : {}),
+    });
+
+  it('accepts the honest continuation (count = 6)', async () => {
+    const r = await spend();
+    expect(r.vmError ?? '', 'honest spend rejected').toBe('');
+    expect(r.vmAccepted).toBe(true);
+    expect(r.continuationState).toEqual({ count: 6n });
+  }, 120_000);
+
+  for (const stale of [5n, 0n]) {
+    it(`rejects a continuation committing count = ${stale}`, async () => {
+      const r = await spend({ count: stale });
+      expect(r.reachedEngine, 'rejection did not come from the script').toBe(true);
+      expect(r.vmAccepted, `stale count = ${stale} accepted`).toBe(false);
+    }, 120_000);
   }
 });

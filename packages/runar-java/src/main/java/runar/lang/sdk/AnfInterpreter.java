@@ -579,6 +579,14 @@ public final class AnfInterpreter {
             }
             if (args.containsKey(pname)) {
                 env.put(pname, args.get(pname));
+            } else if (pname != null && pname.endsWith("@local")) {
+                // N-360: a property-named public param the method reassigns is
+                // bound in the ANF under its `<name>@local` slot; the caller's
+                // args (and the ABI) use the source name.
+                String source = pname.substring(0, pname.length() - "@local".length());
+                if (args.containsKey(source)) {
+                    env.put(pname, args.get(source));
+                }
             }
         }
         // F-024 (R14): with no caller-supplied `_newAmount`, model the honest

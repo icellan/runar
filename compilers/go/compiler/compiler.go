@@ -417,7 +417,14 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		}
 		params := make([]ABIParam, len(method.Params))
 		for j, p := range method.Params {
-			params[j] = ABIParam{Name: p.Name, Type: p.Type}
+			// N-360: a reassigned property-named public param is bound in the
+			// ANF under its `<name>@local` slot; the ABI keeps the source name
+			// the caller passes.
+			name := p.Name
+			if method.IsPublic {
+				name = strings.TrimSuffix(name, "@local")
+			}
+			params[j] = ABIParam{Name: name, Type: p.Type}
 		}
 		m := ABIMethod{
 			Name:     method.Name,

@@ -368,9 +368,15 @@ module Runar
         Array(method['params']).each do |param|
           pname = param['name']
           next if IMPLICIT_PARAMS.include?(pname) && !caller_bound_continuation_arg?(pname, args)
-          next unless args.key?(pname) || args.key?(pname.to_sym)
 
-          env[pname] = args.key?(pname) ? args[pname] : args[pname.to_sym]
+          # N-360: a property-named public param the method reassigns is bound
+          # in the ANF under its `<name>@local` slot; the caller's args (and
+          # the ABI) use the source name.
+          key = pname
+          key = pname.delete_suffix('@local') if !(args.key?(pname) || args.key?(pname.to_sym)) && pname.end_with?('@local')
+          next unless args.key?(key) || args.key?(key.to_sym)
+
+          env[pname] = args.key?(key) ? args[key] : args[key.to_sym]
         end
 
         state_delta = {}

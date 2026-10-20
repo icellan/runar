@@ -790,7 +790,14 @@ pub fn emitArtifact(
             for (method.params, 0..) |param, j| {
                 if (j > 0) try w.writeByte(',');
                 try w.writeAll("{\"name\":");
-                try writeJsonString(w, param.name);
+                // N-360: a reassigned property-named public param is bound in
+                // the ANF under its `<name>@local` slot; the ABI keeps the
+                // source name the caller passes.
+                const abi_name = if (method.is_public and std.mem.endsWith(u8, param.name, "@local"))
+                    param.name[0 .. param.name.len - "@local".len]
+                else
+                    param.name;
+                try writeJsonString(w, abi_name);
                 try w.writeAll(",\"type\":");
                 try writeJsonString(w, param.type_name);
                 try w.writeByte('}');

@@ -423,8 +423,12 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			methodCtx.addParam(p.Name)
 			// N-016: a private helper's parameter is not part of any ABI, so one
 			// that shadows a property is bound under the collision-proof local
-			// name. (A PUBLIC parameter keeps its ABI name.)
-			if method.Visibility == "private" && methodCtx.isProperty(p.Name) {
+			// name. (A PUBLIC parameter keeps its ABI name.) N-360: a public one
+			// the body REASSIGNS is renamed too — its rebinding is merged out of
+			// an if by name, where a property result of the same name would
+			// capture it. The ABI keeps the source name either way.
+			if methodCtx.isProperty(p.Name) &&
+				(method.Visibility == "private" || statementsReassign(method.Body, p.Name)) {
 				methodCtx.renamePrivateParamTo(p.Name, methodCtx.localName(p.Name))
 			}
 		}
@@ -635,6 +639,9 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 
 			// Build augmented params list for ABI
 			augmentedParams := lowerParams(method.Params)
+			for i := range augmentedParams {
+				augmentedParams[i].Name = methodCtx.paramSlot(augmentedParams[i].Name)
+			}
 			if includesChange {
 				augmentedParams = append(augmentedParams,
 					ir.ANFParam{Name: "_changePKH", Type: "Ripemd160"},
@@ -1125,7 +1132,104 @@ func (ctx *lowerCtx) localTarget(name string) string {
 	if local := ctx.localName(name); ctx.isLocal(local) {
 		return local
 	}
+	// N-360: a renamed parameter is read from its slot, so it is rebound there.
+	if ctx.isParam(name) {
+		return ctx.paramSlot(name)
+	}
 	return name
+}
+
+// isParamSlot (N-360) reports whether name is the load_param slot of one of
+// this method's parameters.
+func (ctx *lowerCtx) isParamSlot(name string) bool {
+	for p, registered := range ctx.paramNames {
+		if registered && ctx.paramSlot(p) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// statementsReassign (N-360) reports whether any statement writes the bare
+// identifier name — an assignment to it, or a ++ / -- of it — anywhere,
+// nested blocks included.
+func statementsReassign(stmts []Statement, name string) bool {
+	for _, s := range stmts {
+		if statementReassigns(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func statementReassigns(stmt Statement, name string) bool {
+	switch s := stmt.(type) {
+	case VariableDeclStmt:
+		return expressionReassigns(s.Init, name)
+	case AssignmentStmt:
+		if id, ok := s.Target.(Identifier); ok && id.Name == name {
+			return true
+		}
+		return expressionReassigns(s.Target, name) || expressionReassigns(s.Value, name)
+	case IfStmt:
+		return expressionReassigns(s.Condition, name) ||
+			statementsReassign(s.Then, name) || statementsReassign(s.Else, name)
+	case ForStmt:
+		if expressionReassigns(s.Init.Init, name) || expressionReassigns(s.Condition, name) {
+			return true
+		}
+		if s.Update != nil && statementReassigns(s.Update, name) {
+			return true
+		}
+		return statementsReassign(s.Body, name)
+	case ReturnStmt:
+		return s.Value != nil && expressionReassigns(s.Value, name)
+	case ExpressionStmt:
+		return expressionReassigns(s.Expr, name)
+	}
+	return false
+}
+
+func expressionReassigns(expr Expression, name string) bool {
+	switch e := expr.(type) {
+	case BinaryExpr:
+		return expressionReassigns(e.Left, name) || expressionReassigns(e.Right, name)
+	case UnaryExpr:
+		return expressionReassigns(e.Operand, name)
+	case CallExpr:
+		if expressionReassigns(e.Callee, name) {
+			return true
+		}
+		for _, a := range e.Args {
+			if expressionReassigns(a, name) {
+				return true
+			}
+		}
+	case MemberExpr:
+		return expressionReassigns(e.Object, name)
+	case TernaryExpr:
+		return expressionReassigns(e.Condition, name) ||
+			expressionReassigns(e.Consequent, name) || expressionReassigns(e.Alternate, name)
+	case IndexAccessExpr:
+		return expressionReassigns(e.Object, name) || expressionReassigns(e.Index, name)
+	case IncrementExpr:
+		if id, ok := e.Operand.(Identifier); ok && id.Name == name {
+			return true
+		}
+		return expressionReassigns(e.Operand, name)
+	case DecrementExpr:
+		if id, ok := e.Operand.(Identifier); ok && id.Name == name {
+			return true
+		}
+		return expressionReassigns(e.Operand, name)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			if expressionReassigns(el, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (ctx *lowerCtx) renamePrivateParamTo(name, slot string) {
@@ -1812,7 +1916,8 @@ func (ctx *lowerCtx) collectBranchMergedLocals(thenCtx, elseCtx *lowerCtx) []str
 		lastIndex := make(map[string]int)
 		var order []string
 		for i, b := range branch.bindings {
-			if !ctx.isLocal(b.Name) {
+			// N-360: a reassigned parameter merges like a local (by its slot name).
+			if !ctx.isLocal(b.Name) && !ctx.isParamSlot(b.Name) {
 				continue
 			}
 			if _, seen := lastIndex[b.Name]; !seen {

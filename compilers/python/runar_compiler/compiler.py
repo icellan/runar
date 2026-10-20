@@ -952,7 +952,16 @@ def _assemble_artifact(
     for method in program.methods:
         if method.name == "constructor":
             continue
-        params = [ABIParam(name=p.name, type=p.type) for p in method.params]
+        # N-360: a reassigned property-named public param is bound in the ANF
+        # under its ``<name>@local`` slot; the ABI keeps the source name the
+        # caller passes.
+        params = [
+            ABIParam(
+                name=p.name[: -len("@local")] if method.is_public and p.name.endswith("@local") else p.name,
+                type=p.type,
+            )
+            for p in method.params
+        ]
         # For stateful contracts, mark public methods without a continuation as
         # terminal. N-038: a SIGHASH_SINGLE method continues without
         # _changePKH, so its continuation is read off the IR instead.

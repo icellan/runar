@@ -1,0 +1,24 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/n360-shadow-param-rebind.anf.json",
+  "methodName": "m",
+  "currentState": {
+    "count": "3n"
+  },
+  "args": {
+    "count": "4n",
+    "c": false
+  },
+  "constructorArgs": [
+    "3n"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/N360ShadowParamRebind.runar.ts",
+    "constructorArgs": [
+      "3n"
+    ],
+    "methodArgs": [
+      "4n",
+      false
+    ]
+  }
+}

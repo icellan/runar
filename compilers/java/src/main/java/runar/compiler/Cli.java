@@ -487,7 +487,14 @@ public final class Cli {
                 mb.append("{\"name\": ").append(jsonString(m.name())).append(", \"params\": [");
                 for (int i = 0; i < m.params().size(); i++) {
                     if (i > 0) mb.append(", ");
-                    mb.append("{\"name\": ").append(jsonString(m.params().get(i).name()))
+                    // N-360: a reassigned property-named public param is bound in
+                    // the ANF under its `<name>@local` slot; the ABI keeps the
+                    // source name the caller passes.
+                    String abiName = m.params().get(i).name();
+                    if (m.isPublic() && abiName.endsWith("@local")) {
+                        abiName = abiName.substring(0, abiName.length() - "@local".length());
+                    }
+                    mb.append("{\"name\": ").append(jsonString(abiName))
                         .append(", \"type\": ").append(jsonString(m.params().get(i).type()))
                         .append('}');
                 }

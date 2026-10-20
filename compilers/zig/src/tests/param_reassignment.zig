@@ -23,6 +23,16 @@
 //!     SL (stateless, below)               ts/go 788b7852937c9d0000a07777
 //!                                         zig   788b527a757852935279537a537a9d0000a07777
 //!
+//! N-360 then moved the reference itself. The six-tier 1420 / 1404 bytes above
+//! bound the property-named parameter `count` under the property's own name,
+//! and the PR spend they produce commits the UNINCREMENTED argument: on the
+//! @bsv/sdk Spend engine `increment(5, 1)` from state 0 rejected the honest
+//! continuation (count = 6) and accepted the stale one (count = 5). A
+//! property-named public parameter that the method reassigns is now bound
+//! under its `count@local` slot, and the TS reference is PR 1414 hex,
+//! ShadowParam 1398 hex (`conformance/negatives/param-reassign-parity.test.ts`
+//! executes the PR spend on-chain).
+//!
 //! The .runar.py / .runar.rb surfaces were never affected: their parsers turn
 //! the first assignment of a name into a declaration, so it reaches the
 //! `let_decl` arm, not this one.
@@ -39,9 +49,9 @@
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
-/// sha256 of the TS reference hex for PR, fold OFF (1420 hex chars).
-const PR_TS_SHA256 = "342abda71c4eed6f75a655b86db86e98cd2357eec9861ae69df6b2aab2fa507d";
-const PR_TS_LEN: usize = 1420;
+/// sha256 of the TS reference hex for PR, fold OFF (1414 hex chars, N-360).
+const PR_TS_SHA256 = "a8300f31ee8ab63c3f0a7b617e9dd91f9e37c4f753ab84496911b80fef5728ee";
+const PR_TS_LEN: usize = 1414;
 
 /// TS reference hex for SL, fold OFF.
 const SL_TS_HEX = "788b7852937c9d0000a07777";

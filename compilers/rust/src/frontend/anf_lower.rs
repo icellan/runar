@@ -402,8 +402,14 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             method_ctx.add_param(&p.name);
             // N-016: a private helper's parameter is not part of any ABI, so
             // one that shadows a property is bound under the collision-proof
-            // local name. (A PUBLIC parameter keeps its ABI name.)
-            if method.visibility == Visibility::Private && method_ctx.is_property(&p.name) {
+            // local name. (A PUBLIC parameter keeps its ABI name.) N-360: a
+            // public one the body REASSIGNS is renamed too — its rebinding is
+            // merged out of an if by name, where a property result of the same
+            // name would capture it. The ABI keeps the source name either way.
+            if method_ctx.is_property(&p.name)
+                && (method.visibility == Visibility::Private
+                    || statements_reassign(&method.body, &p.name))
+            {
                 let slot = method_ctx.local_name(&p.name);
                 method_ctx.renamed_private_params.insert(p.name.clone(), slot);
             }
@@ -725,6 +731,9 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
 
             // Build augmented params list for ABI
             let mut augmented_params = lower_params(&method.params);
+            for p in augmented_params.iter_mut() {
+                p.name = method_ctx.param_slot(&p.name);
+            }
             if includes_change {
                 augmented_params.push(ANFParam {
                     name: "_changePKH".to_string(),
@@ -1263,9 +1272,19 @@ impl<'a> LoweringContext<'a> {
         let local = self.local_name(name);
         if self.is_local(&local) {
             local
+        } else if self.is_param(name) {
+            // N-360: a renamed parameter is read from its slot, so it is
+            // rebound there.
+            self.param_slot(name)
         } else {
             name.to_string()
         }
+    }
+
+    /// N-360: whether `name` is the `load_param` slot of one of this method's
+    /// parameters.
+    fn is_param_slot(&self, name: &str) -> bool {
+        self.param_names.iter().any(|p| self.param_slot(p) == name)
     }
 
     /// N-016: the `load_param` name a source parameter resolves to.
@@ -1461,6 +1480,82 @@ fn collect_statement_reads(stmt: &Statement, out: &mut HashSet<String>) {
         Statement::ExpressionStatement { expression, .. } => {
             collect_expression_reads(expression, out)
         }
+    }
+}
+
+/// N-360: whether any statement writes the bare identifier `name` — an
+/// assignment to it, or a `++` / `--` of it — anywhere, nested blocks included.
+fn statements_reassign(stmts: &[Statement], name: &str) -> bool {
+    stmts.iter().any(|s| statement_reassigns(s, name))
+}
+
+fn statement_reassigns(stmt: &Statement, name: &str) -> bool {
+    match stmt {
+        Statement::VariableDecl { init, .. } => expression_reassigns(init, name),
+        Statement::Assignment { target, value, .. } => {
+            matches!(target, Expression::Identifier { name: n } if n == name)
+                || expression_reassigns(target, name)
+                || expression_reassigns(value, name)
+        }
+        Statement::IfStatement {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_reassigns(condition, name)
+                || statements_reassign(then_branch, name)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| statements_reassign(e, name))
+        }
+        Statement::ForStatement {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            statement_reassigns(init, name)
+                || expression_reassigns(condition, name)
+                || statement_reassigns(update, name)
+                || statements_reassign(body, name)
+        }
+        Statement::ReturnStatement { value, .. } => {
+            value.as_ref().is_some_and(|v| expression_reassigns(v, name))
+        }
+        Statement::ExpressionStatement { expression, .. } => expression_reassigns(expression, name),
+    }
+}
+
+fn expression_reassigns(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::BinaryExpr { left, right, .. } => {
+            expression_reassigns(left, name) || expression_reassigns(right, name)
+        }
+        Expression::UnaryExpr { operand, .. } => expression_reassigns(operand, name),
+        Expression::CallExpr { callee, args, .. } => {
+            expression_reassigns(callee, name) || args.iter().any(|a| expression_reassigns(a, name))
+        }
+        Expression::MemberExpr { object, .. } => expression_reassigns(object, name),
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => {
+            expression_reassigns(condition, name)
+                || expression_reassigns(consequent, name)
+                || expression_reassigns(alternate, name)
+        }
+        Expression::IndexAccess { object, index } => {
+            expression_reassigns(object, name) || expression_reassigns(index, name)
+        }
+        Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+            matches!(operand.as_ref(), Expression::Identifier { name: n } if n == name)
+                || expression_reassigns(operand, name)
+        }
+        Expression::ArrayLiteral { elements } => elements.iter().any(|e| expression_reassigns(e, name)),
+        _ => false,
     }
 }
 
@@ -1913,7 +2008,8 @@ fn collect_branch_merged_locals(
     let last_rebind_order = |branch: &LoweringContext| -> Vec<String> {
         let mut order: Vec<(String, usize)> = Vec::new();
         for (i, b) in branch.bindings.iter().enumerate() {
-            if !ctx.is_local(&b.name) {
+            // N-360: a reassigned parameter merges like a local (by its slot name).
+            if !ctx.is_local(&b.name) && !ctx.is_param_slot(&b.name) {
                 continue;
             }
             match order.iter_mut().find(|(n, _)| *n == b.name) {

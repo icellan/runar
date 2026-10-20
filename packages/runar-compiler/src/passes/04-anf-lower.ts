@@ -317,7 +317,13 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // N-016: a private helper's parameter is not part of any ABI, so one that
       // shadows a property is bound under the collision-proof local name. (A
       // PUBLIC parameter keeps its ABI name; stack lowering reserves its slot.)
-      if (method.visibility === 'private' && methodCtx.isProperty(p.name)) {
+      // N-360: a public one the body REASSIGNS is renamed too — its rebinding
+      // is merged out of an `if` by name, where a property result of the same
+      // name would capture it. The ABI keeps the source name either way.
+      if (
+        methodCtx.isProperty(p.name) &&
+        (method.visibility === 'private' || statementsReassign(method.body, p.name))
+      ) {
         methodCtx.renamePrivateParam(p.name);
       }
     }
@@ -417,7 +423,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // unlocking scripts push them adjacent to the preimage (matches the
       // existing _changePKH / _changeAmount / _newAmount convention of
       // trailing the user args before the preimage anchor).
-      const finalParams = lowerParams(augmentedParams);
+      const finalParams = lowerParams(augmentedParams).map(p => ({ ...p, name: methodCtx.paramSlot(p.name) }));
       for (const p of methodCtx.methodScope.autoInjectedParams) {
         finalParams.push(p);
       }
@@ -725,6 +731,14 @@ class LoweringContext {
 
   isLocal(name: string): boolean {
     return this.localNames.has(name);
+  }
+
+  /** N-360: whether `name` is the `load_param` slot of one of this method's parameters. */
+  isParamSlot(name: string): boolean {
+    for (const p of this.paramNames) {
+      if (this.paramSlot(p) === name) return true;
+    }
+    return false;
   }
 
   /** Set the current ANF binding for a local variable (after if-statement reassignment). */
@@ -1287,7 +1301,79 @@ function lowerVariableDecl(
  */
 function localTarget(name: string, ctx: LoweringContext): string {
   const local = ctx.localName(name);
-  return ctx.isLocal(local) ? local : name;
+  if (ctx.isLocal(local)) return local;
+  // N-360: a renamed parameter is read from its slot, so it is rebound there.
+  return ctx.isParam(name) ? ctx.paramSlot(name) : name;
+}
+
+/**
+ * N-360: whether any statement writes the bare identifier `name` — an
+ * assignment to it, or a `++` / `--` of it — anywhere, nested blocks included.
+ */
+function statementsReassign(stmts: Statement[], name: string): boolean {
+  return stmts.some((s) => statementReassigns(s, name));
+}
+
+function statementReassigns(stmt: Statement, name: string): boolean {
+  switch (stmt.kind) {
+    case 'variable_decl':
+      return expressionReassigns(stmt.init, name);
+    case 'assignment':
+      return (
+        (stmt.target.kind === 'identifier' && stmt.target.name === name) ||
+        expressionReassigns(stmt.target, name) ||
+        expressionReassigns(stmt.value, name)
+      );
+    case 'if_statement':
+      return (
+        expressionReassigns(stmt.condition, name) ||
+        statementsReassign(stmt.then, name) ||
+        (stmt.else !== undefined && statementsReassign(stmt.else, name))
+      );
+    case 'for_statement':
+      return (
+        expressionReassigns(stmt.init.init, name) ||
+        expressionReassigns(stmt.condition, name) ||
+        statementReassigns(stmt.update, name) ||
+        statementsReassign(stmt.body, name)
+      );
+    case 'return_statement':
+      return stmt.value !== undefined && expressionReassigns(stmt.value, name);
+    case 'expression_statement':
+      return expressionReassigns(stmt.expression, name);
+  }
+  return false;
+}
+
+function expressionReassigns(expr: Expression, name: string): boolean {
+  switch (expr.kind) {
+    case 'binary_expr':
+      return expressionReassigns(expr.left, name) || expressionReassigns(expr.right, name);
+    case 'unary_expr':
+      return expressionReassigns(expr.operand, name);
+    case 'call_expr':
+      return expressionReassigns(expr.callee, name) || expr.args.some((a) => expressionReassigns(a, name));
+    case 'member_expr':
+      return expressionReassigns(expr.object, name);
+    case 'ternary_expr':
+      return (
+        expressionReassigns(expr.condition, name) ||
+        expressionReassigns(expr.consequent, name) ||
+        expressionReassigns(expr.alternate, name)
+      );
+    case 'index_access':
+      return expressionReassigns(expr.object, name) || expressionReassigns(expr.index, name);
+    case 'increment_expr':
+    case 'decrement_expr':
+      return (
+        (expr.operand.kind === 'identifier' && expr.operand.name === name) ||
+        expressionReassigns(expr.operand, name)
+      );
+    case 'array_literal':
+      return expr.elements.some((e) => expressionReassigns(e, name));
+    default:
+      return false;
+  }
 }
 
 /**
@@ -1646,7 +1732,8 @@ function collectBranchMergedLocals(
   const lastRebindOrder = (branch: LoweringContext): string[] => {
     const seen = new Map<string, number>();
     branch.bindings.forEach((b, i) => {
-      if (ctx.isLocal(b.name)) seen.set(b.name, i);
+      // N-360: a reassigned parameter merges like a local (by its slot name).
+      if (ctx.isLocal(b.name) || ctx.isParamSlot(b.name)) seen.set(b.name, i);
     });
     return [...seen.entries()].sort((a, b) => a[1] - b[1]).map(([name]) => name);
   };

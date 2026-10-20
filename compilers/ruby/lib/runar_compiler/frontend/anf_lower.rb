@@ -372,8 +372,12 @@ module RunarCompiler
           method_ctx.add_param(p.name)
           # N-016: a private helper's parameter is not part of any ABI, so one
           # that shadows a property is bound under the collision-proof local
-          # name. (A PUBLIC parameter keeps its ABI name.)
-          if method.visibility == "private" && method_ctx.property?(p.name)
+          # name. (A PUBLIC parameter keeps its ABI name.) N-360: a public one
+          # the body REASSIGNS is renamed too -- its rebinding is merged out of
+          # an if by name, where a property result of the same name would
+          # capture it. The ABI keeps the source name either way.
+          if method_ctx.property?(p.name) &&
+             (method.visibility == "private" || Frontend._statements_reassign(method.body, p.name))
             method_ctx.rename_private_param(p.name)
           end
         end
@@ -591,6 +595,7 @@ module RunarCompiler
           augmented_params = _lower_params(
             method.params.reject { |p| _is_stateful_context_param(p) }
           )
+          augmented_params.each { |ap| ap.name = method_ctx.param_slot(ap.name) }
           if needs_change_output
             augmented_params << IR::ANFParam.new(name: "_changePKH", type: "Ripemd160")
             augmented_params << IR::ANFParam.new(name: "_changeAmount", type: "bigint")
@@ -1136,7 +1141,17 @@ module RunarCompiler
       # @return [String]
       def local_target(name)
         local = local_name(name)
-        local?(local) ? local : name
+        return local if local?(local)
+
+        # N-360: a renamed parameter is read from its slot, so it is rebound there.
+        param?(name) ? param_slot(name) : name
+      end
+
+      # N-360: whether +name+ is the load_param slot of one of this method's
+      # parameters.
+      # @return [Boolean]
+      def param_slot?(name)
+        @param_names.any? { |p| param_slot(p) == name }
       end
 
       # N-016: record a private helper's parameter that shadows a property.
@@ -1700,7 +1715,8 @@ module RunarCompiler
         last_rebind_order = lambda do |branch|
           last_index = {}
           branch.bindings.each_with_index do |b, i|
-            last_index[b.name] = i if local?(b.name)
+            # N-360: a reassigned parameter merges like a local (by its slot name).
+            last_index[b.name] = i if local?(b.name) || param_slot?(b.name)
           end
           last_index.sort_by { |_, i| i }.map(&:first)
         end
@@ -2558,6 +2574,68 @@ module RunarCompiler
         _collect_expression_reads(stmt.value, out)
       when ExpressionStmt
         _collect_expression_reads(stmt.expr, out)
+      end
+    end
+
+    # N-360: whether any statement writes the bare identifier +name+ -- an
+    # assignment to it, or a ++ / -- of it -- anywhere, nested blocks included.
+    def self._statements_reassign(stmts, name)
+      (stmts || []).any? { |s| _statement_reassigns(s, name) }
+    end
+
+    def self._statement_reassigns(stmt, name)
+      case stmt
+      when VariableDeclStmt
+        _expression_reassigns(stmt.init, name)
+      when AssignmentStmt
+        (stmt.target.is_a?(Identifier) && stmt.target.name == name) ||
+          _expression_reassigns(stmt.target, name) ||
+          _expression_reassigns(stmt.value, name)
+      when IfStmt
+        _expression_reassigns(stmt.condition, name) ||
+          _statements_reassign(stmt.then, name) ||
+          _statements_reassign(stmt.else_, name)
+      when ForStmt
+        (stmt.init ? _statement_reassigns(stmt.init, name) : false) ||
+          _expression_reassigns(stmt.condition, name) ||
+          (stmt.update ? _statement_reassigns(stmt.update, name) : false) ||
+          _statements_reassign(stmt.body, name)
+      when ReturnStmt
+        _expression_reassigns(stmt.value, name)
+      when ExpressionStmt
+        _expression_reassigns(stmt.expr, name)
+      else
+        false
+      end
+    end
+
+    def self._expression_reassigns(expr, name)
+      case expr
+      when BinaryExpr
+        _expression_reassigns(expr.left, name) || _expression_reassigns(expr.right, name)
+      when UnaryExpr
+        _expression_reassigns(expr.operand, name)
+      when CallExpr
+        _expression_reassigns(expr.callee, name) ||
+          (expr.args || []).any? { |a| _expression_reassigns(a, name) }
+      when MethodCallExpr
+        _expression_reassigns(expr.object, name) ||
+          (expr.args || []).any? { |a| _expression_reassigns(a, name) }
+      when MemberExpr
+        _expression_reassigns(expr.object, name)
+      when TernaryExpr
+        _expression_reassigns(expr.condition, name) ||
+          _expression_reassigns(expr.consequent, name) ||
+          _expression_reassigns(expr.alternate, name)
+      when IndexAccessExpr
+        _expression_reassigns(expr.object, name) || _expression_reassigns(expr.index, name)
+      when IncrementExpr, DecrementExpr
+        (expr.operand.is_a?(Identifier) && expr.operand.name == name) ||
+          _expression_reassigns(expr.operand, name)
+      when ArrayLiteralExpr
+        (expr.elements || []).any? { |e| _expression_reassigns(e, name) }
+      else
+        false
       end
     end
 

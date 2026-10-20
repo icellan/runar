@@ -44,7 +44,14 @@ output on error — print full output on stdout only after a successful run.
   Exactly one of `case` / `anfPath` must be present.
 - `methodName` — public method name to execute
 - `currentState` — map of property name → value
-- `args` — map of param name → value
+- `args` — map of param name → value, keyed by the SOURCE (ABI) name.
+  Interpreters bind args to the ANF method's `params` BY NAME, never by
+  position. One rename applies (N-360): a property-named public param that
+  the method reassigns appears in the ANF's `params` under its slot name
+  `<name>@local`, and every interpreter binds that slot from `args[<name>]`
+  (an exact `args["<name>@local"]` entry, if present, wins). Positional
+  binding is not used because the ANF and ABI param lists do not align
+  1:1 — a FixedArray param is one ABI entry but several ANF params.
 - `constructorArgs` — list of constructor arg values (positional)
 
 ## Bigint encoding

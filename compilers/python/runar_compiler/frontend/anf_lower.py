@@ -454,8 +454,13 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             method_ctx.add_param(p.name)
             # N-016: a private helper's parameter is not part of any ABI, so one
             # that shadows a property is bound under the collision-proof local
-            # name. (A PUBLIC parameter keeps its ABI name.)
-            if method.visibility == "private" and method_ctx.is_property(p.name):
+            # name. (A PUBLIC parameter keeps its ABI name.) N-360: a public one
+            # the body REASSIGNS is renamed too -- its rebinding is merged out of
+            # an if by name, where a property result of the same name would
+            # capture it. The ABI keeps the source name either way.
+            if method_ctx.is_property(p.name) and (
+                method.visibility == "private" or _statements_reassign(method.body, p.name)
+            ):
                 method_ctx._renamed_private_params[p.name] = method_ctx.local_name(p.name)
 
         if contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
@@ -654,6 +659,8 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
 
             # Build augmented params list for ABI
             augmented_params = _lower_params(method.params)
+            for ap in augmented_params:
+                ap.name = method_ctx.param_slot(ap.name)
             if needs_change_output:
                 augmented_params += [
                     ANFParam(name="_changePKH", type="Ripemd160"),
@@ -1108,7 +1115,15 @@ class _LowerCtx:
         the local's (possibly renamed) binding when a local of that name is in
         scope, otherwise the name itself, exactly as before."""
         local = self.local_name(name)
-        return local if self.is_local(local) else name
+        if self.is_local(local):
+            return local
+        # N-360: a renamed parameter is read from its slot, so it is rebound there.
+        return self.param_slot(name) if self.is_param(name) else name
+
+    def is_param_slot(self, name: str) -> bool:
+        """N-360: whether ``name`` is the ``load_param`` slot of one of this
+        method's parameters."""
+        return any(self.param_slot(p) == name for p in self._param_names)
 
     def param_slot(self, name: str) -> str:
         """N-016: the ``load_param`` name a source parameter resolves to."""
@@ -1502,7 +1517,8 @@ class _LowerCtx:
         def last_rebind_order(branch) -> list[str]:
             last_index: dict[str, int] = {}
             for i, b in enumerate(branch.bindings):
-                if self.is_local(b.name):
+                # N-360: a reassigned parameter merges like a local (by its slot name).
+                if self.is_local(b.name) or self.is_param_slot(b.name):
                     last_index[b.name] = i
             return [n for n, _ in sorted(last_index.items(), key=lambda kv: kv[1])]
 
@@ -2484,6 +2500,74 @@ def _collect_statement_reads(stmt: Statement, out: set[str]) -> None:
         _collect_expression_reads(stmt.value, out)
     elif isinstance(stmt, ExpressionStmt):
         _collect_expression_reads(stmt.expr, out)
+
+
+def _statements_reassign(stmts: list[Statement] | None, name: str) -> bool:
+    """N-360: whether any statement writes the bare identifier ``name`` -- an
+    assignment to it, or a ``++`` / ``--`` of it -- anywhere, nested blocks
+    included."""
+    return any(_statement_reassigns(s, name) for s in stmts or [])
+
+
+def _statement_reassigns(stmt: Statement | None, name: str) -> bool:
+    if stmt is None:
+        return False
+    if isinstance(stmt, VariableDeclStmt):
+        return _expression_reassigns(stmt.init, name)
+    if isinstance(stmt, AssignmentStmt):
+        return (
+            (isinstance(stmt.target, Identifier) and stmt.target.name == name)
+            or _expression_reassigns(stmt.target, name)
+            or _expression_reassigns(stmt.value, name)
+        )
+    if isinstance(stmt, IfStmt):
+        return (
+            _expression_reassigns(stmt.condition, name)
+            or _statements_reassign(stmt.then, name)
+            or _statements_reassign(stmt.else_, name)
+        )
+    if isinstance(stmt, ForStmt):
+        return (
+            _statement_reassigns(stmt.init, name)
+            or _expression_reassigns(stmt.condition, name)
+            or _statement_reassigns(stmt.update, name)
+            or _statements_reassign(stmt.body, name)
+        )
+    if isinstance(stmt, ReturnStmt):
+        return _expression_reassigns(stmt.value, name)
+    if isinstance(stmt, ExpressionStmt):
+        return _expression_reassigns(stmt.expr, name)
+    return False
+
+
+def _expression_reassigns(expr: Expression | None, name: str) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, BinaryExpr):
+        return _expression_reassigns(expr.left, name) or _expression_reassigns(expr.right, name)
+    if isinstance(expr, UnaryExpr):
+        return _expression_reassigns(expr.operand, name)
+    if isinstance(expr, CallExpr):
+        return _expression_reassigns(expr.callee, name) or any(
+            _expression_reassigns(a, name) for a in expr.args
+        )
+    if isinstance(expr, MemberExpr):
+        return _expression_reassigns(expr.object, name)
+    if isinstance(expr, TernaryExpr):
+        return (
+            _expression_reassigns(expr.condition, name)
+            or _expression_reassigns(expr.consequent, name)
+            or _expression_reassigns(expr.alternate, name)
+        )
+    if isinstance(expr, IndexAccessExpr):
+        return _expression_reassigns(expr.object, name) or _expression_reassigns(expr.index, name)
+    if isinstance(expr, (IncrementExpr, DecrementExpr)):
+        return (
+            isinstance(expr.operand, Identifier) and expr.operand.name == name
+        ) or _expression_reassigns(expr.operand, name)
+    if isinstance(expr, ArrayLiteralExpr):
+        return any(_expression_reassigns(e, name) for e in expr.elements)
+    return False
 
 
 def _collect_expression_reads(expr: Expression | None, out: set[str]) -> None:

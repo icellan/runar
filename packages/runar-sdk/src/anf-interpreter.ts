@@ -160,6 +160,11 @@ interface MockPreimageValue {
   readonly scriptCode?: string;
 }
 
+/** N-360: the source name of a param bound under its `<name>@local` slot, else undefined. */
+function renamedParamSource(name: string): string | undefined {
+  return name.endsWith('@local') ? name.slice(0, -'@local'.length) : undefined;
+}
+
 function isMockPreimage(v: unknown): v is MockPreimageValue {
   return typeof v === 'object' && v !== null && (v as MockPreimageValue).__runarMockPreimage === true;
 }
@@ -424,6 +429,12 @@ function runMethod(
     if (implicitParams.has(param.name) && !(param.name === '_newAmount' && param.name in args)) continue;
     if (param.name in args) {
       env[param.name] = args[param.name];
+    } else {
+      // N-360: a property-named public param the method reassigns is bound in
+      // the ANF under its `<name>@local` slot; the caller's args (and the ABI)
+      // use the source name.
+      const source = renamedParamSource(param.name);
+      if (source !== undefined && source in args) env[param.name] = args[source];
     }
   }
   if (

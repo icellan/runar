@@ -262,7 +262,13 @@ pub fn assemble_artifact(
                     .params
                     .iter()
                     .map(|p| ABIParam {
-                        name: p.name.clone(),
+                        // N-360: a reassigned property-named public param is
+                        // bound in the ANF under its `<name>@local` slot; the
+                        // ABI keeps the source name the caller passes.
+                        name: match p.name.strip_suffix("@local") {
+                            Some(source) if m.is_public => source.to_string(),
+                            _ => p.name.clone(),
+                        },
                         param_type: p.param_type.clone(),
                         fixed_array: None,
                     })

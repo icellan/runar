@@ -392,8 +392,13 @@ public final class AnfLower {
                 ctx.addParam(p.name());
                 // N-016: a private helper's parameter is not part of any ABI, so
                 // one that shadows a property is bound under the collision-proof
-                // local name. (A PUBLIC parameter keeps its ABI name.)
-                if (method.visibility() != Visibility.PUBLIC && ctx.isProperty(p.name())) {
+                // local name. (A PUBLIC parameter keeps its ABI name.) N-360: a
+                // public one the body REASSIGNS is renamed too — its rebinding is
+                // merged out of an if by name, where a property result of the
+                // same name would capture it. The ABI keeps the source name.
+                if (ctx.isProperty(p.name())
+                    && (method.visibility() != Visibility.PUBLIC
+                        || statementsReassign(method.body(), p.name()))) {
                     ctx.renamedPrivateParams.put(p.name(), ctx.localName(p.name()));
                 }
             }
@@ -563,7 +568,10 @@ public final class AnfLower {
                     }
                 }
 
-                List<AnfParam> augmented = new ArrayList<>(lowerParams(method.params()));
+                List<AnfParam> augmented = new ArrayList<>();
+                for (AnfParam ap : lowerParams(method.params())) {
+                    augmented.add(new AnfParam(ctx.paramSlot(ap.name()), ap.type()));
+                }
                 if (needsChange) {
                     augmented.add(new AnfParam("_changePKH", "Ripemd160"));
                     augmented.add(new AnfParam("_changeAmount", "bigint"));
@@ -625,6 +633,89 @@ public final class AnfLower {
     private static String sourceLocalName(String bindingName) {
         int at = bindingName.indexOf('@');
         return at < 0 ? bindingName : bindingName.substring(0, at);
+    }
+
+    /**
+     * N-360: whether any statement writes the bare identifier {@code name} — an
+     * assignment to it, or a {@code ++} / {@code --} of it — anywhere, nested
+     * blocks included.
+     */
+    private static boolean statementsReassign(List<Statement> stmts, String name) {
+        if (stmts == null) {
+            return false;
+        }
+        for (Statement s : stmts) {
+            if (statementReassigns(s, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean statementReassigns(Statement stmt, String name) {
+        if (stmt instanceof VariableDeclStatement v) {
+            return expressionReassigns(v.init(), name);
+        } else if (stmt instanceof AssignmentStatement a) {
+            return (a.target() instanceof Identifier id && id.name().equals(name))
+                || expressionReassigns(a.target(), name)
+                || expressionReassigns(a.value(), name);
+        } else if (stmt instanceof IfStatement i) {
+            return expressionReassigns(i.condition(), name)
+                || statementsReassign(i.thenBody(), name)
+                || statementsReassign(i.elseBody(), name);
+        } else if (stmt instanceof ForStatement f) {
+            return (f.init() != null && statementReassigns(f.init(), name))
+                || expressionReassigns(f.condition(), name)
+                || (f.update() != null && statementReassigns(f.update(), name))
+                || statementsReassign(f.body(), name);
+        } else if (stmt instanceof ReturnStatement r) {
+            return expressionReassigns(r.value(), name);
+        } else if (stmt instanceof ExpressionStatement e) {
+            return expressionReassigns(e.expression(), name);
+        }
+        return false;
+    }
+
+    private static boolean expressionReassigns(Expression expr, String name) {
+        if (expr == null) {
+            return false;
+        }
+        if (expr instanceof BinaryExpr b) {
+            return expressionReassigns(b.left(), name) || expressionReassigns(b.right(), name);
+        } else if (expr instanceof UnaryExpr u) {
+            return expressionReassigns(u.operand(), name);
+        } else if (expr instanceof CallExpr c) {
+            if (expressionReassigns(c.callee(), name)) {
+                return true;
+            }
+            for (Expression a : c.args()) {
+                if (expressionReassigns(a, name)) {
+                    return true;
+                }
+            }
+            return false;
+        } else if (expr instanceof MemberExpr m) {
+            return expressionReassigns(m.object(), name);
+        } else if (expr instanceof TernaryExpr t) {
+            return expressionReassigns(t.condition(), name)
+                || expressionReassigns(t.consequent(), name)
+                || expressionReassigns(t.alternate(), name);
+        } else if (expr instanceof IndexAccessExpr ia) {
+            return expressionReassigns(ia.object(), name) || expressionReassigns(ia.index(), name);
+        } else if (expr instanceof IncrementExpr inc) {
+            return (inc.operand() instanceof Identifier id && id.name().equals(name))
+                || expressionReassigns(inc.operand(), name);
+        } else if (expr instanceof DecrementExpr dec) {
+            return (dec.operand() instanceof Identifier id && id.name().equals(name))
+                || expressionReassigns(dec.operand(), name);
+        } else if (expr instanceof ArrayLiteralExpr al) {
+            for (Expression e : al.elements()) {
+                if (expressionReassigns(e, name)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static List<AnfParam> lowerParams(List<ParamNode> params) {
@@ -1042,7 +1133,21 @@ public final class AnfLower {
          */
         String localTarget(String name) {
             String local = localName(name);
-            return isLocal(local) ? local : name;
+            if (isLocal(local)) {
+                return local;
+            }
+            // N-360: a renamed parameter is read from its slot, so it is rebound there.
+            return isParam(name) ? paramSlot(name) : name;
+        }
+
+        /** N-360: whether {@code name} is the load_param slot of one of this method's parameters. */
+        boolean isParamSlot(String name) {
+            for (String p : paramNames) {
+                if (paramSlot(p).equals(name)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /** N-016: the load_param name a source parameter resolves to. */
@@ -1578,7 +1683,8 @@ public final class AnfLower {
             LinkedHashMap<String, Integer> lastIndex = new LinkedHashMap<>();
             for (int i = 0; i < branch.bindings.size(); i++) {
                 String name = branch.bindings.get(i).name();
-                if (isLocal(name)) {
+                // N-360: a reassigned parameter merges like a local (by its slot name).
+                if (isLocal(name) || isParamSlot(name)) {
                     lastIndex.put(name, i);
                 }
             }
