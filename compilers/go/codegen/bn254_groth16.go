@@ -19,6 +19,8 @@ package codegen
 import (
 	"fmt"
 	"math/big"
+
+	"github.com/consensys/gnark-crypto/ecc/bn254"
 )
 
 // =========================================================================
@@ -86,6 +88,21 @@ type Groth16Config struct {
 	// Solidity verifier's BETA_NEG / GAMMA_NEG / DELTA_NEG naming.
 	GammaNegG2 [4]*big.Int // -γ
 	DeltaNegG2 [4]*big.Int // -δ
+
+	// PinnedPublicInputs fixes individual public inputs at compile time for
+	// the MSM-binding variant. A non-nil entry i means pub_i must equal that
+	// value: its term pinned_i · IC[i+1] is folded into the accumulator's
+	// starting point off-chain and the on-chain check for that slot becomes a
+	// single OP_EQUALVERIFY against the pinned scalar instead of an unrolled
+	// 254-step scalar multiplication. nil entries stay variable and are
+	// multiplied on-chain as before. The witness still pushes all five scalars
+	// and Groth16PublicInput(i) keeps working for pinned slots.
+	//
+	// For an SP1 program used by one contract, the program vkey hash
+	// (pub_0), the exit code (pub_2, always 0) and the vk root (pub_3) never
+	// change, so pinning them removes three of the five scalar
+	// multiplications from every spend.
+	PinnedPublicInputs [5]*big.Int
 
 	// NOTE: IC is optional. When nil (the default), the prover computes
 	// prepared_inputs = IC[0] + sum(pub_j * IC[j+1]) off-chain and supplies
@@ -1929,12 +1946,50 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 // disagree. The 5 pub_i scalars and _pi_x / _pi_y are consumed; the G1
 // constants for IC points are also consumed (they are materialized via
 // pushBigInt inside the scalar-mul loop).
+// groth16MSMStart returns IC[0] + Σ_{pinned i} pinned_i · IC[i+1] in affine
+// coordinates, the accumulator's starting point for the on-chain MSM with
+// the pinned public-input terms folded in. Panics if the result is the point
+// at infinity (no affine form; it cannot happen for a real SP1 statement but
+// a contrived key could hit it).
+func groth16MSMStart(config Groth16Config) (*big.Int, *big.Int) {
+	var acc bn254.G1Affine
+	setG1 := func(dst *bn254.G1Affine, p [2]*big.Int) {
+		dst.X.SetBigInt(p[0])
+		dst.Y.SetBigInt(p[1])
+	}
+	setG1(&acc, config.IC[0])
+	var accJ bn254.G1Jac
+	accJ.FromAffine(&acc)
+	for i := 0; i < 5; i++ {
+		s := config.PinnedPublicInputs[i]
+		if s == nil || s.Sign() == 0 {
+			continue
+		}
+		var base bn254.G1Affine
+		setG1(&base, config.IC[i+1])
+		var term bn254.G1Jac
+		term.FromAffine(&base)
+		term.ScalarMultiplication(&term, s)
+		accJ.AddAssign(&term)
+	}
+	acc.FromJacobian(&accJ)
+	if acc.IsInfinity() {
+		panic("groth16MSMStart: folded accumulator is the point at infinity")
+	}
+	var x, y big.Int
+	acc.X.BigInt(&x)
+	acc.Y.BigInt(&y)
+	return &x, &y
+}
+
 func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 	pfx := "_msm_"
 
-	// Start accumulator = IC[0] in affine form (px, py).
-	t.pushBigInt(pfx+"acc_x", config.IC[0][0])
-	t.pushBigInt(pfx+"acc_y", config.IC[0][1])
+	// Start accumulator = IC[0] + Σ_{pinned i} pinned_i · IC[i+1], folded
+	// off-chain (see Groth16Config.PinnedPublicInputs).
+	startX, startY := groth16MSMStart(config)
+	t.pushBigInt(pfx+"acc_x", startX)
+	t.pushBigInt(pfx+"acc_y", startY)
 
 	accXName := pfx + "acc_x"
 	accYName := pfx + "acc_y"
@@ -1942,6 +1997,20 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 	for i := 0; i < 5; i++ {
 		// Scalar: pub_i (bring from the witness slot on the main stack).
 		scalarName := "_pub_" + string(rune('0'+i))
+
+		if pinned := config.PinnedPublicInputs[i]; pinned != nil {
+			// Pinned slot: the term is already in the accumulator; just
+			// require the witness scalar to be the pinned value. Both are
+			// minimal bigint pushes, so byte equality is exact.
+			chk := pfx + "pin_" + itoa(i)
+			want := pfx + "pin_want_" + itoa(i)
+			t.copyToTop(scalarName, chk)
+			t.pushBigInt(want, pinned)
+			t.rawBlock([]string{chk, want}, "", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+			})
+			continue
+		}
 
 		// Push IC[i+1] as the base point (affine bx, by).
 		bxName := pfx + "bx_" + itoa(i)

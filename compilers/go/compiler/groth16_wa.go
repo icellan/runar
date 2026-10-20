@@ -3,9 +3,11 @@ package compiler
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
+	"strconv"
 
 	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/packages/runar-go/bn254witness"
@@ -192,6 +194,32 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 		} else {
 			cfg.IC[i] = [2]*big.Int{big.NewInt(0), big.NewInt(0)}
 		}
+	}
+
+	// Optional: pin individual public inputs (see
+	// codegen.Groth16Config.PinnedPublicInputs). vk.json may carry
+	//   "pinnedPublicInputs": {"0": "<decimal>", "2": "0", "3": "<decimal>"}
+	// keyed by slot index; the SP1 VK loader ignores the field, so read it here.
+	raw, err := os.ReadFile(vkPath)
+	if err != nil {
+		return codegen.Groth16Config{}, fmt.Errorf("read %s: %w", vkPath, err)
+	}
+	var extra struct {
+		Pinned map[string]string `json:"pinnedPublicInputs"`
+	}
+	if err := json.Unmarshal(raw, &extra); err != nil {
+		return codegen.Groth16Config{}, fmt.Errorf("parse %s: %w", vkPath, err)
+	}
+	for k, v := range extra.Pinned {
+		idx, err := strconv.Atoi(k)
+		if err != nil || idx < 0 || idx >= 5 {
+			return codegen.Groth16Config{}, fmt.Errorf("%s: pinnedPublicInputs key %q is not a slot index 0..4", vkPath, k)
+		}
+		n, ok := new(big.Int).SetString(v, 10)
+		if !ok || n.Sign() < 0 || n.Cmp(bn254ScalarR) >= 0 {
+			return codegen.Groth16Config{}, fmt.Errorf("%s: pinnedPublicInputs[%d] = %q is not a scalar in [0, r)", vkPath, idx, v)
+		}
+		cfg.PinnedPublicInputs[idx] = n
 	}
 
 	return cfg, nil

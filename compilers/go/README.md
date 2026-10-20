@@ -143,6 +143,37 @@ Options:
 - `--name <ContractName>`: contract name to record in the artifact (default: `Groth16Verifier`).
 - `--modulo-threshold <int>`: bytes threshold for deferred mod reduction. Default `0` produces a ~1.4 MB script (strict mod reduction — recommended). The 2048-byte value from the nChain paper is not recommended on today's go-sdk interpreter.
 
+#### Pinning public inputs at compile time (`pinnedPublicInputs`)
+
+The MSM-binding verifier multiplies each of the five public-input scalars by
+its `IC` point on-chain, and an unrolled BN254 scalar multiplication is the
+single most expensive thing in the script. When a public input is a constant
+for the life of the contract, the vk.json can declare it:
+
+```json
+"pinnedPublicInputs": { "0": "6635758631…786", "2": "0", "3": "2488316284…944" }
+```
+
+Keys are slot indices `0..4`; values are decimal scalars in `[0, r)`. For a
+pinned slot the term `pinned_i · IC[i+1]` is folded into the accumulator's
+starting point when the script is generated, and the on-chain work for that
+slot becomes one `OP_EQUALVERIFY` of the witness scalar against the pinned
+value. Unpinned slots are multiplied on-chain exactly as before, and
+`Groth16PublicInput(i)` still reads pinned slots in a stateful method body.
+
+For an SP1 program the vkey hash (slot 0), the exit code (slot 2, always 0)
+and the vk root (slot 3) never change, so pinning them removes three of the
+five scalar multiplications from every spend; with the SP1 v6 fixture that is
+roughly a 30% smaller script and ~400,000 fewer executed ops. The field is
+read by both the `groth16-wa` subcommand and the stateful
+`AssertGroth16WitnessAssistedWithMSM` path (`--groth16-vk` /
+`CompileOptions.Groth16WAVKey`).
+
+A pinned value is a statement about the circuit, not something the compiler
+can check: a proof whose public input differs from the pinned value is
+rejected, which is the point, so pin only inputs that are genuinely fixed for
+every spend of the contract.
+
 The emitted artifact has `groth16WA.numPubInputs`, `groth16WA.vkDigest` and
 `groth16WA.publicInputs` fields so downstream consumers can sanity-check
 which VK and which statement were baked in without having to re-derive them
