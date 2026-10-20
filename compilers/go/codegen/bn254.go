@@ -181,6 +181,49 @@ func (t *BN254Tracker) PopQFromBottom() {
 	t.primeCacheActive = false
 }
 
+// qIndex returns the nm index of the field modulus when it is tracked as a
+// named slot ("_q" from the Groth16 witness layout, "_qbot_p" from
+// PushQToBottom), or -1.
+func (t *BN254Tracker) qIndex() int {
+	for i, n := range t.nm {
+		if n == "_q" || n == "_qbot_p" {
+			return i
+		}
+	}
+	return -1
+}
+
+// emitFetchQ emits a copy of the field modulus onto the top of the stack from
+// inside a rawBlock. `above` is the number of live items the block currently
+// holds above the tracker's nm (rawBlock pops the consumed names before the
+// body runs, so a block that has turned its two inputs into one product has
+// above = 1).
+//
+// When the modulus is a tracked slot its depth is known at codegen time, so
+// the fetch is one push plus OP_PICK instead of OP_DEPTH OP_1SUB OP_PICK.
+// Pushes do not count toward SV Node's maxopsperscriptpolicy (Arcade's GoBDK
+// runs it at 1,000,000), so this is two counted ops fewer per fetch; across
+// the ~100,000 fetches in the Groth16 verifier that is ~200,000 ops, for at
+// most one extra byte per fetch (depths of 128 and above take a two-byte
+// push). Falls back to the dynamic form when the modulus is not tracked.
+func (t *BN254Tracker) emitFetchQ(e func(StackOp), above int) {
+	if t.qAtBottom {
+		if idx := t.qIndex(); idx >= 0 {
+			d := len(t.nm) - 1 - idx + above
+			e(StackOp{Op: "push", Value: bigIntPush(int64(d))})
+			e(StackOp{Op: "pick", Depth: d})
+			return
+		}
+		e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
+		e(StackOp{Op: "opcode", Code: "OP_1SUB"})
+		e(StackOp{Op: "opcode", Code: "OP_PICK"})
+		return
+	}
+	e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+	e(StackOp{Op: "opcode", Code: "OP_DUP"})
+	e(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+}
+
 func (t *BN254Tracker) findDepth(name string) int {
 	for i := len(t.nm) - 1; i >= 0; i-- {
 		if t.nm[i] == name {
@@ -371,9 +414,7 @@ func bn254FieldMod(t *BN254Tracker, aName, resultName string) {
 	if t.primeCacheActive {
 		t.rawBlock([]string{aName}, resultName, func(e func(StackOp)) {
 			if t.qAtBottom {
-				e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-				e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-				e(StackOp{Op: "opcode", Code: "OP_PICK"})
+				t.emitFetchQ(e, 1)
 			} else {
 				e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 				e(StackOp{Op: "opcode", Code: "OP_DUP"})
@@ -413,9 +454,7 @@ func bn254FieldAdd(t *BN254Tracker, aName, bName, resultName string) {
 	if t.qAtBottom {
 		t.rawBlock([]string{aName, bName}, resultName, func(e func(StackOp)) {
 			e(StackOp{Op: "opcode", Code: "OP_ADD"})
-			e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-			e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-			e(StackOp{Op: "opcode", Code: "OP_PICK"})
+			t.emitFetchQ(e, 1)
 			e(StackOp{Op: "opcode", Code: "OP_MOD"})
 		})
 		return
@@ -481,9 +520,7 @@ func bn254FieldSub(t *BN254Tracker, aName, bName, resultName string) {
 		t.rawBlock([]string{aName, bName}, resultName, func(e func(StackOp)) {
 			e(StackOp{Op: "opcode", Code: "OP_SUB"}) // [diff]
 			if t.qAtBottom {
-				e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-				e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-				e(StackOp{Op: "opcode", Code: "OP_PICK"})
+				t.emitFetchQ(e, 1)
 			} else {
 				e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 				e(StackOp{Op: "opcode", Code: "OP_DUP"})
@@ -516,9 +553,7 @@ func bn254FieldMul(t *BN254Tracker, aName, bName, resultName string) {
 		// Flat: a b -> a*b -> (a*b) % q. All in one rawBlock.
 		t.rawBlock([]string{aName, bName}, resultName, func(e func(StackOp)) {
 			e(StackOp{Op: "opcode", Code: "OP_MUL"})
-			e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-			e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-			e(StackOp{Op: "opcode", Code: "OP_PICK"})
+			t.emitFetchQ(e, 1)
 			e(StackOp{Op: "opcode", Code: "OP_MOD"})
 		})
 		return
@@ -542,9 +577,7 @@ func bn254FieldModPositive(t *BN254Tracker, aName, resultName string) {
 	if t.primeCacheActive {
 		t.rawBlock([]string{aName}, resultName, func(e func(StackOp)) {
 			if t.qAtBottom {
-				e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-				e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-				e(StackOp{Op: "opcode", Code: "OP_PICK"})
+				t.emitFetchQ(e, 1)
 			} else {
 				e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 				e(StackOp{Op: "opcode", Code: "OP_DUP"})
@@ -576,9 +609,7 @@ func bn254FieldNeg(t *BN254Tracker, aName, resultName string) {
 		t.rawBlock([]string{aName}, resultName, func(e func(StackOp)) {
 			// [a]
 			if t.qAtBottom {
-				e(StackOp{Op: "opcode", Code: "OP_DEPTH"})
-				e(StackOp{Op: "opcode", Code: "OP_1SUB"})
-				e(StackOp{Op: "opcode", Code: "OP_PICK"})
+				t.emitFetchQ(e, 1)
 			} else {
 				e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 				e(StackOp{Op: "opcode", Code: "OP_DUP"})
