@@ -52,18 +52,18 @@
         }
       ]
     },
-    "script": "76009c63757b7b7b7b7b7b760060a5697c01207f6b7c7652977c6b7b7b7b637c687ea86c6c01207f6b7c768e52977c6b7b7b7b637c687ea86c6c01207f6b7c7652b752977c6b7b7b7b637c687ea86c6c01207f6b7c7653b752977c6b7b7b7b637c687ea86c6c7c7582009d75008767519d7b7b7b7b7b7b760060a5697c01207f6b7c7652977c6b7b7b7b637c687eaa6c6c01207f6b7c768e52977c6b7b7b7b637c687eaa6c6c01207f6b7c7652b752977c6b7b7b7b637c687eaa6c6c01207f6b7c7653b752977c6b7b7b7b637c687eaa6c6c7c7582009d75008768",
+    "script": "76009c63757b7b7b7b7b7b760060a5697c01207f6b7c7652977c6b637c687ea86c6c01207f6b7c768e52977c6b637c687ea86c6c01207f6b7c7652b752977c6b637c687ea86c6c01207f6b7c7653b752977c6b637c687ea86c6c7c7582009d75008767519d7b7b7b7b7b7b760060a5697c01207f6b7c7652977c6b637c687eaa6c6c01207f6b7c768e52977c6b637c687eaa6c6c01207f6b7c7652b752977c6b637c687eaa6c6c01207f6b7c7653b752977c6b637c687eaa6c6c7c7582009d75008768",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 108,
+        "byteOffset": 96,
         "name": "expectedRoot",
         "type": "ByteString",
         "valueEncoding": "data"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 216,
+        "byteOffset": 192,
         "name": "expectedRoot",
         "type": "ByteString",
         "valueEncoding": "data"
@@ -77,7 +77,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 108,
+          "byteOffset": 96,
           "slot": "expectedRoot"
         },
         {
@@ -85,7 +85,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 216,
+          "byteOffset": 192,
           "slot": "expectedRoot"
         },
         {

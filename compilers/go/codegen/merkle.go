@@ -136,16 +136,9 @@ func emitMerkleRoot(emit func(StackOp), depth int, hashOp string) {
 		// If direction_bit = 1, we want hash(sibling || current), so swap
 		// If direction_bit = 0, we want hash(current || sibling), no swap needed
 
-		// Rearrange to get current and sibling adjacent:
-		// Roll current to top:
-		emit(StackOp{Op: "rot"})
-		// Stack: [sibling, direction_bit, current]
-		emit(StackOp{Op: "rot"})
-		// Stack: [direction_bit, current, sibling]
-
-		// Now: if direction_bit=1, swap current and sibling before CAT
-		emit(StackOp{Op: "rot"})
-		// Stack: [current, sibling, direction_bit]
+		// F-249: no rotation here. [current, sibling, direction_bit] is already the
+		// order OP_IF wants (it pops direction_bit, leaving current and sibling
+		// adjacent); the three OP_ROTs that used to sit here composed to the identity.
 
 		emit(StackOp{
 			Op: "if",

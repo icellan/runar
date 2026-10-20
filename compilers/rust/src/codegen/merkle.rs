@@ -121,16 +121,9 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
         // Stack: [current, sibling, direction_bit]  Alt: [rest_proof, index]
 
         // --- Step 3: Conditional swap + concatenate + hash ---
-        // Rearrange to get current and sibling adjacent:
-        // Roll current to top:
-        emit(StackOp::Rot);
-        // Stack: [sibling, direction_bit, current]
-        emit(StackOp::Rot);
-        // Stack: [direction_bit, current, sibling]
-
-        // Now: if direction_bit=1, swap current and sibling before CAT
-        emit(StackOp::Rot);
-        // Stack: [current, sibling, direction_bit]
+        // F-249: no rotation here. [current, sibling, direction_bit] is already the
+        // order OP_IF wants (it pops direction_bit, leaving current and sibling
+        // adjacent); the three OP_ROTs that used to sit here composed to the identity.
 
         emit(StackOp::If {
             then_ops: vec![

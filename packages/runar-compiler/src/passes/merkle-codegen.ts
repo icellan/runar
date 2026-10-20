@@ -149,16 +149,9 @@ function emitMerkleRoot(emit: (op: StackOp) => void, depth: number, hashOp: stri
     // But current is at depth 2, sibling at depth 1, direction_bit at top.
     // We need: if bit=1 → cat(sibling, current), else cat(current, sibling)
 
-    // Rearrange to get current and sibling adjacent:
-    // Roll current to top:
-    emit({ op: 'rot' });
-    // Stack: [sibling, direction_bit, current]
-    emit({ op: 'rot' });
-    // Stack: [direction_bit, current, sibling]
-
-    // Now: if direction_bit=1, swap current and sibling before CAT
-    emit({ op: 'rot' });
-    // Stack: [current, sibling, direction_bit]
+    // F-249: no rotation here. [current, sibling, direction_bit] is already the
+    // order OP_IF wants (it pops direction_bit, leaving current and sibling
+    // adjacent); the three OP_ROTs that used to sit here composed to the identity.
 
     emit({ op: 'if',
       then: [
