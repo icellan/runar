@@ -24,6 +24,7 @@
 const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
+const const_reassign = @import("const_reassign.zig");
 const types = @import("../ir/types.zig");
 const identifier_collision = @import("identifier_collision.zig");
 
@@ -89,7 +90,9 @@ pub fn parseRust(allocator: Allocator, source: []const u8, file_name: []const u8
     while (guard <= source.len) : (guard += 1) {
         if (t.next().kind == .eof) break;
     }
-    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    const lex_errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    // N-344: a `let` without `mut` cannot be reassigned.
+    const errs = if (r.contract) |c| const_reassign.check(allocator, file_name, c, lex_errs) else lex_errs;
     return .{ .contract = r.contract, .errors = errs };
 }
 

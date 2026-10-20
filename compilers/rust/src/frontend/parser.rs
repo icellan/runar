@@ -2335,7 +2335,16 @@ fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
             if let Some(msg) = unsupported_directive_error(source, s) {
                 return directive_guard_result(msg);
             }
-            return (s.parse)(source, file_name);
+            let mut result = (s.parse)(source, file_name);
+            // N-344: an immutable `.runar.rs` `let` / `.runar.zig` `const` local
+            // cannot be reassigned (the other surfaces have no such spelling).
+            if s.ext == ".runar.rs" || s.ext == ".runar.zig" {
+                if let Some(contract) = result.contract.as_ref() {
+                    let errs = super::const_reassign::check_const_reassignment(contract);
+                    result.errors.extend(errs);
+                }
+            }
+            return result;
         }
     }
     // Default: TypeScript parser

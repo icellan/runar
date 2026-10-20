@@ -117,7 +117,7 @@ Supported:
 
 - `if { ... } else { ... }`
 - bounded `for` loops in the supported compiler subset
-- local `const` and `var`
+- local `const` and `var` (a `const` local cannot be reassigned: the compiler refuses `Cannot assign to 'x' because it is a constant.`; use `var`)
 - assignments and compound assignments
 
 Unsupported or intentionally narrow:

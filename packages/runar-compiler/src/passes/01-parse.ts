@@ -196,13 +196,15 @@ function parseDispatch(source: string, fileName?: string): ParseResult {
     return parseGoSource(source, file);
   }
   if (file.endsWith('.runar.rs')) {
-    return parseRustSource(source, file);
+    // N-344: a `let` without `mut` cannot be reassigned.
+    return withConstReassignment(parseRustSource(source, file));
   }
   if (file.endsWith('.runar.rb')) {
     return parseRubySource(source, file);
   }
   if (file.endsWith('.runar.zig')) {
-    return parseZigSource(source, file);
+    // N-344: a `const` local cannot be reassigned.
+    return withConstReassignment(parseZigSource(source, file));
   }
   if (file.endsWith('.runar.java')) {
     return parseJavaSource(source, file);
@@ -211,6 +213,12 @@ function parseDispatch(source: string, fileName?: string): ParseResult {
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
   const result = withNestingLimit(file, () => parseTsSurface(source, file, errors));
   // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+  if (result.contract) result.errors.push(...checkConstReassignment(result.contract));
+  return result;
+}
+
+/** N-344: append the immutable-local reassignment diagnostics to a parse result. */
+function withConstReassignment(result: ParseResult): ParseResult {
   if (result.contract) result.errors.push(...checkConstReassignment(result.contract));
   return result;
 }

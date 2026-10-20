@@ -118,6 +118,8 @@ let msg = num2bin(&price, 8);     // immutable binding (const)
 let mut total = 0;                // mutable binding (let)
 ```
 
+Reassigning a binding declared without `mut` is a compile error in every compiler (`Cannot assign to 'msg' because it is a constant.`).
+
 ### add_output (Stateful Contracts)
 
 For contracts that produce multiple outputs, define an output type and tracking field:

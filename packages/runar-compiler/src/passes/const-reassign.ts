@@ -4,8 +4,10 @@
  * spec/grammar.md §9: "`const` variables cannot be reassigned." The parser
  * recorded `mutable: false` for `const` and nothing ever read it, so
  * `const s = 1n; s = s + x;` compiled. The check runs on the `.runar.ts`
- * parse result only: other surfaces spell immutability differently (or not at
- * all) and several of their parsers record `mutable` as a constant.
+ * parse result and, since N-344, on `.runar.rs` (`let` without `mut`) and
+ * `.runar.zig` (`const`), whose parsers record `mutable` faithfully. Other
+ * surfaces spell immutability differently (or not at all) and several of
+ * their parsers record `mutable` as a constant.
  *
  * Refused, with one diagnostic in all seven tiers:
  *   - `x = e`, and the compound forms the parser desugars to it (`x += e`);

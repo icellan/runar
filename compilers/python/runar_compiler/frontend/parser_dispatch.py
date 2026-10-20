@@ -137,13 +137,23 @@ def _parse_source_dispatch(source: str, file_name: str) -> ParseResult:
         return parse_go(source, file_name)
     elif lower.endswith(".runar.rs"):
         from runar_compiler.frontend.parser_rust import parse_rust
-        return parse_rust(source, file_name)
+        result = parse_rust(source, file_name)
+        # N-344: an immutable ``let`` (no ``mut``) cannot be reassigned.
+        if result.contract is not None:
+            from runar_compiler.frontend.const_reassign import check_const_reassignment
+            result.errors.extend(check_const_reassignment(result.contract))
+        return result
     elif lower.endswith(".runar.rb"):
         from runar_compiler.frontend.parser_ruby import parse_ruby
         return parse_ruby(source, file_name)
     elif lower.endswith(".runar.zig"):
         from runar_compiler.frontend.parser_zig import parse_zig
-        return parse_zig(source, file_name)
+        result = parse_zig(source, file_name)
+        # N-344: a ``const`` local cannot be reassigned.
+        if result.contract is not None:
+            from runar_compiler.frontend.const_reassign import check_const_reassignment
+            result.errors.extend(check_const_reassignment(result.contract))
+        return result
     elif lower.endswith(".runar.java"):
         from runar_compiler.frontend.parser_java import parse_java
         return parse_java(source, file_name)

@@ -199,13 +199,21 @@ module RunarCompiler
       Frontend.parse_go(source, file_name)
     elsif lower.end_with?(".runar.rs")
       require_relative "frontend/parser_rust"
-      Frontend.parse_rust(source, file_name)
+      require_relative "frontend/const_reassign"
+      result = Frontend.parse_rust(source, file_name)
+      # N-344: an immutable +let+ (no +mut+) cannot be reassigned.
+      result.errors.concat(Frontend::ConstReassign.check(result.contract)) unless result.contract.nil?
+      result
     elsif lower.end_with?(".runar.rb")
       require_relative "frontend/parser_ruby"
       Frontend.parse_ruby(source, file_name)
     elsif lower.end_with?(".runar.zig")
       require_relative "frontend/parser_zig"
-      Frontend.parse_zig(source, file_name)
+      require_relative "frontend/const_reassign"
+      result = Frontend.parse_zig(source, file_name)
+      # N-344: a +const+ local cannot be reassigned.
+      result.errors.concat(Frontend::ConstReassign.check(result.contract)) unless result.contract.nil?
+      result
     elsif lower.end_with?(".runar.java")
       require_relative "frontend/parser_java"
       Frontend.parse_java(source, file_name)

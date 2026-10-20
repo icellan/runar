@@ -458,6 +458,9 @@ public final class ZigParser {
         final List<String> errors = new ArrayList<>();
         /** F-213 measure (A): parse nesting. */
         final SourceNesting.Counter nest = new SourceNesting.Counter();
+        /** N-344: the declarations read as {@code const} (the AST keeps no mutability). */
+        final java.util.Set<VariableDeclStatement> constDecls =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
         // Contract being built.
         String contractName = "UnnamedContract";
@@ -664,6 +667,12 @@ public final class ZigParser {
                 ));
             }
             properties = normalized;
+
+            // N-344: a `const` local cannot be reassigned. Checked before the
+            // rewrite below, which rebuilds declarations and so loses identity.
+            errors.addAll(ConstReassign.check(
+                new ContractNode(contractName, parentClass, properties, constructor, methods, file),
+                constDecls, file));
 
             // Rewrite bare method calls.
             Set<String> methodNames = new HashSet<>();
@@ -1116,8 +1125,9 @@ public final class ZigParser {
 
         Statement parseVariableDecl() {
             SourceLocation l = loc();
-            // 'const' or 'var' — mutability is not modelled in the Java AST,
-            // but we still consume the keyword.
+            // 'const' or 'var' — mutability is not modelled in the Java AST, so
+            // `const` is remembered by identity in constDecls (N-344).
+            boolean isConst = current().kind == Kind.CONST;
             advance();
             String name = expect(Kind.IDENT, "variable name").value;
 
@@ -1131,7 +1141,9 @@ public final class ZigParser {
             Expression init = parseExpression();
             match(Kind.SEMICOLON);
 
-            return new VariableDeclStatement(name, typeNode, init, l);
+            VariableDeclStatement decl = new VariableDeclStatement(name, typeNode, init, l);
+            if (isConst) constDecls.add(decl);
+            return decl;
         }
 
         Statement parseIfStatement() {

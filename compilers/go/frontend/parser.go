@@ -93,7 +93,13 @@ func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 			if msg := unsupportedDirectiveError(source, s); msg != "" {
 				return directiveGuardResult(msg)
 			}
-			return s.parse(source, fileName)
+			result := s.parse(source, fileName)
+			// N-344: an immutable `.runar.rs` `let` / `.runar.zig` `const` local
+			// cannot be reassigned (the other surfaces have no such spelling).
+			if result != nil && (s.ext == ".runar.rs" || s.ext == ".runar.zig") {
+				result.Errors = append(result.Errors, checkConstReassignment(result.Contract)...)
+			}
+			return result
 		}
 	}
 	// TypeScript surface: honours @sighash / @embedAlways directly.

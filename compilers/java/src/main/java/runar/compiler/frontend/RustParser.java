@@ -99,6 +99,8 @@ public final class RustParser {
         ContractNode contract = SourceNesting.guard(() -> parseContract(state), ParseException::new);
         String collision = state.idents.message();
         if (collision != null) state.errors.add(collision);
+        // N-344: a `let` without `mut` cannot be reassigned.
+        state.errors.addAll(ConstReassign.check(contract, state.constDecls, filename));
         if (!state.errors.isEmpty()) {
             // Report first error to mirror Python behaviour where the caller
             // surfaces diagnostics; for the Java parser surface we promote
@@ -592,6 +594,9 @@ public final class RustParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-344: the declarations read as {@code let} without {@code mut} (the AST keeps no mutability). */
+        final java.util.Set<VariableDeclStatement> constDecls =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
         /** F-213 measure (A): parse nesting. */
@@ -1209,9 +1214,9 @@ public final class RustParser {
         // let [mut] name [: type] = expr;
         if (s.check(TOK_LET)) {
             s.advance();
-            s.matchTok(TOK_MUT); // mutability flag — Rúnar AST has no field for this; the
-                                  // ast PropertyNode tracks readonliness, but VariableDeclStatement
-                                  // has no `mutable` slot, matching JavaParser behaviour.
+            // The Rúnar AST has no mutability slot on VariableDeclStatement, so a
+            // `let` without `mut` is remembered by identity in constDecls (N-344).
+            boolean isMut = s.matchTok(TOK_MUT);
 
             String varName = "unknown";
             if (s.peek().kind == TOK_IDENT) {
@@ -1232,7 +1237,9 @@ public final class RustParser {
             s.expect(TOK_EQ);
             Expression init = parseExpression(s);
             s.matchTok(TOK_SEMI);
-            return new VariableDeclStatement(varName, varType, init, stmtLoc);
+            VariableDeclStatement decl = new VariableDeclStatement(varName, varType, init, stmtLoc);
+            if (!isMut) s.constDecls.add(decl);
+            return decl;
         }
 
         // if
