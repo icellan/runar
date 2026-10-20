@@ -839,7 +839,7 @@ The suite currently contains **91 fixtures** under `tests/` — that directory i
 | `cross-covenant` | Cross-contract covenant validation | Yes |
 | `ec-demo` | EC point operation demos | Yes |
 | `ec-primitives` | EC point operations (ecAdd, ecMul, ecMulGen, etc.) | Yes |
-| `ec-unit` | Fine-grained EC unit tests | Yes |
+| `ec-unit` | Fine-grained EC unit tests. Since F-269 the EC optimizer resolves `@ref:` aliases, so its `assert(!ecOnCurve(ecAdd(g, neg)))` (P + (-P)) and `ecMul(g, 2n)` (specialized to `ecMulGen(2n)`) are folded at compile time in every tier: the golden no longer runs the adder's point-at-infinity path or the ladder's k = 2 path with runtime operands (N-354, user decision R125: the fixture and its goldens are deliberately unchanged). Those paths are executed on `@bsv/sdk` with operands pushed at runtime by `packages/runar-testing/src/__tests__/ec-degenerate-add.test.ts` (P + (-P) is the all-zero point, rejected by `ecOnCurve`), `ec-add-doubling.test.ts` (`ecAdd(P, P)`) and `ec-mul-k2.test.ts` (`ecMul(P, 2n)`); the fold itself is pinned in all 7 tiers by `packages/runar-compiler/src/__tests__/r034-ec-negate-cancel-parity.test.ts` | Yes |
 | `escrow` | Multi-party escrow with multiple spending paths | Yes |
 | `function-patterns` | Private helper methods and function call patterns | Yes |
 | `go-dsl-bytestring-literal` | `.runar.go` DSL `ByteString` literal grammar | Yes |
