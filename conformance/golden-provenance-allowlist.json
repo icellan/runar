@@ -2778,6 +2778,24 @@
       "date": "2026-10-06"
     },
     {
+      "path": "conformance/anf-interpreter/expected-strict/n360-shadow-param-rebind-false.json",
+      "sha256": "1e7e0c9b008619736c53435d6c11a0c757449cbba979fb95acf3029631d2e692",
+      "verified-against": "second-implementation",
+      "reason": "N-363 (provenance gate for N-360, 3a22a351a): NEW strict-mode ANF-interpreter golden, no previous bytes. Pins the n360 shadow-param branch-merge outcome for conformance/anf-interpreter/programs/n360-shadow-param-rebind.anf.json method m with currentState count=3, args count=4, c=false: a parameter reassigned in both arms of an if/else must be merged so the later read sees the new value. Expected state.count=63n (else arm: count@local=4+2=6; new count = 6*10 + load_prop count(3) = 63); a dropped merge would leave the stale argument and give 4*10+3=43 for both. Hand-derived from the program source (remediation-logs/N-363/derive.txt). Verified-against: second-implementation -- all 7 tier interpreters (TS/Go/Python/Rust/Ruby/Zig/Java) independently reproduce these bytes: conformance/anf-interpreter/cross-interpreter-strict.test.ts passes the n360-shadow-param-rebind-false row for each of the 7 tiers (120/120 passing, 14 n360 rows). The same program also carries a scriptOracle (compiled script executed on @bsv/sdk) exercised by conformance/negatives/n360-param-branch-merge-execution-parity.test.ts. No compiler golden moved.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-20"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/n360-shadow-param-rebind-true.json",
+      "sha256": "a2358da5e5874f14581257434425a60640d3f055c37a29832fd60006799fed10",
+      "verified-against": "second-implementation",
+      "reason": "N-363 (provenance gate for N-360, 3a22a351a): NEW strict-mode ANF-interpreter golden, no previous bytes. Pins the n360 shadow-param branch-merge outcome for conformance/anf-interpreter/programs/n360-shadow-param-rebind.anf.json method m with currentState count=3, args count=4, c=true: a parameter reassigned in both arms of an if/else must be merged so the later read sees the new value. Expected state.count=53n (then arm: count@local=4+1=5; new count = 5*10 + load_prop count(3) = 53); a dropped merge would leave the stale argument and give 4*10+3=43 for both. Hand-derived from the program source (remediation-logs/N-363/derive.txt). Verified-against: second-implementation -- all 7 tier interpreters (TS/Go/Python/Rust/Ruby/Zig/Java) independently reproduce these bytes: conformance/anf-interpreter/cross-interpreter-strict.test.ts passes the n360-shadow-param-rebind-true row for each of the 7 tiers (120/120 passing, 14 n360 rows). The same program also carries a scriptOracle (compiled script executed on @bsv/sdk) exercised by conformance/negatives/n360-param-branch-merge-execution-parity.test.ts. No compiler golden moved.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-20"
+    },
+    {
       "path": "conformance/anf-interpreter/expected-strict/num2bin-negative-widths.json",
       "sha256": "99ed53cef34803af4e00a20c39aecba9935f3c117590cc82f667b436350a8345",
       "verified-against": "second-implementation",
