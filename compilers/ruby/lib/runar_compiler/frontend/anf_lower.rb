@@ -929,19 +929,36 @@ module RunarCompiler
           end)
         end
 
+        # N-362: a parameter the body reassigns is not aliased -- a write cannot
+        # rebind an alias, so the helper read the caller's argument after it and
+        # the write landed on the caller's same-named variable. It is bound as a
+        # local of the helper below.
         aliased_params = []
+        reassigned = []
         n = [method.params.size, arg_refs.size].min
         n.times do |i|
           param_name = method.params[i].name
+          if Frontend._statements_reassign(method.body, param_name)
+            reassigned << i
+            next
+          end
           push_param_alias(param_name, arg_refs[i])
           aliased_params << param_name
         end
 
-        start_index = @bindings.size
         # N-047: the helper body is its own lexical scope. Its locals are
         # declared against the caller's (a collision is alpha-renamed by
         # declare_local) and go out of scope when it returns.
         caller_scope = enter_inlined_scope
+        # N-362: `let <param> = <arg>` for each reassigned parameter (spec 6.3).
+        reassigned.each do |i|
+          param = method.params[i]
+          binding_name = declare_local(param.name)
+          add_local(binding_name)
+          @local_byte_vars.add(binding_name) if BYTE_TYPES.include?(Frontend._type_node_to_string(param.type))
+          emit_named(binding_name, Frontend._make_load_const_string("@ref:#{arg_refs[i]}"))
+        end
+        start_index = @bindings.size
         lower_statements(method.body)
         leave_inlined_scope(caller_scope)
         end_index = @bindings.size

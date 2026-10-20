@@ -966,19 +966,38 @@ public final class AnfLower {
                 return emit(new MethodCall(thisRef, methodName, argRefs));
             }
 
+            // N-362: a parameter the body reassigns is not aliased -- a write
+            // cannot rebind an alias, so the helper read the caller's argument
+            // after it and the write landed on the caller's same-named variable.
+            // It is bound as a local of the helper below.
             List<String> aliasedParams = new ArrayList<>();
+            List<Integer> reassigned = new ArrayList<>();
             int n = Math.min(method.params().size(), argRefs.size());
             for (int i = 0; i < n; i++) {
                 String paramName = method.params().get(i).name();
+                if (statementsReassign(method.body(), paramName)) {
+                    reassigned.add(i);
+                    continue;
+                }
                 pushParamAlias(paramName, argRefs.get(i));
                 aliasedParams.add(paramName);
             }
 
-            int startIndex = bindings.size();
             // N-047: the helper body is its own lexical scope. Its locals are
             // declared against the caller's (a collision is alpha-renamed by
             // declareLocal) and go out of scope when it returns.
             InlinedScopeState callerScope = enterInlinedScope();
+            // N-362: `let <param> = <arg>` for each reassigned parameter (spec 6.3).
+            for (int i : reassigned) {
+                var param = method.params().get(i);
+                String bindingName = declareLocal(param.name());
+                addLocal(bindingName);
+                if (isByteType(typeToString(param.type()))) {
+                    localByteVars.add(bindingName);
+                }
+                emitNamed(bindingName, makeLoadConstString("@ref:" + argRefs.get(i)));
+            }
+            int startIndex = bindings.size();
             lowerStatements(method.body());
             leaveInlinedScope(callerScope);
             int endIndex = bindings.size();

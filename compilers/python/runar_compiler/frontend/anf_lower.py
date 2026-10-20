@@ -2206,18 +2206,34 @@ class _LowerCtx:
                 method=method_name, args=arg_refs,
             ))
 
+        # N-362: a parameter the body reassigns is not aliased -- a write cannot
+        # rebind an alias, so the helper read the caller's argument after it and
+        # the write landed on the caller's same-named variable. It is bound as a
+        # local of the helper below.
         aliased: list[str] = []
+        reassigned: list[int] = []
         for i, param in enumerate(method.params):
             if i >= len(arg_refs):
                 break
+            if _statements_reassign(method.body, param.name):
+                reassigned.append(i)
+                continue
             self.push_param_alias(param.name, arg_refs[i])
             aliased.append(param.name)
 
-        start_index = len(self.bindings)
         # N-047: the helper body is its own lexical scope. Its locals are
         # declared against the caller's (a collision is alpha-renamed by
         # ``declare_local``) and go out of scope when it returns.
         caller_scope = self.enter_inlined_scope()
+        # N-362: ``let <param> = <arg>`` for each reassigned parameter (spec 6.3).
+        for i in reassigned:
+            param = method.params[i]
+            binding_name = self.declare_local(param.name)
+            self.add_local(binding_name)
+            if _type_node_to_string(param.type) in _BYTE_TYPES:
+                self._local_byte_vars.add(binding_name)
+            self.emit_named(binding_name, _make_load_const_string("@ref:" + arg_refs[i]))
+        start_index = len(self.bindings)
         self.lower_statements(method.body)
         self.leave_inlined_scope(caller_scope)
         end_index = len(self.bindings)

@@ -3152,19 +3152,37 @@ func (ctx *lowerCtx) inlinePrivateMethodCall(methodName string, argRefs []string
 		return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: methodName, Args: argRefs})
 	}
 
-	// Bind caller arg refs to the private's parameter names.
+	// Bind caller arg refs to the private's parameter names. N-362: a parameter
+	// the body reassigns is not aliased — a write cannot rebind an alias, so the
+	// helper read the caller's argument after it and the write landed on the
+	// caller's same-named variable. It is bound as a local of the helper below.
 	var aliasedParams []string
+	var reassignedParams []int
 	for i := 0; i < len(method.Params) && i < len(argRefs); i++ {
 		paramName := method.Params[i].Name
+		if statementsReassign(method.Body, paramName) {
+			reassignedParams = append(reassignedParams, i)
+			continue
+		}
 		ctx.pushParamAlias(paramName, argRefs[i])
 		aliasedParams = append(aliasedParams, paramName)
 	}
 
-	startIndex := len(ctx.bindings)
 	// N-047: the helper body is its own lexical scope. Its locals are declared
 	// against the caller's (a collision is alpha-renamed by declareLocal) and
 	// go out of scope when it returns.
 	callerScope := ctx.enterInlinedScope()
+	// N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
+	for _, i := range reassignedParams {
+		param := method.Params[i]
+		bindingName := ctx.declareLocal(param.Name)
+		ctx.addLocal(bindingName)
+		if isByteType(typeNodeToString(param.Type)) {
+			ctx.localByteVars[bindingName] = true
+		}
+		ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+argRefs[i]))
+	}
+	startIndex := len(ctx.bindings)
 	ctx.lowerStatements(method.Body)
 	ctx.leaveInlinedScope(callerScope)
 	endIndex := len(ctx.bindings)

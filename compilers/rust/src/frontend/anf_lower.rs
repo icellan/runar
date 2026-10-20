@@ -3681,8 +3681,12 @@ fn inline_private_method_call(
     // Snapshot the method body + param names before mutating the
     // context (Rust's borrow checker won't let us hold a &MethodNode
     // and mutate ctx simultaneously).
-    let (params, body): (Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
-        Some(m) => (m.params.iter().map(|p| p.name.clone()).collect(), m.body.clone()),
+    let (params, param_types, body): (Vec<String>, Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
+        Some(m) => (
+            m.params.iter().map(|p| p.name.clone()).collect(),
+            m.params.iter().map(|p| type_node_to_string(&p.param_type)).collect(),
+            m.body.clone(),
+        ),
         None => {
             // Should not happen — caller checked should_inline_private,
             // which requires the method to exist. Fall back to a
@@ -3699,21 +3703,43 @@ fn inline_private_method_call(
         }
     };
 
-    // Bind caller arg refs to the private's parameter names.
+    // Bind caller arg refs to the private's parameter names. N-362: a parameter
+    // the body reassigns is not aliased — a write cannot rebind an alias, so the
+    // helper read the caller's argument after it and the write landed on the
+    // caller's same-named variable. It is bound as a local of the helper below.
     let mut aliased: Vec<String> = Vec::new();
+    let mut reassigned: Vec<usize> = Vec::new();
     for (i, param_name) in params.iter().enumerate() {
         if i >= arg_refs.len() {
             break;
+        }
+        if statements_reassign(&body, param_name) {
+            reassigned.push(i);
+            continue;
         }
         ctx.push_param_alias(param_name, &arg_refs[i]);
         aliased.push(param_name.clone());
     }
 
-    let start_index = ctx.bindings.len();
     // N-047: the helper body is its own lexical scope. Its locals are declared
     // against the caller's (a collision is alpha-renamed by `declare_local`)
     // and go out of scope when it returns.
     let caller_scope = ctx.enter_inlined_scope();
+    // N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
+    for &i in &reassigned {
+        let binding_name = ctx.declare_local(&params[i]);
+        ctx.add_local(&binding_name);
+        if is_byte_type(&param_types[i]) {
+            ctx.local_byte_vars.insert(binding_name.clone());
+        }
+        ctx.emit_named(
+            &binding_name,
+            ANFValue::LoadConst {
+                value: serde_json::Value::String(format!("@ref:{}", arg_refs[i])),
+            },
+        );
+    }
+    let start_index = ctx.bindings.len();
     lower_statements(&body, ctx);
     ctx.leave_inlined_scope(caller_scope);
     let end_index = ctx.bindings.len();

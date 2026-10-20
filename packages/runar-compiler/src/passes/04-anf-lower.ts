@@ -2741,7 +2741,8 @@ function isStatefulContextParam(param: ParamNode): boolean {
  * the runtime hashOutputs check would diverge from actual outputs.
  *
  * Caller's arg refs are mapped onto the private's parameter names via
- * `pushParamAlias`. While the private's body lowers, any identifier
+ * `pushParamAlias` (except a parameter the body reassigns, which is bound
+ * as a local of the helper — N-362). While the private's body lowers, any identifier
  * expression matching one of those param names resolves to the
  * caller's ref (see `lowerIdentifier`). The aliases are popped
  * afterwards so subsequent lowering in the caller's body sees its own
@@ -2772,19 +2773,35 @@ function inlinePrivateMethodCall(
     return ctx.emit({ kind: 'method_call', object: thisRef, method: methodName, args: argRefs });
   }
 
-  // Bind caller arg refs to the private's parameter names.
+  // Bind caller arg refs to the private's parameter names. N-362: a parameter
+  // the body reassigns is not aliased — a write cannot rebind an alias, so the
+  // helper read the caller's argument after it and the write landed on the
+  // caller's same-named variable. It is bound as a local of the helper below.
   const aliasedParams: string[] = [];
+  const reassignedParams: number[] = [];
   for (let i = 0; i < method.params.length && i < argRefs.length; i++) {
     const paramName = method.params[i]!.name;
+    if (statementsReassign(method.body, paramName)) {
+      reassignedParams.push(i);
+      continue;
+    }
     ctx.pushParamAlias(paramName, argRefs[i]!);
     aliasedParams.push(paramName);
   }
 
-  const startIndex = ctx.bindings.length;
   // N-047: the helper body is its own lexical scope. Its locals are declared
   // against the caller's (a collision is alpha-renamed by `declareLocal`) and
   // go out of scope when it returns.
   const callerScope = ctx.enterInlinedScope();
+  // N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
+  for (const i of reassignedParams) {
+    const param = method.params[i]!;
+    const bindingName = ctx.declareLocal(param.name);
+    ctx.addLocal(bindingName);
+    if (isByteStringFamilyType(typeNodeToString(param.type))) ctx.addLocalByteVar(bindingName);
+    ctx.emitNamed(bindingName, { kind: 'load_const', value: `@ref:${argRefs[i]!}` });
+  }
+  const startIndex = ctx.bindings.length;
   lowerStatements(method.body, ctx);
   ctx.leaveInlinedScope(callerScope);
   const endIndex = ctx.bindings.length;

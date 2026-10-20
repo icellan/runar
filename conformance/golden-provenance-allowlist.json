@@ -2796,6 +2796,24 @@
       "date": "2026-10-20"
     },
     {
+      "path": "conformance/anf-interpreter/expected-strict/n362-inl-helper-param-rebind-false.json",
+      "sha256": "bea9467ff000ebd6ade53d9a02c334f5e2732ebba497082f624cba162c60fd1a",
+      "verified-against": "second-implementation",
+      "reason": "N-362: NEW strict-mode ANF-interpreter golden, no previous bytes. Pins the outcome of conformance/anf-interpreter/programs/n362-inl-helper-param-rebind.anf.json method m with currentState count=3, args x=4, c=false: the output-emitting private helper emit(a, c) is ANF-inlined, and its parameter a is reassigned (a = a * 10n, then a = a + 2 in the else arm) before this.addOutput(1000n, a + this.count). Expected state.count=45n (4*10 + 2 + 3); the pre-fix ANF ignored the writes to the inlined helper's aliased parameter and gives 4 + 3 = 7 (measured: all 7 interpreters return 7n on the HEAD-compiled ANF). Hand-derived from the program source. Verified-against: second-implementation -- all 7 tier interpreters (TS/Go/Python/Rust/Ruby/Zig/Java) independently reproduce these bytes in conformance/anf-interpreter/cross-interpreter-strict.test.ts (RUNAR_ANF_DRIVERS_STRICT=1). The input carries a scriptOracle, so cross-interpreter.test.ts also executes the compiled script on @bsv/sdk and decodes the same count from the continuation output. No compiler golden moved.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-20"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/n362-inl-helper-param-rebind-true.json",
+      "sha256": "e5cd6bd8ed35d123568e8e2c9977d0e2aa19395397af909557b042c3e0e70765",
+      "verified-against": "second-implementation",
+      "reason": "N-362: NEW strict-mode ANF-interpreter golden, no previous bytes. Pins the outcome of conformance/anf-interpreter/programs/n362-inl-helper-param-rebind.anf.json method m with currentState count=3, args x=4, c=true: the output-emitting private helper emit(a, c) is ANF-inlined, and its parameter a is reassigned (a = a * 10n, then a = a + 1 in the then arm) before this.addOutput(1000n, a + this.count). Expected state.count=44n (4*10 + 1 + 3); the pre-fix ANF ignored the writes to the inlined helper's aliased parameter and gives 4 + 3 = 7 (measured: all 7 interpreters return 7n on the HEAD-compiled ANF). Hand-derived from the program source. Verified-against: second-implementation -- all 7 tier interpreters (TS/Go/Python/Rust/Ruby/Zig/Java) independently reproduce these bytes in conformance/anf-interpreter/cross-interpreter-strict.test.ts (RUNAR_ANF_DRIVERS_STRICT=1). The input carries a scriptOracle, so cross-interpreter.test.ts also executes the compiled script on @bsv/sdk and decodes the same count from the continuation output. No compiler golden moved.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-20"
+    },
+    {
       "path": "conformance/anf-interpreter/expected-strict/num2bin-negative-widths.json",
       "sha256": "99ed53cef34803af4e00a20c39aecba9935f3c117590cc82f667b436350a8345",
       "verified-against": "second-implementation",

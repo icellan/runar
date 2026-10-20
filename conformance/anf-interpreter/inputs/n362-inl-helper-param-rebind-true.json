@@ -1,0 +1,24 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/n362-inl-helper-param-rebind.anf.json",
+  "methodName": "m",
+  "currentState": {
+    "count": "3n"
+  },
+  "args": {
+    "x": "4n",
+    "c": true
+  },
+  "constructorArgs": [
+    "3n"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/N362InlHelperParamRebind.runar.ts",
+    "constructorArgs": [
+      "3n"
+    ],
+    "methodArgs": [
+      "4n",
+      true
+    ]
+  }
+}

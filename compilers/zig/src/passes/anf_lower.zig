@@ -2994,22 +2994,41 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
         } });
     };
 
-    // Bind caller arg refs to the private's parameter names.
+    // Bind caller arg refs to the private's parameter names. N-362: a parameter
+    // the body reassigns is not aliased — a write cannot rebind an alias, so the
+    // helper read the caller's argument after it and the write landed on the
+    // caller's same-named variable. It is bound as a local of the helper below.
     var aliased_params: std.ArrayListUnmanaged([]const u8) = .empty;
     defer aliased_params.deinit(ctx.allocator);
+    var reassigned: std.ArrayListUnmanaged(usize) = .empty;
+    defer reassigned.deinit(ctx.allocator);
     const n = @min(method.params.len, arg_refs.len);
     var i: usize = 0;
     while (i < n) : (i += 1) {
         const param_name = method.params[i].name;
+        if (statementsReassign(method.body, param_name)) {
+            try reassigned.append(ctx.allocator, i);
+            continue;
+        }
         try ctx.pushParamAlias(param_name, arg_refs[i]);
         try aliased_params.append(ctx.allocator, param_name);
     }
 
-    const start_index = ctx.bindings.items.len;
     // N-047: the helper body is its own lexical scope. Its locals are declared
     // against the caller's (a collision is alpha-renamed by `declareLocal`)
     // and go out of scope when it returns.
     const caller_scope = try ctx.enterInlinedScope();
+    // N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
+    for (reassigned.items) |k| {
+        const param = method.params[k];
+        const binding_name = try ctx.declareLocal(param.name);
+        try ctx.addLocal(binding_name);
+        if (isByteType(param.type_info)) {
+            try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, param.name, binding_name), {});
+        }
+        try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, arg_refs[k])));
+    }
+    const start_index = ctx.bindings.items.len;
     try lowerStatements(ctx, method.body);
     ctx.leaveInlinedScope(caller_scope);
     const end_index = ctx.bindings.items.len;
