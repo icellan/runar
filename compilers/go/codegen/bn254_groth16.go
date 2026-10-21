@@ -1454,6 +1454,11 @@ func emitWAFinalExp(t *BN254Tracker, fPrefix, resultPrefix string) {
 // SP1's Solidity verifier is not a counter-example: it computes the MSM
 // itself via the BN254 EC precompile from public inputs its caller
 // supplies, rather than accepting a prover-supplied accumulator.
+//
+// config.PinnedPublicInputs has no meaning here: this variant never sees
+// the public-input scalars, so it cannot enforce a pin. The stack lowering
+// refuses a config that pins inputs for a method on this variant (see
+// HasPinnedPublicInputs); callers of the emitter directly must not pass one.
 func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config) {
 	// Count Miller loop iterations for gradient allocation
 	naf := bn254SixXPlus2NAF
@@ -1997,6 +2002,16 @@ func emitWAGroth16PublicInputRangeCheck(t *BN254Tracker) {
 // the pinned public-input terms folded in. Panics if the result is the point
 // at infinity (no affine form; it cannot happen for a real SP1 statement but
 // a contrived key could hit it).
+// HasPinnedPublicInputs reports whether any public-input slot is pinned.
+func (c Groth16Config) HasPinnedPublicInputs() bool {
+	for _, p := range c.PinnedPublicInputs {
+		if p != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func groth16MSMStart(config Groth16Config) (*big.Int, *big.Int) {
 	var acc bn254.G1Affine
 	setG1 := func(dst *bn254.G1Affine, p [2]*big.Int) {

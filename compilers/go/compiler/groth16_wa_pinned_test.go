@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/icellan/runar/compilers/go/codegen"
 )
 
 // ---------------------------------------------------------------------------
@@ -307,4 +308,138 @@ func (c *PinnedCheck) Advance(nextCounter runar.Bigint) {
 		t.Fatalf("pinned contract script is not smaller: %d >= %d hex chars", len(pinned), len(unpinned))
 	}
 	t.Logf("stateful contract: pinned %d, unpinned %d hex chars", len(pinned), len(unpinned))
+}
+
+// TestPinnedPublicInputs_StandaloneChecksEachSlotOnce: the groth16-wa
+// backend pins all five inputs with --pub. A slot the vk.json also pins has
+// already been checked inside the MSM binding, so the backend's own pass must
+// only drop it, not compare it a second time.
+func TestPinnedPublicInputs_StandaloneChecksEachSlotOnce(t *testing.T) {
+	pubs := []*big.Int{big.NewInt(7), big.NewInt(11), big.NewInt(0), big.NewInt(13), big.NewInt(0)}
+	count := func(ops []codegen.StackOp, code string) int {
+		n := 0
+		for _, op := range ops {
+			if op.Op == "opcode" && op.Code == code {
+				n++
+			}
+		}
+		return n
+	}
+
+	none := emitGroth16PublicInputPins(nil, pubs, [5]*big.Int{})
+	if got := count(none, "OP_EQUALVERIFY"); got != 5 {
+		t.Fatalf("no vk.json pins: expected 5 OP_EQUALVERIFY, got %d", got)
+	}
+	if got := count(none, "OP_DROP"); got != 1 {
+		t.Fatalf("no vk.json pins: expected 1 OP_DROP (the truthy marker), got %d", got)
+	}
+
+	var byConfig [5]*big.Int
+	byConfig[0], byConfig[2], byConfig[3] = pubs[0], pubs[2], pubs[3]
+	some := emitGroth16PublicInputPins(nil, pubs, byConfig)
+	if got := count(some, "OP_EQUALVERIFY"); got != 2 {
+		t.Fatalf("slots 0,2,3 pinned by vk.json: expected 2 OP_EQUALVERIFY, got %d", got)
+	}
+	if got := count(some, "OP_DROP"); got != 4 {
+		t.Fatalf("slots 0,2,3 pinned by vk.json: expected 4 OP_DROP (marker + 3 slots), got %d", got)
+	}
+	// Every slot is consumed exactly once either way, so the stack effect
+	// of the two forms is identical: 6 items in, 1 out.
+	if len(some) != len(none)-3*1 { // each skipped slot: push+EQUALVERIFY (2 ops) becomes DROP (1 op)
+		t.Fatalf("expected %d ops with three slots skipped, got %d", len(none)-3, len(some))
+	}
+
+	// End to end: the honest proof still verifies with the duplicate checks
+	// gone (the pinned builds in the other tests go through this path), and
+	// the standalone artifact is smaller than it would be with both checks.
+	s := newSynthGroth16(t)
+	honest := honestPublicInputs(t)
+	proof := s.proofFor(honest)
+	s.sanityCheck(t, proof, honest)
+	path := writePinnedVK(t, s.vkPath, pinsFrom(honest, 0, 2, 3))
+	art, err := CompileGroth16WA(path, Groth16WAOpts{PublicInputs: honest})
+	if err != nil {
+		t.Fatalf("CompileGroth16WA: %v", err)
+	}
+	if err := executeArtifactWithWitness(t, art, buildWitness(t, layoutMSM, s.vk, proof, honest)); err != nil {
+		t.Fatalf("honest proof rejected once the duplicate pin checks were removed: %v", err)
+	}
+	// A spend whose witness lies about a vk.json-pinned slot must still be
+	// caught by the single remaining check inside the MSM binding.
+	w := buildWitness(t, layoutMSM, s.vk, proof, honest)
+	w.PublicInputs[0] = new(big.Int).Add(w.PublicInputs[0], big.NewInt(1))
+	if err := executeArtifactWithWitness(t, art, w); err == nil {
+		t.Fatal("a witness scalar that disagrees with the vk.json pin was accepted after the backend's own check was dropped")
+	}
+}
+
+// TestPinnedPublicInputs_StandaloneRejectsConflictingPub: a vk.json pin and
+// the --pub value for the same slot must agree, or the verifier could never
+// accept any proof. That is refused at compile time.
+func TestPinnedPublicInputs_StandaloneRejectsConflictingPub(t *testing.T) {
+	s := newSynthGroth16(t)
+	honest := honestPublicInputs(t)
+	conflict := map[int]*big.Int{0: new(big.Int).Add(honest[0], big.NewInt(1))}
+	path := writePinnedVK(t, s.vkPath, conflict)
+	_, err := CompileGroth16WA(path, Groth16WAOpts{PublicInputs: honest})
+	if err == nil {
+		t.Fatal("CompileGroth16WA accepted a --pub value that contradicts the vk.json pin for the same slot")
+	}
+	if !strings.Contains(err.Error(), "pinnedPublicInputs") || !strings.Contains(err.Error(), "public input 0") {
+		t.Fatalf("error should name the slot and the field; got: %v", err)
+	}
+	// Agreeing values compile.
+	path = writePinnedVK(t, s.vkPath, pinsFrom(honest, 0))
+	if _, err := CompileGroth16WA(path, Groth16WAOpts{PublicInputs: honest}); err != nil {
+		t.Fatalf("CompileGroth16WA with an agreeing pin: %v", err)
+	}
+}
+
+// TestPinnedPublicInputs_RejectedOnNonMSMPath: the plain witness-assisted
+// verifier (AssertGroth16WitnessAssisted, no MSM binding) never sees the
+// public-input scalars and cannot enforce a pin. A vk.json that pins inputs
+// is refused for such a method rather than silently ignored; the same vk.json
+// is accepted by the MSM variant and the unpinned vk.json by both.
+func TestPinnedPublicInputs_RejectedOnNonMSMPath(t *testing.T) {
+	vkPath := sp1VKPath(t)
+	pubs := sp1PublicInputs(t)
+	pinnedPath := writePinnedVK(t, vkPath, pinsFrom(pubs, 0, 2, 3))
+
+	write := func(name, assertCall string) string {
+		source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type ` + name + ` struct {
+	runar.SmartContract
+}
+
+func (c *` + name + `) Verify() {
+	runar.` + assertCall + `()
+	runar.Assert(true)
+}
+`
+		p := filepath.Join(t.TempDir(), name+".runar.go")
+		if err := os.WriteFile(p, []byte(source), 0o644); err != nil {
+			t.Fatalf("write source: %v", err)
+		}
+		return p
+	}
+	raw := write("RawPinned", "AssertGroth16WitnessAssisted")
+	msm := write("MSMPinned", "AssertGroth16WitnessAssistedWithMSM")
+
+	_, err := CompileFromSource(raw, CompileOptions{Groth16WAVKey: pinnedPath})
+	if err == nil {
+		t.Fatal("a pinned vk.json was accepted for AssertGroth16WitnessAssisted, where the pin cannot be enforced")
+	}
+	if !strings.Contains(err.Error(), "pinnedPublicInputs") || !strings.Contains(err.Error(), "WithMSM") {
+		t.Fatalf("error should name the field and point at the MSM variant; got: %v", err)
+	}
+	if _, err := CompileFromSource(raw, CompileOptions{Groth16WAVKey: vkPath}); err != nil {
+		t.Fatalf("unpinned vk.json on the raw variant should compile: %v", err)
+	}
+	if _, err := CompileFromSource(msm, CompileOptions{Groth16WAVKey: pinnedPath}); err != nil {
+		t.Fatalf("pinned vk.json on the MSM variant should compile: %v", err)
+	}
 }
