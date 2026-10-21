@@ -136,8 +136,9 @@ func TestN051BranchArmPrivateHelper_SevenTierScript(t *testing.T) {
 		{"ternary-arm/+1", n051TernaryArmPlus1, "7600a0638b6700776800a2"},
 		{"ternary-arm/+2", n051TernaryArmPlus2, "7600a06352936700776800a2"},
 		{"ternary-arm-manual-inline", n051TernaryArmManualInline, "7600a0638b6700776800a2"},
-		{"if-statement-arm", n051IfStatementArm, "007800a0637c8b767676537a757777670076537a757768517a7500a2"},
-		{"if-statement-arm-no-helper", n051IfStatementArmNoHelper, "007800a0637c8b7677670076537a757768517a7500a2"},
+		// N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
+		{"if-statement-arm", n051IfStatementArm, "007800a0637c8b767676537a757777670076537a7577687c7500a2"},
+		{"if-statement-arm-no-helper", n051IfStatementArmNoHelper, "007800a0637c8b7677670076537a7577687c7500a2"},
 		{"statement-position", n051StatementPosition, "8b00a2"},
 	}
 

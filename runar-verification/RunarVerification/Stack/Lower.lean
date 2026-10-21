@@ -859,6 +859,21 @@ def StackMap.findFrom? (sm : StackMap) (start : Nat) (name : String) : Option Na
   | some i => some (start + i)
   | none   => none
 
+/-- The bytes of the reference's post-`OP_ENDIF` reconcile roll from depth `d`:
+TS emits `push d` and a `roll` StackOp, and its peephole folds the pair
+`PUSH 0 / 1 / 2, Roll{0 / 1 / 2}` to nothing / `OP_SWAP` / `OP_ROT`. N-216: the
+reconcile sites used to tag that roll with depth `d + 1` (the restore loop with
+`w` for a push of `w - 1`), so the fold could never fire and the reference kept
+`OP_d OP_ROLL`; with the metadata corrected the folds fire, so the model emits
+the folded form. Depth `≥ 3` keeps the explicit `push d, OP_ROLL` (not the fused
+`.roll d`, which `rollPickRewriteOne` would treat differently — see
+`removePropEntryAux`). -/
+def reconcileRoll : Nat → List StackOp
+  | 0     => []
+  | 1     => [.swap]
+  | 2     => [.rot]
+  | n + 3 => [.push (.bigint (Int.ofNat (n + 3))), .opcode "OP_ROLL"]
+
 /-- Lift the slot at depth `d` to the top, preserving every other slot's
 relative order. Mirrors the reference's `removeAtDepth(d)` followed by pushing
 the lifted slot back (`05-stack-lower.ts:2566-2567`). Out-of-range `d` is the
@@ -903,7 +918,7 @@ def sinkResultBlock (n : Nat) (sinkBelow : Nat) (sm : StackMap) :
     (List.range sinkBelow).foldl
       (init := (([] : List StackOp), sm))
       fun (ops, m) _ =>
-        (ops ++ [.push (.bigint (Int.ofNat (w - 1))), .opcode "OP_ROLL"],
+        (ops ++ reconcileRoll (w - 1),
          m.liftFromDepth (w - 1))
 
 /-- `sinkBelow = 0` is the common case — no result crossed an inherited slot —
@@ -941,7 +956,7 @@ def adoptDeclaredResults (sm : StackMap) (results : List String) :
       fun (ops, m, sink) name =>
         match m.findFrom? n name with
         | some d =>
-            (ops ++ [.push (.bigint (Int.ofNat d)), .opcode "OP_ROLL", .drop],
+            (ops ++ reconcileRoll d ++ [.drop],
              m.removeAtDepth d,
              max sink (d - n))
         | none   => (ops, m, sink)
@@ -3027,9 +3042,10 @@ out as soon as one is removed.
 
 Mirrors the dispatch:
 * `d = 1`  → emit `OP_NIP`, drop the `rest[0]` entry.
-* `d ≥ 2`  → emit `[push d, roll d+1, drop]`. The literal `push d`
-  consumes one extra slot, then `roll d+1` brings the prop entry
-  (now at depth d+1) to top, and `drop` removes it.
+* `d ≥ 2`  → emit `reconcileRoll d ++ [drop]`: `[push d, OP_ROLL, drop]`,
+  folded to `[rot, drop]` at `d = 2` (N-216). The literal `push d` is
+  consumed by OP_ROLL, which brings the prop entry at depth d to top, and
+  `drop` removes it.
 
 Recurses on the depth index `d` and the tail of the stackmap, so it
 terminates on the length of `rest`.
@@ -3047,7 +3063,9 @@ encoder bundles `push d` *into* `.roll d` (`Script/Emit.lean:176`), so
 emitting `[push d, .roll (d + 1)]` would double-push the depth literal
 (producing the spurious `OP_2 OP_3 OP_ROLL` prefix observed in the
 auction / add-raw-output / cross-covenant fixtures pre-Phase 3z-G). We
-emit `[.push d, .opcode "OP_ROLL", .drop]` to match TS byte-for-byte. -/
+emit `[.push d, .opcode "OP_ROLL", .drop]` to match TS byte-for-byte —
+via `reconcileRoll`, which also writes the `d = 2` OP_ROT fold the reference
+performs since N-216 corrected its roll metadata to `d`. -/
 def removePropEntryAux (propName : String) :
     Nat → StackMap → (List StackOp × StackMap)
   | _,  []        => ([], [])
@@ -3056,7 +3074,7 @@ def removePropEntryAux (propName : String) :
         if d = 1 then
           ([.nip], xs)
         else
-          ([.push (.bigint (Int.ofNat d)), .opcode "OP_ROLL", .drop], xs)
+          (reconcileRoll d ++ [.drop], xs)
       else
         let (ops, xs') := removePropEntryAux propName (d + 1) xs
         (ops, x :: xs')
@@ -5054,29 +5072,27 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
           -- `rollPickRewriteOne`, so leaving `[.pickStruct 1]` here kept
           -- the unfolded `OP_1 OP_PICK` (2 bytes vs 1).
           --
-          -- cleanup: TS emits `push(d'), roll(d'+1), drop` where d' is
+          -- cleanup: TS emits `push(d'), roll(d'), drop` where d' is
           -- the post-ENDIF stale depth = `d + 1` (the elseSynth pushed
           -- a new top, displacing the original `topName` by 1). Bytes:
-          -- `OP_<d+1> OP_ROLL OP_DROP`.
+          -- `OP_<d+1> OP_ROLL OP_DROP`, except that at d' = 2 the TS
+          -- peephole's "PUSH 2, Roll{2} → Rot" now fires (N-216: the roll
+          -- used to carry depth d'+1, so the pair disagreed and the
+          -- reference kept `OP_2 OP_ROLL`). `loop-if-merged-locals`
+          -- reaches this at d == 1, i.e. d' = 2.
           --
-          -- Issue #150: emitted as an explicit `[.push (d+1), .opcode
-          -- "OP_ROLL", .drop]` — the same shape `adoptDeclaredResults`
-          -- uses for this identical TS loop — and NOT as `[.roll (d+1),
-          -- .drop]`. The two are byte-equal for `d + 1 ≥ 3`, but at
-          -- `d + 1 = 2` our fused `.roll 2` is fold-eligible and
-          -- `rollPickRewriteOne` rewrites it to `.rot` (1 byte). TS CANNOT
-          -- fold here: its pushed value (d') and its roll depth (d'+1)
-          -- DISAGREE, and "PUSH 2, Roll{2} → Rot"
-          -- (`optimizer/peephole.ts:352-357`) requires them equal. The
-          -- reference therefore keeps `OP_2 OP_ROLL`, and so must we —
-          -- `loop-if-merged-locals` reaches this at d == 1.
+          -- Emitted through `reconcileRoll` — the same shape
+          -- `adoptDeclaredResults` uses for this identical TS loop — and
+          -- NOT as `[.roll (d+1), .drop]`, so the fold is written where
+          -- the reference performs it rather than left to
+          -- `rollPickRewriteOne`.
           let elseSynth : List StackOp :=
             if d == 0 then [.dup]
             else if d == 1 then [.over]
             else [.pickStruct d]
           let cleanup : List StackOp :=
             if d == 0 then [.nip]
-            else [.push (.bigint (Int.ofNat (d + 1))), .opcode "OP_ROLL", .drop]
+            else reconcileRoll (d + 1) ++ [.drop]
           let smCleaned : StackMap := (smBranch.removeAtDepth d).push topName
           (condOps ++ [.ifOp thnOps (some elseSynth)] ++ cleanup, smCleaned, localBindings)
       | none =>
@@ -5278,13 +5294,12 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                     if vd == 0 then [.dup]
                     else if vd == 1 then [.over]
                     else [.pickStruct vd]
-                  -- Post-ENDIF stale removal. Explicit `push / OP_ROLL`
-                  -- (not the fused `.roll`) for the same reason as the
-                  -- `shadowRebind` cleanup: TS's pushed value and roll
-                  -- depth DISAGREE here, so its rot-fold cannot fire.
+                  -- Post-ENDIF stale removal, through `reconcileRoll` for
+                  -- the same reason as the `shadowRebind` cleanup: TS
+                  -- folds its `push 2 / roll 2` here to OP_ROT (N-216).
                   let cleanupOps : List StackOp :=
                     if staleD == 1 then [.nip]
-                    else [.push (.bigint (Int.ofNat staleD)), .opcode "OP_ROLL", .drop]
+                    else reconcileRoll staleD ++ [.drop]
                   let elsCopyOps := elsOps ++ elsCleanupOps ++ copyOps
                   -- The else arm's post-phase-3 map is the COPY pad, not the
                   -- generic `smElsPad`, so its restore is computed against it.
@@ -5369,8 +5384,8 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- 2. Rename top from `ref` to `propName` so subsequent `loadProp`
       --    finds the updated value.
       -- 3. If the OLD `propName` entry survives below (depth ≥ 1), the TS
-      --    reference removes it via NIP (depth 1) or [push d, roll d+1,
-      --    drop] (depth ≥ 2) — but ONLY when it is not lowering inside an
+      --    reference removes it via NIP (depth 1) or [push d, roll d,
+      --    drop] (depth ≥ 2; ROT+DROP at depth 2) — but ONLY when it is not lowering inside an
       --    `if` arm (`!this._insideBranch`, `05-stack-lower.ts:3312`).
       --    Inside an arm the stale slot is kept ON PURPOSE, because it is
       --    what `lowerIf`'s same-property detection reads after OP_ENDIF.

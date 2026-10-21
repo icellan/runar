@@ -221,7 +221,9 @@ const STATEFUL: { name: string; src: string; headSha?: { off: string; on: string
     if (c) { count = count + 1n; this.count = count; } else { this.count = count; }
     assert(true);
   }`),
-    headSha: { off: 'e0019cc299bfb325', on: 'e0019cc299bfb325' },
+    // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now
+    // folds to OP_ROT (745 -> 744 B, opcode diff is that fold only).
+    headSha: { off: 'c4547ac45f720db6', on: 'c4547ac45f720db6' },
   },
   {
     name: 'Out',

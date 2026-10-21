@@ -104,7 +104,8 @@ const SHAPES: Shape[] = [
   {
     name: 'C-nonterminal-results', body: `let k = 0n; if (c) { k = 1n; } else { k = 2n; } assert(a);`,
     expect: (a) => a,
-    pinnedHex: '52797600877c51879b69787600877c51879b69767600877c51879b69007c635176776752767768517a757b7777',
+    // N-216 (2026-10-21): re-pinned; the post-ENDIF `OP_1 OP_ROLL` reconcile now folds to OP_SWAP (-1 B, opcode diff is that fold only).
+    pinnedHex: '52797600877c51879b69787600877c51879b69767600877c51879b69007c6351767767527677687c757b7777',
   },
 ];
 

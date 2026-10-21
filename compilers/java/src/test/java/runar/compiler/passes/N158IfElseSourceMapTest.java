@@ -69,7 +69,7 @@ class N158IfElseSourceMapTest {
     /**
      * Proves: compiled through the same passes the CLI's --emit-source-map
      * uses (fold off, as conformance runs), the map is exactly the TS
-     * reference's 14 entries: OP_IF at 11 is mapped to the {@code if}, and
+     * reference's 13 entries (14 before N-216): OP_IF at 11 is mapped to the {@code if}, and
      * 15/16/21/22 (arm merge ops) are unmapped.
      * Does not prove: other contract shapes (nested ifs, loops inside arms);
      * the six source-map fixtures are covered by conformance/source-map/run.ts.
@@ -91,8 +91,10 @@ class N158IfElseSourceMapTest {
             "10->27", "11->27",
             "12->28", "13->28", "14->28",
             "18->30", "19->30", "20->30",
-            "24->27", "25->27", "26->27",
-            "27->32", "28->32");
+            // N-216 (2026-10-21): the post-ENDIF `OP_1 OP_ROLL` reconcile now
+            // folds to OP_SWAP, one opcode fewer, so the tail shifts down by one.
+            "24->27", "25->27",
+            "26->32", "27->32");
         assertEquals(want, got);
     }
 }

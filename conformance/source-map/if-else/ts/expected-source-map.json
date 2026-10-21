@@ -69,17 +69,11 @@
     {
       "opcodeIndex": 26,
       "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
-      "line": 13,
-      "column": 4
-    },
-    {
-      "opcodeIndex": 27,
-      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
       "line": 18,
       "column": 4
     },
     {
-      "opcodeIndex": 28,
+      "opcodeIndex": 27,
       "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
       "line": 18,
       "column": 4

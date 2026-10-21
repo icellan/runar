@@ -151,8 +151,9 @@ class N130CompoundAssignTest {
     }
 
     /** sha256 of the TS reference script hex for the unit-step loop (all 7 tiers agree). */
+    // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now folds to OP_ROT (886 -> 885 B).
     private static final String UNIT_LOOP_TS_SHA256 =
-        "2414282a9f4fc557af75daa5cec21f45d3b608366643525beb02f010c64e1f25";
+        "6993bf337af1e5f184d954514ffb1b254e45e6001400fda896ff92022ba664e9";
 
     /** A unit-step {@code i += Bigint.ONE} loop update compiles exactly like {@code i++}. */
     @Test

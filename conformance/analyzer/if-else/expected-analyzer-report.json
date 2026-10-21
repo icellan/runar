@@ -1,6 +1,6 @@
 {
-  "script": "767600877c51879b69007c637c00937677677c0094767768517a7500a0",
-  "scriptSize": 29,
+  "script": "767600877c51879b69007c637c00937677677c00947677687c7500a0",
+  "scriptSize": 28,
   "findings": [
     {
       "severity": "warning",
@@ -43,6 +43,6 @@
     "pathsWithCheckSig": 0,
     "pathsWithoutCheckSig": 2,
     "maxStackDepth": 0,
-    "scriptSizeBytes": 29
+    "scriptSizeBytes": 28
   }
 }

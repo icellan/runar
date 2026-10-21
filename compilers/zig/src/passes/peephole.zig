@@ -480,13 +480,13 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
     if (isPushInt(a, 0) and isOp(b, .op_roll)) return .{ null, null };
 
     // NOTE: PUSH(1) + ROLL -> SWAP and PUSH(2) + ROLL -> ROT are intentionally
-    // NOT folded as 2-window peephole rules. The TS reference compiler
-    // distinguishes typed `RollOp` (which carries a depth field and IS folded
-    // by peephole) from untyped post-if reconciliation rolls (`push d +
-    // roll(depth=d+1) + drop`, which are NOT folded). The Zig instruction
-    // stream collapses both into `op_roll`, so we cannot tell them apart at
-    // the peephole level. To preserve byte-equivalence with the canonical TS
-    // output, we leave these rolls unfolded.
+    // NOT folded as 2-window peephole rules. The TS reference compiler folds
+    // only a typed `RollOp` whose depth field equals the pushed value, and some
+    // of its rolls still carry a different depth (so they stay unfolded). The
+    // Zig instruction stream collapses both into `op_roll`, so we cannot tell
+    // them apart at the peephole level; each lowering site that TS folds
+    // writes the folded form out itself (the post-if reconcile rolls since
+    // N-216, which used to be `roll(depth=d+1)` in TS and never folded).
 
     // Rule 20: PUSH(0) + PICK -> DUP
     if (isPushInt(a, 0) and isOp(b, .op_pick)) return .{ Inst{ .op = .op_dup }, null };

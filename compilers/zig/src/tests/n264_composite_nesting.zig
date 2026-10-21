@@ -57,5 +57,6 @@ fn expectGoDigest(d: usize, want: []const u8) !void {
 }
 
 test "N-264: D=32 x 120 compiles byte-identically to Go" {
-    try expectGoDigest(32, "edf53286692322f6787832929bb6aaf18d2b686e9bef2ad4683cbaf3e8a25fc2");
+    // N-216 (2026-10-21): re-pinned to the post-fix Go output (D=32: 30586 -> 30525 B, D=127: 121406 -> 121155 B); the opcode diff vs the 5b75534ec pin is only the branch-reconcile `<k> OP_ROLL` -> OP_SWAP / OP_ROT folds.
+    try expectGoDigest(32, "84c53e49c0d144c35d8db922859dd52fd71590d0c2e6ebea5b82501593301ec8");
 }

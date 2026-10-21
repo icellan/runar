@@ -83,5 +83,6 @@ test "N-279: a mutation 71 private-helper hops deep compiles byte-identically to
     // --disable-constant-folding --hex` printed at HEAD (5b75534ec-equivalent
     // tip for N-279), independently reproduced by Rust, Python, Ruby, Java
     // and the TS reference compiler against the same source.
-    try std.testing.expectEqualStrings("c45bba77357a648bdb50ca53400fc5f7e6bf1ee36e7c036a51ac3c2db06a238b", &got);
+    // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff vs the old pin is folds only (Go agrees).
+    try std.testing.expectEqualStrings("9acf031ac53e363f0727682ba052d45e411123dc526fa89074e8e5b7bf395389", &got);
 }

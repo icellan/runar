@@ -266,12 +266,13 @@ class N079InlinedParamAliasBranchArmTest {
 
     /** {label, source, byte length, sha256 of the lowercase script hex}. */
     private static final Object[][] SEVEN_TIER = {
-        {"if-arm", IF_ARM, 708,
-            "d0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470"},
-        {"if-arm-manual", IF_ARM_MANUAL, 708,
-            "d0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470"},
-        {"if-arm-200", IF_ARM_200, 709,
-            "76b75efe60492121334561aa1f44639aa538efac39f0c8c078a68b7ecccc935e"},
+        // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
+        {"if-arm", IF_ARM, 707,
+            "55b165be06f53bc2e65c3458fb0ad00f6e42501307cf7717ec8fb910e994dc8f"},
+        {"if-arm-manual", IF_ARM_MANUAL, 707,
+            "55b165be06f53bc2e65c3458fb0ad00f6e42501307cf7717ec8fb910e994dc8f"},
+        {"if-arm-200", IF_ARM_200, 708,
+            "327265f54207c1ec4af32c04f1b24c97c920d970c70051d8181f1edc56593418"},
         {"ternary-arm", TERNARY_ARM, 694,
             "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde"},
         {"ternary-arm-manual", TERNARY_ARM_MANUAL, 694,
@@ -282,10 +283,10 @@ class N079InlinedParamAliasBranchArmTest {
             "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a"},
         {"no-if", NO_IF, 686,
             "7ac476f9ac2eaac74d9b7d6ec51483a1ef7fe8f267998ff371728b5408511300"},
-        {"stmt-level", STMT_LEVEL, 704,
-            "c7df31bb403a85a97117ba27f16da98b58068b9ffc5be12dbd3d76d0a5ae0c79"},
-        {"passthrough", PASSTHROUGH, 706,
-            "8826b46db122ecd01f584ff3148ef7f24d9dd948088bd97cee4c086235efdd56"},
+        {"stmt-level", STMT_LEVEL, 703,
+            "9b3a9ebbe5701fdb3eca8c77a822130a37e787e94a5aaa2a3f7d6921bc89864d"},
+        {"passthrough", PASSTHROUGH, 705,
+            "5ed88937d0c4e98c9adf381e5b32570adce11b68622b35e866b1223e04bc3048"},
     };
 
     private static String hex(String source, boolean disableConstantFolding) throws Exception {

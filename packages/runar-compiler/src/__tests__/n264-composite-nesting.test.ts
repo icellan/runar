@@ -42,8 +42,9 @@ function comp(d: number, k: number): string {
 }
 
 const GO_DIGEST: Record<number, string> = {
-  32: 'edf53286692322f6787832929bb6aaf18d2b686e9bef2ad4683cbaf3e8a25fc2',
-  127: 'd1a30af5609fe4b5704c58f518cb9bdd1f31fce14df88c650dcf33fe25153c53',
+  // N-216 (2026-10-21): re-pinned to the post-fix Go output (D=32: 30586 -> 30525 B, D=127: 121406 -> 121155 B); the opcode diff vs the 5b75534ec pin is only the branch-reconcile `<k> OP_ROLL` -> OP_SWAP / OP_ROT folds.
+  32: '84c53e49c0d144c35d8db922859dd52fd71590d0c2e6ebea5b82501593301ec8',
+  127: 'ccec07fd320da3dfe9c4013365bc1d9afbd83efbf6256ee009df920d129fab13',
 };
 
 describe('N-264: composite call depth x nesting compiles without host-stack overflow', () => {

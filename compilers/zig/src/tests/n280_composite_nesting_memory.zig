@@ -89,7 +89,8 @@ test "N-280: D=8 x 120 compiles to Go's bytes within a bounded peak RSS" {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(std.mem.trimEnd(u8, hex, "\r\n"), &digest, .{});
     const got = std.fmt.bytesToHex(digest, .lower);
-    try std.testing.expectEqualStrings("579eeccfa4389f180849590c9857e7520a284bc3e5fb6d367a3291ee9c8a5052", &got);
+    // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff vs the old pin is folds only (Go agrees).
+    try std.testing.expectEqualStrings("774fd304ca86e62cc9d0ebb59694c5ea8c8245f536c9ac039d3f2d52268526ac", &got);
 
     if (rss > rss_bound) {
         std.debug.print("N-280: D=8 x 120 peaked at {d} bytes RSS (bound {d})\n", .{ rss, rss_bound });

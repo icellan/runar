@@ -401,7 +401,8 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     defer a.free(hex);
     // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 1784).
     // N-044: +134 hex for the two ByteString slots' PUSHDATA4 writer arm and the unsigned-length reader.
-    try std.testing.expectEqual(@as(usize, 1952), hex.len); // W1: +6, two zero-pad sites
+    // N-216: -2 hex, one branch-reconcile `OP_2 OP_ROLL` now folds to OP_ROT (code-part length literal follows).
+    try std.testing.expectEqual(@as(usize, 1950), hex.len); // W1: +6, two zero-pad sites
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 

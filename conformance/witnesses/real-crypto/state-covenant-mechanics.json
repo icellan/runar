@@ -4,7 +4,7 @@
   "signerKey": "alice",
   "note": "R-192. `state-covenant` carries a fixture-wide `\"compilers\": [\"go\"]` allowlist, justified by two Go-only builtins (bbFieldMul, merkleRootSha256). But the allowlist is FIXTURE-wide, so the covenant's state-continuation lowering, its OP_CODESEPARATOR handling and its output construction were excused from cross-tier parity too \u2014 mechanics that have nothing to do with the STARK families. This is the same contract with the two builtin calls removed, as a full seven-tier fixture, so the mechanics are checked and only the two builtins stay isolated.",
   "goldenHashes": {
-    "expected-script.hex": "d17e5beb80451899b534d85c571af180e9da2f3c0a4ecc1cbae06b7009581fec",
+    "expected-script.hex": "73cc23f8d2f0375d971d0999b20cebe28981f38dad526feec4391e11a1629123",
     "expected-ir.json": "2379723b84f4ab6fb87ef0f95da5d71b4fb51cea6f2444ca34724785a2ee0399"
   },
   "constructorArgs": [

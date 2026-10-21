@@ -105,17 +105,11 @@
     {
       "opcodeIndex": 26,
       "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
-      "line": 12,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 27,
-      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
       "line": 17,
       "column": 8
     },
     {
-      "opcodeIndex": 28,
+      "opcodeIndex": 27,
       "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
       "line": 17,
       "column": 8

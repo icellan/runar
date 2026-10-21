@@ -2902,7 +2902,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 				if ctx.sm.peekAtDepth(d) == name {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -2937,7 +2937,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			for j := 0; j < sinkBelow; j++ {
 				ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(windowSize - 1))})
 				ctx.sm.push("")
-				ctx.emitOp(StackOp{Op: "roll", Depth: windowSize})
+				ctx.emitOp(StackOp{Op: "roll", Depth: windowSize - 1})
 				ctx.sm.pop()
 				lifted := ctx.sm.removeAtDepth(windowSize - 1)
 				ctx.sm.push(lifted)
@@ -2968,7 +2968,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 				if ctx.sm.peekAtDepth(d) == name {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -3004,7 +3004,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 					} else {
 						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 						ctx.sm.push("")
-						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+						ctx.emitOp(StackOp{Op: "roll", Depth: d})
 						ctx.sm.pop()
 						rolled := ctx.sm.removeAtDepth(d)
 						ctx.sm.push(rolled)
@@ -3028,7 +3028,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 					} else {
 						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 						ctx.sm.push("")
-						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+						ctx.emitOp(StackOp{Op: "roll", Depth: d})
 						ctx.sm.pop()
 						rolled := ctx.sm.removeAtDepth(d)
 						ctx.sm.push(rolled)
@@ -3280,7 +3280,7 @@ func (ctx *loweringContext) lowerUpdateProp(propName, valueRef string, bindingIn
 				} else {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)

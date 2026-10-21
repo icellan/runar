@@ -1139,14 +1139,13 @@ const LowerCtx = struct {
     }
 
     /// Drop a stale property entry after an if-else expression that wrote the
-    /// same property in both branches. Mirrors the TS reference compiler's
-    /// `lowerUpdateProp` post-if cleanup (`05-stack-lower.ts` ~line 1909),
-    /// which uses `push d + roll(depth=d+1) + drop`. The push value (`d`) is
-    /// the visible depth from the StackMap, but the runtime roll consumes the
-    /// extra temporary from the push (`d + 1`). The peephole rule
-    /// `push 2n + roll(depth=2) → rot` checks the *IR* depth, not the push
-    /// value, so this case never folds in TS. Keep the literal
-    /// `push d + OP_ROLL + OP_DROP` here for byte equivalence.
+    /// same property in both branches (and the N>=2 / if-without-else
+    /// reconciles). Mirrors the TS reference compiler's post-ENDIF cleanup in
+    /// `lowerIf`, which emits `push d + roll(depth=d) + drop` (depth 1 is
+    /// OP_NIP there too). N-216: that roll used to carry depth `d + 1`, so
+    /// TS's `push 2n + roll(depth=2) → rot` peephole rule never matched and
+    /// this helper kept the literal `push 2 + OP_ROLL`; with the metadata
+    /// corrected TS folds it, so depth 2 is emitted here as `rot + drop`.
     fn removeStalePropertyAtDepth(ctx: *LowerCtx, depth: usize) !void {
         if (depth == 0) {
             try ctx.emitOp(.op_drop);
@@ -1157,6 +1156,17 @@ const LowerCtx = struct {
         if (depth == 1) {
             try ctx.emitOp(.op_nip);
             try ctx.stack.removeAtDepth(ctx.allocator, 1);
+            return;
+        }
+
+        if (depth == 2) {
+            // push(2)+roll(2)+drop → rot+drop (TS peephole fold, N-216).
+            try ctx.emitOp(.op_rot);
+            const rolled2 = ctx.stack.peekAtDepth(2);
+            try ctx.stack.removeAtDepth(ctx.allocator, 2);
+            try ctx.stack.push(ctx.allocator, rolled2);
+            try ctx.emitOp(.op_drop);
+            _ = ctx.stack.pop();
             return;
         }
 
@@ -2184,6 +2194,10 @@ const LowerCtx = struct {
             if (old_depth) |od| {
                 if (od == 1) {
                     try self.emitOp(.op_nip);
+                } else if (od == 2) {
+                    // N-216: TS's `push 2 + roll(depth=2)` now folds to OP_ROT.
+                    try self.emitOp(.op_rot);
+                    try self.emitOp(.op_drop);
                 } else {
                     try self.emitPushInt(@intCast(od));
                     try self.emitOp(.op_roll);
@@ -6222,17 +6236,26 @@ const LowerCtx = struct {
                 while (d < self.stack.depth()) : (d += 1) {
                     if (self.stack.peekAtDepth(d)) |nm2| {
                         if (std.mem.eql(u8, nm2, name)) {
-                            // The unconditional push/roll/drop of the
-                            // pre-existing N>=2 reconcile, NOT
-                            // `removeStalePropertyAtDepth` — that helper nips at
-                            // depth 1, and the reference tier does not, so using
-                            // it here would diverge by three bytes on every
-                            // single-result `if` whose stale slot sits at depth
-                            // 1 (`if-else`, `selector`).
-                            try self.emitPushInt(@intCast(d));
-                            try self.stack.push(self.allocator, null);
-                            try self.emitOp(.op_roll);
-                            _ = self.stack.pop();
+                            // NOT `removeStalePropertyAtDepth` — that helper
+                            // nips at depth 1, and the reference tier does not:
+                            // TS emits `push d + roll(depth=d) + drop` here and
+                            // its peephole folds `push 1 + roll 1` to OP_SWAP
+                            // (leaving OP_SWAP OP_DROP, not OP_NIP) and
+                            // `push 2 + roll 2` to OP_ROT. N-216: the roll used
+                            // to carry depth `d + 1`, so neither fold fired and
+                            // this site emitted the literal pair; Zig has no
+                            // typed roll depth, so the folded forms are written
+                            // out here.
+                            switch (d) {
+                                1 => try self.emitOp(.op_swap),
+                                2 => try self.emitOp(.op_rot),
+                                else => {
+                                    try self.emitPushInt(@intCast(d));
+                                    try self.stack.push(self.allocator, null);
+                                    try self.emitOp(.op_roll);
+                                    _ = self.stack.pop();
+                                },
+                            }
                             const rolled = self.stack.peekAtDepth(d);
                             try self.stack.removeAtDepth(self.allocator, d);
                             try self.stack.push(self.allocator, rolled);
@@ -6266,10 +6289,20 @@ const LowerCtx = struct {
                 const window_size = n_declared + sink_below;
                 var sj: usize = 0;
                 while (sj < sink_below) : (sj += 1) {
-                    try self.emitPushInt(@intCast(window_size - 1));
-                    try self.stack.push(self.allocator, null);
-                    try self.emitOp(.op_roll);
-                    _ = self.stack.pop();
+                    // N-231: TS emits `push(window_size - 1) +
+                    // roll(depth=window_size - 1)`, which its peephole folds to
+                    // OP_SWAP / OP_ROT at 1 / 2 (the roll used to carry depth
+                    // `window_size`, so it never folded).
+                    switch (window_size - 1) {
+                        1 => try self.emitOp(.op_swap),
+                        2 => try self.emitOp(.op_rot),
+                        else => {
+                            try self.emitPushInt(@intCast(window_size - 1));
+                            try self.stack.push(self.allocator, null);
+                            try self.emitOp(.op_roll);
+                            _ = self.stack.pop();
+                        },
+                    }
                     const lifted = self.stack.peekAtDepth(window_size - 1);
                     try self.stack.removeAtDepth(self.allocator, window_size - 1);
                     try self.stack.push(self.allocator, lifted);

@@ -41,9 +41,10 @@ import { isCiEnv } from '../env.js';
 
 /** Each case spawns every tier once; the deep compile itself takes seconds. */
 const CASE_TIMEOUT_MS = 600_000;
-const GO_DIGEST_D32 = 'edf53286692322f6787832929bb6aaf18d2b686e9bef2ad4683cbaf3e8a25fc2';
+// N-216 (2026-10-21): re-pinned to the post-fix Go output (D=32: 30586 -> 30525 B, D=127: 121406 -> 121155 B); the opcode diff vs the 5b75534ec pin is only the branch-reconcile `<k> OP_ROLL` -> OP_SWAP / OP_ROT folds.
+const GO_DIGEST_D32 = '84c53e49c0d144c35d8db922859dd52fd71590d0c2e6ebea5b82501593301ec8';
 /** sha256 of remediation-logs/N-264/go-oracle-127.hex (unmodified Go, same source). */
-const GO_DIGEST_D127 = 'd1a30af5609fe4b5704c58f518cb9bdd1f31fce14df88c650dcf33fe25153c53';
+const GO_DIGEST_D127 = 'ccec07fd320da3dfe9c4013365bc1d9afbd83efbf6256ee009df920d129fab13';
 
 /** remediation-logs/N-180/compgen.py, verbatim. */
 function comp(d: number, k: number): string {

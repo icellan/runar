@@ -958,6 +958,28 @@ private theorem runOps_pushI_opRoll_drop_eq
              StackState.push, StackState.pop?, hAsNN, Stack.Eval.applyRoll,
              hNotGe, if_false, Stack.Eval.applyDrop]
 
+/-- N-216: the deep cleanup tail is `reconcileRoll d' ++ [.drop]` — the
+`[push d', OP_ROLL, .drop]` triple for `d' ≥ 3`, and `[.rot, .drop]` at
+`d' = 2`, where the reference's `PUSH 2, Roll{2} → Rot` peephole fold now
+fires. Either way the net effect is `s.stack.eraseIdx d'`. -/
+private theorem runOps_reconcileRoll_drop_eq
+    (s : StackState) (d' : Nat) (h2 : 2 ≤ d') (h : d' < s.stack.length) :
+    Stack.Eval.runOps (Stack.Lower.reconcileRoll d' ++ [StackOp.drop]) s
+      = .ok ({ s with stack := s.stack.eraseIdx d' }) := by
+  match d', h2 with
+  | 2, _ =>
+    obtain ⟨a, b, c, rest, hs⟩ : ∃ a b c rest, s.stack = a :: b :: c :: rest := by
+      match hs : s.stack with
+      | a :: b :: c :: rest => exact ⟨a, b, c, rest, rfl⟩
+      | [] => simp [hs] at h
+      | [_] => simp [hs] at h
+      | [_, _] => simp [hs] at h
+    simp [Stack.Lower.reconcileRoll, Stack.Eval.runOps, Stack.Eval.stepNonIf,
+          Stack.Eval.applyRot, Stack.Eval.applyDrop, hs]
+  | n + 3, _ =>
+    simp only [Stack.Lower.reconcileRoll, List.cons_append, List.nil_append]
+    exact runOps_pushI_opRoll_drop_eq s _ (n + 3) rfl h
+
 /-! ### Lookup of `propName` at depth d' in the post-load tagged sm
 
 For Tier 3b we need a `taggedStackAlignedAt` witness on the post-load
@@ -1042,8 +1064,7 @@ private theorem removePropEntryAux_deep_match :
       2 ≤ dStart + pre.length →
       Stack.Lower.removePropEntryAux propName dStart
           (pre ++ some propName :: post)
-        = ([.push (.bigint (Int.ofNat (dStart + pre.length))),
-            .opcode "OP_ROLL", .drop],
+        = (Stack.Lower.reconcileRoll (dStart + pre.length) ++ [.drop],
            pre ++ post)
   | propName, [], post, dStart, _hNotMem, hDep => by
       -- Base case: pre = [], so the input is `propName :: post`.
@@ -1097,8 +1118,7 @@ private theorem removePropEntryOps_deepMatch
     (hPreLen : 1 ≤ pre.length) :
     Stack.Lower.removePropEntryOps
         (some propName :: (pre ++ some propName :: post)) propName
-      = ([.push (.bigint (Int.ofNat (pre.length + 1))),
-          .opcode "OP_ROLL", .drop],
+      = (Stack.Lower.reconcileRoll (pre.length + 1) ++ [.drop],
          some propName :: (pre ++ post)) := by
   unfold Stack.Lower.removePropEntryOps
   -- The recursion starts at dStart = 1 on the tail.
@@ -1177,10 +1197,9 @@ theorem simpleStepRel_updateProp_existingDeep_preserves
     rw [hNil, runOps_bringToTop_depth0_eq initialStack]
     show (Except.toOption
         (Stack.Eval.runOps
-          [StackOp.push (PushVal.bigint (↑pre.length + 1)),
-           StackOp.opcode "OP_ROLL", StackOp.drop] initialStack)).isSome = true
-    rw [runOps_pushI_opRoll_drop_eq initialStack _ (pre.length + 1)
-          (by rfl) hLenBound]
+          (Stack.Lower.reconcileRoll (pre.length + 1) ++ [StackOp.drop]) initialStack)).isSome = true
+    rw [runOps_reconcileRoll_drop_eq initialStack (pre.length + 1)
+          (by omega) hLenBound]
     simp [Except.toOption]
   · -- Depth-1 load: `loadOps = [.swap]`, post-load stack = b :: a :: rest.
     -- Length is preserved (swap is length-preserving).
@@ -1192,12 +1211,11 @@ theorem simpleStepRel_updateProp_existingDeep_preserves
       simp [hStk]
     show (Except.toOption
         (Stack.Eval.runOps
-          [StackOp.push (PushVal.bigint (↑pre.length + 1)),
-           StackOp.opcode "OP_ROLL", StackOp.drop]
+          (Stack.Lower.reconcileRoll (pre.length + 1) ++ [StackOp.drop])
           ({ initialStack with stack := b :: a :: rest } : StackState))).isSome = true
-    rw [runOps_pushI_opRoll_drop_eq
-          { initialStack with stack := b :: a :: rest } _ (pre.length + 1)
-          (by rfl) (by rw [hPostLen]; exact hLenBound)]
+    rw [runOps_reconcileRoll_drop_eq
+          { initialStack with stack := b :: a :: rest } (pre.length + 1)
+          (by omega) (by rw [hPostLen]; exact hLenBound)]
     simp [Except.toOption]
   · -- Depth-2 load: `loadOps = [.rot]`, post-load stack = c :: a :: b :: rest.
     rw [hRot, runOps_bringToTop_depth2_eq initialStack a b c rest hStk]
@@ -1207,12 +1225,11 @@ theorem simpleStepRel_updateProp_existingDeep_preserves
       simp [hStk]
     show (Except.toOption
         (Stack.Eval.runOps
-          [StackOp.push (PushVal.bigint (↑pre.length + 1)),
-           StackOp.opcode "OP_ROLL", StackOp.drop]
+          (Stack.Lower.reconcileRoll (pre.length + 1) ++ [StackOp.drop])
           ({ initialStack with stack := c :: a :: b :: rest } : StackState))).isSome = true
-    rw [runOps_pushI_opRoll_drop_eq
-          { initialStack with stack := c :: a :: b :: rest } _ (pre.length + 1)
-          (by rfl) (by rw [hPostLen]; exact hLenBound)]
+    rw [runOps_reconcileRoll_drop_eq
+          { initialStack with stack := c :: a :: b :: rest } (pre.length + 1)
+          (by omega) (by rw [hPostLen]; exact hLenBound)]
     simp [Except.toOption]
   · -- Depth-dRoll load: `loadOps = [.roll dRoll]`. Length preserved.
     rw [hRoll]
@@ -1241,16 +1258,15 @@ theorem simpleStepRel_updateProp_existingDeep_preserves
       omega
     show (Except.toOption
         (Stack.Eval.runOps
-          [StackOp.push (PushVal.bigint (↑pre.length + 1)),
-           StackOp.opcode "OP_ROLL", StackOp.drop]
+          (Stack.Lower.reconcileRoll (pre.length + 1) ++ [StackOp.drop])
           ({ initialStack with
               stack := initialStack.stack[dRoll]!
                         :: initialStack.stack.eraseIdx dRoll } : StackState))).isSome = true
-    rw [runOps_pushI_opRoll_drop_eq
+    rw [runOps_reconcileRoll_drop_eq
           { initialStack with
               stack := initialStack.stack[dRoll]!
-                        :: initialStack.stack.eraseIdx dRoll } _
-          (pre.length + 1) (by rfl)
+                        :: initialStack.stack.eraseIdx dRoll }
+          (pre.length + 1) (by omega)
           (by rw [hPostLen]; exact hLenBound)]
     simp [Except.toOption]
 

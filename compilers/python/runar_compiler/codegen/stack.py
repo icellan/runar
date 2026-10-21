@@ -2601,7 +2601,7 @@ class _LoweringContext:
                     if self.sm.peek_at_depth(d) == name:
                         self.emit_op(StackOp(op="push", value=big_int_push(d)))
                         self.sm.push("")
-                        self.emit_op(StackOp(op="roll", depth=d + 1))
+                        self.emit_op(StackOp(op="roll", depth=d))
                         self.sm.pop()
                         rolled = self.sm.remove_at_depth(d)
                         self.sm.push(rolled)
@@ -2636,7 +2636,7 @@ class _LoweringContext:
                         StackOp(op="push", value=big_int_push(window_size - 1))
                     )
                     self.sm.push("")
-                    self.emit_op(StackOp(op="roll", depth=window_size))
+                    self.emit_op(StackOp(op="roll", depth=window_size - 1))
                     self.sm.pop()
                     lifted = self.sm.remove_at_depth(window_size - 1)
                     self.sm.push(lifted)
@@ -2660,7 +2660,7 @@ class _LoweringContext:
                     if self.sm.peek_at_depth(d) == name:
                         self.emit_op(StackOp(op="push", value=big_int_push(d)))
                         self.sm.push("")
-                        self.emit_op(StackOp(op="roll", depth=d + 1))
+                        self.emit_op(StackOp(op="roll", depth=d))
                         self.sm.pop()
                         rolled = self.sm.remove_at_depth(d)
                         self.sm.push(rolled)
@@ -2685,7 +2685,7 @@ class _LoweringContext:
                         else:
                             self.emit_op(StackOp(op="push", value=big_int_push(d)))
                             self.sm.push("")
-                            self.emit_op(StackOp(op="roll", depth=d + 1))
+                            self.emit_op(StackOp(op="roll", depth=d))
                             self.sm.pop()
                             rolled = self.sm.remove_at_depth(d)
                             self.sm.push(rolled)
@@ -2707,7 +2707,7 @@ class _LoweringContext:
                         else:
                             self.emit_op(StackOp(op="push", value=big_int_push(d)))
                             self.sm.push("")
-                            self.emit_op(StackOp(op="roll", depth=d + 1))
+                            self.emit_op(StackOp(op="roll", depth=d))
                             self.sm.pop()
                             rolled = self.sm.remove_at_depth(d)
                             self.sm.push(rolled)
@@ -2949,7 +2949,7 @@ class _LoweringContext:
                     else:
                         self.emit_op(StackOp(op="push", value=big_int_push(d)))
                         self.sm.push("")
-                        self.emit_op(StackOp(op="roll", depth=d + 1))
+                        self.emit_op(StackOp(op="roll", depth=d))
                         self.sm.pop()
                         rolled = self.sm.remove_at_depth(d)
                         self.sm.push(rolled)

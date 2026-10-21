@@ -101,7 +101,8 @@ const ACCEPTED: Array<[string, string, string, string]> = [
     '`;` inside and after if / else arms',
     go('\ty := x\n\tif y > 1 {\n\t\ty = y - 1\n\t} else {\n\t\ty = y + 1\n\t}\n\trunar.Assert(y == c.T)'),
     go('\ty := x; if y > 1 { y = y - 1; } else { y = y + 1; }; runar.Assert(y == c.T)'),
-    '51787ca06351787c9476776751787c93767768517a75009c',
+    // N-216 (2026-10-21): re-pinned; the post-ENDIF `OP_1 OP_ROLL` reconcile now folds to OP_SWAP (-1 B, opcode diff is that fold only).
+    '51787ca06351787c9476776751787c937677687c75009c',
   ],
   [
     '`;` inside and after a for body',

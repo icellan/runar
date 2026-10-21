@@ -224,8 +224,12 @@ export class SinkDistance extends StatefulSmartContract {
   // check added 32 bytes (+64 hex) to both modes. Re-measured with the
   // 2538 `d + nDeclared` mutant applied: fold-OFF 1496 / fold-ON 1512 hex
   // chars, different digests — the pin still kills it.
-  foldOff: 'c6c0be0341c3f36739a19e6a23e654aecac5611c446829374f9d0a97f6b17220',
-  foldOn: '3d1a315bca0cb99e1f2ffbc109d17c80853c67946742d0364e54eadfa8206b35',
+  // N-216 (2026-10-21) re-stamp: two branch-reconcile `OP_2 OP_ROLL` pairs now
+  // fold to OP_ROT (-4 hex chars, both modes; opcode diff is the folds only).
+  // Re-measured against the same mutant: fold-OFF 1494 / fold-ON 1510 hex
+  // chars, different digests — still killed.
+  foldOff: 'e09d8fba20bc9d24cd2cbe88250816061be18623a135e56bc7e5ac559801310a',
+  foldOn: '5a82cfcf45cc98f4857c80ff7345e5ae1ccb421fa73aea2a3d147a904368a658',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -247,8 +251,9 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
         // W1's zero-pad before the auto-injected sighash-type pin's OP_BIN2NUM
         // added 6 hex chars to both modes.
         // F-024 (R14): +64 hex chars in both modes for the value check.
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1478);
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1496);
+        // N-216: -4 hex chars in both modes (two reconcile rolls fold to OP_ROT).
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1474);
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1494);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

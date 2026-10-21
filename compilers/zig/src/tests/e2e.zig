@@ -704,7 +704,8 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly).
     // N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
     // N-045 took it 7849 -> 7857: the mutable PubKey playerO is width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY, +4) before each of its two continuation commits.
-    const expected_bytes: usize = 7857;
+    // N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
+    const expected_bytes: usize = 7855;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

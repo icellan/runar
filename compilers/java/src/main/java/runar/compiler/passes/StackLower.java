@@ -3645,7 +3645,7 @@ public final class StackLower {
                         if (name.equals(sm.peekAtDepth(d))) {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3680,7 +3680,7 @@ public final class StackLower {
                     for (int j = 0; j < sinkBelow; j++) {
                         emitOp(new PushOp(PushValue.of(windowSize - 1)));
                         sm.push("");
-                        emitOp(new RollOp(windowSize));
+                        emitOp(new RollOp(windowSize - 1));
                         sm.pop();
                         String lifted = sm.removeAtDepth(windowSize - 1);
                         sm.push(lifted);
@@ -3707,7 +3707,7 @@ public final class StackLower {
                         if (name.equals(sm.peekAtDepth(d))) {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3795,7 +3795,7 @@ public final class StackLower {
                     } else {
                         emitOp(new PushOp(PushValue.of(d)));
                         sm.push("");
-                        emitOp(new RollOp(d + 1));
+                        emitOp(new RollOp(d));
                         sm.pop();
                         String rolled = sm.removeAtDepth(d);
                         sm.push(rolled);
@@ -4056,7 +4056,7 @@ public final class StackLower {
                         } else {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);

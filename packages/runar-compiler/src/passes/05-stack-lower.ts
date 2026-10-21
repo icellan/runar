@@ -3167,7 +3167,7 @@ class LoweringContext {
           if (this.stackMap.peekAtDepth(d) === name) {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -3200,7 +3200,7 @@ class LoweringContext {
         for (let j = 0; j < sinkBelow; j++) {
           this.emitOp({ op: 'push', value: BigInt(windowSize - 1) });
           this.stackMap.push(null);
-          this.emitOp({ op: 'roll', depth: windowSize });
+          this.emitOp({ op: 'roll', depth: windowSize - 1 });
           this.stackMap.pop();
           const lifted = this.stackMap.removeAtDepth(windowSize - 1);
           this.stackMap.push(lifted);
@@ -3252,7 +3252,7 @@ class LoweringContext {
           if (this.stackMap.peekAtDepth(d) === name) {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -3281,7 +3281,7 @@ class LoweringContext {
             } else {
               this.emitOp({ op: 'push', value: BigInt(d) });
               this.stackMap.push(null);
-              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.emitOp({ op: 'roll', depth: d });
               this.stackMap.pop();
               const rolled = this.stackMap.removeAtDepth(d);
               this.stackMap.push(rolled);
@@ -3308,7 +3308,7 @@ class LoweringContext {
             } else {
               this.emitOp({ op: 'push', value: BigInt(d) });
               this.stackMap.push(null);
-              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.emitOp({ op: 'roll', depth: d });
               this.stackMap.pop();
               const rolled = this.stackMap.removeAtDepth(d);
               this.stackMap.push(rolled);
@@ -3569,7 +3569,7 @@ class LoweringContext {
           } else {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
