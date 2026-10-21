@@ -1071,6 +1071,7 @@ jobs:
           conformance/fixture-count-doc.test.ts
           conformance/split-stack-desync.test.ts
           conformance/ci-predicate-sweep.test.ts
+          conformance/state-shape-witnesses.test.ts
           conformance/codepart-pin
           conformance/dce
           conformance/source-map

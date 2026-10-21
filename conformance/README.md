@@ -879,9 +879,9 @@ Gated in CI by the `Script Execution Oracle` job. It is a curated family list
 (not a completeness gate over every fixture); the TS `witnesses/differential.test.ts`
 ScriptVM also executes fold-ON bytes against a script engine.
 
-### SDK-output conformance (74 fixtures, 7 SDKs)
+### SDK-output conformance (80 fixtures, 7 SDKs)
 
-`sdk-output/tests/` contains 74 fixtures (one `input.json` + one
+`sdk-output/tests/` contains 80 fixtures (one `input.json` + one
 `expected-locking.hex` per directory). The runner in `sdk-output/runner/sdk-runner.ts`
 compiles each fixture through all seven SDK tools in `sdk-output/tools/` (TypeScript,
 Go, Python, Ruby, Rust, Zig, Java) and asserts byte-identical locking-script hex
