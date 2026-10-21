@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./Ledger.runar.ts",
+    ".runar.sol": "./Ledger.runar.sol",
+    ".runar.move": "./Ledger.runar.move",
+    ".runar.go": "./Ledger.runar.go",
+    ".runar.rs": "./Ledger.runar.rs",
+    ".runar.py": "./Ledger.runar.py",
+    ".runar.zig": "./Ledger.runar.zig",
+    ".runar.rb": "./Ledger.runar.rb",
+    ".runar.java": "./Ledger.runar.java"
+  }
+}

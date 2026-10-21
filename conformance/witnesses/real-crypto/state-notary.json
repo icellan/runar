@@ -1,0 +1,75 @@
+{
+  "fixture": "state-notary",
+  "kind": "stateful",
+  "note": "Notary notarize(): {ByteString, PubKey, bigint} mutable state with the PubKey declared BEFORE the variable-length ByteString, the reverse of annotated-vault's order, so the on-chain reader walks a different layout. seq is read, incremented and written back.",
+  "constructorArgs": [
+    {
+      "$pubkey": "alice"
+    },
+    "aabb",
+    "0n"
+  ],
+  "spends": [
+    {
+      "method": "notarize",
+      "args": [
+        null,
+        "0xccddee"
+      ],
+      "expect": "accept",
+      "note": "signer replaces the note and seq 0 -> 1",
+      "signerKey": "alice",
+      "expectedState": {
+        "signer": {
+          "$pubkey": "alice"
+        },
+        "note": "0xccddee",
+        "seq": "1n"
+      }
+    },
+    {
+      "method": "notarize",
+      "args": [
+        null,
+        "0x"
+      ],
+      "expect": "accept",
+      "note": "an empty note is a legal ByteString state value",
+      "signerKey": "alice",
+      "expectedState": {
+        "signer": {
+          "$pubkey": "alice"
+        },
+        "note": "0x",
+        "seq": "1n"
+      }
+    },
+    {
+      "method": "notarize",
+      "args": [
+        null,
+        "0xccddee"
+      ],
+      "expect": "reject",
+      "note": "wrong signer: signer=alice but bob signs",
+      "signerKey": "bob",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "notarize",
+      "args": [
+        null,
+        "0xccddee"
+      ],
+      "expect": "reject",
+      "note": "tampered continuation output",
+      "signerKey": "alice",
+      "tamperOutput": true,
+      "cryptoNearMiss": true
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "8ac19ce0742a9458ffc18a45f603241b27c25c7d56f14f1d75ed1f5541fcec94",
+    "expected-ir.json": "c7cd5185b95dd5d06eb6369c21e67f693702107e713d097554d3709d0cf46ddb"
+  }
+}

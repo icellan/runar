@@ -179,10 +179,15 @@ describe('conformance allowlist audit', () => {
   // N-093 added the third, `embed-always-fixed-array`, for the same reason
   // (user decision R38: the one approved `.runar.java` skip, like the other
   // FixedArray fixtures).
+  //
+  // F-352 added the fourth, `state-array-set`, for the same reason: it is the
+  // second witness for the mutable-state shape FixedArray<bigint, 4>, and no
+  // Java spelling of a FixedArray property exists.
   const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
     'embed-always-fixed-array': ['.runar.java'],
     'fixed-array-index': ['.runar.java'],
     'fixed-array-write': ['.runar.java'],
+    'state-array-set': ['.runar.java'],
   };
   it('no fixture opts a format out of parser coverage unless approved (parserSkip stays governed)', () => {
     const offenders: string[] = [];

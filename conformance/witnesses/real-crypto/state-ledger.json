@@ -1,0 +1,95 @@
+{
+  "fixture": "state-ledger",
+  "kind": "stateful",
+  "note": "Ledger spend(): {PubKey, bigint, bigint} mutable state, the second witness for the shape token-ft pins. One call rewrites balance and nonce from different expressions under the holder's real checkSig.",
+  "constructorArgs": [
+    {
+      "$pubkey": "alice"
+    },
+    "100n",
+    "0n"
+  ],
+  "spends": [
+    {
+      "method": "spend",
+      "args": [
+        null,
+        "30n"
+      ],
+      "expect": "accept",
+      "note": "holder spends 30 of 100: balance 70, nonce 1",
+      "signerKey": "alice",
+      "expectedState": {
+        "holder": {
+          "$pubkey": "alice"
+        },
+        "balance": "70n",
+        "nonce": "1n"
+      }
+    },
+    {
+      "method": "spend",
+      "args": [
+        null,
+        "100n"
+      ],
+      "expect": "accept",
+      "note": "spend the whole balance: balance 0, nonce 1",
+      "signerKey": "alice",
+      "expectedState": {
+        "holder": {
+          "$pubkey": "alice"
+        },
+        "balance": "0n",
+        "nonce": "1n"
+      }
+    },
+    {
+      "method": "spend",
+      "args": [
+        null,
+        "30n"
+      ],
+      "expect": "reject",
+      "note": "wrong signer: holder=alice but bob signs",
+      "signerKey": "bob",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "spend",
+      "args": [
+        null,
+        "0n"
+      ],
+      "expect": "reject",
+      "note": "amount 0 is not > 0",
+      "signerKey": "alice"
+    },
+    {
+      "method": "spend",
+      "args": [
+        null,
+        "101n"
+      ],
+      "expect": "reject",
+      "note": "amount 101 exceeds balance 100",
+      "signerKey": "alice"
+    },
+    {
+      "method": "spend",
+      "args": [
+        null,
+        "30n"
+      ],
+      "expect": "reject",
+      "note": "tampered continuation output",
+      "signerKey": "alice",
+      "tamperOutput": true,
+      "cryptoNearMiss": true
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "d8456b58b223d44f3eec899329a105b67a99ac9109c5f1afc91043adbd079224",
+    "expected-ir.json": "8ffddf40381afbcb8b5d15c5c2fcfb63833e48377ac4587d29a217dc404641a1"
+  }
+}

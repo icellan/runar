@@ -1,0 +1,60 @@
+{
+  "fixture": "state-owner-box",
+  "kind": "stateful",
+  "note": "OwnerBox rotate(): {PubKey} mutable state, the second witness for the shape token-nft pins. Ownership moves by assigning the property (auto-continuation), not by addOutput.",
+  "constructorArgs": [
+    {
+      "$pubkey": "alice"
+    }
+  ],
+  "spends": [
+    {
+      "method": "rotate",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        }
+      ],
+      "expect": "accept",
+      "note": "alice rotates ownership to bob",
+      "signerKey": "alice",
+      "expectedState": {
+        "owner": {
+          "$pubkey": "bob"
+        }
+      }
+    },
+    {
+      "method": "rotate",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        }
+      ],
+      "expect": "reject",
+      "note": "wrong signer: owner=alice but bob signs",
+      "signerKey": "bob",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "rotate",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        }
+      ],
+      "expect": "reject",
+      "note": "tampered continuation output",
+      "signerKey": "alice",
+      "tamperOutput": true,
+      "cryptoNearMiss": true
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "490cc770b0399f5c57a6fa2c0e6cd8f155b23583d8f6a603eca2565cfa522381",
+    "expected-ir.json": "22da174abebb131f529f409fde50e128c545d46168e84b08f564b43eda93d97c"
+  }
+}

@@ -831,7 +831,12 @@ number. It is pinned from both sides:
 -- baselineMatches; the first non-ALL stateful fixture, byte-exact because
 -- N-178 made the model read check_preimage's sighashFlag):
 -- 72 = baselineMatches (69) + (22 - 19).
-def expectedByteExact : Nat := 72
+--
+-- 2026-10-21 (F-352): F-352 added six second-witness mutable-state fixtures
+-- (`state-array-set`, `state-digest-log`, `state-leaderboard`, `state-ledger`,
+-- `state-notary`, `state-owner-box`), all byte-exact, all in baselineMatches:
+-- 78 = baselineMatches (75) + (22 - 19).
+def expectedByteExact : Nat := 78
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -852,8 +857,11 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 `embed-always-fixed-array` fixtures (both byte-exact, in `baselineMatches`).
 2026-10-15 (N-179): 90 -> 91 for N-179's `sighash-single-stateful` fixture
 (byte-exact, in `baselineMatches`).
+2026-10-21 (F-352): 91 -> 97 for F-352's six second-witness mutable-state fixtures
+(`state-array-set`, `state-digest-log`, `state-leaderboard`, `state-ledger`,
+`state-notary`, `state-owner-box`; all byte-exact, in `baselineMatches`).
 -/
-def expectedFixtureTotal : Nat := 91
+def expectedFixtureTotal : Nat := 97
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -917,8 +925,14 @@ def baselineMatches : List String := [
   "sha256-finalize",
   "shift-ops",
   "sighash-single-stateful",
+  "state-array-set",
   "state-bigint-edges",
   "state-covenant-mechanics",
+  "state-digest-log",
+  "state-leaderboard",
+  "state-ledger",
+  "state-notary",
+  "state-owner-box",
   "state-ripemd160",
   "stateful",
   "stateful-bytestring",
@@ -1246,7 +1260,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 91 := by rfl
+        + lowerDivergencePending.length = 97 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

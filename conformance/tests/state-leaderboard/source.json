@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./LeaderBoard.runar.ts",
+    ".runar.sol": "./LeaderBoard.runar.sol",
+    ".runar.move": "./LeaderBoard.runar.move",
+    ".runar.go": "./LeaderBoard.runar.go",
+    ".runar.rs": "./LeaderBoard.runar.rs",
+    ".runar.py": "./LeaderBoard.runar.py",
+    ".runar.zig": "./LeaderBoard.runar.zig",
+    ".runar.rb": "./LeaderBoard.runar.rb",
+    ".runar.java": "./LeaderBoard.runar.java"
+  }
+}

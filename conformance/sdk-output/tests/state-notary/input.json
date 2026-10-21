@@ -1,0 +1,117 @@
+{
+  "artifact": {
+    "version": "runar-v1.0.0-rc.1",
+    "compilerVersion": "1.0.0-rc.1",
+    "contractName": "Notary",
+    "parentClass": "StatefulSmartContract",
+    "abi": {
+      "constructor": {
+        "params": [
+          {
+            "name": "signer",
+            "type": "PubKey"
+          },
+          {
+            "name": "note",
+            "type": "ByteString"
+          },
+          {
+            "name": "seq",
+            "type": "bigint"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "name": "notarize",
+          "params": [
+            {
+              "name": "sig",
+              "type": "Sig"
+            },
+            {
+              "name": "nextNote",
+              "type": "ByteString"
+            },
+            {
+              "name": "_changePKH",
+              "type": "Ripemd160"
+            },
+            {
+              "name": "_changeAmount",
+              "type": "bigint"
+            },
+            {
+              "name": "_newAmount",
+              "type": "bigint"
+            },
+            {
+              "name": "txPreimage",
+              "type": "SigHashPreimage"
+            }
+          ],
+          "isPublic": true,
+          "usesCodePart": true
+        }
+      ]
+    },
+    "script": "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f77686868587982760479030000819c6952947b7c7f517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f776868685779827700947f7701217f517f7c01007e8176014c9f637f6776014c9c6375516776014d9c63755267014e9d5468687f7c01007e817f68587f008881587a5379ad577a527a75788b527a755379820134947f77587f758155797ca269567a567a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b757768537a8201219d537a8276014c9f635280517f757c7e67760200019f635280517f75014c7c7e7c7e6776030000019f635480527f75014d7c7e7c7e675580547f75014e7c7e7c7e6868687e7b58807e5279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f758777",
+    "stateFields": [
+      {
+        "name": "signer",
+        "type": "PubKey",
+        "index": 0,
+        "encoding": "raw",
+        "byteLength": 33,
+        "byteOffset": 0
+      },
+      {
+        "name": "note",
+        "type": "ByteString",
+        "index": 1,
+        "encoding": "pushdata",
+        "byteOffset": 33
+      },
+      {
+        "name": "seq",
+        "type": "bigint",
+        "index": 2,
+        "encoding": "num2bin-le8",
+        "byteLength": 8,
+        "tailOffset": -8
+      }
+    ],
+    "codeSepIndexSlots": [
+      {
+        "byteOffset": 593,
+        "codeSepIndex": 1
+      }
+    ],
+    "codeSeparatorIndex": 1,
+    "codeSeparatorIndices": [
+      1
+    ],
+    "rawScriptSpans": [
+      {
+        "offset": 3,
+        "length": 428,
+        "inArity": 1,
+        "outArity": 1
+      }
+    ]
+  },
+  "constructorArgs": [
+    {
+      "type": "PubKey",
+      "value": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    {
+      "type": "ByteString",
+      "value": "aabb"
+    },
+    {
+      "type": "bigint",
+      "value": "0"
+    }
+  ]
+}

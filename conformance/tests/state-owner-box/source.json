@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./OwnerBox.runar.ts",
+    ".runar.sol": "./OwnerBox.runar.sol",
+    ".runar.move": "./OwnerBox.runar.move",
+    ".runar.go": "./OwnerBox.runar.go",
+    ".runar.rs": "./OwnerBox.runar.rs",
+    ".runar.py": "./OwnerBox.runar.py",
+    ".runar.zig": "./OwnerBox.runar.zig",
+    ".runar.rb": "./OwnerBox.runar.rb",
+    ".runar.java": "./OwnerBox.runar.java"
+  }
+}

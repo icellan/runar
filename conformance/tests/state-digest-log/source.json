@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./DigestLog.runar.ts",
+    ".runar.sol": "./DigestLog.runar.sol",
+    ".runar.move": "./DigestLog.runar.move",
+    ".runar.go": "./DigestLog.runar.go",
+    ".runar.rs": "./DigestLog.runar.rs",
+    ".runar.py": "./DigestLog.runar.py",
+    ".runar.zig": "./DigestLog.runar.zig",
+    ".runar.rb": "./DigestLog.runar.rb",
+    ".runar.java": "./DigestLog.runar.java"
+  }
+}

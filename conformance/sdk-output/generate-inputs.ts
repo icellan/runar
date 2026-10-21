@@ -307,6 +307,48 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '0' },
     ],
   },
+  // F-352 (CL-GAP-148): the second witness for six mutable-state shapes that
+  // had exactly one. Each pins the deploy-time state layout of its shape at
+  // the SDK layer; the fixtures themselves live under conformance/tests/.
+  {
+    name: 'state-leaderboard',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+      { type: 'bigint', value: '10' },
+    ],
+  },
+  {
+    name: 'state-digest-log',
+    constructorArgs: [
+      { type: 'Ripemd160', value: ADDR },
+    ],
+  },
+  {
+    name: 'state-ledger',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+      { type: 'bigint', value: '100' },
+      { type: 'bigint', value: '0' },
+    ],
+  },
+  {
+    name: 'state-owner-box',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+    ],
+  },
+  {
+    name: 'state-notary',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+      { type: 'ByteString', value: 'aabb' },
+      { type: 'bigint', value: '0' },
+    ],
+  },
+  {
+    name: 'state-array-set',
+    constructorArgs: [],
+  },
   // R-248: the corpus's only MUTABLE `boolean` state field. The compiler
   // spells the type `boolean` (never `bool`) and annotates it
   // `encoding: "bool1", byteLength: 1`; five of the seven SDKs matched only
