@@ -856,12 +856,14 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     // then F-047's digest reduction OP_ROT=7b OP_MOD=97, then OP_NUMEQUAL=9c.
     // F-144 operand-sign normalization PUSH1(00)=0100 OP_CAT=7e OP_BIN2NUM=81
     // before OP_SWAP (pubKey), after OP_SWAP (padding) and after the first
-    // OP_ROT (sig). Verified against the compiler's actual output for THIS
+    // OP_ROT (sig). F-368's sig < pubKey gate OP_DUP=76 OP_3=53 OP_PICK=79
+    // OP_LESSTHAN=9f OP_VERIFY=69 follows the sig normalization. Verified
+    // against the compiler's actual output for THIS
     // contract, not inferred: although `unlock` wraps the call in runar.assert,
     // the peephole does NOT fuse to OP_NUMEQUALVERIFY here (the oracle-price
     // fixture does fuse, so the fused form is context-dependent and must not be
     // assumed).
-    const rabin_subseq = "01007e81" ++ "7c" ++ "01007e81" ++ "7600" ++ "03000001" ++ "a5697b" ++ "01007e81" ++ "769593" ++ "78977b" ++ "a8" ++ "0100" ++ "7e" ++ "81" ++ "7b97" ++ "9c";
+    const rabin_subseq = "01007e81" ++ "7c" ++ "01007e81" ++ "7600" ++ "03000001" ++ "a5697b" ++ "01007e81" ++ "7653799f69" ++ "769593" ++ "78977b" ++ "a8" ++ "0100" ++ "7e" ++ "81" ++ "7b97" ++ "9c";
     const found = std.mem.indexOf(u8, hex, rabin_subseq);
     if (found == null) {
         std.debug.print(
@@ -872,12 +874,13 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     try std.testing.expect(found != null);
 }
 
-test "verifyRabinSig appendVerifyRabinSig emits exactly 29 opcodes" {
+test "verifyRabinSig appendVerifyRabinSig emits exactly 34 opcodes" {
     // Direct emitter pin: the appendVerifyRabinSig builder helper must
-    // emit exactly 29 instructions (matching the cross-tier reference,
-    // post BUG-010 + BUG-011 + F-047 + F-144: 10 original + 5 padding-range-check
+    // emit exactly 34 instructions (matching the cross-tier reference,
+    // post BUG-010 + BUG-011 + F-047 + F-144 + F-368: 10 original + 5 padding-range-check
     // ops + 4 digest-encoding-normalization ops, minus the OP_EQUAL that
-    // OP_NUMEQUAL replaced, + 2 digest-reduction ops + 3x3 operand-sign ops).
+    // OP_NUMEQUAL replaced, + 2 digest-reduction ops + 3x3 operand-sign ops
+    // + 5 sig < pubKey ops).
     const crypto_emitters = @import("passes/helpers/crypto_emitters.zig");
     const registry = @import("passes/helpers/crypto_builtins.zig");
 
@@ -885,7 +888,7 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 29 opcodes" {
     defer list.deinit(std.testing.allocator);
 
     try crypto_emitters.appendBuiltinInstructions(&list, std.testing.allocator, registry.CryptoBuiltin.verify_rabin_sig);
-    try std.testing.expectEqual(@as(usize, 29), list.items.len);
+    try std.testing.expectEqual(@as(usize, 34), list.items.len);
 
     // Pin the exact opcode order (the cross-compiler reference). Position 9
     // is a push of the BUG-010 padding limit (65536) — checked separately.
@@ -906,6 +909,11 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 29 opcodes" {
         null, // index 13: push_data(0x00) — F-144 sig sign byte
         "OP_CAT",
         "OP_BIN2NUM",
+        "OP_DUP", // F-368: sig < pubKey
+        null, // index 17: push_int(3) — F-368 pick depth
+        "OP_PICK",
+        "OP_LESSTHAN",
+        "OP_VERIFY",
         "OP_DUP",
         "OP_MUL",
         "OP_ADD",
@@ -913,7 +921,7 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 29 opcodes" {
         "OP_MOD",
         "OP_ROT",
         "OP_SHA256",
-        null, // index 23: push_data(0x00) — BUG-011 digest sign byte
+        null, // index 28: push_data(0x00) — BUG-011 digest sign byte
         "OP_CAT",
         "OP_BIN2NUM",
         "OP_ROT", // F-047
@@ -931,8 +939,13 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 29 opcodes" {
                 .push_int => |v| try std.testing.expectEqual(@as(i64, 65536), v),
                 else => return error.UnexpectedInstructionKind,
             }
+        } else if (i == 17) {
+            switch (list.items[i]) {
+                .push_int => |v| try std.testing.expectEqual(@as(i64, 3), v),
+                else => return error.UnexpectedInstructionKind,
+            }
         } else {
-            // F-144 operand sign bytes (0, 4, 13), BUG-011 digest sign byte (23).
+            // F-144 operand sign bytes (0, 4, 13), BUG-011 digest sign byte (28).
             switch (list.items[i]) {
                 .push_data => |b| try std.testing.expectEqualSlices(u8, &.{0x00}, b),
                 else => return error.UnexpectedInstructionKind,

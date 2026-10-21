@@ -1,8 +1,10 @@
 //! Rabin signature verification codegen for Bitcoin Script.
 //!
 //! Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
-//! AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
-//! The emission is a fixed 29-opcode sequence:
+//! AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010)
+//! AND sig is in [0, pubKey) — also enforced on-chain (F-368; sig >= 0 holds
+//! after F-144, so only sig < pubKey costs opcodes).
+//! The emission is a fixed 34-opcode sequence:
 //!
 //!   <push 0x00> OP_CAT OP_BIN2NUM                   // pubKey as unsigned (F-144)
 //!   OP_SWAP
@@ -10,6 +12,7 @@
 //!   OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
 //!   OP_ROT
 //!   <push 0x00> OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+//!   OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY      // sig < pubKey (F-368)
 //!   OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
 //!   OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
 //!   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
@@ -61,6 +64,13 @@ pub fn append(
     try list.append(allocator, .{ .push_data = &.{0x00} }); // F-144: sig as unsigned
     try list.append(allocator, .{ .op_name = "OP_CAT" });
     try list.append(allocator, .{ .op_name = "OP_BIN2NUM" });
+    // F-368: assert sig < pubKey (sig >= 0 already holds after F-144), so the
+    // sig + k*pubKey re-encodings of one signature are refused.
+    try list.append(allocator, .{ .op_name = "OP_DUP" });
+    try list.append(allocator, .{ .push_int = 3 });
+    try list.append(allocator, .{ .op_name = "OP_PICK" });
+    try list.append(allocator, .{ .op_name = "OP_LESSTHAN" });
+    try list.append(allocator, .{ .op_name = "OP_VERIFY" });
     try list.append(allocator, .{ .op_name = "OP_DUP" });
     try list.append(allocator, .{ .op_name = "OP_MUL" });
     try list.append(allocator, .{ .op_name = "OP_ADD" });
@@ -85,14 +95,14 @@ pub fn append(
     try list.append(allocator, .{ .op_name = "OP_NUMEQUAL" });
 }
 
-test "rabin emitter appends the 29-opcode byte-frozen golden sequence (BUG-010, BUG-011, F-047, F-144)" {
+test "rabin emitter appends the 34-opcode byte-frozen golden sequence (BUG-010, BUG-011, F-047, F-144, F-368)" {
     const allocator = std.testing.allocator;
     var list: std.ArrayListUnmanaged(Instruction) = .empty;
     defer list.deinit(allocator);
 
     try append(&list, allocator);
 
-    try std.testing.expectEqual(@as(usize, 29), list.items.len);
+    try std.testing.expectEqual(@as(usize, 34), list.items.len);
 
     const expected_opcodes = [_]?[]const u8{
         null, "OP_CAT", "OP_BIN2NUM", // F-144: pubKey as unsigned (push_data 0x00 at 0)
@@ -103,9 +113,10 @@ test "rabin emitter appends the 29-opcode byte-frozen golden sequence (BUG-010, 
         "OP_WITHIN", "OP_VERIFY",
         "OP_ROT",
         null, "OP_CAT", "OP_BIN2NUM", // F-144: sig as unsigned (push_data 0x00 at 13)
+        "OP_DUP", null, "OP_PICK", "OP_LESSTHAN", "OP_VERIFY", // F-368: sig < pubKey (push_int 3 at 17)
         "OP_DUP", "OP_MUL", "OP_ADD", "OP_OVER",
         "OP_MOD", "OP_ROT", "OP_SHA256",
-        null, // index 23 is push_data(0x00), checked separately
+        null, // index 28 is push_data(0x00), checked separately
         "OP_CAT", "OP_BIN2NUM",
         "OP_ROT", "OP_MOD", // F-047: SHA256(msg) mod pubKey
         "OP_NUMEQUAL",
@@ -120,11 +131,17 @@ test "rabin emitter appends the 29-opcode byte-frozen golden sequence (BUG-010, 
                 .push_int => |v| try std.testing.expectEqual(rabin_padding_limit, v),
                 else => return error.TestExpectedPushInt,
             }
+        } else if (i == 17) {
+            // F-368 pick depth.
+            switch (inst) {
+                .push_int => |v| try std.testing.expectEqual(@as(i64, 3), v),
+                else => return error.TestExpectedPushInt,
+            }
         } else {
             // F-144 operand sign bytes (0, 4, 13) and the BUG-011 digest sign
-            // byte (23): each 0x00 makes the item below it read as a
+            // byte (28): each 0x00 makes the item below it read as a
             // NON-NEGATIVE Script number.
-            try std.testing.expect(i == 0 or i == 4 or i == 13 or i == 23);
+            try std.testing.expect(i == 0 or i == 4 or i == 13 or i == 28);
             switch (inst) {
                 .push_data => |b| try std.testing.expectEqualSlices(u8, &.{0x00}, b),
                 else => return error.TestExpectedPushData,

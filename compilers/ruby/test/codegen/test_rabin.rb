@@ -34,6 +34,11 @@ class TestRabinCodegen < Minitest::Test
     nil, # F-144: sig sign byte (0x00)
     'OP_CAT',
     'OP_BIN2NUM',
+    'OP_DUP', # F-368: sig < pubKey
+    nil, # push 3
+    'OP_PICK',
+    'OP_LESSTHAN',
+    'OP_VERIFY',
     'OP_DUP',
     'OP_MUL',
     'OP_ADD',
@@ -60,9 +65,13 @@ class TestRabinCodegen < Minitest::Test
         assert_equal 'push', op[:op], "op #{i}: expected push"
         assert_equal 'bigint', op[:value][:kind], "op #{i}: push kind"
         assert_equal 65_536, op[:value][:big_int], "op #{i}: BUG-010 padding limit"
+      elsif expected.nil? && i == 17
+        assert_equal 'push', op[:op], "op #{i}: expected push"
+        assert_equal 'bigint', op[:value][:kind], "op #{i}: push kind"
+        assert_equal 3, op[:value][:big_int], "op #{i}: F-368 pick depth"
       elsif expected.nil?
         # F-144 operand sign bytes (0, 4, 13) and the BUG-011 digest sign byte
-        # (23): each makes the item below it read as a NON-NEGATIVE Script number.
+        # (28): each makes the item below it read as a NON-NEGATIVE Script number.
         assert_equal 'push', op[:op], "op #{i}: expected push"
         assert_equal 'bytes', op[:value][:kind], "op #{i}: push kind"
         assert_equal "\x00".b, op[:value][:bytes_val], "op #{i}: sign byte"

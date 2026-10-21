@@ -23,7 +23,8 @@ import runar.compiler.ir.stack.StackOp;
  * to the top in argument order before invoking
  * {@link #emitVerifyRabinSig(Consumer)}.
  *
- * <p>The opcode sequence (post BUG-010, BUG-011, F-047, F-144) is:
+ * <p>The opcode sequence (post BUG-010, BUG-011, F-047, F-144, F-368) is a
+ * fixed 34 ops:
  * <pre>
  *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // pubkey as unsigned (F-144)
  *   OP_SWAP
@@ -31,6 +32,7 @@ import runar.compiler.ir.stack.StackOp;
  *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536 (BUG-010)
  *   OP_ROT
  *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+ *   OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY      // sig &lt; pubkey (F-368)
  *   OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
  *   OP_ROT OP_SHA256 &lt;push 0x00&gt; OP_CAT OP_BIN2NUM
  *   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubkey (F-047)
@@ -39,7 +41,9 @@ import runar.compiler.ir.stack.StackOp;
  * <p>It computes {@code (sig*sig + padding) mod pubkey == sha256(msg)},
  * which is the standard Rabin signature check, and additionally enforces
  * the {@code 0 &lt;= padding &lt; 65536} range bound on-chain.
- * See {@code _review/BUG-010-rfc.md}.
+ * See {@code _review/BUG-010-rfc.md}. F-368 adds {@code sig &lt; pubkey}
+ * ({@code sig &gt;= 0} already holds after F-144), so the
+ * {@code sig + k*pubkey} re-encodings of one signature are refused.
  *
  * <p>OPERAND SIGN (F-144): off-chain verifiers read padding (and the native
  * Go/Rust/Python/Ruby/Zig layers also sig and pubkey) as UNSIGNED
@@ -91,6 +95,12 @@ public final class Rabin {
         emit.accept(new PushOp(PushValue.ofHex("00"))); // F-144: sig as unsigned
         emit.accept(new OpcodeOp("OP_CAT"));
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
+        // F-368: assert sig < pubkey (sig >= 0 already holds after F-144).
+        emit.accept(new OpcodeOp("OP_DUP"));
+        emit.accept(new PushOp(PushValue.of(BigInteger.valueOf(3))));
+        emit.accept(new OpcodeOp("OP_PICK"));
+        emit.accept(new OpcodeOp("OP_LESSTHAN"));
+        emit.accept(new OpcodeOp("OP_VERIFY"));
         emit.accept(new OpcodeOp("OP_DUP"));
         emit.accept(new OpcodeOp("OP_MUL"));
         emit.accept(new OpcodeOp("OP_ADD"));

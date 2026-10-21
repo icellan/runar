@@ -3,7 +3,7 @@
   "kind": "stateless-signed",
   "note": "verifyRabinSig on a real @bsv/sdk Spend with a real ECDSA receiver signature over the real BIP-143 sighash. Pins the F-047 semantics: the on-chain check is (sig^2 + padding) mod n == SHA256(msg) mod n, the definition every off-chain verifier uses (rabinVerify, runar-go RabinVerify). The interpreter verdict (off-chain rabinVerify) is asserted equal to the Spend verdict on every row. receiver = alice. F-144: each Rabin operand (n, padding, sig) is read on chain as an UNSIGNED little-endian integer (0x00 sign byte + OP_BIN2NUM), so a raw push whose last byte has its high bit set keeps the value every off-chain verifier gives it; a non-negative Script number is unchanged.",
   "goldenHashes": {
-    "expected-script.hex": "b02695a2e3ded56a6bc7897e8f8c3ae42bd326598422bd2a46f227263b8dec25",
+    "expected-script.hex": "faa9f7cb345d3d070dae39e9b54c5eb739f145bbc98f2c011f52ea5867dc71fe",
     "expected-ir.json": "9db6022cc803ef1311c1d212788dd2a78859d16393ba324dfe5d6c2cbc45b79e"
   },
   "constructorArgs": {

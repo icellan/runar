@@ -3,7 +3,7 @@
   "kind": "stateless-signed",
   "note": "F-148 / R30 route A. PriceBet is the end2end example hand-written in all nine formats (examples/end2end-example/*/PriceBet.*); this fixture holds all seven tiers to one ANF IR and one script hex for it. Every spend below executes the fixture's compiled locking script on @bsv/sdk Spend with real secp256k1 signatures over the real BIP-143 sighash. alicePubKey = alice, bobPubKey = bob, dave is a key neither party holds. The Rabin vector (price 50003, its signature and padding 0x1b under the ~2^260 oracle key) is the one witnesses/real-crypto/oracle-price.json already uses, produced by packages/runar-go RabinSign over num2bin(50003, 8), so the oracle half is not derived from this compiler's output. The winner rows hand the LOSER a dave signature: a valid signature for both parties would let an inverted price > strikePrice branch pass, so each branch has an accept where only the winner's signature is valid and a reject where only the loser's is.",
   "goldenHashes": {
-    "expected-script.hex": "e75b3b7c190968ce59a29986557396c45746428d5aaaa70ea260b9b4a709cc16",
+    "expected-script.hex": "ddc1091d5b6889a63a2f3574af12914804d99aa83a65dd0a3863ff1cda601d75",
     "expected-ir.json": "f83042bf715eef62c5562aafdd3fddc60c7ce7d4d0d2da8d567d6d69d52c8d0e"
   },
   "constructorArgs": {

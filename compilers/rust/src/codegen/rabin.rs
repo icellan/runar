@@ -6,8 +6,10 @@
 //! `emit_verify_rabin_sig`: [msg, sig, padding, pubKey] -> [bool]
 //!
 //! Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
-//! AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
-//! The emission is a fixed 29-op sequence:
+//! AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010)
+//! AND sig is in [0, pubKey) — also enforced on-chain (F-368; sig >= 0 holds
+//! after F-144, so only sig < pubKey costs opcodes).
+//! The emission is a fixed 34-op sequence:
 //!
 //!   <push 0x00> OP_CAT OP_BIN2NUM                   // pubKey as unsigned (F-144)
 //!   OP_SWAP
@@ -15,6 +17,7 @@
 //!   OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
 //!   OP_ROT
 //!   <push 0x00> OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+//!   OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY      // sig < pubKey (F-368)
 //!   OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
 //!   OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
 //!   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
@@ -69,6 +72,13 @@ pub fn emit_verify_rabin_sig(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::Push(PushValue::Bytes(vec![0x00]))); // F-144: sig as unsigned
     emit(StackOp::Opcode("OP_CAT".to_string()));
     emit(StackOp::Opcode("OP_BIN2NUM".to_string()));
+    // F-368: assert sig < pubKey (sig >= 0 already holds after F-144), so the
+    // sig + k*pubKey re-encodings of one signature are refused.
+    emit(StackOp::Opcode("OP_DUP".to_string())); // msg pubKey padding sig sig
+    emit(StackOp::Push(PushValue::Int(BigInt::from(3)))); // ... sig sig 3
+    emit(StackOp::Opcode("OP_PICK".to_string())); // ... sig sig pubKey
+    emit(StackOp::Opcode("OP_LESSTHAN".to_string())); // ... sig (sig<pubKey)
+    emit(StackOp::Opcode("OP_VERIFY".to_string())); // msg pubKey padding sig
     emit(StackOp::Opcode("OP_DUP".to_string())); // msg pubKey padding sig sig
     emit(StackOp::Opcode("OP_MUL".to_string())); // msg pubKey padding sig^2
     emit(StackOp::Opcode("OP_ADD".to_string())); // msg pubKey (sig^2+padding)
@@ -91,15 +101,16 @@ pub fn emit_verify_rabin_sig(emit: &mut dyn FnMut(StackOp)) {
 mod tests {
     use super::*;
 
-    /// Byte-frozen golden: the fixed 29-op Rabin verification sequence
+    /// Byte-frozen golden: the fixed 34-op Rabin verification sequence
     /// (BUG-010 range check + BUG-011 digest-encoding normalization +
-    /// F-047 digest reduction mod pubKey + F-144 unsigned operands).
+    /// F-047 digest reduction mod pubKey + F-144 unsigned operands +
+    /// F-368 sig < pubKey gate).
     #[test]
     fn emit_verify_rabin_sig_byte_frozen_golden() {
         let mut ops: Vec<StackOp> = Vec::new();
         emit_verify_rabin_sig(&mut |op| ops.push(op));
 
-        assert_eq!(ops.len(), 29, "opcode count");
+        assert_eq!(ops.len(), 34, "opcode count");
 
         let expected_opcodes: &[(usize, &str)] = &[
             // indices 0, 4, 13 are the F-144 0x00 sign-byte pushes, checked below.
@@ -116,19 +127,24 @@ mod tests {
             (12, "OP_ROT"),
             (14, "OP_CAT"),
             (15, "OP_BIN2NUM"),
+            // F-368 gate: indices 16-20 (index 17 is the push of 3, checked below).
             (16, "OP_DUP"),
-            (17, "OP_MUL"),
-            (18, "OP_ADD"),
-            (19, "OP_OVER"),
-            (20, "OP_MOD"),
-            (21, "OP_ROT"),
-            (22, "OP_SHA256"),
-            // index 23 is the push of 0x00, checked separately below.
-            (24, "OP_CAT"),
-            (25, "OP_BIN2NUM"),
+            (18, "OP_PICK"),
+            (19, "OP_LESSTHAN"),
+            (20, "OP_VERIFY"),
+            (21, "OP_DUP"),
+            (22, "OP_MUL"),
+            (23, "OP_ADD"),
+            (24, "OP_OVER"),
+            (25, "OP_MOD"),
             (26, "OP_ROT"),
-            (27, "OP_MOD"),
-            (28, "OP_NUMEQUAL"),
+            (27, "OP_SHA256"),
+            // index 28 is the push of 0x00, checked separately below.
+            (29, "OP_CAT"),
+            (30, "OP_BIN2NUM"),
+            (31, "OP_ROT"),
+            (32, "OP_MOD"),
+            (33, "OP_NUMEQUAL"),
         ];
 
         for &(i, code) in expected_opcodes {
@@ -145,8 +161,15 @@ mod tests {
             other => panic!("op 9: expected Push(Int(65536)), got {other:?}"),
         }
 
-        // F-144 operand sign bytes (0, 4, 13) and the BUG-011 digest sign byte (23).
-        for i in [0usize, 4, 13, 23] {
+        match &ops[17] {
+            StackOp::Push(PushValue::Int(v)) => {
+                assert_eq!(v, &BigInt::from(3), "F-368 pick-depth push");
+            }
+            other => panic!("op 17: expected Push(Int(3)), got {other:?}"),
+        }
+
+        // F-144 operand sign bytes (0, 4, 13) and the BUG-011 digest sign byte (28).
+        for i in [0usize, 4, 13, 28] {
             match &ops[i] {
                 StackOp::Push(PushValue::Bytes(b)) => {
                     assert_eq!(b, &vec![0x00u8], "sign-byte push at {i}");

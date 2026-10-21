@@ -20,9 +20,10 @@ from __future__ import annotations
 from runar_compiler.codegen.rabin import RABIN_PADDING_LIMIT, emit_verify_rabin_sig
 from runar_compiler.codegen.stack import StackOp
 
-# Position 9 is the push of 65536 (the BUG-010 padding limit); None means
-# "check push value at this index, not opcode code". Positions 0, 4 and 13
-# are the F-144 operand sign bytes, 23 the BUG-011 digest sign byte.
+# Position 9 is the push of 65536 (the BUG-010 padding limit) and 17 the
+# F-368 pick-depth push of 3; None means "check push value at this index,
+# not opcode code". Positions 0, 4 and 13 are the F-144 operand sign bytes,
+# 28 the BUG-011 digest sign byte.
 RABIN_GOLDEN: list[str | None] = [
     None,  # push 0x00 (F-144: pubKey as unsigned)
     "OP_CAT",
@@ -40,6 +41,11 @@ RABIN_GOLDEN: list[str | None] = [
     None,  # push 0x00 (F-144: sig as unsigned)
     "OP_CAT",
     "OP_BIN2NUM",
+    "OP_DUP",  # F-368: sig < pubKey
+    None,  # push 3
+    "OP_PICK",
+    "OP_LESSTHAN",
+    "OP_VERIFY",
     "OP_DUP",
     "OP_MUL",
     "OP_ADD",
@@ -71,6 +77,9 @@ def test_emit_verify_rabin_sig_byte_frozen_golden() -> None:
                 assert op.value.big_int == RABIN_PADDING_LIMIT, (
                     f"op {i}: BUG-010 padding limit"
                 )
+            elif i == 17:
+                assert op.value.kind == "bigint", f"op {i}: push kind"
+                assert op.value.big_int == 3, f"op {i}: F-368 pick depth"
             else:
                 # F-144 operand sign bytes and the BUG-011 digest sign byte:
                 # each makes the item below it read as a non-negative Script

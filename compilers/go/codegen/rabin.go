@@ -3,8 +3,9 @@
 // EmitVerifyRabinSig: [msg, sig, padding, pubKey] → [bool]
 //
 // Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
-// AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
-// The emission is a fixed 29-op sequence:
+// AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010)
+// AND sig is in [0, pubKey) — also enforced on-chain (F-368).
+// The emission is a fixed 34-op sequence:
 //
 //	<push 0x00> OP_CAT OP_BIN2NUM                   // pubKey as unsigned (F-144)
 //	OP_SWAP
@@ -12,6 +13,7 @@
 //	OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
 //	OP_ROT
 //	<push 0x00> OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+//	OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY      // sig < pubKey (F-368)
 //	OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
 //	OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
 //	OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
@@ -22,6 +24,12 @@
 // whose last byte's high bit is the sign. Each operand gets an explicit
 // 0x00 sign byte and OP_BIN2NUM, so a raw unsigned push keeps its unsigned
 // value and a non-negative Script number is unchanged.
+//
+// CANONICAL SIGNATURE (F-368): (sig + k*n)^2 = sig^2 (mod n), so without a
+// range check sig + n is a malleated re-encoding of an honest spend. sig >= 0
+// already holds after the F-144 normalization; the script asserts sig < pubKey
+// and aborts otherwise. The second root n - sig remains accepted (inherent to
+// Rabin). See packages/runar-compiler/src/passes/rabin-codegen.ts.
 //
 // ENCODING (BUG-011): the final comparison is NUMERIC, not byte-wise.
 // OP_MOD leaves a minimal Script number (33 bytes with a trailing 0x00 sign
@@ -65,6 +73,11 @@ func EmitVerifyRabinSig(emit func(StackOp)) {
 	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x00}}}) // F-144: sig as unsigned
 	emit(StackOp{Op: "opcode", Code: "OP_CAT"})
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                        // F-368: msg pubKey padding sig sig
+	emit(StackOp{Op: "push", Value: bigIntPush(3)})                    // ... sig sig 3
+	emit(StackOp{Op: "opcode", Code: "OP_PICK"})                       // ... sig sig pubKey
+	emit(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})                   // ... sig (sig<pubKey)
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})                     // msg pubKey padding sig (abort if sig >= pubKey)
 	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                        // msg pubKey padding sig sig
 	emit(StackOp{Op: "opcode", Code: "OP_MUL"})                        // msg pubKey padding sig^2
 	emit(StackOp{Op: "opcode", Code: "OP_ADD"})                        // msg pubKey (sig^2+padding)

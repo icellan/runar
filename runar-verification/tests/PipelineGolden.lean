@@ -646,15 +646,22 @@ the constants had been honest all along.
 -- `[stale]` (their goldens moved under F-249: 219 -> 195 and 1033 -> 1021
 -- bytes) and their constants were replaced by the live hex, which byte-equals
 -- the new expected-script.hex. All three stay `.regenLive`.
+-- 2026-10-21 (F-368 / R90 + R138): the model fingerprint moved to
+-- v1:64f:7192832b:e8f34623d11e5414 (Stack/Lower.lean + Stack/Rabin.lean:
+-- verifyRabinSig asserts sig < pubKey with `OP_DUP <3> OP_PICK OP_LESSTHAN
+-- OP_VERIFY` after the F-144 sig normalization, a 34-op body). A full live regen
+-- (`RUNAR_VERIFICATION_REGEN=1`) returned all three `.regenLive` anchors
+-- `[fresh]` and byte-exact against their expected-script.hex (none calls
+-- verifyRabinSig), so only their fingerprints move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:64f:7188528b:4c90ea1700b05002"⟩,
+  ⟨"babybear", .regenLive, "v1:64f:7192832b:e8f34623d11e5414"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:64f:7188528b:4c90ea1700b05002"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:64f:7192832b:e8f34623d11e5414"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -677,7 +684,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:64f:7188528b:4c90ea1700b05002"⟩
+  ⟨"state-covenant", .regenLive, "v1:64f:7192832b:e8f34623d11e5414"⟩
 ]
 
 /--

@@ -39,13 +39,14 @@ class RabinTest {
     }
 
     @Test
-    void emitsExactly29Ops() {
+    void emitsExactly34Ops() {
         List<StackOp> ops = capture();
-        assertEquals(29, ops.size(),
-            "Rabin verifier must emit exactly 29 opcodes (cross-compiler reference; "
+        assertEquals(34, ops.size(),
+            "Rabin verifier must emit exactly 34 opcodes (cross-compiler reference; "
                 + "10 original + 5 BUG-010 range-check ops + 4 BUG-011 "
                 + "digest-encoding ops, less the OP_EQUAL that OP_NUMEQUAL replaced, "
-                + "+ 2 F-047 digest-reduction ops + 9 F-144 operand-sign ops)");
+                + "+ 2 F-047 digest-reduction ops + 9 F-144 operand-sign ops "
+                + "+ 5 F-368 sig < pubKey ops)");
     }
 
     @Test
@@ -53,9 +54,9 @@ class RabinTest {
         List<StackOp> ops = capture();
         for (int i = 0; i < ops.size(); i++) {
             StackOp op = ops.get(i);
-            if (i == 0 || i == 4 || i == 9 || i == 13 || i == 23) {
+            if (i == 0 || i == 4 || i == 9 || i == 13 || i == 17 || i == 28) {
                 // 0/4/13 = F-144 operand sign bytes, 9 = BUG-010 padding limit,
-                // 23 = BUG-011 digest sign byte.
+                // 17 = F-368 pick depth, 28 = BUG-011 digest sign byte.
                 assertTrue(op instanceof PushOp,
                     "Rabin op " + i + " must be a push; got "
                         + op.getClass().getSimpleName());
@@ -71,8 +72,9 @@ class RabinTest {
     void exactOpcodeSequenceMatchesReference() {
         List<StackOp> ops = capture();
         // Position 9 is the padding-limit push (65536); marked with null below
-        // so the loop body verifies it separately. 0, 4, 13 and 23 are 0x00
-        // sign-byte pushes (F-144 operands, BUG-011 digest).
+        // so the loop body verifies it separately, as is 17 (the F-368 pick
+        // depth 3). 0, 4, 13 and 28 are 0x00 sign-byte pushes (F-144
+        // operands, BUG-011 digest).
         List<String> expected = java.util.Arrays.asList(
             null, // F-144: pubKey sign byte (0x00)
             "OP_CAT",
@@ -90,6 +92,11 @@ class RabinTest {
             null, // F-144: sig sign byte (0x00)
             "OP_CAT",
             "OP_BIN2NUM",
+            "OP_DUP", // F-368: sig < pubKey
+            null, // push 3
+            "OP_PICK",
+            "OP_LESSTHAN",
+            "OP_VERIFY",
             "OP_DUP",
             "OP_MUL",
             "OP_ADD",
@@ -112,6 +119,10 @@ class RabinTest {
                 assertEquals(BigInteger.valueOf(Rabin.RABIN_PADDING_LIMIT),
                     p.value().raw(),
                     "Rabin op " + i + " must push the BUG-010 padding limit");
+            } else if (want == null && i == 17) {
+                PushOp p = (PushOp) ops.get(i);
+                assertEquals(BigInteger.valueOf(3), p.value().raw(),
+                    "Rabin op " + i + " must push the F-368 pick depth 3");
             } else if (want == null) {
                 // F-144 operand sign bytes and the BUG-011 digest sign byte:
                 // each makes the item below it read as a NON-NEGATIVE Script number.
@@ -142,7 +153,7 @@ class RabinTest {
     void dispatchRoutesKnownName() {
         List<StackOp> ops = new ArrayList<>();
         Rabin.dispatch("verifyRabinSig", ops::add);
-        assertEquals(29, ops.size());
+        assertEquals(34, ops.size());
     }
 
     @Test

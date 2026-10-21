@@ -42,7 +42,7 @@
         }
       ]
     },
-    "script": "53795880537a537a00537a537a537a537a01007e817c01007e81760003000001a5697b01007e8176959378977ba801007e817b979d7c0350c300a06900ac",
+    "script": "53795880537a537a00537a537a537a537a01007e817c01007e81760003000001a5697b01007e817653799f6976959378977ba801007e817b979d7c0350c300a06900ac",
     "constructorSlots": [
       {
         "paramIndex": 0,
@@ -53,7 +53,7 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 60,
+        "byteOffset": 65,
         "name": "receiver",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -77,7 +77,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 60,
+          "byteOffset": 65,
           "slot": "receiver"
         },
         {

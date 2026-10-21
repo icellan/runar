@@ -65,7 +65,7 @@ pub fn appendBuiltinInstructions(
 }
 
 /// Rabin signature verification — delegates to the standalone
-/// `rabin_emitter.zig` module so the 29-opcode sequence is owned in one place
+/// `rabin_emitter.zig` module so the 34-opcode sequence is owned in one place
 /// (mirrors the standalone Rabin modules in the other compiler tiers).
 pub fn appendVerifyRabinSig(builder: *Builder) !void {
     try rabin_emitter.append(&builder.instructions, builder.allocator);

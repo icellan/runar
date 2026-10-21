@@ -3,8 +3,10 @@
 emit_verify_rabin_sig: [msg, sig, padding, pubKey] -> [bool]
 
 Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey
-AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
-The emission is a fixed 29-opcode sequence:
+AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010)
+AND sig is in [0, pubKey) — also enforced on-chain (F-368; sig >= 0 holds
+after F-144, so only sig < pubKey costs opcodes).
+The emission is a fixed 34-opcode sequence:
 
     <push 0x00> OP_CAT OP_BIN2NUM                   # pubKey as unsigned (F-144)
     OP_SWAP
@@ -12,6 +14,7 @@ The emission is a fixed 29-opcode sequence:
     OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   # 0 <= padding < 65536 (BUG-010)
     OP_ROT
     <push 0x00> OP_CAT OP_BIN2NUM                   # sig as unsigned (F-144)
+    OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY      # sig < pubKey (F-368)
     OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
     OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
     OP_ROT OP_MOD OP_NUMEQUAL                       # digest mod pubKey (F-047)
@@ -82,6 +85,13 @@ def emit_verify_rabin_sig(emit: Callable[["StackOp"], None]) -> None:
     emit(_push_bytes(b"\x00"))                          # F-144: sig as unsigned
     emit(_opcode("OP_CAT"))
     emit(_opcode("OP_BIN2NUM"))
+    # F-368: assert sig < pubKey (sig >= 0 already holds after F-144), so the
+    # sig + k*pubKey re-encodings of one signature are refused.
+    emit(_opcode("OP_DUP"))                             # msg pubKey padding sig sig
+    emit(_push_int(3))                                  # ... sig sig 3
+    emit(_opcode("OP_PICK"))                            # ... sig sig pubKey
+    emit(_opcode("OP_LESSTHAN"))                        # ... sig (sig<pubKey)
+    emit(_opcode("OP_VERIFY"))                          # msg pubKey padding sig
     emit(_opcode("OP_DUP"))                             # msg pubKey padding sig sig
     emit(_opcode("OP_MUL"))                             # msg pubKey padding sig^2
     emit(_opcode("OP_ADD"))                             # msg pubKey (sig^2+padding)

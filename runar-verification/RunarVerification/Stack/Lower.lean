@@ -2262,6 +2262,7 @@ then emits (`emitVerifyRabinSig`, `rabin-codegen.ts:53-70`):
   OP_DUP  OP_0  <65536>  OP_WITHIN  OP_VERIFY   -- BUG-010 padding gate
   OP_ROT
   <push 0x00>  OP_CAT  OP_BIN2NUM               -- F-144 sig as unsigned
+  OP_DUP  <3>  OP_PICK  OP_LESSTHAN  OP_VERIFY  -- F-368 sig < pubKey gate
   OP_DUP  OP_MUL  OP_ADD
   OP_OVER  OP_MOD  OP_ROT  OP_SHA256  <push 0x00>  OP_CAT  OP_BIN2NUM
   OP_ROT  OP_MOD  OP_NUMEQUAL                     -- F-047 digest mod pubKey
@@ -2309,6 +2310,12 @@ def lowerVerifyRabinSigOpsLive (sm : StackMap) (bindingName : String)
     , StackOp.push (.bytes (ByteArray.mk #[0x00]))  -- F-144 sig as unsigned
     , StackOp.opcode "OP_CAT"
     , StackOp.opcode "OP_BIN2NUM"
+    -- F-368: canonical-signature gate `sig < pubKey` (sig ≥ 0 after F-144).
+    , StackOp.dup                     -- msg pubKey padding sig sig
+    , StackOp.push (.bigint 3)        -- … sig sig 3
+    , StackOp.opcode "OP_PICK"        -- … sig sig pubKey
+    , StackOp.opcode "OP_LESSTHAN"    -- … sig (sig < pubKey)
+    , StackOp.opcode "OP_VERIFY"      -- msg pubKey padding sig
     , StackOp.dup                     -- msg pubKey padding sig sig
     , StackOp.opcode "OP_MUL"         -- msg pubKey padding sig^2
     , StackOp.opcode "OP_ADD"         -- msg pubKey (sig^2+padding)
