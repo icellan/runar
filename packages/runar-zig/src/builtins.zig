@@ -655,8 +655,10 @@ pub fn gcd(a: base.Bigint, b: base.Bigint) base.Bigint {
     return x;
 }
 
+/// Exact floor(log2(n)); the compiled script aborts for n <= 0 (N-103).
 pub fn log2(value: base.Bigint) base.Bigint {
-    if (value <= 1) return 0;
+    assert(value > 0);
+    if (value == 1) return 0;
 
     var count: i64 = 0;
     var current = value;

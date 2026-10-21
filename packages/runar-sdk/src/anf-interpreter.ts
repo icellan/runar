@@ -1294,12 +1294,9 @@ function evalCall(
     }
     case 'log2': {
       const v = toBigInt(args[0]);
-      if (v <= 0n) return 0n;
-      let bits = 0n;
-      let x = v;
-      // The script unrolls exactly 64 halvings: saturates at 64 (N-030).
-      while (x > 1n && bits < 64n) { x >>= 1n; bits++; }
-      return bits;
+      // The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+      if (v <= 0n) throw new Error('log2: non-positive input');
+      return BigInt(v.toString(2).length - 1);
     }
     case 'bool': return isTruthy(args[0]) ? 1n : 0n;
     case 'mulDiv': {

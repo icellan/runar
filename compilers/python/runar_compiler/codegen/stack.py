@@ -5024,6 +5024,21 @@ class _LoweringContext:
 
     def _lower_log2(self, binding_name: str, args: list[str],
                     binding_index: int, last_uses: dict[str, int]) -> None:
+        """log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+        user decision R86). No iteration cap: the bit length is read off the
+        minimal Script-number encoding.
+
+          OP_BIN2NUM                              n        (minimal re-encoding)
+          OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+          OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+          OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+          OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+          7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+          OP_NIP                                  b + #{c : t >= c}
+
+        t = 0 only as the sign-padding byte, where n's bit length is exactly
+        8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
+        """
         if not args:
             raise RuntimeError("log2 requires 1 argument")
         n = args[0]
@@ -5032,29 +5047,30 @@ class _LoweringContext:
         self.bring_to_top(n, n_is_last)
         self.sm.pop()
 
-        # Push counter = 0
+        def op(code: str) -> None:
+            self.emit_op(StackOp(op="opcode", code=code))
+
+        op("OP_BIN2NUM")
+        op("OP_DUP")
         self.emit_op(StackOp(op="push", value=big_int_push(0)))
-
-        LOG2_ITERATIONS = 64
-        for _ in range(LOG2_ITERATIONS):
-            self.emit_op(StackOp(op="swap"))
-            self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-            self.emit_op(StackOp(op="push", value=big_int_push(1)))
-            self.emit_op(StackOp(op="opcode", code="OP_GREATERTHAN"))
-            self.emit_op(StackOp(
-                op="if",
-                then=[
-                    StackOp(op="push", value=big_int_push(2)),
-                    StackOp(op="opcode", code="OP_DIV"),
-                    StackOp(op="swap"),
-                    StackOp(op="opcode", code="OP_1ADD"),
-                    StackOp(op="swap"),
-                ],
-            ))
-            self.emit_op(StackOp(op="swap"))
-
-        # Drop input, keep counter
-        self.emit_op(StackOp(op="nip"))
+        op("OP_GREATERTHAN")
+        op("OP_VERIFY")
+        op("OP_SIZE")
+        op("OP_1SUB")
+        op("OP_TUCK")
+        op("OP_SPLIT")
+        op("OP_NIP")
+        op("OP_BIN2NUM")
+        op("OP_SWAP")
+        self.emit_op(StackOp(op="push", value=big_int_push(8)))
+        op("OP_MUL")
+        op("OP_1SUB")
+        for c in (1, 2, 4, 8, 16, 32, 64):
+            op("OP_OVER")
+            self.emit_op(StackOp(op="push", value=big_int_push(c)))
+            op("OP_GREATERTHANOREQUAL")
+            op("OP_ADD")
+        op("OP_NIP")
 
         self.sm.push(binding_name)
         self._track_depth()

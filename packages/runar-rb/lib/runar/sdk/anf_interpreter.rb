@@ -1905,16 +1905,10 @@ module Runar
       # @param v [Integer]
       # @return [Integer]
       def integer_log2(v)
-        return 0 if v <= 0
+        # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+        raise 'log2: non-positive input' if v <= 0
 
-        bits = 0
-        x    = v
-        # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
-        while x > 1 && bits < 64
-          x >>= 1
-          bits += 1
-        end
-        bits
+        v.bit_length - 1
       end
 
       # ---------------------------------------------------------------------------

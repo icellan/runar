@@ -28,7 +28,7 @@
  *
  * N-030 widened the file to the shared oracle for EVERY tier's native runtime
  * and SDK ANF interpreter, and added `wideCases` (operands/results beyond i64:
- * log2 saturating at 64, gcd stopping after 256 Euclid steps, sqrt's 2^495
+ * log2 exact past 2^64 (N-103), gcd stopping after 256 Euclid steps, sqrt's 2^495
  * guard, ...), executed here exactly like `cases`.
  *
  * What this does NOT prove: anything about a native runtime or interpreter by

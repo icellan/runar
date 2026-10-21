@@ -1071,9 +1071,9 @@ pub fn divmod(a: Int, b: Int) -> Int {
     a / b
 }
 
-/// Approximate floor(log2(n)).
+/// Exact floor(log2(n)); the compiled script aborts for n <= 0 (N-103).
 pub fn log2(n: Int) -> Int {
-    if n <= 0 { return 0; }
+    assert!(n > 0, "log2: non-positive input");
     let mut bits: Int = 0;
     let mut val = n;
     while val > 1 { val >>= 1; bits += 1; }

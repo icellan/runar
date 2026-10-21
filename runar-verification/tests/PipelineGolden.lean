@@ -653,15 +653,25 @@ the constants had been honest all along.
 -- (`RUNAR_VERIFICATION_REGEN=1`) returned all three `.regenLive` anchors
 -- `[fresh]` and byte-exact against their expected-script.hex (none calls
 -- verifyRabinSig), so only their fingerprints move.
+-- 2026-10-21 (N-103 / R86 + R139): the model fingerprint moved to
+-- v1:64f:7194500b:7b2f5d8035a4b362 (Stack/Lower.lean: log2 is the exact,
+-- branch-free read of the operand's minimal encoding — OP_BIN2NUM, an n > 0
+-- guard, OP_SIZE OP_1SUB OP_TUCK OP_SPLIT OP_NIP OP_BIN2NUM, OP_SWAP OP_8
+-- OP_MUL OP_1SUB, 7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], OP_NIP —
+-- replacing the 64-iteration halving loop; Stack/AgreesA4.lean gains a doc
+-- note only). Sharded live regens (`RUNAR_VERIFICATION_REGEN=1
+-- RUNAR_VERIFICATION_SHARD=1|8|2 RUNAR_VERIFICATION_SHARDS=20`) returned all
+-- three `.regenLive` anchors `[fresh]` and byte-exact against their
+-- expected-script.hex (none calls log2), so only their fingerprints move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:64f:7192832b:e8f34623d11e5414"⟩,
+  ⟨"babybear", .regenLive, "v1:64f:7194500b:7b2f5d8035a4b362"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:64f:7192832b:e8f34623d11e5414"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:64f:7194500b:7b2f5d8035a4b362"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -684,7 +694,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:64f:7192832b:e8f34623d11e5414"⟩
+  ⟨"state-covenant", .regenLive, "v1:64f:7194500b:7b2f5d8035a4b362"⟩
 ]
 
 /--

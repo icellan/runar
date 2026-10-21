@@ -645,10 +645,10 @@ module Runar
     end
 
     def log2(n)
-      return 0 if n <= 0
+      # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+      raise ArgumentError, 'log2: non-positive input' if n <= 0
 
-      # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
-      [n.bit_length - 1, 64].min
+      n.bit_length - 1
     end
 
     def bool(n)

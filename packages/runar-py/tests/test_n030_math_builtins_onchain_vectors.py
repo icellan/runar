@@ -10,7 +10,7 @@ That file is the oracle: every row is executed on @bsv/sdk Spend.validate by
 What this proves: for every ``cases`` and ``wideCases`` row, the native
 ``runar`` builtins (what a ``.runar.py`` contract calls under pytest) and the
 SDK ANF interpreter return the on-chain value, or raise where the script aborts
-(never a value) -- including clamp with lo > hi, log2 saturating at 64 and
+(never a value) -- including clamp with lo > hi, log2 exact past 2^64 and aborting for n <= 0 (N-103) and
 gcd's partial remainder after 256 Euclid steps.
 What it does not prove: inputs outside the file, or the script itself (the
 oracle). ``bool``/``within`` interpreter results are compared as script

@@ -16,7 +16,7 @@ import type { ANFProgram } from 'runar-ir-schema';
 //
 // Proves: for every `cases` and `wideCases` row the interpreter returns the
 // on-chain value, or throws where the script aborts (never a value) — including
-// clamp with lo > hi (min(max(v, lo), hi)), log2 saturating at 64 and gcd's
+// clamp with lo > hi (min(max(v, lo), hi)), log2 exact past 2^64 and aborting for n <= 0 (N-103) and gcd's
 // partial remainder after 256 Euclid steps.
 // Does not prove: inputs outside the file, or the script itself (the oracle).
 // `bool`/`within` results are compared as script numbers (true == 1, false == 0).

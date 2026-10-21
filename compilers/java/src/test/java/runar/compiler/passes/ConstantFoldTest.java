@@ -607,9 +607,11 @@ class ConstantFoldTest {
     // ---------------------------------------------------------------
     // N-029: folded values must be what the emitted script computes.
     // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi),
-    // which differs from `v < lo ? lo : ...` once lo > hi; log2 unrolls 64
-    // halvings and gcd 256 Euclid steps, so past those the script returns a
-    // saturated / partial value and the folder must decline. Expected values
+    // which differs from `v < lo ? lo : ...` once lo > hi; gcd unrolls 256
+    // Euclid steps, so past those the script returns a partial value and the
+    // folder must decline. log2 is exact for every n > 0 since N-103 and
+    // aborts for n <= 0, so the folder folds every positive operand and
+    // declines the rest. Expected values
     // were executed on @bsv/sdk Spend.validate by
     // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
     // Proves the Java folder's value/decline decisions; not the script itself.
@@ -647,12 +649,17 @@ class ConstantFoldTest {
         assertEquals(n029Int(0), bigInt(n029Fold("clamp", n029Int(-20), n029Int(10), n029Int(0))));
     }
 
+    // N-103 (user decision R86): this used to pin the decline past 64 halvings
+    // (2^65 and 2^70 not folded). The script is now exact with no cap, and
+    // n <= 0 (which it aborts on) is declined instead of folded to 0.
     @Test
-    void n029Log2DeclinesPast64Halvings() {
+    void n103Log2ExactAndDeclinesNonPositive() {
         assertEquals(n029Int(64), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(64))));
         assertEquals(n029Int(64), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(65).subtract(BigInteger.ONE))));
-        assertTrue(n029Fold("log2", BigInteger.ONE.shiftLeft(65)) instanceof Call);
-        assertTrue(n029Fold("log2", BigInteger.ONE.shiftLeft(70)) instanceof Call);
+        assertEquals(n029Int(65), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(65))));
+        assertEquals(n029Int(70), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(70))));
+        assertTrue(n029Fold("log2", BigInteger.ZERO) instanceof Call);
+        assertTrue(n029Fold("log2", BigInteger.valueOf(-1)) instanceof Call);
     }
 
     @Test

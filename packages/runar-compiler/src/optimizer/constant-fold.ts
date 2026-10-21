@@ -38,12 +38,11 @@ const SQRT_DOMAIN_LIMIT = 1n << 495n;
 const POW_EXPONENT_LIMIT = 32n;
 
 /**
- * Unroll counts of the emitted `log2` and `gcd` loops
- * (`passes/05-stack-lower.ts#lowerLog2` / `#lowerGcd`). Past them the script
- * returns a saturated / partial value, not the mathematical one, so the
- * folder declines there and leaves the script to compute it (N-029).
+ * Unroll count of the emitted `gcd` loop (`passes/05-stack-lower.ts#lowerGcd`).
+ * Past it the script returns a partial value, not the mathematical one, so the
+ * folder declines there and leaves the script to compute it (N-029). `log2` is
+ * exact for every n > 0 since N-103 and needs no such bound.
  */
-const LOG2_ITERATIONS = 64n;
 const GCD_ITERATIONS = 256;
 
 // ---------------------------------------------------------------------------
@@ -252,14 +251,9 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'log2': {
       if (bigintArgs.length !== 1) return null;
       const n = bigintArgs[0]!;
-      if (n <= 0n) return 0n;
-      let bits = 0n;
-      let val = n;
-      while (val > 1n) { val >>= 1n; bits++; }
-      // The script halves at most LOG2_ITERATIONS times, so it saturates at
-      // 64 for n >= 2^65. Decline there (N-029).
-      if (bits > LOG2_ITERATIONS) return null;
-      return bits;
+      // The script aborts for n <= 0 (N-103): decline, so the abort survives.
+      if (n <= 0n) return null;
+      return BigInt(n.toString(2).length - 1);
     }
     case 'bool': {
       if (bigintArgs.length !== 1) return null;

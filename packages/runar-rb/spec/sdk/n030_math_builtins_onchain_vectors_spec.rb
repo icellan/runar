@@ -17,7 +17,7 @@ require 'runar/sdk'
 # Proves: for every `cases` and `wideCases` row, Runar::Builtins (what a
 # .runar.rb contract calls under rspec) and the SDK ANF interpreter return the
 # on-chain value, or raise where the script aborts (never a value) -- including
-# clamp with lo > hi, log2 saturating at 64, gcd's partial remainder after 256
+# clamp with lo > hi, log2 exact past 2^64 (N-103), gcd's partial remainder after 256
 # Euclid steps, and abs/min/max existing natively at all.
 # Does not prove: inputs outside the file, or the script itself (the oracle).
 # Interpreter `bool`/`within` results are compared as script numbers

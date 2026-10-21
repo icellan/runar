@@ -382,7 +382,10 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     ("reverseBytes", 1, 2083, 0xaa355cbc2102a10c),
     ("sign", 1, 2, 0x00a1c571bf6296bf),
     ("sqrt", 1, 10, 0xbfe239cb7a0312f2), // R-169: 2 -> 10 top-level ops (2 domain guards, 8 ops, ahead of the unchanged OP_DUP + OP_IF pair); the 256-round min-clamped Newton body lives inside the If and does not add top-level ops
-    ("log2", 1, 386, 0x391ad77ad05d6a00),
+    // N-103 (user decision R86, 2026-10-21): 386 -> 44 top-level ops; the
+    // 64-iteration halving loop (capped at 64) became the exact, branch-free
+    // read of the operand's minimal encoding.
+    ("log2", 1, 44, 0x5a9f644619073f3a),
 ];
 
 #[test]

@@ -3708,25 +3708,44 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+    /// user decision R86). No iteration cap: the bit length is read off the
+    /// minimal Script-number encoding.
+    ///
+    ///   OP_BIN2NUM                              n        (minimal re-encoding)
+    ///   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+    ///   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+    ///   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+    ///   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+    ///   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+    ///   OP_NIP                                  b + #{c : t >= c}
+    ///
+    /// t = 0 only as the sign-padding byte, where n's bit length is exactly
+    /// 8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
     fn lowerLog2(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         try self.bringToTopAuto(args[0]);
         _ = self.stack.pop();
+        try self.emitOp(.op_bin2num);
+        try self.emitOp(.op_dup);
         try self.emitPushInt(0);
-        var iter: u32 = 0;
-        while (iter < 64) : (iter += 1) {
-            try self.emitOp(.op_swap);
-            try self.emitOp(.op_dup);
-            try self.emitPushInt(1);
-            try self.emitOp(.op_greaterthan);
-            try self.emitOp(.op_if);
-            try self.emitPushInt(2);
-            try self.emitOp(.op_div);
-            try self.emitOp(.op_swap);
-            try self.emitOp(.op_1add);
-            try self.emitOp(.op_swap);
-            try self.emitOp(.op_endif);
-            try self.emitOp(.op_swap);
+        try self.emitOp(.op_greaterthan);
+        try self.emitOp(.op_verify);
+        try self.emitOp(.op_size);
+        try self.emitOp(.op_1sub);
+        try self.emitOp(.op_tuck);
+        try self.emitOp(.op_split);
+        try self.emitOp(.op_nip);
+        try self.emitOp(.op_bin2num);
+        try self.emitOp(.op_swap);
+        try self.emitPushInt(8);
+        try self.emitOp(.op_mul);
+        try self.emitOp(.op_1sub);
+        for ([_]i64{ 1, 2, 4, 8, 16, 32, 64 }) |c| {
+            try self.emitOp(.op_over);
+            try self.emitPushInt(c);
+            try self.emitOp(.op_greaterthanorequal);
+            try self.emitOp(.op_add);
         }
         try self.emitOp(.op_nip);
         try self.stack.push(self.allocator, bind_name);

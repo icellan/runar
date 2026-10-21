@@ -895,11 +895,15 @@ describe('Pass 5: Stack Lower', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Fix #5: log2() uses bit-scanning (not byte-size approximation)
+  // N-103: log2() is an exact read of the minimal encoding. Fix #5 replaced a
+  // byte-size approximation with a 64-iteration halving loop, which capped
+  // log2 at 64; N-103 (user decision R86, 2026-10-21) replaced that loop with
+  // the exact, branch-free sequence pinned here. Execution is covered by
+  // conformance/negatives/n103-log2-exact-parity.test.ts.
   // ---------------------------------------------------------------------------
 
-  describe('log2() bit-scanning (Fix #5)', () => {
-    it('emits OP_DIV and OP_GREATERTHAN for proper bit scanning', () => {
+  describe('log2() exact encoding read (N-103)', () => {
+    it('emits the N-103 sequence and no branch', () => {
       const source = `
         class C extends SmartContract {
           readonly x: bigint;
@@ -912,17 +916,18 @@ describe('Pass 5: Stack Lower', () => {
       `;
       const program = compileToStack(source);
       const method = findStackMethod(program, 'm');
-      const allOps = flattenOps(method.ops);
-      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
-
-      // The bit-scanning loop should use OP_DIV and OP_GREATERTHAN
-      expect(opcodes).toContain('OP_DIV');
-      expect(opcodes).toContain('OP_GREATERTHAN');
-      expect(opcodes).toContain('OP_1ADD');
-
-      // The old byte-size approximation used OP_SIZE and OP_MUL — those should NOT be present
-      // for the log2 computation itself
-      expect(opcodes).not.toContain('OP_MUL');
+      const tokens = method.ops.map((o) =>
+        o.op === 'opcode' ? o.code : o.op === 'push' ? `PUSH(${String(o.value)})` : o.op);
+      const want = [
+        'OP_BIN2NUM', 'OP_DUP', 'PUSH(0)', 'OP_GREATERTHAN', 'OP_VERIFY',
+        'OP_SIZE', 'OP_1SUB', 'OP_TUCK', 'OP_SPLIT', 'OP_NIP', 'OP_BIN2NUM',
+        'OP_SWAP', 'PUSH(8)', 'OP_MUL', 'OP_1SUB',
+        ...[1, 2, 4, 8, 16, 32, 64].flatMap((c) => ['OP_OVER', `PUSH(${c})`, 'OP_GREATERTHANOREQUAL', 'OP_ADD']),
+        'OP_NIP',
+      ];
+      const at = tokens.findIndex((_, i) => want.every((w, j) => tokens[i + j] === w));
+      expect(at, `log2 sequence not found in ${tokens.join(' ')}`).toBeGreaterThanOrEqual(0);
+      expect(flattenOps(method.ops).some((o) => o.op === 'if')).toBe(false);
     });
   });
 

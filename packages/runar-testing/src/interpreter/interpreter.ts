@@ -1299,13 +1299,10 @@ export class RunarInterpreter {
 
       case 'log2': {
         const n = this.toBigInt(args[0]!);
-        if (n <= 0n) return { kind: 'bigint', value: 0n };
-        let bits = 0n;
-        let val = n;
-        // The compiled script unrolls exactly 64 halvings
-        // (`05-stack-lower.ts#lowerLog2`), so it saturates at 64 (N-029).
-        while (val > 1n && bits < 64n) { val >>= 1n; bits++; }
-        return { kind: 'bigint', value: bits };
+        // The compiled script (`05-stack-lower.ts#lowerLog2`) is exact for
+        // every n > 0 and aborts for n <= 0 (N-103).
+        if (n <= 0n) throw new Error('log2: non-positive input');
+        return { kind: 'bigint', value: BigInt(n.toString(2).length - 1) };
       }
 
       case 'bool': {

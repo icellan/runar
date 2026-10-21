@@ -9,8 +9,10 @@
 //     equivalent max(lo, min(v, hi))), which differs once lo > hi:
 //     clamp(5, 10, 0) is 0 on-chain and folded to 10. Rust alone folded it
 //     right, so the tiers also disagreed with each other.
-//   - log2 unrolls 64 halvings, so it saturates at 64 for n >= 2^65. Every
-//     tier folded the true floor(log2 n).
+//   - log2 unrolled 64 halvings, so it saturated at 64 for n >= 2^65. Every
+//     tier folded the true floor(log2 n). (N-103 since made the script exact
+//     for every n > 0 and abort for n <= 0: every tier now folds every
+//     positive operand exactly and declines n <= 0.)
 //   - gcd unrolls 256 Euclid steps and returns a partial remainder when more
 //     are needed. Every tier folded the true gcd.
 //
@@ -35,8 +37,11 @@ export class FoldBuiltinScriptParity extends SmartContract {
     const clamped: bigint = clamp(5n, 10n, 0n);
     // 2^64: exactly 64 halvings, inside the unroll — every tier folds to 64.
     const log2In: bigint = log2(18446744073709551616n);
-    // 2^70: past the unroll — no tier may fold it.
+    // 2^70: exact since N-103 (it used to be past the unroll) — every tier
+    // folds to 70.
     const log2Out: bigint = log2(1180591620717411303424n);
+    // 0: the script aborts (N-103) — no tier may fold it.
+    const log2Abort: bigint = log2(0n);
     // gcd(F258, F257) takes exactly 256 Euclid steps — every tier folds to 1.
     const gcdIn: bigint = gcd(
       370959230771131880927453318055001997489772178180790104n,
@@ -48,6 +53,6 @@ export class FoldBuiltinScriptParity extends SmartContract {
       370959230771131880927453318055001997489772178180790104n,
     );
 
-    assert(clamped + log2In + log2Out + gcdIn + gcdOut === x + this.tag);
+    assert(clamped + log2In + log2Out + log2Abort + gcdIn + gcdOut === x + this.tag);
   }
 }

@@ -1632,8 +1632,9 @@ fn evalUnaryOp(allocator: std.mem.Allocator, op: []const u8, operand: ANFValue, 
 
 /// True when the compiled script for this math builtin ABORTS on these
 /// operands: OP_DIV/OP_MOD by zero (`safediv`, `safemod`, `divmod`, `mulDiv`),
-/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, and `sqrt`'s
-/// `n >= 0` guard. (`sqrt`'s `n < 2^495` guard is out of i64 reach.)
+/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, `sqrt`'s
+/// `n >= 0` guard and `log2`'s `n > 0` guard (N-103). (`sqrt`'s `n < 2^495`
+/// guard is out of i64 reach.)
 fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
     const eql = std.mem.eql;
     if (eql(u8, func, "safediv") or eql(u8, func, "safemod") or eql(u8, func, "divmod")) {
@@ -1645,6 +1646,7 @@ fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *cons
         return exp < 0 or exp > 32;
     }
     if (eql(u8, func, "sqrt")) return toInt(getArg(arg_names, 0, env)) < 0;
+    if (eql(u8, func, "log2")) return toInt(getArg(arg_names, 0, env)) <= 0;
     return false;
 }
 

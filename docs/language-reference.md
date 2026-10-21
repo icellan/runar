@@ -601,7 +601,7 @@ private helper(x: bigint): bigint {
 | `sqrt` | `(n: bigint) => bigint` | 256-round Newton's method with a convergence break: `next = (guess + n/guess) / 2; guess = min(guess, next)`. `OP_MIN` is the break — integer Newton reaches `floor(sqrt(n))` and then oscillates between it and `floor+1`, so clamping to the running minimum makes `floor(sqrt(n))` a fixed point. **Domain: `0 <= n < 2^495`, enforced.** A negative `n`, or one needing more than 62 script bytes, makes the script FAIL rather than return a wrong root (`OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY` and `OP_SIZE <63> OP_LESSTHAN OP_VERIFY`). The constant folder and the reference interpreter refuse on the same bound. |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — **Warning:** Despite the name, `divmod` only returns the quotient. The remainder is computed internally but discarded. |
-| `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop using `PUSH 2 OP_DIV` for numeric halving — exact floor(log2(n)) |
+| `log2` | `(n: bigint) => bigint` | Exact floor(log2(n)) for **every** `n > 0`, with no width cap, read off the operand's minimal Script-number encoding (`OP_SIZE` plus a scan of the top byte; branch-free, 46 bytes). **Domain: `n > 0`, enforced.** `n <= 0` makes the script FAIL (`OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY`). The constant folder and the reference interpreter refuse on the same bound. |
 
 > **Note on `pow`:** The compiler emits 32 unrolled conditional multiplies, so **32 is the largest exponent it can compute**, and that bound is ENFORCED rather than documented: `pow(base, exp)` with `exp < 0` or `exp > 32` makes the script FAIL. It does **not** return `base ** 32`.
 >
@@ -611,7 +611,7 @@ private helper(x: bigint): bigint {
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
-> **Note on `log2`:** This computes the exact floor(log2(n)) using a 64-iteration unrolled bit-scanning loop that halves the input (via `PUSH 2 OP_DIV`) until it reaches 1, counting iterations. Uses `OP_DIV` rather than `OP_RSHIFT` because `OP_RSHIFT` has byte-array semantics on BSV that are incompatible with script number halving.
+> **Note on `log2`:** The script normalises `n` (`OP_BIN2NUM`), aborts unless `n > 0`, splits off the top byte `t` of the minimal little-endian encoding of size `s`, and returns `8(s-1) - 1 + #{c in 1,2,4,…,64 : t >= c}`. A top byte of `0x00` is the sign-padding byte, and then the bit length is exactly `8(s-1)`, which the same formula gives. So `log2(1n)` is `0n`, `log2(1024n)` is `10n` and `log2(2n ** 70n)` is `70n`; `log2(0n)` and `log2(-1n)` fail the script. Until N-103 the compiler emitted a 64-iteration halving loop that saturated at 64 (`log2(2n ** 70n)` was `64n`) and returned `0n` for `n <= 0`.
 
 ### Control
 

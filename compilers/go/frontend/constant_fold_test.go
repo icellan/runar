@@ -767,9 +767,10 @@ func TestFoldConstants_Clamp(t *testing.T) {
 
 // N-029: every folded value must be what the emitted script computes.
 // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
-// differs from `v < lo ? lo : ...` once lo > hi; log2 unrolls 64 halvings and
-// gcd 256 Euclid steps, so past those the script returns a saturated / partial
-// value and the folder must decline. Expected values were executed on
+// differs from `v < lo ? lo : ...` once lo > hi; gcd unrolls 256 Euclid
+// steps, so past those the script returns a partial value and the folder must
+// decline. log2 is exact for every n > 0 since N-103 and aborts for n <= 0, so
+// the folder folds every positive operand and declines the rest. Expected values were executed on
 // @bsv/sdk Spend.validate by
 // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
 // Proves the Go folder's value/decline decisions; not the script itself.
@@ -801,13 +802,19 @@ func TestFoldConstants_N029_ClampLoAboveHiMatchesScript(t *testing.T) {
 	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(-20), big.NewInt(10), big.NewInt(0)}, "clamp"), 0)
 }
 
-func TestFoldConstants_N029_Log2DeclinesPast64Halvings(t *testing.T) {
+// N-103 (user decision R86): this used to pin the decline past 64 halvings
+// (2^65 and 2^70 not folded). The script is now exact with no cap, so those
+// fold to their exact value, and n <= 0 — which the script aborts on — is
+// declined instead of folded to 0.
+func TestFoldConstants_N103_Log2ExactAndDeclinesNonPositive(t *testing.T) {
 	two := big.NewInt(2)
 	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(64), nil)}, "log2"), 64)
 	max64 := new(big.Int).Sub(new(big.Int).Exp(two, big.NewInt(65), nil), big.NewInt(1))
 	assertLoadConstBigInt(t, n029Fold([]*big.Int{max64}, "log2"), 64)
-	assertNotFolded(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(65), nil)}, "log2"), "call")
-	assertNotFolded(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(70), nil)}, "log2"), "call")
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(65), nil)}, "log2"), 65)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(70), nil)}, "log2"), 70)
+	assertNotFolded(t, n029Fold([]*big.Int{big.NewInt(0)}, "log2"), "call")
+	assertNotFolded(t, n029Fold([]*big.Int{big.NewInt(-1)}, "log2"), "call")
 }
 
 func TestFoldConstants_N029_GcdDeclinesPast256Steps(t *testing.T) {

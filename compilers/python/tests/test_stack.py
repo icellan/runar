@@ -536,12 +536,16 @@ class TestLoop:
 
 
 # ---------------------------------------------------------------------------
-# Test: log2 uses bit-scanning (not byte-size approximation)
+# Test: log2 reads the minimal encoding exactly (N-103)
 # ---------------------------------------------------------------------------
 
 class TestLog2:
-    def test_bit_scanning(self):
-        """log2 should use OP_GREATERTHAN for bit-scanning loop, not OP_SIZE."""
+    def test_exact_encoding_read(self):
+        """N-103 (user decision R86): the 64-iteration halving loop this used to
+        pin (OP_DIV, no OP_SIZE / OP_MUL, 64 if-ops; capped at 64) became an
+        exact, branch-free read of the operand's minimal encoding. Pins the
+        whole sequence; execution is covered by
+        conformance/negatives/n103-log2-exact-parity.test.ts."""
         program = ANFProgram(
             contract_name="Log2Test",
             properties=[],
@@ -566,28 +570,14 @@ class TestLog2:
 
         asm = _ops_to_string(check.ops)
 
-        # Must use OP_GREATERTHAN (bit-scanning loop), not OP_SIZE (byte approximation)
-        assert "OP_GREATERTHAN" in asm, (
-            f"log2 should use OP_GREATERTHAN for bit-scanning loop, got: {asm}"
-        )
-
-        # Must use OP_DIV for numeric halving
-        assert "OP_DIV" in asm, f"log2 should use OP_DIV for bit-scanning loop, got: {asm}"
-
-        # Must NOT use the old OP_SIZE byte-approximation approach
-        assert "OP_SIZE" not in asm, f"log2 should NOT use OP_SIZE (old byte approx), got: {asm}"
-        assert "OP_MUL" not in asm, f"log2 should NOT use OP_MUL (old byte approx), got: {asm}"
-
-        # The bit-scanning loop should have 64 if-ops with OP_DIV + OP_1ADD inside
-        if_count = sum(
-            1 for op in check.ops
-            if op.op == "if"
-            and "OP_DIV" in _ops_to_string(op.then)
-            and "OP_1ADD" in _ops_to_string(op.then)
-        )
-        assert if_count == 64, (
-            f"log2 should have 64 if-ops for bit-scanning iterations, got {if_count}"
-        )
+        want = ["OP_BIN2NUM", "OP_DUP", "PUSH(0)", "OP_GREATERTHAN", "OP_VERIFY",
+                "OP_SIZE", "OP_1SUB", "OP_TUCK", "OP_SPLIT", "OP_NIP", "OP_BIN2NUM",
+                "OP_SWAP", "PUSH(8)", "OP_MUL", "OP_1SUB"]
+        for c in (1, 2, 4, 8, 16, 32, 64):
+            want += ["OP_OVER", f"PUSH({c})", "OP_GREATERTHANOREQUAL", "OP_ADD"]
+        want.append("OP_NIP")
+        assert " ".join(want) in asm, f"log2 should emit the N-103 sequence, got: {asm}"
+        assert all(op.op != "if" for op in check.ops), f"log2 must be branch-free, got: {asm}"
 
 
 # ---------------------------------------------------------------------------

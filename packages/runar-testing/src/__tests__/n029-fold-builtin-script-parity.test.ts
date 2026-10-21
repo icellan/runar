@@ -10,9 +10,12 @@
  *                     computed `v < lo ? lo : (v > hi ? hi : v)`, which is a
  *                     different function once lo > hi: clamp(5, 10, 0) is 0
  *                     on-chain and folded to 10.
- *   log2(n)           the script unrolls 64 halvings, so it returns
+ *   log2(n)           the script unrolled 64 halvings, so it returned
  *                     min(floor(log2 n), 64). The folder returned the true
- *                     floor(log2 n): log2(2^70) is 64 on-chain, folded to 70.
+ *                     floor(log2 n): log2(2^70) was 64 on-chain, folded to 70.
+ *                     (N-103 since made the script exact for every n > 0 and
+ *                     abort for n <= 0; the folder now folds exactly and
+ *                     declines n <= 0.)
  *   gcd(a, b)         the script unrolls 256 Euclid steps. Past 256 steps it
  *                     returns the partial remainder, not the gcd:
  *                     gcd(F300, F299) is 701408733 on-chain, folded to 1.
@@ -78,12 +81,16 @@ const EDGE: Case[] = [
   { fn: 'clamp', args: [0n, 3n, -3n], expect: -3n },
   { fn: 'clamp', args: [-20n, 10n, 0n], expect: 0n },
   { fn: 'clamp', args: [7n, 7n, 7n], expect: 7n },
-  // log2: exact up to 64 halvings (n < 2^65), saturates at 64 after.
+  // log2: exact for every n > 0 since N-103 (user decision R86; before it the
+  // script saturated at 64 from 2^65 up, which these rows used to pin), and
+  // n <= 0 aborts — the folder must decline, not fold 0.
   { fn: 'log2', args: [1n << 64n], expect: 64n },
   { fn: 'log2', args: [(1n << 65n) - 1n], expect: 64n },
-  { fn: 'log2', args: [1n << 65n], expect: 64n },
-  { fn: 'log2', args: [1n << 70n], expect: 64n },
-  { fn: 'log2', args: [1n << 200n], expect: 64n },
+  { fn: 'log2', args: [1n << 65n], expect: 65n },
+  { fn: 'log2', args: [1n << 70n], expect: 70n },
+  { fn: 'log2', args: [1n << 200n], expect: 200n },
+  { fn: 'log2', args: [0n], expect: 'abort' },
+  { fn: 'log2', args: [-1n], expect: 'abort' },
   // gcd: consecutive Fibonacci numbers are Euclid's worst case.
   // gcd(F258, F257) needs exactly 256 steps (the unroll): exact.
   { fn: 'gcd', args: [fib(258), fib(257)], expect: 1n },

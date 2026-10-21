@@ -760,10 +760,10 @@ def divmod_(a: int, b: int) -> int:
     return _script_div(a, b, 'divmod')
 
 def log2(n: int) -> int:
+    # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
     if n <= 0:
-        return 0
-    # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
-    return min(n.bit_length() - 1, 64)
+        raise ValueError('log2: non-positive input')
+    return n.bit_length() - 1
 
 def bool_cast(n: int) -> bool:
     return n != 0

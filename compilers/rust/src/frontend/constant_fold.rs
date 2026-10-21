@@ -23,10 +23,9 @@ type ConstEnv = HashMap<String, ConstValue>;
 /// OP_VERIFY`) and with the reference interpreter.
 const POW_FOLD_EXPONENT_LIMIT: u32 = 32;
 
-/// Unroll counts of the emitted `log2` and `gcd` loops (`codegen/stack.rs`).
-/// Past them the script returns a saturated / partial value, not the
-/// mathematical one, so the folder declines there (N-029).
-const LOG2_FOLD_ITERATIONS: u64 = 64;
+/// Unroll count of the emitted `gcd` loop (`codegen/stack.rs`). Past it the
+/// script returns a partial value, not the mathematical one, so the folder
+/// declines there (N-029). `log2` is exact for every n > 0 since N-103.
 const GCD_FOLD_ITERATIONS: usize = 256;
 
 fn env_clone(env: &ConstEnv) -> ConstEnv {
@@ -328,17 +327,12 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
                 return None;
             }
             let n = int_args[0];
+            // The script aborts for n <= 0 (N-103): decline, so the abort survives.
             if !n.is_positive() {
-                return Some(ConstValue::Int(BigInt::from(0)));
+                return None;
             }
             // bits() returns the minimum number of bits to represent |n|;
             // floor(log2(n)) = bits - 1 for n > 0.
-            // The script halves at most LOG2_FOLD_ITERATIONS times
-            // (`codegen/stack.rs` log2 lowering), so it saturates at 64 for
-            // n >= 2^65. Decline there (N-029).
-            if n.bits() - 1 > LOG2_FOLD_ITERATIONS {
-                return None;
-            }
             Some(ConstValue::Int(BigInt::from(n.bits() - 1)))
         }
         "bool" => {
@@ -1392,8 +1386,10 @@ mod tests {
 
     // N-029: every folded value must be what the emitted script computes.
     // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi);
-    // log2 unrolls 64 halvings and gcd 256 Euclid steps, so past those the
-    // script returns a saturated / partial value and the folder must decline.
+    // gcd unrolls 256 Euclid steps, so past those the script returns a partial
+    // value and the folder must decline. log2 is exact for every n > 0 since
+    // N-103 and aborts for n <= 0: the folder folds every positive operand and
+    // declines the rest.
     // Expected values were executed on @bsv/sdk Spend.validate by
     // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
     // Proves the Rust folder's value/decline decisions; not the script itself.
@@ -1426,13 +1422,18 @@ mod tests {
         assert_load_const_int(&n029_fold(vec![i(-20), i(10), i(0)], "clamp"), 0);
     }
 
+    // N-103 (user decision R86): this used to pin the decline past 64 halvings
+    // (2^65 and 2^70 not folded). The script is now exact with no cap, and
+    // n <= 0 (which it aborts on) is declined instead of folded to 0.
     #[test]
-    fn test_n029_log2_declines_past_64_halvings() {
+    fn test_n103_log2_exact_and_declines_non_positive() {
         let one = BigInt::from(1);
         assert_load_const_int(&n029_fold(vec![&one << 64], "log2"), 64);
         assert_load_const_int(&n029_fold(vec![(&one << 65) - &one], "log2"), 64);
-        assert_not_folded(&n029_fold(vec![&one << 65], "log2"), "call");
-        assert_not_folded(&n029_fold(vec![&one << 70], "log2"), "call");
+        assert_load_const_int(&n029_fold(vec![&one << 65], "log2"), 65);
+        assert_load_const_int(&n029_fold(vec![&one << 70], "log2"), 70);
+        assert_not_folded(&n029_fold(vec![BigInt::from(0)], "log2"), "call");
+        assert_not_folded(&n029_fold(vec![BigInt::from(-1)], "log2"), "call");
     }
 
     #[test]

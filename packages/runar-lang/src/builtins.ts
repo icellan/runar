@@ -391,8 +391,9 @@ export function divmod(_a: bigint, _b: bigint): bigint {
 }
 
 /**
- * Approximate floor(log2(n)) via bit-scanning.
- * Compiles to a 64-iteration bit-scanning loop.
+ * Exact floor(log2(n)) for every n > 0, with no width cap; the script aborts
+ * for n <= 0. Compiles to a branch-free read of the operand's minimal
+ * Script-number encoding (OP_SIZE plus a scan of the top byte) (N-103).
  */
 export function log2(_n: bigint): bigint {
   return compilerStub('log2');

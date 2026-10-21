@@ -24,7 +24,7 @@ import (
 //
 // Proves: the interpreter returns the on-chain value, or panics with a
 // *ScriptOpcodeError where the script aborts, for every `cases` and
-// `wideCases` row (clamp with lo > hi, log2 saturating at 64, gcd's partial
+// `wideCases` row (clamp with lo > hi, log2 exact past 2^64 (N-103), gcd's partial
 // remainder after 256 Euclid steps, ...). The int64 native builtins do the
 // same for every `cases` row, and the arbitrary-precision .runar.go builtins
 // (AbsBig, GcdBig) for every abs/gcd row of both lists.

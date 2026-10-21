@@ -433,11 +433,11 @@ public final class ConstantFold {
             BigInteger.valueOf(StackLower.POW_EXPONENT_LIMIT);
 
     /**
-     * Unroll counts of the emitted {@code log2} and {@code gcd} loops
-     * ({@link StackLower}). Past them the script returns a saturated / partial
-     * value, not the mathematical one, so the folder declines there (N-029).
+     * Unroll count of the emitted {@code gcd} loop ({@link StackLower}). Past
+     * it the script returns a partial value, not the mathematical one, so the
+     * folder declines there (N-029). {@code log2} is exact for every n > 0
+     * since N-103.
      */
-    private static final int LOG2_FOLD_ITERATIONS = 64;
     private static final int GCD_FOLD_ITERATIONS = 256;
 
     private static ConstSlot evalBuiltinCall(String funcName, List<ConstSlot> args) {
@@ -544,10 +544,8 @@ public final class ConstantFold {
             case "log2": {
                 if (ints.size() != 1) return null;
                 BigInteger n = ints.get(0);
-                if (n.signum() <= 0) return ConstSlot.ofInt(BigInteger.ZERO);
-                // The script halves at most LOG2_FOLD_ITERATIONS times, so it
-                // saturates at 64 for n >= 2^65. Decline there (N-029).
-                if (n.bitLength() - 1 > LOG2_FOLD_ITERATIONS) return null;
+                // The script aborts for n <= 0 (N-103): decline, so the abort survives.
+                if (n.signum() <= 0) return null;
                 return ConstSlot.ofInt(BigInteger.valueOf(n.bitLength() - 1));
             }
             case "bool": {

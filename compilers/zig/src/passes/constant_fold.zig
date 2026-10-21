@@ -26,10 +26,9 @@ const Allocator = std.mem.Allocator;
 /// OP_VERIFY`) and with the reference interpreter.
 const pow_fold_exponent_limit: u32 = 32;
 
-/// Unroll counts of the emitted `log2` and `gcd` loops (`passes/stack_lower.zig`).
-/// Past them the script returns a saturated / partial value, not the
-/// mathematical one, so the folder declines there (N-029).
-const log2_fold_iterations: usize = 64;
+/// Unroll count of the emitted `gcd` loop (`passes/stack_lower.zig`). Past it
+/// the script returns a partial value, not the mathematical one, so the folder
+/// declines there (N-029). `log2` is exact for every n > 0 since N-103.
 const gcd_fold_iterations: usize = 256;
 const ConstValue = types.ConstValue;
 const ANFValue = types.ANFValue;
@@ -456,13 +455,10 @@ fn evalBuiltinCall(
         .builtin_log2 => {
             if (count != 1) return null;
             const n = big_args[0];
-            // n <= 0 folds to 0, matching the TS reference.
-            if (const_arith.isZero(n) or const_arith.isNegative(n)) return .{ .integer = 0 };
+            // The script aborts for n <= 0 (N-103): decline, so the abort survives.
+            if (const_arith.isZero(n) or const_arith.isNegative(n)) return null;
             // Bit length - 1. `bitCountAbs` is exact for a positive value.
             const bits = n.toConst().bitCountAbs();
-            // The script halves at most log2_fold_iterations times, so it
-            // saturates at 64 for n >= 2^65. Decline there (N-029).
-            if (bits - 1 > log2_fold_iterations) return null;
             return .{ .integer = @as(i128, @intCast(bits - 1)) };
         },
         .builtin_bool => {
@@ -1205,9 +1201,10 @@ test "fold builtin log2(1024) = 10" {
 
 // N-029: every folded value must be what the emitted script computes.
 // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
-// differs from max(lo, min(v, hi)) once lo > hi; log2 unrolls 64 halvings and
-// gcd 256 Euclid steps, so past those the script returns a saturated / partial
-// value and the folder must decline. Expected values were executed on @bsv/sdk
+// differs from max(lo, min(v, hi)) once lo > hi; gcd unrolls 256 Euclid steps,
+// so past those the script returns a partial value and the folder must decline.
+// log2 is exact for every n > 0 since N-103 and aborts for n <= 0, so the
+// folder folds every positive operand and declines the rest. Expected values were executed on @bsv/sdk
 // Spend.validate by
 // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
 // Proves the Zig folder's value/decline decisions; not the script itself.
@@ -1243,17 +1240,26 @@ test "N-029 clamp with lo > hi folds to min(max(v, lo), hi), as the script compu
     }
 }
 
-test "N-029 log2 declines past the script's 64 halvings" {
+// N-103 (user decision R86): this used to pin the decline past 64 halvings
+// (2^65 and 2^70 not folded). The script is now exact with no cap, and n <= 0
+// (which it aborts on) is declined instead of folded to 0.
+test "N-103 log2 folds exactly and declines n <= 0" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const one: i128 = 1;
-    const got64 = (try n029Fold(a, "log2", &.{.{ .integer = one << 64 }})) orelse return error.TestExpectedEqual;
-    try testing.expect(got64.eql(.{ .integer = 64 }));
-    const got64b = (try n029Fold(a, "log2", &.{.{ .integer = (one << 65) - 1 }})) orelse return error.TestExpectedEqual;
-    try testing.expect(got64b.eql(.{ .integer = 64 }));
-    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = one << 65 }})) == null);
-    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = one << 70 }})) == null);
+    const cases = [_]struct { n: i128, want: i128 }{
+        .{ .n = one << 64, .want = 64 },
+        .{ .n = (one << 65) - 1, .want = 64 },
+        .{ .n = one << 65, .want = 65 },
+        .{ .n = one << 70, .want = 70 },
+    };
+    for (cases) |c| {
+        const got = (try n029Fold(a, "log2", &.{.{ .integer = c.n }})) orelse return error.TestExpectedEqual;
+        try testing.expect(got.eql(.{ .integer = c.want }));
+    }
+    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = 0 }})) == null);
+    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = -1 }})) == null);
 }
 
 test "N-029 gcd declines past the script's 256 Euclid steps" {

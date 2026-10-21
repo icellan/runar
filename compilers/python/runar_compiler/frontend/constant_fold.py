@@ -28,10 +28,9 @@ from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
 # reference interpreter.
 POW_FOLD_EXPONENT_LIMIT = 32
 
-# Unroll counts of the emitted log2 and gcd loops (codegen/stack.py). Past them
-# the script returns a saturated / partial value, not the mathematical one, so
-# the folder declines there (N-029).
-LOG2_FOLD_ITERATIONS = 64
+# Unroll count of the emitted gcd loop (codegen/stack.py). Past it the script
+# returns a partial value, not the mathematical one, so the folder declines
+# there (N-029). log2 is exact for every n > 0 since N-103.
 GCD_FOLD_ITERATIONS = 256
 
 
@@ -352,11 +351,8 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 1:
             return None
         n = int_args[0]
+        # The script aborts for n <= 0 (N-103): decline, so the abort survives.
         if n <= 0:
-            return ("int", 0)
-        # The script halves at most LOG2_FOLD_ITERATIONS times, so it saturates
-        # at 64 for n >= 2**65. Decline there (N-029).
-        if n.bit_length() - 1 > LOG2_FOLD_ITERATIONS:
             return None
         return ("int", n.bit_length() - 1)
 

@@ -1523,15 +1523,11 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 
 	case "log2":
 		v := anfToBigInt(args[0])
+		// The script is exact for every n > 0 and aborts for n <= 0 (N-103).
 		if v.Sign() <= 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "log2", Message: "non-positive input"})
 		}
-		// The script unrolls exactly 64 halvings: saturates at 64 (N-030).
-		bits := int64(v.BitLen() - 1)
-		if bits > 64 {
-			bits = 64
-		}
-		return big.NewInt(bits)
+		return big.NewInt(int64(v.BitLen() - 1))
 
 	case "bool":
 		if anfIsTruthy(args[0]) {

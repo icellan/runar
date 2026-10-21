@@ -12,8 +12,8 @@
 //! (booleans compared as script numbers), or returns its abort error where the
 //! script aborts — never a value — including clamp with lo > hi
 //! (min(max(v, lo), hi)).
-//! Does NOT prove: the `wideCases` rows (operands beyond i64: log2 saturating
-//! at 64, gcd's 256-step partial remainder, sqrt's 2^495 guard) — this
+//! Does NOT prove: the `wideCases` rows (operands beyond i64: log2 past
+//! 2^64, gcd's 256-step partial remainder, sqrt's 2^495 guard) — this
 //! interpreter's integer value is i64, so those inputs cannot be expressed; the
 //! bigint-capable tiers replay them. Nor inputs outside the file.
 

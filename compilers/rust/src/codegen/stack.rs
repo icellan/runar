@@ -6768,15 +6768,20 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// log2(n): exact floor(log2(n)) via bit-scanning.
+    /// log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+    /// user decision R86). No iteration cap: the bit length is read off the
+    /// minimal Script-number encoding.
     ///
-    /// Uses a bounded unrolled loop (64 iterations for bigint range):
-    ///   counter = 0
-    ///   while input > 1: input >>= 1, counter++
-    ///   result = counter
+    ///   OP_BIN2NUM                              n        (minimal re-encoding)
+    ///   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+    ///   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+    ///   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+    ///   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+    ///   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+    ///   OP_NIP                                  b + #{c : t >= c}
     ///
-    /// Stack layout during loop: <input> <counter>
-    /// Each iteration: OP_SWAP OP_DUP 1 OP_GREATERTHAN OP_IF 2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF OP_SWAP
+    /// t = 0 only as the sign-padding byte, where n's bit length is exactly
+    /// 8(s-1). Mirrors `05-stack-lower.ts#lowerLog2`.
     fn lower_log2(
         &mut self,
         binding_name: &str,
@@ -6795,35 +6800,29 @@ impl LoweringContext {
 
         self.sm.pop();
 
-        // Stack: <n>
-        // Push counter = 0
-        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0)))); // n 0
-
-        // 64 iterations (sufficient for Bitcoin Script bigint range)
-        const LOG2_ITERATIONS: usize = 64;
-        for _ in 0..LOG2_ITERATIONS {
-            // Stack: input counter
-            self.emit_op(StackOp::Swap);                                     // counter input
-            self.emit_op(StackOp::Opcode("OP_DUP".to_string()));            // counter input input
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));                  // counter input input 1
-            self.emit_op(StackOp::Opcode("OP_GREATERTHAN".to_string()));     // counter input (input>1)
-            self.emit_op(StackOp::If {
-                then_ops: vec![
-                    StackOp::Push(PushValue::Int(BigInt::from(2))),                        // counter input 2
-                    StackOp::Opcode("OP_DIV".to_string()),                   // counter (input/2)
-                    StackOp::Swap,                                           // (input/2) counter
-                    StackOp::Opcode("OP_1ADD".to_string()),                  // (input/2) (counter+1)
-                    StackOp::Swap,                                           // (counter+1) (input/2)
-                ],
-                else_ops: vec![],
-            });
-            // Stack: counter input (or input counter if swapped back)
-            // After the if: stack is counter input (swap at start, then if-branch swaps back)
-            self.emit_op(StackOp::Swap);                                     // input counter
+        let op = |s: &mut Self, code: &str| s.emit_op(StackOp::Opcode(code.to_string()));
+        op(self, "OP_BIN2NUM");
+        op(self, "OP_DUP");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        op(self, "OP_GREATERTHAN");
+        op(self, "OP_VERIFY");
+        op(self, "OP_SIZE");
+        op(self, "OP_1SUB");
+        op(self, "OP_TUCK");
+        op(self, "OP_SPLIT");
+        op(self, "OP_NIP");
+        op(self, "OP_BIN2NUM");
+        op(self, "OP_SWAP");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(8))));
+        op(self, "OP_MUL");
+        op(self, "OP_1SUB");
+        for c in [1i64, 2, 4, 8, 16, 32, 64] {
+            op(self, "OP_OVER");
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(c))));
+            op(self, "OP_GREATERTHANOREQUAL");
+            op(self, "OP_ADD");
         }
-        // Stack: input counter
-        // Drop input, keep counter
-        self.emit_op(StackOp::Nip); // counter
+        op(self, "OP_NIP");
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -8167,11 +8166,36 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // log2 uses bit-scanning (OP_DIV + OP_GREATERTHAN), not byte approx
+    // log2 reads the minimal encoding exactly (N-103)
+    //
+    // N-103 (user decision R86, 2026-10-21): this used to pin the 64-iteration
+    // halving loop (OP_DIV / OP_1ADD present, no OP_SIZE / OP_MUL), which
+    // saturated at 64. The lowering is now an exact, branch-free read of the
+    // operand's minimal encoding; this pins that whole sequence. Execution is
+    // covered by conformance/negatives/n103-log2-exact-parity.test.ts.
     // -----------------------------------------------------------------------
 
+    fn n103_log2_window() -> Vec<String> {
+        let mut w: Vec<String> = [
+            "OP_BIN2NUM", "OP_DUP", "PUSH(0)", "OP_GREATERTHAN", "OP_VERIFY",
+            "OP_SIZE", "OP_1SUB", "OP_TUCK", "OP_SPLIT", "OP_NIP", "OP_BIN2NUM",
+            "OP_SWAP", "PUSH(8)", "OP_MUL", "OP_1SUB",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for c in [1, 2, 4, 8, 16, 32, 64] {
+            w.push("OP_OVER".to_string());
+            w.push(format!("PUSH({})", c));
+            w.push("OP_GREATERTHANOREQUAL".to_string());
+            w.push("OP_ADD".to_string());
+        }
+        w.push("OP_NIP".to_string());
+        w
+    }
+
     #[test]
-    fn test_log2_uses_bit_scanning_not_byte_approx() {
+    fn test_log2_reads_minimal_encoding_exactly() {
         let program = ANFProgram {
             contract_name: "TestLog2".to_string(),
             parent_class: String::new(),
@@ -8225,35 +8249,11 @@ mod tests {
 
         let methods = lower_to_stack(&program).expect("stack lowering should succeed");
         let opcodes = collect_all_opcodes(&methods[0].ops);
-
-        // The bit-scanning implementation must use OP_DIV and OP_GREATERTHAN
+        let want = n103_log2_window();
         assert!(
-            opcodes.contains(&"OP_DIV".to_string()),
-            "log2 should use OP_DIV (bit-scanning), got: {:?}",
-            opcodes
-        );
-        assert!(
-            opcodes.contains(&"OP_GREATERTHAN".to_string()),
-            "log2 should use OP_GREATERTHAN (bit-scanning), got: {:?}",
-            opcodes
-        );
-
-        // The old byte-approximation used OP_SIZE and OP_MUL — must NOT be present
-        assert!(
-            !opcodes.contains(&"OP_SIZE".to_string()),
-            "log2 should NOT use OP_SIZE (old byte approximation), got: {:?}",
-            opcodes
-        );
-        assert!(
-            !opcodes.contains(&"OP_MUL".to_string()),
-            "log2 should NOT use OP_MUL (old byte approximation), got: {:?}",
-            opcodes
-        );
-
-        // Should have OP_1ADD for counter increment
-        assert!(
-            opcodes.contains(&"OP_1ADD".to_string()),
-            "log2 should use OP_1ADD (counter increment), got: {:?}",
+            opcodes.windows(want.len()).any(|w| w == want.as_slice()),
+            "log2 should emit the N-103 sequence {:?}, got: {:?}",
+            want,
             opcodes
         );
     }
@@ -8735,12 +8735,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Row 201: log2 emits exactly 64 if-ops with OP_DIV+OP_1ADD
-    // (bit-scanning: 64 iterations, one per bit of a 64-bit integer)
+    // Row 201: log2 is branch-free (N-103). Before N-103 (user decision R86,
+    // 2026-10-21) this pinned exactly 64 if-ops — the halving loop that capped
+    // log2 at 64; the exact encoding read has none.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_log2_emits_64_if_ops() {
+    fn test_log2_emits_no_if_ops() {
         let program = ANFProgram {
             contract_name: "TestLog2Count".to_string(),
             parent_class: String::new(),
@@ -8794,7 +8795,7 @@ mod tests {
 
         let methods = lower_to_stack(&program).expect("stack lowering should succeed");
 
-        // Count OP_IF occurrences — there should be exactly 64 (one per bit)
+        // Count OP_IF occurrences — there should be none
         fn count_if_ops(ops: &[StackOp]) -> usize {
             let mut count = 0;
             for op in ops {
@@ -8812,8 +8813,8 @@ mod tests {
 
         let if_count = count_if_ops(&methods[0].ops);
         assert_eq!(
-            if_count, 64,
-            "log2 should emit exactly 64 if-ops (one per bit); got {} if-ops",
+            if_count, 0,
+            "log2 should be branch-free; got {} if-ops",
             if_count
         );
     }

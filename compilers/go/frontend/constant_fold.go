@@ -24,14 +24,10 @@ import (
 // OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
 const powFoldExponentLimit = 32
 
-// log2FoldIterations and gcdFoldIterations are the unroll counts of the
-// emitted log2 and gcd loops (codegen/stack.go lowerLog2 / lowerGcd). Past them
-// the script returns a saturated / partial value, so the folder declines
-// (N-029).
-const (
-	log2FoldIterations = 64
-	gcdFoldIterations  = 256
-)
+// gcdFoldIterations is the unroll count of the emitted gcd loop
+// (codegen/stack.go lowerGcd). Past it the script returns a partial value, so
+// the folder declines (N-029). log2 is exact for every n > 0 since N-103.
+const gcdFoldIterations = 256
 
 type constKind int
 
@@ -404,17 +400,11 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 			return nil
 		}
 		n := bigArgs[0]
+		// The script aborts for n <= 0 (N-103): decline, so the abort survives.
 		if n.Sign() <= 0 {
-			return &constValue{kind: constBigInt, bigint: big.NewInt(0)}
-		}
-		bits := int64(n.BitLen() - 1)
-		// The script halves at most log2FoldIterations times
-		// (codegen/stack.go lowerLog2), so it saturates at 64 for n >= 2^65.
-		// Decline there (N-029).
-		if bits > log2FoldIterations {
 			return nil
 		}
-		return &constValue{kind: constBigInt, bigint: big.NewInt(bits)}
+		return &constValue{kind: constBigInt, bigint: big.NewInt(int64(n.BitLen() - 1))}
 
 	case "bool":
 		if len(bigArgs) != 1 {

@@ -5570,16 +5570,20 @@ func (ctx *loweringContext) lowerDivmod(bindingName string, args []string, bindi
 	ctx.trackDepth()
 }
 
-// lowerLog2 lowers log2(n) — exact floor(log2(n)) via bit-scanning.
+// lowerLog2 lowers log2(n) — exact floor(log2(n)) for every n > 0; n <= 0
+// aborts (N-103, user decision R86). No iteration cap: the bit length is read
+// off the minimal Script-number encoding.
 //
-// Uses a bounded unrolled loop (64 iterations for bigint range):
+//	OP_BIN2NUM                              n        (minimal re-encoding)
+//	OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+//	OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+//	OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+//	OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+//	7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+//	OP_NIP                                  b + #{c : t >= c}
 //
-//	counter = 0
-//	while input > 1: input >>= 1, counter++
-//	result = counter
-//
-// Stack layout during loop: <input> <counter>
-// Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+// t = 0 only as the sign-padding byte, where n's bit length is exactly
+// 8(s-1). Mirrors packages/runar-compiler/src/passes/05-stack-lower.ts#lowerLog2.
 func (ctx *loweringContext) lowerLog2(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	if len(args) < 1 {
 		panic("log2 requires 1 argument")
@@ -5590,35 +5594,29 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 	ctx.bringToTop(n, nIsLast)
 	ctx.sm.pop()
 
-	// Stack: <n>
-	// Push counter = 0
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)}) // n 0
-
-	// 64 iterations (sufficient for Bitcoin Script bigint range)
-	const log2Iterations = 64
-	for i := 0; i < log2Iterations; i++ {
-		// Stack: input counter
-		ctx.emitOp(StackOp{Op: "swap"})                           // counter input
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})         // counter input input
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})     // counter input input 1
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"}) // counter input (input>1)
-		ctx.emitOp(StackOp{
-			Op: "if",
-			Then: []StackOp{
-				{Op: "push", Value: bigIntPush(2)}, // counter input 2
-				{Op: "opcode", Code: "OP_DIV"},     // counter (input/2)
-				{Op: "swap"},                       // (input/2) counter
-				{Op: "opcode", Code: "OP_1ADD"},    // (input/2) (counter+1)
-				{Op: "swap"},                       // (counter+1) (input/2)
-			},
-		})
-		// Stack: counter input (or input counter if swapped back)
-		// After the if: stack is counter input (swap at start, then if-branch swaps back)
-		ctx.emitOp(StackOp{Op: "swap"}) // input counter
+	op := func(code string) { ctx.emitOp(StackOp{Op: "opcode", Code: code}) }
+	op("OP_BIN2NUM")
+	op("OP_DUP")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+	op("OP_GREATERTHAN")
+	op("OP_VERIFY")
+	op("OP_SIZE")
+	op("OP_1SUB")
+	op("OP_TUCK")
+	op("OP_SPLIT")
+	op("OP_NIP")
+	op("OP_BIN2NUM")
+	op("OP_SWAP")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+	op("OP_MUL")
+	op("OP_1SUB")
+	for _, c := range []int64{1, 2, 4, 8, 16, 32, 64} {
+		op("OP_OVER")
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(c)})
+		op("OP_GREATERTHANOREQUAL")
+		op("OP_ADD")
 	}
-	// Stack: input counter
-	// Drop input, keep counter
-	ctx.emitOp(StackOp{Op: "nip"}) // counter
+	op("OP_NIP")
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()

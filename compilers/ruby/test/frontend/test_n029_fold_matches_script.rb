@@ -10,9 +10,10 @@ require "runar_compiler/frontend/anf_lower"
 #
 # clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
 # differs from [lo, [v, hi].min].max once lo > hi (clamp(5, 10, 0) is 0
-# on-chain and folded to 10). log2 unrolls 64 halvings and gcd 256 Euclid
-# steps, so past those the script returns a saturated / partial value and the
-# folder must decline. Expected values were executed on @bsv/sdk
+# on-chain and folded to 10). gcd unrolls 256 Euclid steps, so past those the
+# script returns a partial value and the folder must decline. log2 is exact for
+# every n > 0 since N-103 and aborts for n <= 0, so the folder folds every
+# positive operand and declines the rest. Expected values were executed on @bsv/sdk
 # Spend.validate by
 # packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
 #
@@ -57,11 +58,16 @@ class TestN029FoldMatchesScript < Minitest::Test
     assert_folded fold([-20, 10, 0], "clamp"), 0
   end
 
-  def test_log2_declines_past_64_halvings
+  # N-103 (user decision R86): this used to pin the decline past 64 halvings
+  # (2^65 and 2^70 not folded). The script is now exact with no cap, and
+  # n <= 0 (which it aborts on) is declined instead of folded to 0.
+  def test_log2_exact_and_declines_non_positive
     assert_folded fold([1 << 64], "log2"), 64
     assert_folded fold([(1 << 65) - 1], "log2"), 64
-    assert_equal "call", fold([1 << 65], "log2").kind
-    assert_equal "call", fold([1 << 70], "log2").kind
+    assert_folded fold([1 << 65], "log2"), 65
+    assert_folded fold([1 << 70], "log2"), 70
+    assert_equal "call", fold([0], "log2").kind
+    assert_equal "call", fold([-1], "log2").kind
   end
 
   def test_gcd_declines_past_256_steps

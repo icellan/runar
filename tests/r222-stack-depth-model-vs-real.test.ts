@@ -67,7 +67,7 @@ const BLIND_SPOTS: Array<{ name: string; src: string; unlocking: string }> = [
     unlocking: '0101' + '0101',
   },
   {
-    name: 'log2 (64 iterations)',
+    name: 'log2 (exact encoding read, N-103)',
     src: contract('assert(log2(x) === this.expected);', 'log2'),
     unlocking: '0101' + '0101',
   },

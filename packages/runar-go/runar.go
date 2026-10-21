@@ -1407,19 +1407,17 @@ func Divmod(a, b int64) int64 {
 	return a / b
 }
 
-// Log2 returns the approximate floor(log2(n)).
+// Log2 returns the exact floor(log2(n)). It panics for n <= 0, where the
+// compiled script aborts (N-103).
 func Log2(n int64) int64 {
-	if n <= 0 {
-		return 0
-	}
 	return Log2Big(big.NewInt(n))
 }
 
-// Log2Big returns floor(log2(n)) for any *big.Int > 0. Returns 0 for
-// n <= 0, matching Log2's defensive behavior.
+// Log2Big returns the exact floor(log2(n)) for any *big.Int > 0. It panics
+// for n <= 0, where the compiled script aborts (N-103).
 func Log2Big(n *big.Int) int64 {
 	if n == nil || n.Sign() <= 0 {
-		return 0
+		panic("log2: non-positive input")
 	}
 	return int64(n.BitLen() - 1)
 }

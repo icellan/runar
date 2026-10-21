@@ -5725,15 +5725,22 @@ class LoweringContext {
   }
 
   /**
-   * Lower log2(n) — exact floor(log2(n)) via bit-scanning.
+   * Lower log2(n) — exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+   * user decision R86). No iteration cap: the bit length is read off the
+   * minimal Script-number encoding.
    *
-   * Uses a bounded unrolled loop (64 iterations for bigint range):
-   *   counter = 0
-   *   while input > 1: input >>= 1, counter++
-   *   result = counter
+   *   OP_BIN2NUM                              n        (minimal re-encoding)
+   *   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+   *   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+   *   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+   *   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+   *   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+   *   OP_NIP                                  b + #{c : t >= c}
    *
-   * Stack layout during loop: <input> <counter>
-   * Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+   * t = 0 only as the sign-padding byte, where n's bit length is exactly
+   * 8(s-1), i.e. b with no comparison set. The leading OP_BIN2NUM keeps a
+   * non-minimally encoded operand from inflating OP_SIZE; the second one makes
+   * t a minimal number (0x00 is a non-minimal zero).
    */
   private lowerLog2(
     bindingName: string,
@@ -5748,36 +5755,29 @@ class LoweringContext {
     this.bringToTop(n, nIsLast);
     this.stackMap.pop();
 
-    // Stack: <n>
-    // Push counter = 0
-    this.emitOp({ op: 'push', value: 0n }); // n 0
-
-    // 64 iterations (sufficient for Bitcoin Script bigint range)
-    const LOG2_ITERATIONS = 64;
-    for (let i = 0; i < LOG2_ITERATIONS; i++) {
-      // Stack: input counter
-      this.emitOp({ op: 'swap' });              // counter input
-      this.emitOp({ op: 'opcode', code: 'OP_DUP' }); // counter input input
-      this.emitOp({ op: 'push', value: 1n });    // counter input input 1
-      this.emitOp({ op: 'opcode', code: 'OP_GREATERTHAN' }); // counter input (input>1)
-      this.emitOp({
-        op: 'if',
-        then: [
-          { op: 'push', value: 2n },              // counter input 2
-          { op: 'opcode', code: 'OP_DIV' },       // counter (input/2)
-          { op: 'swap' },                         // (input/2) counter
-          { op: 'opcode', code: 'OP_1ADD' },      // (input/2) (counter+1)
-          { op: 'swap' },                         // (counter+1) (input/2)
-        ],
-        else: undefined,
-      });
-      // Stack: counter input  (or input counter if swapped back)
-      // After the if: stack is counter input (swap at start, then if-branch swaps back)
-      this.emitOp({ op: 'swap' });              // input counter
+    const op = (code: string): void => this.emitOp({ op: 'opcode', code });
+    op('OP_BIN2NUM');
+    op('OP_DUP');
+    this.emitOp({ op: 'push', value: 0n });
+    op('OP_GREATERTHAN');
+    op('OP_VERIFY');
+    op('OP_SIZE');
+    op('OP_1SUB');
+    op('OP_TUCK');
+    op('OP_SPLIT');
+    op('OP_NIP');
+    op('OP_BIN2NUM');
+    op('OP_SWAP');
+    this.emitOp({ op: 'push', value: 8n });
+    op('OP_MUL');
+    op('OP_1SUB');
+    for (const c of [1n, 2n, 4n, 8n, 16n, 32n, 64n]) {
+      op('OP_OVER');
+      this.emitOp({ op: 'push', value: c });
+      op('OP_GREATERTHANOREQUAL');
+      op('OP_ADD');
     }
-    // Stack: input counter
-    // Drop input, keep counter
-    this.emitOp({ op: 'nip' }); // counter
+    op('OP_NIP');
 
     this.stackMap.push(bindingName);
     this.trackDepth();

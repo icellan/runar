@@ -750,7 +750,7 @@ BuiltinFunction_Math
     | 'sqrt'               /* sqrt(n: bigint): bigint -- integer square root */
     | 'gcd'                /* gcd(a: bigint, b: bigint): bigint -- greatest common divisor */
     | 'divmod'             /* divmod(a: bigint, b: bigint): bigint -- quotient */
-    | 'log2'               /* log2(n: bigint): bigint -- approximate floor(log2(n)) */
+    | 'log2'               /* log2(n: bigint): bigint -- exact floor(log2(n)) for every n > 0; n <= 0 fails the script */
     ;
 ```
 

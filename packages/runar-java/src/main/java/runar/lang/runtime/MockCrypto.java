@@ -620,10 +620,9 @@ public final class MockCrypto {
     }
 
     public static BigInteger log2(BigInteger n) {
-        // The compiled script returns 0 for n <= 0 and unrolls exactly 64
-        // halvings, so it saturates at 64 (N-030).
-        if (n.signum() <= 0) return BigInteger.ZERO;
-        return BigInteger.valueOf(Math.min(n.bitLength() - 1, 64));
+        // The compiled script is exact for every n > 0 and aborts for n <= 0 (N-103).
+        if (n.signum() <= 0) throw new ArithmeticException("log2: non-positive input");
+        return BigInteger.valueOf(n.bitLength() - 1);
     }
 
     public static boolean bool(BigInteger x) {

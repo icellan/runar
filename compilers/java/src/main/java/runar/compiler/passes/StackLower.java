@@ -2856,11 +2856,20 @@ public final class StackLower {
         }
 
         // ------------------------------------------------------------------
-        // log2(n): floor(log2(n)) via 64-iteration bit-scan.
-        // Mirrors lowerLog2 in Go. push 0 (counter); each iteration:
-        //   swap, OP_DUP, push 1, OP_GREATERTHAN,
-        //   IF { push 2, OP_DIV, swap, OP_1ADD, swap }, swap.
-        // Final OP_NIP drops the input, leaving counter.
+        // log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts
+        // (N-103, user decision R86). No iteration cap: the bit length is
+        // read off the minimal Script-number encoding.
+        //
+        //   OP_BIN2NUM                              n        (minimal re-encoding)
+        //   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+        //   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+        //   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+        //   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+        //   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+        //   OP_NIP                                  b + #{c : t >= c}
+        //
+        // t = 0 only as the sign-padding byte, where n's bit length is
+        // exactly 8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
         // ------------------------------------------------------------------
         void lowerLog2(String bindingName, List<String> args, int idx,
                        Map<String, Integer> lastUses) {
@@ -2872,24 +2881,28 @@ public final class StackLower {
             bringToTop(n, isLastUse(n, idx, lastUses));
             sm.pop();
 
-            emitOp(new PushOp(PushValue.of(0))); // n 0
-
-            final int log2Iterations = 64;
-            for (int i = 0; i < log2Iterations; i++) {
-                emitOp(new SwapOp());                  // counter input
-                emitOp(new OpcodeOp("OP_DUP"));        // counter input input
-                emitOp(new PushOp(PushValue.of(1)));   // counter input input 1
-                emitOp(new OpcodeOp("OP_GREATERTHAN")); // counter input (input>1)
-                List<StackOp> thenOps = new ArrayList<>();
-                thenOps.add(new PushOp(PushValue.of(2))); // counter input 2
-                thenOps.add(new OpcodeOp("OP_DIV"));   // counter (input/2)
-                thenOps.add(new SwapOp());             // (input/2) counter
-                thenOps.add(new OpcodeOp("OP_1ADD"));  // (input/2) (counter+1)
-                thenOps.add(new SwapOp());             // (counter+1) (input/2)
-                emitOp(new IfOp(thenOps));
-                emitOp(new SwapOp());                  // input counter
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new OpcodeOp("OP_DUP"));
+            emitOp(new PushOp(PushValue.of(0)));
+            emitOp(new OpcodeOp("OP_GREATERTHAN"));
+            emitOp(new OpcodeOp("OP_VERIFY"));
+            emitOp(new OpcodeOp("OP_SIZE"));
+            emitOp(new OpcodeOp("OP_1SUB"));
+            emitOp(new OpcodeOp("OP_TUCK"));
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            emitOp(new OpcodeOp("OP_NIP"));
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new OpcodeOp("OP_SWAP"));
+            emitOp(new PushOp(PushValue.of(8)));
+            emitOp(new OpcodeOp("OP_MUL"));
+            emitOp(new OpcodeOp("OP_1SUB"));
+            for (int c : new int[]{1, 2, 4, 8, 16, 32, 64}) {
+                emitOp(new OpcodeOp("OP_OVER"));
+                emitOp(new PushOp(PushValue.of(c)));
+                emitOp(new OpcodeOp("OP_GREATERTHANOREQUAL"));
+                emitOp(new OpcodeOp("OP_ADD"));
             }
-            emitOp(new NipOp()); // counter
+            emitOp(new OpcodeOp("OP_NIP"));
 
             sm.push(bindingName);
             trackDepth();

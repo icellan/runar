@@ -1889,8 +1889,9 @@ fn eval_unary_op(op: &str, operand: &Val, result_type: &str) -> Val {
 
 /// True when the compiled script for this math builtin ABORTS on these
 /// operands: OP_DIV/OP_MOD by zero (`safediv`, `safemod`, `divmod`, `mulDiv`),
-/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, and `sqrt`'s
-/// `n >= 0` guard. (`sqrt`'s `n < 2^495` guard is out of i64 reach.)
+/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, `sqrt`'s
+/// `n >= 0` guard and `log2`'s `n > 0` guard (N-103). (`sqrt`'s `n < 2^495`
+/// guard is out of i64 reach.)
 fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
     let arg = |i: usize| args.get(i).map(|v| v.to_i64()).unwrap_or(0);
     match func {
@@ -1898,6 +1899,7 @@ fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
         "mulDiv" => arg(2) == 0,
         "pow" => !(0..=32).contains(&arg(1)),
         "sqrt" => arg(0) < 0,
+        "log2" => arg(0) <= 0,
         _ => false,
     }
 }

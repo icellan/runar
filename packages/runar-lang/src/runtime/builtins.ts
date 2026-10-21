@@ -377,16 +377,9 @@ export function divmod(a: bigint, b: bigint): bigint {
 }
 
 export function log2(n: bigint): bigint {
-  // The compiled script returns 0 for n <= 0 and unrolls exactly 64
-  // halvings, so it saturates at 64 (N-030).
-  if (n <= 0n) return 0n;
-  let result = 0n;
-  let v = n;
-  while (v > 1n && result < 64n) {
-    v >>= 1n;
-    result++;
-  }
-  return result;
+  // The compiled script is exact for every n > 0 and aborts for n <= 0 (N-103).
+  if (n <= 0n) throw new Error('log2: non-positive input');
+  return BigInt(n.toString(2).length - 1);
 }
 
 export function bool(value: bigint): boolean {

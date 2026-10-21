@@ -139,6 +139,56 @@
       "note": "R-169 (pow half): the second base at which the clamp is invisible to the state check, 0^33 == 0^32 == 0. Measured with the guard removed: vmAccepted = true, continuation state value = 0. Two independent bases so a single arithmetic accident cannot carry the discrimination."
     },
     {
+      "method": "computeLog2",
+      "args": [],
+      "constructorArgs": [
+        "1024n"
+      ],
+      "expect": "accept",
+      "note": "N-103: log2(1024) = 10, an in-range control the old 64-halving loop also computed.",
+      "expectedState": {
+        "value": "10n"
+      }
+    },
+    {
+      "method": "computeLog2",
+      "args": [],
+      "constructorArgs": [
+        "9223372036854775807n"
+      ],
+      "expect": "accept",
+      "note": "N-103: log2(2^63 - 1) = 62, the largest value the 8-byte state word holds (an 8-byte encoding, top byte 0x7f). Operands past 2^64, where the old script saturated at 64, cannot be state here; they are executed by conformance/negatives/n103-log2-exact-parity.test.ts.",
+      "expectedState": {
+        "value": "62n"
+      }
+    },
+    {
+      "method": "computeLog2",
+      "args": [],
+      "constructorArgs": [
+        "0n"
+      ],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "attackerNewState": {
+        "value": "0n"
+      },
+      "note": "N-103 (user decision R86): log2(0) ABORTS. The old script returned 0 for n <= 0, so an attacker committing value 0 was accepted; the OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY guard now rejects it on the Spend engine (cryptoNearMiss: the rejection must reach Spend, not stop in the SDK, whose interpreter also refuses log2(0))."
+    },
+    {
+      "method": "computeLog2",
+      "args": [],
+      "constructorArgs": [
+        "-1n"
+      ],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "attackerNewState": {
+        "value": "0n"
+      },
+      "note": "N-103: log2(-1) ABORTS (the old script returned 0, which this attacker state would have matched)."
+    },
+    {
       "method": "divideBy",
       "args": [
         "2n"
@@ -150,6 +200,6 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "e2da04626b7be18b5fd5cabc66d332dd3cde5f0eb2bb30dbf1d180a2b3a94708"
+    "expected-script.hex": "ee17c155c0ce942eddd49eb75d36250349e66777b54bb0cc88384ea250f420b9"
   }
 }

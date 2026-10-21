@@ -2304,8 +2304,23 @@ end GcdWrappers
 
 /-! ## A4 math/byte bounded-loop builtin — `log2`
 
-`lowerValueP`'s `.call "log2"` arm (`Stack/Lower.lean:3065-3098`)
-emits, for a single arg `n`:
+**N-103 (user decision R86, 2026-10-21): this section no longer describes the
+lowering.** `lowerValueP`'s `.call "log2"` arm now emits the exact,
+branch-free read of the operand's minimal encoding (`OP_BIN2NUM`, an
+`n > 0` guard, `OP_SIZE OP_1SUB OP_TUCK OP_SPLIT OP_NIP OP_BIN2NUM`, then a
+7-comparison scan of the top byte), not the 64-iteration loop below. The
+theorems here take the op list as the `hLowering` hypothesis, so they still
+build, but no lowered method satisfies that hypothesis any more: the
+`isSome` obligation they discharge is VACUOUS for the current model. It
+cannot be re-proved for the new sequence against this VM: `Stack/Eval.lean`'s
+`asBytes?` coerces only `vBigint 0` to bytes, so `OP_SIZE` / `OP_BIN2NUM` on a
+non-zero `vBigint` operand is a `typeError` in the typed VM, although real
+Script (every element a byte vector) runs it. Closing the gap needs the total
+`vBigint n ↦ encodeMinimalLE n` coercion that `asBytes?`'s own comment calls
+"faithful too but cascades" — an `Eval.lean` change outside N-103's scope.
+
+The historical description follows. `lowerValueP`'s `.call "log2"` arm used
+to emit, for a single arg `n`:
 
 ```
   <loadN> <push 0>                              -- input counter

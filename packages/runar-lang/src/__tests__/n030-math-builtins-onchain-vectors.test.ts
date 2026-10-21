@@ -16,7 +16,7 @@ import * as rt from '../runtime/index.js';
 //
 // Proves: for every `cases` and `wideCases` row, the runtime returns the
 // on-chain value, or throws where the script aborts (never a value) — including
-// clamp with lo > hi, log2 of n <= 0 (0, not an error) and saturating at 64,
+// clamp with lo > hi, log2 aborting for n <= 0 and exact past 2^64 (N-103),
 // and gcd's partial remainder after 256 Euclid steps.
 // Does not prove: inputs outside the file, or the script itself (the oracle).
 

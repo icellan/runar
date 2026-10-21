@@ -222,7 +222,14 @@ class TestMathUtils:
         assert log2(10) == 3  # floor(log2(10))
 
     def test_log2_zero(self):
-        assert log2(0) == 0
+        # N-103 (user decision R86): the compiled script aborts for n <= 0, so
+        # the runtime raises instead of returning 0 (which this pinned before).
+        with pytest.raises(ValueError):
+            log2(0)
+
+    def test_log2_past_64_bits(self):
+        # N-103: exact with no 64-halving cap.
+        assert log2(1 << 70) == 70
 
 
 # ---------------------------------------------------------------------------

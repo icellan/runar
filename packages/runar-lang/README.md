@@ -199,7 +199,7 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 | `sqrt` | `(n: bigint) => bigint` | Integer square root |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | Greatest common divisor |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | Division returning quotient |
-| `log2` | `(n: bigint) => bigint` | Approximate floor(log2(n)) |
+| `log2` | `(n: bigint) => bigint` | Exact floor(log2(n)) for every n > 0; n <= 0 fails the script |
 | `bool` | `(n: bigint) => boolean` | Convert integer to boolean (0 is false, non-zero is true) |
 
 ### Control

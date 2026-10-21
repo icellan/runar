@@ -136,7 +136,7 @@ _OP_COUNTS = [
     ("sqrt",       1,   10),  # R-169: 2 -> 10 top-level ops (two domain guards ahead of the unchanged OP_DUP + if)
     ("gcd",        2,  777),
     ("divmod",     2,   10),
-    ("log2",       1,  386),
+    ("log2",       1,   44),  # N-103 (R86, 2026-10-21): 386 -> 44; the 64-iteration halving loop (capped at 64) became the exact encoding read
 ]
 
 
@@ -406,25 +406,25 @@ def test_divmod_emits_2dup_div_rot_rot_mod_drop_tail():
 
 # -- log2 ------------------------------------------------------------------
 
-def test_log2_unrolls_64_iterations_under_if_guard():
+def test_log2_reads_the_minimal_encoding_exactly():
+    """N-103 (user decision R86): the 64-iteration halving loop this used to pin
+    (64 IF blocks, capped at 64) became an exact, branch-free read of the
+    operand's minimal encoding. Pins the whole sequence; that it computes
+    floor(log2 n) is executed on @bsv/sdk by
+    conformance/negatives/n103-log2-exact-parity.test.ts."""
     ops = _unlock_ops("log2", 1)
-    # Counter pushed first.
-    assert _is_push_int(ops[0], 0)
-    # Trailing nip drops the consumed input, keeping the counter.
-    assert ops[-1].op == "nip"
-
-    if_blocks = [op for op in ops if op.op == "if"]
-    assert len(if_blocks) == 64, (
-        f"log2 expected 64 unrolled IF blocks, got {len(if_blocks)}"
-    )
-    # Each IF body: push(2), DIV, swap, OP_1ADD, swap.
-    for blk in if_blocks:
-        assert len(blk.then) == 5
-        assert _is_push_int(blk.then[0], 2)
-        assert _is_opcode(blk.then[1], "OP_DIV")
-        assert blk.then[2].op == "swap"
-        assert _is_opcode(blk.then[3], "OP_1ADD")
-        assert blk.then[4].op == "swap"
+    want = ["OP_BIN2NUM", "OP_DUP", 0, "OP_GREATERTHAN", "OP_VERIFY",
+            "OP_SIZE", "OP_1SUB", "OP_TUCK", "OP_SPLIT", "OP_NIP", "OP_BIN2NUM",
+            "OP_SWAP", 8, "OP_MUL", "OP_1SUB"]
+    for c in (1, 2, 4, 8, 16, 32, 64):
+        want += ["OP_OVER", c, "OP_GREATERTHANOREQUAL", "OP_ADD"]
+    want.append("OP_NIP")
+    assert len(ops) == len(want)
+    for i, (op, w) in enumerate(zip(ops, want)):
+        if isinstance(w, int):
+            assert _is_push_int(op, w), f"log2 op[{i}] expected push {w}, got {op}"
+        else:
+            assert _is_opcode(op, w), f"log2 op[{i}] expected {w}, got {op}"
 
 
 # ---------------------------------------------------------------------------

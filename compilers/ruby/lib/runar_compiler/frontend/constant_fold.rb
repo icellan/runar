@@ -21,10 +21,9 @@ module RunarCompiler
       # OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
       POW_FOLD_EXPONENT_LIMIT = 32
 
-      # Unroll counts of the emitted log2 and gcd loops (codegen/stack.rb).
-      # Past them the script returns a saturated / partial value, not the
-      # mathematical one, so the folder declines there (N-029).
-      LOG2_FOLD_ITERATIONS = 64
+      # Unroll count of the emitted gcd loop (codegen/stack.rb). Past it the
+      # script returns a partial value, not the mathematical one, so the folder
+      # declines there (N-029). log2 is exact for every n > 0 since N-103.
       GCD_FOLD_ITERATIONS = 256
 
       # -----------------------------------------------------------------
@@ -283,10 +282,8 @@ module RunarCompiler
         when "log2"
           return nil unless int_args.size == 1
           n = int_args[0]
-          return ["int", 0] if n <= 0
-          # The script halves at most LOG2_FOLD_ITERATIONS times, so it
-          # saturates at 64 for n >= 2**65. Decline there (N-029).
-          return nil if n.bit_length - 1 > LOG2_FOLD_ITERATIONS
+          # The script aborts for n <= 0 (N-103): decline, so the abort survives.
+          return nil if n <= 0
           return ["int", n.bit_length - 1]
 
         when "bool"

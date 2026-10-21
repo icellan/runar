@@ -4618,36 +4618,44 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         | _ =>
             ([.opcode "OP_RUNAR_GCD_ARITY"], sm.push bindingName, localBindings)
       else if func = "log2" then
-        -- TS `lowerLog2` (`05-stack-lower.ts:3721-3767`): floor(log2(n))
-        -- via 64-iteration bit-scan. Each iteration shifts the input right
-        -- and increments the counter when input > 1.
+        -- TS `lowerLog2` (`05-stack-lower.ts`, N-103 / user decision R86):
+        -- exact floor(log2(n)) for every n > 0, n <= 0 aborts. The bit length
+        -- is read off the minimal Script-number encoding; no iteration cap.
         --
-        --   <n> <0>                                   -- input counter
-        --   for _ in 0..64:
-        --     OP_SWAP OP_DUP <1> OP_GREATERTHAN
-        --     OP_IF <2> OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
-        --     OP_SWAP                                 -- input counter
-        --   OP_NIP                                    -- counter
+        --   OP_BIN2NUM                              n        (minimal re-encoding)
+        --   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+        --   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+        --   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte)
+        --   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+        --   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+        --   OP_NIP                                  b + #{c : t >= c}
         match args with
         | [n] =>
             let (loadN, sm1) := loadRefLive sm n currentIndex lastUses outerProtected
             let smFinal : StackMap := (sm1.popN 1).push bindingName
-            let iter : List StackOp :=
-              [ StackOp.swap
+            let head : List StackOp :=
+              [ StackOp.opcode "OP_BIN2NUM"
               , StackOp.opcode "OP_DUP"
-              , StackOp.push (.bigint 1)
+              , StackOp.push (.bigint 0)
               , StackOp.opcode "OP_GREATERTHAN"
-              , StackOp.ifOp
-                  [ StackOp.push (.bigint 2)
-                  , StackOp.opcode "OP_DIV"
-                  , StackOp.swap
-                  , StackOp.opcode "OP_1ADD"
-                  , StackOp.swap ]
-                  none
-              , StackOp.swap ]
-            let body : List StackOp :=
-              StackOp.push (.bigint 0)
-                :: ((List.range 64).flatMap (fun _ => iter)) ++ [StackOp.nip]
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.opcode "OP_SIZE"
+              , StackOp.opcode "OP_1SUB"
+              , StackOp.opcode "OP_TUCK"
+              , StackOp.opcode "OP_SPLIT"
+              , StackOp.opcode "OP_NIP"
+              , StackOp.opcode "OP_BIN2NUM"
+              , StackOp.opcode "OP_SWAP"
+              , StackOp.push (.bigint 8)
+              , StackOp.opcode "OP_MUL"
+              , StackOp.opcode "OP_1SUB" ]
+            let scan : List StackOp :=
+              [1, 2, 4, 8, 16, 32, 64].flatMap (fun (c : Int) =>
+                [ StackOp.opcode "OP_OVER"
+                , StackOp.push (.bigint c)
+                , StackOp.opcode "OP_GREATERTHANOREQUAL"
+                , StackOp.opcode "OP_ADD" ])
+            let body : List StackOp := head ++ scan ++ [StackOp.opcode "OP_NIP"]
             (loadN ++ body, smFinal, localBindings)
         | _ =>
             ([.opcode "OP_RUNAR_LOG2_ARITY"], sm.push bindingName, localBindings)

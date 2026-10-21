@@ -1630,8 +1630,9 @@ public final class AnfInterpreter {
             }
             case "log2": {
                 BigInteger v = toBigInt(args.get(0));
-                // Same as MockCrypto.log2: 0 for n <= 0, saturates at 64 (N-030).
-                return MockCrypto.log2(v);
+                // The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+                if (v.signum() <= 0) throw new InterpreterException("log2: non-positive input");
+                return BigInteger.valueOf(v.bitLength() - 1);
             }
             case "bool":       return isTruthy(args.get(0)) ? BigInteger.ONE : BigInteger.ZERO;
             case "mulDiv": {

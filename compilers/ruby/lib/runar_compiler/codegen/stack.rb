@@ -4104,27 +4104,42 @@ module RunarCompiler::Codegen
       bring_to_top(args[0], is_last)
       @sm.pop
 
-      # Push counter = 0
+      # Exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103, user
+      # decision R86). No iteration cap: the bit length is read off the minimal
+      # Script-number encoding.
+      #
+      #   OP_BIN2NUM                              n        (minimal re-encoding)
+      #   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+      #   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+      #   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+      #   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+      #   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+      #   OP_NIP                                  b + #{c : t >= c}
+      #
+      # t = 0 only as the sign-padding byte, where n's bit length is exactly
+      # 8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
+      emit_opcode("OP_BIN2NUM")
+      emit_opcode("OP_DUP")
       emit_op({ op: "push", value: { kind: "bigint", big_int: 0 } })
-
-      log2_iterations = 64
-      log2_iterations.times do
-        emit_op({ op: "swap" })
-        emit_opcode("OP_DUP")
-        emit_op({ op: "push", value: { kind: "bigint", big_int: 1 } })
-        emit_opcode("OP_GREATERTHAN")
-        emit_op({ op: "if", then: [
-          { op: "push", value: { kind: "bigint", big_int: 2 } },
-          { op: "opcode", code: "OP_DIV" },
-          { op: "swap" },
-          { op: "opcode", code: "OP_1ADD" },
-          { op: "swap" },
-        ] })
-        emit_op({ op: "swap" })
+      emit_opcode("OP_GREATERTHAN")
+      emit_opcode("OP_VERIFY")
+      emit_opcode("OP_SIZE")
+      emit_opcode("OP_1SUB")
+      emit_opcode("OP_TUCK")
+      emit_opcode("OP_SPLIT")
+      emit_opcode("OP_NIP")
+      emit_opcode("OP_BIN2NUM")
+      emit_opcode("OP_SWAP")
+      emit_op({ op: "push", value: { kind: "bigint", big_int: 8 } })
+      emit_opcode("OP_MUL")
+      emit_opcode("OP_1SUB")
+      [1, 2, 4, 8, 16, 32, 64].each do |c|
+        emit_opcode("OP_OVER")
+        emit_op({ op: "push", value: { kind: "bigint", big_int: c } })
+        emit_opcode("OP_GREATERTHANOREQUAL")
+        emit_opcode("OP_ADD")
       end
-
-      # Drop input, keep counter
-      emit_op({ op: "nip" })
+      emit_opcode("OP_NIP")
 
       @sm.push(binding_name)
       _track_depth

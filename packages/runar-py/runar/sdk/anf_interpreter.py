@@ -1494,15 +1494,10 @@ def _eval_call(
         return _abort_div(_to_int(args[0]), _to_int(args[1]), 'divmod')
     if func == 'log2':
         v = _to_int(args[0])
+        # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
         if v <= 0:
-            return 0
-        bits = 0
-        x = v
-        # The script unrolls exactly 64 halvings: saturates at 64 (N-030).
-        while x > 1 and bits < 64:
-            x >>= 1
-            bits += 1
-        return bits
+            raise ValueError('log2: non-positive input')
+        return v.bit_length() - 1
     if func == 'bool':
         return 1 if _is_truthy(args[0]) else 0
     if func == 'mulDiv':
