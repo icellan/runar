@@ -174,6 +174,15 @@ can check: a proof whose public input differs from the pinned value is
 rejected, which is the point, so pin only inputs that are genuinely fixed for
 every spend of the contract.
 
+Two consistency rules: in the `groth16-wa` subcommand a slot pinned in the
+vk.json and its `--pub` value must agree (the compile fails otherwise), and
+the subcommand then checks that slot once, inside the MSM binding, rather
+than a second time afterwards. A vk.json with `pinnedPublicInputs` is
+refused for a method that calls the plain `AssertGroth16WitnessAssisted`
+(no MSM binding): that variant never sees the public-input scalars, so it
+could not enforce the pin, and silently ignoring it would be worse than an
+error.
+
 The emitted artifact has `groth16WA.numPubInputs`, `groth16WA.vkDigest` and
 `groth16WA.publicInputs` fields so downstream consumers can sanity-check
 which VK and which statement were baked in without having to re-derive them

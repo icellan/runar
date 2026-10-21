@@ -122,9 +122,18 @@ func validateGroth16PublicInputs(pubs []*big.Int, numPubInputs int) error {
 // and re-push the marker. Together with the MSM binding this closes the loop:
 // the MSM check forces prepared_inputs == IC[0] + Σ pub_j·IC[j+1], and these
 // checks force each pub_j to the deployer's chosen value.
-func emitGroth16PublicInputPins(ops []codegen.StackOp, pubs []*big.Int) []codegen.StackOp {
+//
+// A slot the vk.json already pins (config.PinnedPublicInputs) has been
+// checked inside the MSM binding against the same value, so it is only
+// dropped here; checking it twice would cost a 32-byte push per spend for
+// nothing. CompileGroth16WA has already verified the two values agree.
+func emitGroth16PublicInputPins(ops []codegen.StackOp, pubs []*big.Int, pinnedByConfig [5]*big.Int) []codegen.StackOp {
 	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_DROP"})
 	for i := len(pubs) - 1; i >= 0; i-- {
+		if i < len(pinnedByConfig) && pinnedByConfig[i] != nil {
+			ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_DROP"})
+			continue
+		}
 		ops = append(ops, codegen.StackOp{
 			Op:    "push",
 			Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(pubs[i])},
@@ -287,6 +296,17 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 	}
 	config.ModuloThreshold = opts.ModuloThreshold
 
+	// 3a. A slot pinned in vk.json and the --pub value for it must agree:
+	//     the MSM binding would enforce the vk.json value and the pin check
+	//     below the --pub value, so a disagreement is a verifier no proof
+	//     could ever satisfy. Refuse at compile time instead.
+	for i, pinned := range config.PinnedPublicInputs {
+		if pinned != nil && i < len(opts.PublicInputs) && pinned.Cmp(opts.PublicInputs[i]) != 0 {
+			return nil, fmt.Errorf("CompileGroth16WA: public input %d is %s but %s pins it to %s (pinnedPublicInputs); the two must agree",
+				i, opts.PublicInputs[i], vkPath, pinned)
+		}
+	}
+
 	// 4. Emit the MSM-binding verifier. loadGroth16WAConfig already
 	//    populated config.IC from the VK, which is what the MSM preamble
 	//    recomputes the prepared-inputs accumulator from.
@@ -298,8 +318,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 		return nil, fmt.Errorf("CompileGroth16WA: codegen produced zero ops (bug)")
 	}
 
-	// 5. Pin the public-input scalars the MSM preamble left on the stack.
-	ops = emitGroth16PublicInputPins(ops, opts.PublicInputs)
+	// 5. Pin the public-input scalars the MSM preamble left on the stack
+	//    (slots the vk.json pinned were already checked inside the MSM bind).
+	ops = emitGroth16PublicInputPins(ops, opts.PublicInputs, config.PinnedPublicInputs)
 
 	// 6. Run peephole optimizers: the general stack-op peepholes and the
 	//    BN254-specific ones. Both are applied in the same order as the
