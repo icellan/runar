@@ -343,7 +343,9 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // instead of a `load_param` (see VERIFY_RABIN_SIG_KEY_BINDING_INDEX
     // above), so it is read from a different stack depth than before; same
     // op count (45), different fingerprint.
-    ("verifyRabinSig", 4, 45, 0xfd0ec4a2972a3164),
+    // F-368: 45 -> 50 top-level ops; the +5 is the sig < pubKey gate (OP_DUP,
+    // push 3, OP_PICK, OP_LESSTHAN, OP_VERIFY) after the F-144 sig normalization.
+    ("verifyRabinSig", 4, 50, 0x1324455e9a505b0e),
     // R-135: +3 top-level ops for the exact-signature-length gate (OP_SIZE,
     // push 2144, OP_EQUALVERIFY). 5444 -> 5447, and the fingerprint moves with it.
     ("verifyWOTS", 3, 5447, 0xeb5c21ad8b9fcfb4),
