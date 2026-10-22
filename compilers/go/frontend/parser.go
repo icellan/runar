@@ -206,10 +206,17 @@ func parseTsSurface(source []byte, fileName string) *ParseResult {
 		return &ParseResult{Errors: []Diagnostic{{Message: fmt.Sprintf("parse error: %v", err), Severity: SeverityError}}}
 	}
 
+	// N-390: heal `a < (-1n & -2n)`, which tree-sitter reads as type arguments.
+	var inserted []insertedByte
+	if fixed, fixedTree, ins := repairLtParenNegativeLiteral(ctx, parser, source, tree); fixedTree != nil {
+		source, tree, inserted = fixed, fixedTree, ins
+	}
+
 	root := tree.RootNode()
 	p := &parseContext{
 		source:   source,
 		fileName: fileName,
+		inserted: inserted,
 	}
 
 	// F-213 measure (A), before anything walks the tree recursively.
@@ -273,6 +280,25 @@ type parseContext struct {
 	source   []byte
 	fileName string
 	errors   []Diagnostic
+	// inserted lists the bytes repairLtParenNegativeLiteral added to source,
+	// so reported columns can be mapped back to the original text (N-390).
+	inserted []insertedByte
+}
+
+// insertedByte is the (row, column) of one byte repairLtParenNegativeLiteral
+// inserted, in the repaired source.
+type insertedByte struct{ row, col uint32 }
+
+// origCol maps a column of the repaired source back to the column of the
+// same character in the original source.
+func (p *parseContext) origCol(pt sitter.Point) int {
+	col := int(pt.Column)
+	for _, b := range p.inserted {
+		if b.row == pt.Row && b.col < pt.Column {
+			col--
+		}
+	}
+	return col
 }
 
 // checkNumericLiterals refuses every malformed .runar.ts numeric literal
@@ -296,7 +322,7 @@ func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 			coveredTo = end
 			text := string(p.source[start:end])
 			if parseIntLiteral("ts", text) == nil {
-				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, p.origCol(n.StartPoint())))
 			}
 		}
 		return true
@@ -311,7 +337,7 @@ func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
 func (p *parseContext) checkOptionalChaining(root *sitter.Node) {
 	tsWalk(root, func(n *sitter.Node) bool {
 		if n.Type() == "optional_chain" || n.Type() == "?." {
-			p.errors = append(p.errors, lexDiag(OptionalChainingMsg, p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
+			p.errors = append(p.errors, lexDiag(OptionalChainingMsg, p.fileName, int(n.StartPoint().Row)+1, p.origCol(n.StartPoint())))
 			return false
 		}
 		return true
@@ -341,6 +367,81 @@ func tsWalk(root *sitter.Node, visit func(*sitter.Node) bool) {
 			}
 		}
 	}
+}
+
+// repairLtParenNegativeLiteral works around a tree-sitter-typescript
+// ambiguity (N-390). In `a < (-1n & -2n)` the grammar prefers type arguments
+// (`a<(-1n & -2n)>`, `-1n` being a valid literal type) over a comparison, and
+// then fails on the missing `>`; the real TypeScript parser, and so the TS
+// reference, reads the comparison. A negative literal in a type position can
+// be told apart from the expression by writing it `-(1n)`, which is not a type
+// and which parseParenExpression reads straight through, so the AST is the one
+// the unparenthesised spelling denotes. The rewrite is used only when the
+// rewritten source parses with no error at all; otherwise it returns a nil
+// tree and the caller keeps (and reports) the original.
+func repairLtParenNegativeLiteral(ctx context.Context, parser *sitter.Parser, source []byte, tree *sitter.Tree) ([]byte, *sitter.Tree, []insertedByte) {
+	const maxSites = 64
+	root := tree.RootNode()
+	if !root.HasError() {
+		return nil, nil, nil
+	}
+	type site struct{ start, end uint32 }
+	var sites []site
+	tooMany := false
+	tsWalk(root, func(n *sitter.Node) bool {
+		if n.Type() != "unary_expression" {
+			return true
+		}
+		if par := n.Parent(); par == nil || par.Type() != "literal_type" {
+			return true
+		}
+		op, arg := n.ChildByFieldName("operator"), n.ChildByFieldName("argument")
+		if op == nil || arg == nil || op.Content(source) != "-" || arg.Type() != "number" {
+			return true
+		}
+		if len(sites) == maxSites {
+			tooMany = true
+			return false
+		}
+		sites = append(sites, site{arg.StartByte(), arg.EndByte()})
+		return true
+	})
+	if len(sites) == 0 || tooMany {
+		return nil, nil, nil
+	}
+	fixed := make([]byte, 0, len(source)+2*len(sites))
+	var inserted []insertedByte
+	row, lineStart := uint32(0), 0
+	// mark records the byte about to be appended at its (row, column) in fixed.
+	mark := func() {
+		inserted = append(inserted, insertedByte{row, uint32(len(fixed) - lineStart)})
+	}
+	// copyText appends src, tracking the row/line start of the repaired source.
+	copyText := func(src []byte) {
+		for _, c := range src {
+			fixed = append(fixed, c)
+			if c == '\n' {
+				row++
+				lineStart = len(fixed)
+			}
+		}
+	}
+	last := uint32(0)
+	for _, st := range sites {
+		copyText(source[last:st.start])
+		mark()
+		fixed = append(fixed, '(')
+		copyText(source[st.start:st.end])
+		mark()
+		fixed = append(fixed, ')')
+		last = st.end
+	}
+	fixed = append(fixed, source[last:]...)
+	fixedTree, err := parser.ParseCtx(ctx, nil, fixed)
+	if err != nil || fixedTree == nil || fixedTree.RootNode().HasError() {
+		return nil, nil, nil
+	}
+	return fixed, fixedTree, inserted
 }
 
 // firstBadNode returns the first ERROR or MISSING node in the tree (pre-order,
@@ -389,7 +490,7 @@ func (p *parseContext) loc(node *sitter.Node) SourceLocation {
 	return SourceLocation{
 		File:   p.fileName,
 		Line:   int(pos.Row) + 1,
-		Column: int(pos.Column),
+		Column: p.origCol(pos),
 	}
 }
 
@@ -703,7 +804,7 @@ func (p *parseContext) reportLostDirectives(body *sitter.Node, methodSpans, prop
 	sort.Slice(found, func(i, j int) bool { return found[i].pos < found[j].pos })
 	for _, f := range found {
 		lineStart := bytes.LastIndexByte(p.source[:f.pos], '\n') + 1
-		loc := SourceLocation{File: p.fileName, Line: bytes.Count(p.source[:f.pos], []byte{'\n'}) + 1, Column: f.pos - lineStart}
+		loc := SourceLocation{File: p.fileName, Line: bytes.Count(p.source[:f.pos], []byte{'\n'}) + 1, Column: p.origCol(sitter.Point{Row: uint32(bytes.Count(p.source[:f.pos], []byte{'\n'})), Column: uint32(f.pos - lineStart)})}
 		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg(f.directive), Severity: SeverityError, Loc: &loc})
 	}
 }
