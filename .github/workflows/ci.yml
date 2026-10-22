@@ -689,6 +689,13 @@ jobs:
         run: cd compilers/zig && zig build test
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
+      # N-391: `zig build test` does not depend on this step, so the per-tier
+      # byte-identical golden harness (src/tests/conformance_goldens.zig) ran
+      # nowhere. Kept a separate step rather than folded into `zig build test`
+      # (about 60s incl. build); it reads ../../conformance/tests relative to
+      # compilers/zig, which the checkout provides.
+      - name: Zig conformance goldens
+        run: cd compilers/zig && zig build conformance-goldens
       - name: Build release binary
         # ReleaseSafe + baseline CPU: ReleaseFast was SIGILL-ing on heavier
         # conformance fixtures on the conformance runner (different ubuntu-
