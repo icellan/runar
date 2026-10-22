@@ -23,11 +23,10 @@
 //! continuation bindings carry no source location; no dispatch opcode is
 //! mapped; and stateful-counter's Rust mappings fall inside the TypeScript
 //! reference golden's per-statement opcode spans and cover every opcode TS maps.
-//! What it does NOT prove: anything about the other tiers, nor nested
-//! control flow — a `StackOp::If`'s inner ops share the if-statement's
-//! location in this tier (the parallel `source_locs` vector is top-level only),
-//! which is coarser than TS's per-inner-statement mapping and is not
-//! addressed here.
+//! What it does NOT prove: anything about the other tiers, nor per-opcode
+//! equality with TS inside nested control flow — a `StackOp::If`'s branch-body
+//! ops map to their own statements (N-222), checked against TS in
+//! n222_branch_source_map_tests.rs and n385_tail_source_map_tests.rs, not here.
 
 use runar_compiler_rust::ir::ANFValue;
 use runar_compiler_rust::{
@@ -193,4 +192,21 @@ fn stateful_counter_mappings_match_the_typescript_reference_spans() {
     for (&i, &k) in &ts_idx {
         assert_eq!(rs_idx.get(&i), Some(&k), "TS maps opcode #{} to statement #{}; Rust does not", i, k);
     }
+}
+
+// Pins the claim the header makes about nested control flow (N-386). Proves: in
+// if-else (`if mode` on line 12, then-arm on line 13, else-arm on line 15) the
+// Rust map attributes then/else-arm opcodes to the arm statements' own lines,
+// not to the `if` line. Does NOT prove per-opcode equality with TS; that is
+// n222_branch_source_map_tests.rs and n385_tail_source_map_tests.rs.
+#[test]
+fn branch_arm_ops_map_to_their_own_statements_not_the_if_line() {
+    let art = compile_from_source_with_options(&repo("examples/rust/if-else/IfElse.runar.rs"), &fold_off())
+        .expect("compile IfElse.runar.rs");
+    let lines: std::collections::BTreeSet<usize> =
+        art.source_map.expect("source map").mappings.iter().map(|m| m.line).collect();
+    let (if_line, then_line, else_line) = (12, 13, 15);
+    assert!(lines.contains(&if_line), "no opcode maps to the `if` line: {:?}", lines);
+    assert!(lines.contains(&then_line), "no opcode maps to the then-arm statement: {:?}", lines);
+    assert!(lines.contains(&else_line), "no opcode maps to the else-arm statement: {:?}", lines);
 }
