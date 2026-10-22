@@ -150,9 +150,10 @@ interface FuzzerCLIOptions {
   /** Wall-clock budget in ms (anf / execute modes). */
   timeBudgetMs?: number;
   /**
-   * ANF mode only. Run every tier with constant-folding ON (omit
-   * `--disable-constant-folding`). Default off → fold-OFF, matching the
-   * checked-in goldens.
+   * ANF mode only. Render each generated program to `.runar.ts` and compile it
+   * from SOURCE in every tier with constant folding ON. Not via `--ir`: every
+   * tier forces folding off on IR input, so the `--ir` path cannot fold
+   * (N-003). Default off → fold-OFF `--ir`, matching the checked-in goldens.
    */
   foldOn: boolean;
 }
@@ -321,7 +322,8 @@ Options:
   --anf                  Item 7 — direct ANF IR differential fuzzer.
                          Generates random valid ANF programs and asserts every
                          tier's --ir --hex pipeline produces byte-identical
-                         Bitcoin Script. Skips frontends entirely.
+                         Bitcoin Script. Skips frontends entirely (fold-OFF;
+                         --fold-on compiles rendered source instead).
   --canonical            GAP-002 — cross-tier canonicalJson (RFC 8785 / JCS)
                          differential fuzzer. Generates random JSON-shaped
                          values spanning the tricky surface (UTF-16 key order,
@@ -397,10 +399,17 @@ Options:
   --inputs <n>           Execute mode only. Input vectors per (contract, method)
                          (default 6).
   --time-budget-ms <n>   ANF / execute modes. Early-stop once wall-clock exceeded.
-  --fold-on              ANF mode only. Run every tier with constant-folding
-                         ENABLED (omit --disable-constant-folding). Default is
-                         fold-OFF, matching the checked-in goldens. Either mode
-                         must produce byte-identical hex across all tiers.
+  --fold-on              ANF mode only. Render each generated ANF program to
+                         .runar.ts and compile it with --source <file> --hex in
+                         every tier (TS in-process via compile()), constant
+                         folding ON. It does NOT use --ir: every tier forces
+                         folding off on IR input, so that path cannot fold.
+                         The rendered source is re-lowered by each frontend, so
+                         this compares a corpus DERIVED from the ANF programs.
+                         Reports how many programs' bytes folding changed.
+                         Default is fold-OFF via --ir, matching the checked-in
+                         goldens. Either mode must produce byte-identical hex
+                         across all tiers.
   --help, -h             Show this help message
 
 Examples:
@@ -464,8 +473,12 @@ async function main(): Promise<void> {
     console.log(`  Generator: IR (render=${opts.renderStrategy}${opts.stateful ? ', stateful' : ''})`);
   }
   if (opts.anf) {
-    console.log('  Generator: ANF (Item 7 — direct ANF IR, all 7 tiers via --ir --hex)');
-    console.log(`  Folding: ${opts.foldOn ? 'ON (fold-on)' : 'OFF (--disable-constant-folding)'}`);
+    console.log(
+      opts.foldOn
+        ? '  Generator: ANF (Item 7 — ANF programs rendered to .runar.ts, all 7 tiers via --source --hex)'
+        : '  Generator: ANF (Item 7 — direct ANF IR, all 7 tiers via --ir --hex)',
+    );
+    console.log(`  Folding: ${opts.foldOn ? 'ON (source path)' : 'OFF (--disable-constant-folding)'}`);
     if (opts.timeBudgetMs !== undefined) {
       console.log(`  Budget: ${opts.timeBudgetMs}ms`);
     }
@@ -719,6 +732,7 @@ async function main(): Promise<void> {
     console.log(`ANF differential fuzzing complete:`);
     console.log(`  Programs run:  ${report.programsRun}/${report.totalPrograms}`);
     console.log(`  Mismatches:    ${report.mismatchCount}`);
+    if (opts.foldOn) console.log(`  Folded:        ${report.foldedPrograms} program(s) whose bytes folding changed`);
     console.log(`  Duration:      ${report.durationMs}ms`);
     if (report.earlyStop) console.log(`  Early-stopped: time budget reached`);
     console.log(`  Tiers:         ${Object.entries(report.perTierAvailable)
@@ -747,7 +761,13 @@ async function main(): Promise<void> {
         `INCOMPLETE RUN: time budget reached after ${report.programsRun}/${report.totalPrograms} programs — treating as a failure.`,
       );
     }
-    if (report.mismatchCount > 0 || incompleteAnfRun) process.exit(1);
+    // N-003: a fold-ON run in which folding changed no program's bytes compared
+    // fold-OFF under another name — the defect this mode used to have.
+    const vacuousFoldOn = opts.foldOn && report.programsRun > 0 && report.foldedPrograms === 0;
+    if (vacuousFoldOn) {
+      console.error('VACUOUS RUN: --fold-on changed no program\'s bytes — folding never ran on what was compared.');
+    }
+    if (report.mismatchCount > 0 || incompleteAnfRun || vacuousFoldOn) process.exit(1);
     return;
   }
 

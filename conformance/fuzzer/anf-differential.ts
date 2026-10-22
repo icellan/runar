@@ -39,7 +39,8 @@
  * it through every compiler's frontend + backend (`differential.ts`,
  * `ir-differential.ts`). This module is the third leg: it skips the
  * frontends entirely and exercises the *ANF loader + stack-lowering
- * passes* across all 7 tiers — the path that the existing source
+ * passes* across all 7 tiers (fold-OFF; `--fold-on` compiles rendered
+ * source instead — see `renderAnfProgramToTypeScript`) — the path that the existing source
  * fuzzers cannot reach unambiguously because two frontends may legally
  * lower the same source to slightly different (but conformant) ANF.
  *
@@ -71,6 +72,7 @@ import {
   mkdirSync,
   existsSync,
   readdirSync,
+  readFileSync,
   unlinkSync,
 } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -669,6 +671,149 @@ function arbAnfProgram(opts: GenOpts = DEFAULT_GEN_OPTS): fc.Arbitrary<AnfProgra
 }
 
 // ---------------------------------------------------------------------------
+// Fold-ON mode: render the ANF program to `.runar.ts` (N-003).
+//
+// Every tier forces constant folding OFF on `--ir` input — deliberately, so the
+// IR path stays byte-identical to the fold-OFF goldens — so fold-ON cannot be
+// exercised through `--ir` at all. Running the `--ir` argv without
+// `--disable-constant-folding` used to be this harness's "fold-ON" mode, and it
+// re-ran fold-OFF byte for byte. Fold-ON instead renders each generated program
+// to TypeScript source and compiles it from SOURCE in every tier with folding
+// on (each CLI's default), which is the only path on which folding runs.
+//
+// The rendered program is DERIVED from the ANF corpus, not the same IR: each
+// frontend re-lowers it. Leaves (constants, params, props no method writes) and
+// single-use pure expressions are inlined into their use, because the folder
+// does not see through a named local (`const v = 2n` lowers to an `@ref:`
+// alias it skips), so naming every binding would hide every fold. A binding
+// used more than once, or never, becomes a `const v<n>` (`t<n>` is reserved for
+// compiler temps). A prop some method writes is read into a local where the ANF
+// read it, so moving the read cannot reorder it past the write. Any
+// `update_prop` makes the contract a StatefulSmartContract with that prop
+// mutable; everything else is readonly.
+// ---------------------------------------------------------------------------
+
+function anfValueRefs(v: AnfValue): string[] {
+  switch (v.kind) {
+    case 'bin_op': return [v.left, v.right];
+    case 'unary_op': return [v.operand];
+    case 'call': return v.args;
+    case 'array_literal': return v.elements;
+    case 'assert': return [v.value];
+    case 'update_prop': return [v.value];
+    default: return [];
+  }
+}
+
+const BOOL_RESULT_OPS = new Set(['===', '!==', '<', '>', '<=', '>=', '&&', '||']);
+
+export function renderAnfProgramToTypeScript(program: AnfProgram): string {
+  const written = new Set<string>();
+  for (const m of program.methods) {
+    for (const b of m.body) if (b.value.kind === 'update_prop') written.add(b.value.name);
+  }
+  const parentClass = written.size > 0 ? 'StatefulSmartContract' : 'SmartContract';
+  const propType = new Map(program.properties.map((p) => [p.name, p.type]));
+  let usesAbs = false;
+
+  const methods = program.methods.map((m) => {
+    const uses = new Map<string, number>();
+    for (const b of m.body) {
+      for (const r of anfValueRefs(b.value)) uses.set(r, (uses.get(r) ?? 0) + 1);
+    }
+    const paramType = new Map(m.params.map((p) => [p.name, p.type]));
+    const types = new Map<string, string>();
+    const inlined = new Map<string, string>();
+    const ref = (name: string): string => inlined.get(name) ?? name.replace(/^t(?=\d+$)/, 'v');
+    const lines: string[] = [];
+
+    for (const b of m.body) {
+      const v = b.value;
+      let expr: string;
+      let ty = 'bigint';
+      let leaf = false;
+      switch (v.kind) {
+        case 'load_const': {
+          if (typeof v.value === 'boolean') {
+            expr = String(v.value);
+            ty = 'boolean';
+          } else {
+            const n = BigInt(v.value);
+            expr = n < 0n ? `(${n}n)` : `${n}n`;
+          }
+          leaf = true;
+          break;
+        }
+        case 'load_param':
+          expr = v.name;
+          ty = paramType.get(v.name) ?? 'bigint';
+          leaf = true;
+          break;
+        case 'load_prop':
+          expr = `this.${v.name}`;
+          ty = propType.get(v.name) ?? 'bigint';
+          leaf = !written.has(v.name);
+          break;
+        case 'bin_op':
+          expr = `(${ref(v.left)} ${v.op} ${ref(v.right)})`;
+          ty = BOOL_RESULT_OPS.has(v.op) ? 'boolean' : 'bigint';
+          break;
+        case 'unary_op':
+          expr = `(${v.op}${ref(v.operand)})`;
+          ty = v.op === '!' ? 'boolean' : 'bigint';
+          break;
+        case 'call':
+          if (v.func === 'abs') usesAbs = true;
+          expr = `${v.func}(${v.args.map(ref).join(', ')})`;
+          break;
+        case 'array_literal':
+          lines.push(`    const ${ref(b.name)} = [${v.elements.map(ref).join(', ')}];`);
+          continue;
+        case 'assert':
+          lines.push(`    assert(${ref(v.value)});`);
+          continue;
+        case 'update_prop':
+          lines.push(`    this.${v.name} = ${ref(v.value)};`);
+          continue;
+      }
+      types.set(b.name, ty);
+      const n = uses.get(b.name) ?? 0;
+      if (n > 0 && (leaf || (n === 1 && v.kind !== 'load_prop'))) {
+        inlined.set(b.name, expr);
+      } else {
+        lines.push(`    const ${ref(b.name)}: ${ty} = ${expr};`);
+      }
+    }
+    const params = m.params.map((p) => `${p.name}: ${p.type}`).join(', ');
+    return [`  public ${m.name}(${params}) {`, ...lines, '  }'].join('\n');
+  });
+
+  const imports = [parentClass, 'assert', ...(usesAbs ? ['abs'] : [])];
+  const props = program.properties.map(
+    (p) => `  ${written.has(p.name) ? '' : 'readonly '}${p.name}: ${p.type};`,
+  );
+  const ctorParams = program.properties.map((p) => `${p.name}: ${p.type}`).join(', ');
+  const ctor = [
+    `  constructor(${ctorParams}) {`,
+    `    super(${program.properties.map((p) => p.name).join(', ')});`,
+    ...program.properties.map((p) => `    this.${p.name} = ${p.name};`),
+    '  }',
+  ];
+  return [
+    `import { ${imports.join(', ')} } from 'runar-lang';`,
+    '',
+    `class ${program.contractName} extends ${parentClass} {`,
+    ...props,
+    ...(props.length > 0 ? [''] : []),
+    ...ctor,
+    '',
+    methods.join('\n\n'),
+    '}',
+    '',
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Canonical JSON (loaded lazily from runar-ir-schema to avoid bootstrapping
 // the workspace before the fuzzer starts).
 // ---------------------------------------------------------------------------
@@ -709,6 +854,26 @@ async function loadTsCompileFromAnf(): Promise<TsCompileFromAnf | null> {
   }
   _cachedTsCompile = null;
   return _cachedTsCompile;
+}
+
+/** TS in-process compile from SOURCE — the fold-ON path (N-003). */
+interface TsCompileSource {
+  (source: string, opts: { fileName: string; disableConstantFolding: boolean }): {
+    success: boolean;
+    artifact?: { script?: string };
+  };
+}
+let _cachedTsSource: TsCompileSource | null | undefined;
+async function loadTsCompileSource(): Promise<TsCompileSource | null> {
+  if (_cachedTsSource !== undefined) return _cachedTsSource;
+  try {
+    const entry = resolve(ROOT, 'packages/runar-compiler/src/index.ts');
+    const mod = (await import(pathToFileURL(entry).href)) as Record<string, unknown>;
+    _cachedTsSource = typeof mod.compile === 'function' ? (mod.compile as TsCompileSource) : null;
+  } catch {
+    _cachedTsSource = null;
+  }
+  return _cachedTsSource;
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +957,7 @@ interface TierContext {
   pythonAvail: boolean;
   javaJar: string | null;
   tsCompile: TsCompileFromAnf | null;
+  tsCompileSource: TsCompileSource | null;
 }
 
 async function initTierContext(): Promise<TierContext> {
@@ -803,6 +969,7 @@ async function initTierContext(): Promise<TierContext> {
     pythonAvail: hasPython(),
     javaJar: findJavaJar(),
     tsCompile: await loadTsCompileFromAnf(),
+    tsCompileSource: await loadTsCompileSource(),
   };
 }
 
@@ -872,6 +1039,41 @@ function runTsInProcess(
   }
 }
 
+/**
+ * Fold-ON (N-003): compile a rendered `.runar.ts` from SOURCE with each tier's
+ * default pipeline, i.e. constant folding ON (no `--disable-constant-folding`).
+ */
+function runSourceFile(tier: CompilerName, srcFile: string, ctx: TierContext): string | null {
+  let r: { stdout: string; code: number } | null = null;
+  if (tier === 'go' && ctx.goBin) r = runProc(ctx.goBin, ['--source', srcFile, '--hex']);
+  if (tier === 'rust' && ctx.rustBin) r = runProc(ctx.rustBin, ['--source', srcFile, '--hex']);
+  if (tier === 'zig' && ctx.zigBin) r = runProc(ctx.zigBin, ['--source', srcFile, '--hex']);
+  if (tier === 'python' && ctx.pythonAvail) {
+    r = runProc('python3', ['-m', 'runar_compiler', '--source', srcFile, '--hex'], {
+      cwd: resolve(ROOT, 'compilers/python'),
+    });
+  }
+  if (tier === 'ruby' && ctx.rubyBin) r = runProc('ruby', [ctx.rubyBin, '--source', srcFile, '--hex']);
+  if (tier === 'java' && ctx.javaJar) r = runProc('java', ['-jar', ctx.javaJar, '--source', srcFile, '--hex']);
+  if (tier === 'ts') return runTsSource(srcFile, ctx.tsCompileSource, false);
+  return r && r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+}
+
+function runTsSource(
+  srcFile: string,
+  compile: TsCompileSource | null,
+  disableConstantFolding: boolean,
+): string | null {
+  if (!compile) return null;
+  try {
+    const r = compile(readFileSync(srcFile, 'utf-8'), { fileName: srcFile, disableConstantFolding });
+    return r.success && r.artifact?.script ? r.artifact.script.toLowerCase() : null;
+  } catch (e) {
+    if (process.env.FUZZ_DEBUG) console.error('ts-compile throw:', (e as Error).message);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Findings persistence
 // ---------------------------------------------------------------------------
@@ -880,11 +1082,15 @@ interface Finding {
   seed: number | undefined;
   programIndex: number;
   programJson: string;
+  /** Fold-ON mode: the rendered `.runar.ts` every tier compiled (N-003). */
+  source?: string;
   outputs: Partial<Record<CompilerName, string>>;
   reason: string;
   /** Delta-debugged reproducer (F-173); absent if shrinking failed. */
   reduced?: {
     programJson: string;
+    /** Fold-ON mode: the reduced program's rendered `.runar.ts`. */
+    source?: string;
     outputs: Partial<Record<CompilerName, string>>;
     reason: string;
     originalBindings: number;
@@ -907,6 +1113,7 @@ function saveFinding(dir: string, f: Finding): string {
   const out = join(dir, `${ts}-${f.programIndex}`);
   mkdirSync(out, { recursive: true });
   writeFileSync(join(out, 'program.json'), f.programJson, 'utf-8');
+  if (f.source !== undefined) writeFileSync(join(out, 'program.runar.ts'), f.source, 'utf-8');
   for (const [tier, hex] of Object.entries(f.outputs)) {
     if (hex !== undefined) writeFileSync(join(out, `hex-${tier}.txt`), hex + '\n', 'utf-8');
   }
@@ -922,6 +1129,9 @@ function saveFinding(dir: string, f: Finding): string {
 function saveReduced(out: string, f: Finding): void {
   if (!f.reduced) return;
   writeFileSync(join(out, 'program-reduced.json'), f.reduced.programJson, 'utf-8');
+  if (f.reduced.source !== undefined) {
+    writeFileSync(join(out, 'program-reduced.runar.ts'), f.reduced.source, 'utf-8');
+  }
   for (const [tier, hex] of Object.entries(f.reduced.outputs)) {
     if (hex !== undefined) writeFileSync(join(out, `hex-${tier}-reduced.txt`), hex + '\n', 'utf-8');
   }
@@ -1035,12 +1245,14 @@ export interface AnfDifferentialOptions {
   /** Wall-clock budget in ms; harness returns early once exceeded. */
   timeBudgetMs?: number;
   /**
-   * Run every tier with constant-folding DISABLED (fold-OFF). Default
-   * `true` — preserves the harness's original behavior of matching the
-   * checked-in fold-OFF goldens. Set `false` to exercise the fold-ON
-   * cross-tier path: native tiers omit `--disable-constant-folding` and
-   * the TS in-process path passes `disableConstantFolding: false`. Either
-   * mode must produce byte-identical hex across every available tier.
+   * `true` (default): fold-OFF — every tier compiles the canonical ANF through
+   * its `--ir` entry point with `--disable-constant-folding`, matching the
+   * checked-in fold-OFF goldens.
+   * `false`: fold-ON — every tier compiles `renderAnfProgramToTypeScript(program)`
+   * from SOURCE (`--source <file>.runar.ts --hex`, TS via `compile()`) with
+   * folding on. Not via `--ir`: every tier forces folding off on IR input, so
+   * that path cannot fold (N-003). Either mode must produce byte-identical hex
+   * across every available tier.
    */
   disableConstantFolding?: boolean;
   /** Verbose per-program log. */
@@ -1057,7 +1269,8 @@ export interface AnfDifferentialOptions {
   compileTier?: (
     tier: CompilerName,
     program: AnfProgram,
-    irFile: string,
+    /** fold-OFF: the canonical IR `.json`; fold-ON: the rendered `.runar.ts`. */
+    inputFile: string,
     disableConstantFolding: boolean,
   ) => string | null;
 }
@@ -1070,6 +1283,12 @@ export interface AnfDifferentialReport {
   perTierAvailable: Partial<Record<CompilerName, boolean>>;
   findings: string[];
   durationMs: number;
+  /**
+   * Fold-ON mode: programs whose TS bytes changed when folding was switched on
+   * (same rendered source, TS compiler, fold-ON vs fold-OFF). Zero across a
+   * whole fold-ON run means the mode folded nothing. Always 0 in fold-OFF mode.
+   */
+  foldedPrograms: number;
 }
 
 /**
@@ -1110,10 +1329,12 @@ export async function runAnfDifferential(
     perTierAvailable = Object.fromEntries(tiers.map((t) => [t, true]));
   } else {
     const ctx = await initTierContext();
-    compileTier = (tier, program, irFile, fold) =>
-      tier === 'ts' ? runTsInProcess(program, ctx, fold) : runIrFile(tier, irFile, ctx, fold);
+    compileTier = (tier, program, inputFile, fold) => {
+      if (!fold) return runSourceFile(tier, inputFile, ctx);
+      return tier === 'ts' ? runTsInProcess(program, ctx, fold) : runIrFile(tier, inputFile, ctx, fold);
+    };
     perTierAvailable = {
-      ts: !!ctx.tsCompile,
+      ts: disableConstantFolding ? !!ctx.tsCompile : !!ctx.tsCompileSource,
       go: !!ctx.goBin,
       rust: !!ctx.rustBin,
       python: ctx.pythonAvail,
@@ -1139,12 +1360,21 @@ export async function runAnfDifferential(
   // Compile one program in every requested tier and classify the results.
   // Shared by the main loop and the finding shrinker, so a reduced program is
   // judged by exactly the oracle check that flagged the original.
+  const foldOn = !disableConstantFolding;
+  const tsCompileSource = foldOn ? await loadTsCompileSource() : null;
+  const sourceFileFor = (irFile: string) => irFile.replace(/\.json$/, '.runar.ts');
   const evaluate = (prog: AnfProgram, canonicalBytes: string, irFile: string) => {
-    writeFileSync(irFile, canonicalBytes, 'utf-8');
+    let inputFile = irFile;
+    if (foldOn) {
+      inputFile = sourceFileFor(irFile);
+      writeFileSync(inputFile, renderAnfProgramToTypeScript(prog), 'utf-8');
+    } else {
+      writeFileSync(irFile, canonicalBytes, 'utf-8');
+    }
     const outputs: Partial<Record<CompilerName, string>> = {};
     const failed: CompilerName[] = [];
     for (const tier of tiers) {
-      const hex = compileTier(tier, prog, irFile, disableConstantFolding);
+      const hex = compileTier(tier, prog, inputFile, disableConstantFolding);
       if (hex === null) {
         // Distinguish "no binary" from "binary present, rejected" (always a
         // failure). perTierAvailable tells us the difference.
@@ -1186,6 +1416,7 @@ export async function runAnfDifferential(
       if (!confirmed) return undefined;
       return {
         programJson: canon(reducedProgram),
+        source: foldOn ? renderAnfProgramToTypeScript(reducedProgram) : undefined,
         outputs: confirmed.outputs,
         reason,
         originalBindings: countBindings(program),
@@ -1198,6 +1429,7 @@ export async function runAnfDifferential(
   };
   let programsRun = 0;
   let earlyStop = false;
+  let foldedPrograms = 0;
 
   for (let i = 0; i < programs.length; i++) {
     if (opts.timeBudgetMs !== undefined && Date.now() - start > opts.timeBudgetMs) {
@@ -1235,12 +1467,25 @@ export async function runAnfDifferential(
     // 2) collect per-tier hex, 3) compare
     const { outputs, classification } = evaluate(program, canonical, irFile);
     const tierKeys = Object.keys(outputs) as CompilerName[];
+    let source: string | undefined;
+    if (foldOn) {
+      // Did folding change the bytes this mode compares? Same rendered source,
+      // TS compiler, folding on vs off — counted only when the bytes the TS
+      // tier was compared on ARE the folded ones.
+      const srcFile = sourceFileFor(irFile);
+      source = renderAnfProgramToTypeScript(program);
+      const on = runTsSource(srcFile, tsCompileSource, false);
+      const off = runTsSource(srcFile, tsCompileSource, true);
+      const compared = tiers.includes('ts') ? outputs.ts : on;
+      if (on !== null && off !== null && on !== off && compared === on) foldedPrograms += 1;
+    }
     if (classification.status === 'mismatch') {
       mismatchCount += 1;
       const finding: Finding = {
         seed: opts.seed,
         programIndex: i,
         programJson: canonical,
+        source,
         outputs,
         reason: classification.reason,
       };
@@ -1264,6 +1509,9 @@ export async function runAnfDifferential(
     // copied into the findings dir (`program.json`), so the temp can
     // always be removed.
     try { unlinkSync(irFile); } catch { /* ignore */ }
+    if (foldOn) {
+      try { unlinkSync(sourceFileFor(irFile)); } catch { /* ignore */ }
+    }
   }
 
   return {
@@ -1274,6 +1522,7 @@ export async function runAnfDifferential(
     perTierAvailable,
     findings,
     durationMs: Date.now() - start,
+    foldedPrograms,
   };
 }
 

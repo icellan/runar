@@ -17,9 +17,10 @@ name: Fuzzer nightly
 #
 # PR merge gate (GAP-001 / GAP-101): on `pull_request` the job runs the
 # fuzzer with a FIXED seed (424242) and a modest program count (40), TWICE
-# — once fold-OFF (default, matches the checked-in goldens) and once
-# `--fold-on` (constant-folding enabled) — each hard-failing on any
-# cross-tier hex divergence. Determinism (fixed seed) keeps the gate
+# — once fold-OFF (default, every tier's `--ir` path, matches the checked-in
+# goldens) and once `--fold-on` (the same ANF corpus rendered to `.runar.ts`
+# and compiled from SOURCE with constant folding enabled) — each hard-failing
+# on any cross-tier hex divergence. Determinism (fixed seed) keeps the gate
 # reproducible and flake-free. The schedule/push path keeps the larger
 # run_id-seeded run for rotating coverage over time.
 #
@@ -34,7 +35,8 @@ name: Fuzzer nightly
 # per-finding directory tree (canonical IR JSON + per-tier diverging hex)
 # as an artifact, so the failing case can be replayed offline via
 #   `compilers/<tier>/<bin> --ir program.json --hex --disable-constant-folding`
-# against any tier.
+# (fold-OFF) or `compilers/<tier>/<bin> --source program.runar.ts --hex`
+# (fold-ON) against any tier.
 #
 # Security: all workflow_dispatch inputs are routed through `env:` blocks
 # (never interpolated directly into `run:` shell scripts) so the fuzzer
@@ -173,16 +175,15 @@ jobs:
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldoff.json
 
-      # ----- fold-ON is now a BLOCKING merge gate (GAP-101 closed). The earlier
-      # ----- cross-tier divergence was the ANF constant-fold being re-run on
-      # ----- the `--ir` path: it rewrote bin_ops to constants but left the
-      # ----- now-dead operand bindings, which the six non-Zig tiers emitted as
-      # ----- wasteful push+drop sequences (Zig's compileFromIR never folds IR
-      # ----- input). All seven IR entry points now skip the ANF fold on
-      # ----- pre-lowered IR (the peephole optimizer still folds), so fold-ON
-      # ----- `--ir` output is byte-identical to fold-OFF / the goldens across
-      # ----- all 7 tiers. Constant folding is still exercised on the source
-      # ----- path (the multi-format conformance gate).
+      # ----- fold-ON is a BLOCKING merge gate (GAP-101). All seven IR entry
+      # ----- points skip the ANF constant fold on pre-lowered IR (GAP-101's
+      # ----- fix), so this step can NOT go through `--ir`: that argv without
+      # ----- `--disable-constant-folding` re-ran fold-OFF byte for byte (N-003).
+      # ----- `--fold-on` therefore renders each generated ANF program to
+      # ----- `.runar.ts` and compiles it with `--source <file> --hex` in every
+      # ----- tier, folding ON — the only path on which folding runs. It fails
+      # ----- on any divergence, and also when folding changed no program's
+      # ----- bytes (a vacuous run).
       - name: Fuzz (PR gate — fold-ON, fixed seed)
         if: github.event_name == 'pull_request'
         working-directory: conformance
