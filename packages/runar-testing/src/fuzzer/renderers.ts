@@ -43,7 +43,8 @@ import {
 // So the native renderers accept `step: 1` + `op: '<'` and reject anything
 // else loudly, rather than emit per-language loop syntax whose 7-tier parity
 // has never been demonstrated. The exec-oracle shapes that need a countdown or
-// an inclusive bound are still TypeScript-only.
+// an inclusive bound are still TypeScript-only (and Java: `renderJava` spells
+// every form, so the `--ir` fuzzer's `ts` strategy can cover them in all 7 tiers).
 const FOR_STMT_UNSUPPORTED =
   'ForStmt form is exec-oracle-only (issue #124): the native cross-tier ' +
   'renderers express only ascending unit-step half-open loops ' +
@@ -1055,13 +1056,15 @@ function javaStmt(
       return lines.join('\n');
     }
     case 'for': {
-      requireNativeLoopForm(stmt);
-      // The loop variable is a bigint in scope for the whole body.
+      // Unlike the other native surfaces, the Java one spells every ForStmt
+      // form: any comparison method and a +1 / -1 update.
       bigintVars.add(stmt.iterVar);
+      const cmp = { '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge' }[stmt.op];
+      const upd = stmt.step === 1 ? 'plus' : 'minus';
       const lines = [
         `${indent}for (Bigint ${stmt.iterVar} = ${javaBigintLiteral(stmt.start)}; ` +
-          `${stmt.iterVar}.lt(${javaBigintLiteral(stmt.bound)}); ` +
-          `${stmt.iterVar} = ${stmt.iterVar}.plus(Bigint.ONE)) {`,
+          `${stmt.iterVar}.${cmp}(${javaBigintLiteral(stmt.bound)}); ` +
+          `${stmt.iterVar} = ${stmt.iterVar}.${upd}(Bigint.ONE)) {`,
       ];
       for (const s of stmt.body) lines.push(javaStmt(s, indent + '    ', bigintVars, boolVars));
       lines.push(`${indent}}`);

@@ -14,6 +14,8 @@ export {
 export {
   arbGeneratedContract,
   arbGeneratedStatefulContract,
+  arbGeneratedContractWideLoops,
+  arbGeneratedStatefulContractWideLoops,
 } from './generator.js';
 export type { GeneratorConfig } from './generator.js';
 

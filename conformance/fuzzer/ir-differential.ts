@@ -32,6 +32,8 @@ import { execFileSync } from 'node:child_process';
 import {
   arbGeneratedContract,
   arbGeneratedStatefulContract,
+  arbGeneratedContractWideLoops,
+  arbGeneratedStatefulContractWideLoops,
   renderTypeScript,
   renderGo,
   renderRust,
@@ -548,9 +550,14 @@ export async function runIRDifferentialFuzzing(
   // Load the TS compiler once; subsequent iterations reuse the cached fn.
   if (compilers.includes('ts')) await loadTsCompile();
 
-  const arb = options.includeStateful
-    ? fc.oneof(arbGeneratedContract, arbGeneratedStatefulContract)
-    : arbGeneratedContract;
+  // Countdown and closed-bound loops (F-300) have no native Go / Rust / Python /
+  // Zig / Ruby surface form, so only the `ts` strategy (TypeScript source for
+  // six tiers, `renderJava` for Java) can feed them to every tier. The `native`
+  // strategy keeps the ascending unit-step subset its renderers can express.
+  const wide = strategy === 'ts';
+  const statelessArb = wide ? arbGeneratedContractWideLoops : arbGeneratedContract;
+  const statefulArb = wide ? arbGeneratedStatefulContractWideLoops : arbGeneratedStatefulContract;
+  const arb = options.includeStateful ? fc.oneof(statelessArb, statefulArb) : statelessArb;
 
   const contracts = fc.sample(arb, { numRuns: numPrograms, seed: options.seed });
   const compilerMap = dispatch();
