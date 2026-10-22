@@ -38,6 +38,28 @@ fn resolveZigBinary(allocator: std.mem.Allocator) ![]const u8 {
     return try allocator.dupe(u8, "zig-out/bin/runar-zig");
 }
 
+/// N-392: read and parse a fixture's `source.json`, failing closed.
+/// Returns null only when the file is absent (the glob fallback / "no
+/// allowlist" cases). An unreadable file is `error.UnreadableSourceJson` and
+/// invalid JSON is `error.MalformedSourceJson`; both print the fixture dir.
+/// Mirrors Python F-323 and the Ruby harness.
+fn parseSourceJson(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !?std.json.Parsed(std.json.Value) {
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/source.json", .{test_dir});
+    defer allocator.free(config_path);
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => {
+            std.debug.print("unreadable source.json in fixture '{s}': {s}\n", .{ test_dir, @errorName(err) });
+            return error.UnreadableSourceJson;
+        },
+    };
+    defer allocator.free(raw);
+    return std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch |err| {
+        std.debug.print("malformed source.json in fixture '{s}': {s}\n", .{ test_dir, @errorName(err) });
+        return error.MalformedSourceJson;
+    };
+}
+
 /// Resolve the Zig-format source file for a conformance fixture.
 ///
 /// Mirrors the TS runner (`conformance/runner/runner.ts`):
@@ -48,40 +70,35 @@ fn resolveZigBinary(allocator: std.mem.Allocator) ![]const u8 {
 /// Returned slice is allocated with `allocator`.
 fn findZigSource(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !?[]u8 {
     // (1) source.json lookup
-    const config_path = try std.fmt.allocPrint(allocator, "{s}/source.json", .{test_dir});
-    defer allocator.free(config_path);
-    if (std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 * 1024 * 1024))) |raw| {
-        defer allocator.free(raw);
-        if (std.json.parseFromSlice(std.json.Value, allocator, raw, .{})) |parsed| {
-            defer parsed.deinit();
-            switch (parsed.value) {
-                .object => |root| {
-                    if (root.get("sources")) |sources_val| {
-                        switch (sources_val) {
-                            .object => |sources| {
-                                if (sources.get(".runar.zig")) |v| {
-                                    switch (v) {
-                                        .string => |rel| {
-                                            const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ test_dir, rel });
-                                            // Confirm existence via stat; fall through on failure.
-                                            if (std.Io.Dir.cwd().statFile(io, resolved, .{})) |_| {
-                                                return resolved;
-                                            } else |_| {
-                                                allocator.free(resolved);
-                                            }
-                                        },
-                                        else => {},
-                                    }
+    if (try parseSourceJson(allocator, io, test_dir)) |parsed| {
+        defer parsed.deinit();
+        switch (parsed.value) {
+            .object => |root| {
+                if (root.get("sources")) |sources_val| {
+                    switch (sources_val) {
+                        .object => |sources| {
+                            if (sources.get(".runar.zig")) |v| {
+                                switch (v) {
+                                    .string => |rel| {
+                                        const resolved = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ test_dir, rel });
+                                        // Confirm existence via stat; fall through on failure.
+                                        if (std.Io.Dir.cwd().statFile(io, resolved, .{})) |_| {
+                                            return resolved;
+                                        } else |_| {
+                                            allocator.free(resolved);
+                                        }
+                                    },
+                                    else => {},
                                 }
-                            },
-                            else => {},
-                        }
+                            }
+                        },
+                        else => {},
                     }
-                },
-                else => {},
-            }
-        } else |_| {}
-    } else |_| {}
+                }
+            },
+            else => {},
+        }
+    }
 
     // (2) glob fallback in fixture directory
     var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{ .iterate = true }) catch return null;
@@ -120,18 +137,12 @@ fn findZigSource(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8)
 /// `read_compiler_allowlist` (F-151). See `conformance/README.md` ⇒
 /// "Per-fixture compiler allowlist".
 ///
-/// Returns true (allowed) when `source.json` is absent/unreadable/malformed,
-/// when it has no `compilers` field, or when that field includes "zig".
+/// Returns true (allowed) when `source.json` is absent (N-392: an unreadable
+/// or malformed one is an error), when it has no `compilers` field, or when that field includes "zig".
 /// N-389: a `compilers` value that is not a list of strings fails closed
 /// (`error.InvalidCompilersAllowlist`) instead of counting as "no allowlist".
 fn fixtureAllowlistedForZig(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !bool {
-    const config_path = try std.fmt.allocPrint(allocator, "{s}/source.json", .{test_dir});
-    defer allocator.free(config_path);
-
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 * 1024 * 1024)) catch return true;
-    defer allocator.free(raw);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return true;
+    const parsed = (try parseSourceJson(allocator, io, test_dir)) orelse return true;
     defer parsed.deinit();
 
     switch (parsed.value) {
@@ -557,6 +568,51 @@ fn printScriptDiff(expected: []const u8, actual: []const u8) void {
 // ============================================================================
 // The single conformance test — iterates all 40 fixture directories
 // ============================================================================
+
+// N-392. What this proves: a malformed (invalid JSON) source.json is a
+// harness failure (error.MalformedSourceJson) from classifyFixture, not a
+// silent fall-through to "no allowlist" / the *.runar.zig glob, and a
+// source.json that exists but cannot be read as a file is
+// error.UnreadableSourceJson. Mirrors Python F-323 and the Ruby harness.
+//
+// What this does not prove: that the real corpus has a malformed
+// source.json (it does not), or the exact stderr wording.
+test "conformance-goldens: a malformed source.json fails closed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const binary = try resolveZigBinary(allocator);
+    defer allocator.free(binary);
+
+    const dir = try n124ScratchDir(allocator, io, "n392-malformed");
+    defer allocator.free(dir);
+    try n124WriteFile(io, dir, "source.json", "{not valid json");
+    defer n124DeleteFile(io, dir, "source.json");
+
+    try std.testing.expectError(
+        error.MalformedSourceJson,
+        classifyFixture(allocator, io, binary, dir, "n392-malformed", &.{}),
+    );
+}
+
+test "conformance-goldens: an unreadable source.json fails closed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const binary = try resolveZigBinary(allocator);
+    defer allocator.free(binary);
+
+    // A directory named source.json exists but cannot be read as a file.
+    const dir = try n124ScratchDir(allocator, io, "n392-unreadable");
+    defer allocator.free(dir);
+    const sub = try std.fmt.allocPrint(allocator, "{s}/source.json", .{dir});
+    defer allocator.free(sub);
+    try std.Io.Dir.cwd().createDirPath(io, sub);
+    defer std.Io.Dir.cwd().deleteDir(io, sub) catch {};
+
+    try std.testing.expectError(
+        error.UnreadableSourceJson,
+        classifyFixture(allocator, io, binary, dir, "n392-unreadable", &.{}),
+    );
+}
 
 test "conformance-goldens: zig compiler produces byte-identical output for all fixtures" {
     const allocator = std.testing.allocator;

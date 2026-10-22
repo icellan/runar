@@ -202,7 +202,21 @@ class ConformanceGoldensTest {
             return new FixtureOutcome(name, Kind.FAILED,
                 "missing-source: no source.json found for fixture '" + name + "'");
         }
-        String configBody = Files.readString(configPath);
+        // N-392: an unreadable or malformed source.json is a harness failure
+        // naming the fixture, never a silent fall-through.
+        String configBody;
+        try {
+            configBody = Files.readString(configPath);
+        } catch (IOException e) {
+            return new FixtureOutcome(name, Kind.FAILED,
+                "unreadable-source-json: cannot read source.json for fixture '" + name + "': " + e);
+        }
+        try {
+            MiniJson.parse(configBody);
+        } catch (RuntimeException e) {
+            return new FixtureOutcome(name, Kind.FAILED,
+                "malformed-source-json: source.json for fixture '" + name + "' is not valid JSON: " + e.getMessage());
+        }
 
         // Per-fixture compilers allowlist (IR/hex parity scope): skip only
         // a NAMED fixture that excludes java (N-389).
@@ -737,6 +751,42 @@ class ConformanceGoldensTest {
         Files.writeString(tmp.resolve("source.json"), "{\"compilers\":\"go\"}");
 
         assertThrows(IllegalStateException.class, () -> classifyFixture(tmp));
+    }
+
+    /**
+     * N-392. What this proves: a malformed (invalid JSON) source.json is a
+     * FAILED outcome naming the fixture ({@code malformed-source-json}),
+     * not an anonymous parser exception that aborts the whole sweep or a
+     * silent fall-through. Mirrors Python F-323 and the Ruby harness.
+     * What this does not prove: that the real corpus has a malformed
+     * source.json (it does not).
+     */
+    @Test
+    void classifyFixtureFailsOnMalformedSourceJson(@TempDir Path tmp) throws IOException {
+        Files.writeString(tmp.resolve("source.json"), "{not valid json");
+
+        FixtureOutcome outcome = classifyFixture(tmp);
+
+        assertEquals(Kind.FAILED, outcome.kind());
+        assertTrue(outcome.detail().startsWith("malformed-source-json")
+                && outcome.detail().contains(tmp.getFileName().toString()),
+            "expected a malformed-source-json failure naming the fixture, got: " + outcome.detail());
+    }
+
+    /**
+     * N-392. A source.json that exists but cannot be read (here a directory)
+     * is a FAILED {@code unreadable-source-json} outcome naming the fixture.
+     */
+    @Test
+    void classifyFixtureFailsOnUnreadableSourceJson(@TempDir Path tmp) throws IOException {
+        Files.createDirectory(tmp.resolve("source.json"));
+
+        FixtureOutcome outcome = classifyFixture(tmp);
+
+        assertEquals(Kind.FAILED, outcome.kind());
+        assertTrue(outcome.detail().startsWith("unreadable-source-json")
+                && outcome.detail().contains(tmp.getFileName().toString()),
+            "expected an unreadable-source-json failure naming the fixture, got: " + outcome.detail());
     }
 
     @Test
