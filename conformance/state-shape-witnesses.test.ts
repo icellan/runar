@@ -38,8 +38,20 @@ interface Fixture {
   shape: string;
 }
 
+/**
+ * N-314 (R144): a fixture whose `compilers` allowlist excludes ts AND which the
+ * TS compiler cannot compile (no codegen for it) is skipped here. Being
+ * allowlisted it can never count as a witness anyway. The skip is BY NAME: only
+ * fixtures listed here AND allowlisted away from ts are skipped, and the skipped
+ * set is pinned below — every other allowlisted fixture (babybear, merkle-proof,
+ * state-covenant, …) is still compiled, and a new uncompilable one fails loudly.
+ */
+const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+const skippedNotTs: string[] = [];
+
 function loadFixtures(): Fixture[] {
   const out: Fixture[] = [];
+  skippedNotTs.length = 0;
   for (const name of readdirSync(TESTS).sort()) {
     const sj = join(TESTS, name, 'source.json');
     if (!existsSync(sj)) continue;
@@ -47,6 +59,11 @@ function loadFixtures(): Fixture[] {
       sources: Record<string, string>;
       compilers?: string[];
     };
+    if (Array.isArray(cfg.compilers) && !cfg.compilers.includes('ts')
+      && EXPECTED_NOT_TS_COMPILABLE.includes(name)) {
+      skippedNotTs.push(name);
+      continue;
+    }
     const tsRel = cfg.sources['.runar.ts'];
     if (!tsRel) throw new Error(`${name}: source.json has no .runar.ts source`);
     const file = resolve(TESTS, name, tsRel);
@@ -67,6 +84,10 @@ function loadFixtures(): Fixture[] {
 describe('every mutable-state shape has >= 2 full-parity witnesses (F-352)', () => {
   const fixtures = loadFixtures();
   const stateful = fixtures.filter((f) => f.shape !== '');
+
+  it('skips exactly the expected fixtures whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs.sort()).toEqual(EXPECTED_NOT_TS_COMPILABLE);
+  });
 
   it('sees a non-trivial stateful corpus (anti-vacuity)', () => {
     expect(stateful.length).toBeGreaterThan(20);

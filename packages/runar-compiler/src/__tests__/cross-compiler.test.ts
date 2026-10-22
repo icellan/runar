@@ -1130,7 +1130,29 @@ describe.skipIf(!hasGo)('Cross-compiler conformance: Go output vs golden hex', (
     }
   });
 
-  const conformanceTests = findConformanceTests('go');
+  // N-314 (R144): this case compiles the source with the TS frontend first,
+  // so a fixture whose allowlist excludes ts AND which TS has no codegen for
+  // (today the Go-only BN254 pairing) cannot run here. Skipped BY NAME, only
+  // when also allowlisted away from ts; the skipped set is pinned below so a
+  // new one fails loudly. Its Go golden is gated by the conformance runner and
+  // executed by conformance/witnesses/real-crypto/bn254-pairing.json.
+  const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+  const excludesTs = (name: string): boolean => {
+    const sj = join(CONFORMANCE_DIR, name, 'source.json');
+    if (!existsSync(sj)) return false;
+    const cfg = JSON.parse(readFileSync(sj, 'utf-8')) as { compilers?: string[] };
+    return Array.isArray(cfg.compilers) && !cfg.compilers.includes('ts');
+  };
+  const allGoTests = findConformanceTests('go');
+  const skippedNotTs = allGoTests
+    .filter(t => excludesTs(t.name) && EXPECTED_NOT_TS_COMPILABLE.includes(t.name))
+    .map(t => t.name)
+    .sort();
+  const conformanceTests = allGoTests.filter(t => !skippedNotTs.includes(t.name));
+
+  it('skips exactly the expected fixtures whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs).toEqual(EXPECTED_NOT_TS_COMPILABLE);
+  });
 
   for (const test of conformanceTests) {
     it(`${test.name}: Go hex output matches expected-script.hex`, () => {

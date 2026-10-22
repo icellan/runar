@@ -1,0 +1,17 @@
+{
+  "compilers": [
+    "go"
+  ],
+  "compilersJustification": "Codegen for the BN254 pairing (bn254MultiPairing4) is Go-only by project policy — see CLAUDE.md ('Go-only crypto codegen modules'). Other tier parsers still run via multi-format.test.ts and the all-tier parser-only matrix.",
+  "sources": {
+    ".runar.ts": "./Bn254Pairing.runar.ts",
+    ".runar.sol": "./Bn254Pairing.runar.sol",
+    ".runar.move": "./Bn254Pairing.runar.move",
+    ".runar.go": "./Bn254Pairing.runar.go",
+    ".runar.rs": "./Bn254Pairing.runar.rs",
+    ".runar.py": "./Bn254Pairing.runar.py",
+    ".runar.zig": "./Bn254Pairing.runar.zig",
+    ".runar.rb": "./Bn254Pairing.runar.rb",
+    ".runar.java": "./Bn254Pairing.runar.java"
+  }
+}

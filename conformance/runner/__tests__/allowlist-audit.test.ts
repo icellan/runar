@@ -25,12 +25,15 @@ const APPROVED_ALLOWLISTS: Record<string, string[]> = {
   // EVM/STARK proof-system primitives are Go-only by project policy
   // (see CLAUDE.md "EVM/STARK proof-system primitives are Go-only by
   // project policy" + the project_go_only_crypto_modules memory).
-  // Covers: BabyBear / merkleRootSha256.
-  // The policy also scopes KoalaBear, Poseidon2*, BN254 + Groth16, SP1 FRI
-  // and FiatShamir-KB to Go. No conformance fixture calls any of them: they
-  // are covered only by Go unit and integration tests. The BN254 / Groth16
-  // fixture is tracked as N-314. tests/f278-go-only-coverage-claims.test.ts
-  // fails if the "Covers:" list names a family that no fixture calls.
+  // Covers: BabyBear / merkleRootSha256 / BN254.
+  // BN254 is the four-pair pairing check `bn254MultiPairing4` in
+  // `bn254-pairing` (N-314), whose golden is executed by the precompiled-hex
+  // spec witnesses/real-crypto/bn254-pairing.json.
+  // The policy also scopes KoalaBear, Poseidon2*, the Groth16 verifier
+  // shape, SP1 FRI and FiatShamir-KB to Go. No conformance fixture calls any
+  // of them: they are covered only by Go unit and integration tests.
+  // tests/f278-go-only-coverage-claims.test.ts fails if the "Covers:" list
+  // names a family that no fixture calls.
   // Non-Go tiers may carry partial ports but are NOT conformance
   // targets for these families. Their parsers are still exercised
   // by the all-tier --parser-only matrix.
@@ -38,6 +41,7 @@ const APPROVED_ALLOWLISTS: Record<string, string[]> = {
   'babybear-ext4': ['go'],
   'merkle-proof': ['go'],
   'state-covenant': ['go'],
+  'bn254-pairing': ['go'],
 };
 
 function listFixtureDirs(): string[] {

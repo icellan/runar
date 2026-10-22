@@ -360,11 +360,13 @@ interface StatefulSpec {
 }
 
 /** Closed vocabulary for `real-crypto/*.json`'s top-level "kind" — the exact
- * two values `real-crypto-execution.test.ts` branches on (`=== 'stateless-signed'`
- * vs. its `else`). A missing/misspelled "kind" must fail loudly here rather
- * than silently falling into the runtime harness's `else` (= "stateful") while
- * being invisible to this static gate (audit P2-1). */
-const SPEC_KINDS = new Set(['stateful', 'stateless-signed']);
+ * values `real-crypto-execution.test.ts` branches on (`=== 'precompiled-hex'`,
+ * `=== 'stateless-signed'`, then its `else`). A missing/misspelled "kind" must
+ * fail loudly here rather than silently falling into the runtime harness's
+ * `else` (= "stateful") while being invisible to this static gate (audit P2-1).
+ * `precompiled-hex` (N-314) executes a committed stateless golden and has no
+ * continuation state. */
+const SPEC_KINDS = new Set(['stateful', 'stateless-signed', 'precompiled-hex']);
 
 function checkExpectedStatePins(
   dir: string,
@@ -386,7 +388,7 @@ function checkExpectedStatePins(
     // real-crypto-execution.test.ts:198) as its COMPLEMENT, not as an
     // `=== 'stateful'` check — the two must never be able to silently
     // diverge on what "stateful" means (audit P2-1).
-    if (spec.kind === 'stateless-signed') continue;
+    if (spec.kind === 'stateless-signed' || spec.kind === 'precompiled-hex') continue;
     for (const s of spec.spends ?? []) {
       // A tampered continuation output must be a NEAR-MISS, never a claimed
       // accept — `tamperOutput: true` deliberately corrupts output 0

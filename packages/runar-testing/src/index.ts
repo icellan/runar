@@ -61,6 +61,7 @@ export {
   runFoldEquivalence,
   runStatelessSigned,
   runStatefulSpend,
+  runPrecompiledHexSpend,
   testKey,
 } from './oracle/index.js';
 export type {
@@ -77,6 +78,7 @@ export type {
   StatelessArg,
   StatelessSignedOptions,
   StatefulSpendOptions,
+  PrecompiledHexOptions,
 } from './oracle/index.js';
 
 // Test helpers

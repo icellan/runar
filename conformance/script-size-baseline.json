@@ -16,6 +16,7 @@
     "basic-p2pkh": 5,
     "bitwise-ops": 63,
     "blake3": 22436,
+    "bn254-pairing": 4722502,
     "boolean-logic": 45,
     "bounded-loop": 42,
     "branch-merged-locals": 712,

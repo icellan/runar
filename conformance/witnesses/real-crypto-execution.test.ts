@@ -11,13 +11,19 @@
  * across `crypto-exempt.json` / `harness-inapplicable.json`) and got NO real
  * execution — all seven tiers agreed on bytes nobody ever ran.
  *
- * Two spec kinds:
+ * Three spec kinds:
  *   - `stateless-signed` — a stateless SmartContract; `$sig` args are filled
  *     with real DER signatures; the accept path is additionally cross-checked
  *     against the ANF interpreter (source-vs-script agreement).
  *   - `stateful` — a StatefulSmartContract driven deploy→call through the SDK
  *     and re-validated on `Spend` (real checkPreimage + OP_CODESEPARATOR +
  *     optional user checkSig).
+ *   - `precompiled-hex` (N-314) — a constructor-less stateless fixture whose
+ *     `compilers` allowlist excludes ts (Go-only codegen), so nothing here can
+ *     compile it. The COMMITTED `expected-script.hex` is executed as-is, with
+ *     argument types read from the committed `expected-ir.json`, and the spec
+ *     must content-pin that hex in `goldenHashes` — the pin is checked below,
+ *     so a spec can never silently run bytes other than the ones it vouches for.
  *
  * Every spend asserts the REAL engine matches the declared expectation. Each
  * fixture carries ≥1 accept and ≥1 reject/near-miss (wrong key, wrong signer,
@@ -29,9 +35,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
   runStatelessSigned,
   runStatefulSpend,
+  runPrecompiledHexSpend,
   testKey,
   type StatelessArg,
 } from '../../packages/runar-testing/src/index.js';
@@ -42,7 +50,9 @@ const SPEC_DIR = join(__dirname, 'real-crypto');
 
 interface Spec {
   fixture: string;
-  kind: 'stateless-signed' | 'stateful';
+  kind: 'stateless-signed' | 'stateful' | 'precompiled-hex';
+  /** precompiled-hex: sha256 pins of the committed goldens it executes. */
+  goldenHashes?: Record<string, string>;
   signerKey?: string;
   constructorArgs?: unknown;
   spends: SpendSpec[];
@@ -96,6 +106,9 @@ interface SpendSpec {
   issue?: string;
   // both
   cryptoNearMiss?: boolean;
+  /** precompiled-hex reject: the engine error must match this (case-insensitive)
+   *  regex, pinning the FAILURE CLASS and not just the verdict. */
+  vmErrorPattern?: string;
 }
 
 /** Resolve the `.runar.ts` source for a fixture. */
@@ -203,6 +216,11 @@ function resolveStatefulArgs(raw: unknown[]): unknown[] {
 
 const specFiles = readdirSync(SPEC_DIR).filter((f) => f.endsWith('.json'));
 
+/** Per-test budget for a `precompiled-hex` spend only: the bn254-pairing golden
+ *  is a ~4.7 MB script (~2.5 s per spend on @bsv/sdk Spend locally). Every other
+ *  kind keeps the default timeout. */
+const PRECOMPILED_TIMEOUT_MS = 120_000;
+
 /** A crypto near-miss reject must be rejected BY THE SCRIPT GUARD on the real
  *  Spend engine, not by a harness/SDK error before the engine ran — otherwise a
  *  reject that fails for an unrelated SDK reason silently passes and the guard it
@@ -233,7 +251,24 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
         } [${s.note ?? ''}]`;
 
         it(label, async () => {
-          if (spec.kind === 'stateless-signed') {
+          if (spec.kind === 'precompiled-hex') {
+            const dir = join(TESTS_DIR, spec.fixture);
+            const r = runPrecompiledHexSpend({
+              scriptHex: readFileSync(join(dir, 'expected-script.hex'), 'utf-8'),
+              irJson: readFileSync(join(dir, 'expected-ir.json'), 'utf-8'),
+              method: s.method,
+              args: resolveStatelessArgs(s.args) as (bigint | boolean | Uint8Array)[],
+            });
+            expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
+            if (s.expect === 'reject') {
+              // Every precompiled reject is a script rejection: no interpreter
+              // runs, so a harness error must never pass for one.
+              expect(r.reachedEngine, `harness error before the engine ran: ${r.vmError}`).toBe(true);
+              if (s.vmErrorPattern !== undefined) {
+                expect(r.vmError ?? '').toMatch(new RegExp(s.vmErrorPattern, 'i'));
+              }
+            }
+          } else if (spec.kind === 'stateless-signed') {
             const r = runStatelessSigned({
               source,
               fileName,
@@ -335,8 +370,37 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               }
             }
           }
-        });
+        }, spec.kind === 'precompiled-hex' ? PRECOMPILED_TIMEOUT_MS : undefined);
       }
+    });
+  }
+});
+
+// N-314: a `precompiled-hex` spec is route (A) evidence for a golden nothing in
+// TS can re-derive, so it must be held to the bytes it vouches for. Every such
+// spec pins the CURRENT sha256 of the hex it executes (and of the IR it reads
+// argument types from), and is only legal for a fixture whose `compilers`
+// allowlist excludes ts — anywhere TS can compile the fixture, compiling fresh
+// (`stateless-signed`) is the stronger check and must be used instead.
+describe('real-crypto precompiled-hex specs pin the exact goldens they execute (N-314)', () => {
+  const sha256 = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  const precompiled = specFiles
+    .map((f) => JSON.parse(readFileSync(join(SPEC_DIR, f), 'utf-8')) as Spec)
+    .filter((sp) => sp.kind === 'precompiled-hex');
+
+  it('at least one precompiled-hex spec exists (the bn254-pairing Go-only fixture)', () => {
+    expect(precompiled.map((sp) => sp.fixture)).toContain('bn254-pairing');
+  });
+
+  for (const sp of precompiled) {
+    it(`${sp.fixture}: goldenHashes equal the committed goldens; allowlist excludes ts`, () => {
+      const dir = join(TESTS_DIR, sp.fixture);
+      for (const g of ['expected-script.hex', 'expected-ir.json']) {
+        expect(sp.goldenHashes?.[g], `${sp.fixture}: goldenHashes["${g}"]`).toBe(sha256(join(dir, g)));
+      }
+      const cfg = JSON.parse(readFileSync(join(dir, 'source.json'), 'utf-8')) as { compilers?: string[] };
+      expect(Array.isArray(cfg.compilers), `${sp.fixture}: needs a "compilers" allowlist`).toBe(true);
+      expect(cfg.compilers).not.toContain('ts');
     });
   }
 });

@@ -371,6 +371,79 @@ export function runStatelessSigned(opts: StatelessSignedOptions): RealExecResult
 }
 
 // ---------------------------------------------------------------------------
+// Precompiled-hex execution (N-314)
+// ---------------------------------------------------------------------------
+
+export interface PrecompiledHexOptions {
+  /** The committed locking script (e.g. a fixture's `expected-script.hex`). */
+  scriptHex: string;
+  /** The committed ANF IR (`expected-ir.json`) — read ONLY for the public
+   *  methods' parameter types (unlocking-push encoding) and dispatch order. */
+  irJson: string;
+  method: string;
+  args: (bigint | boolean | Uint8Array)[];
+}
+
+/**
+ * Execute PRECOMPILED script bytes on the real `@bsv/sdk` Spend (strict,
+ * version-1 consensus rules) — no compiler runs. This is the oracle for a
+ * fixture whose codegen exists only in a non-TS tier (the Go-only BN254
+ * family): the committed golden is executed exactly as stamped, so its
+ * accept/reject verdict is evidence about those bytes and not about a fresh
+ * TS compile of the same source.
+ *
+ * Refused (throws) rather than guessed: an IR with properties or a non-
+ * `SmartContract` parent (its golden would be a template with constructor
+ * slots, or need a tx-context preimage, neither of which this runner builds),
+ * an unknown method, or an arg-count mismatch.
+ */
+export function runPrecompiledHexSpend(opts: PrecompiledHexOptions): RealExecResult {
+  const ir = JSON.parse(opts.irJson) as {
+    parentClass?: string;
+    properties?: unknown[];
+    methods: { name: string; isPublic: boolean; params: ABIParam[] }[];
+  };
+  if (ir.parentClass !== 'SmartContract' || (ir.properties ?? []).length > 0) {
+    throw new Error(
+      'runPrecompiledHexSpend: only a constructor-less SmartContract golden is the complete ' +
+        `locking script (parentClass=${ir.parentClass}, ${(ir.properties ?? []).length} properties)`,
+    );
+  }
+  const publicMethods = ir.methods.filter((m) => m.isPublic);
+  const publicIdx = publicMethods.findIndex((m) => m.name === opts.method);
+  if (publicIdx === -1) throw new Error(`runPrecompiledHexSpend: no public method '${opts.method}'`);
+  const method = publicMethods[publicIdx]!;
+  if (opts.args.length !== method.params.length) {
+    throw new Error(
+      `arg count mismatch for ${opts.method}: IR declares ${method.params.length}, got ${opts.args.length}`,
+    );
+  }
+  const pushes = method.params.map((param, i) => encodeConcrete(opts.args[i]!, param));
+  if (publicMethods.length > 1) pushes.push(encodePushData(encodeScriptNumber(BigInt(publicIdx))));
+
+  const lockingHex = opts.scriptHex.trim().toLowerCase();
+  const unlockingHex = bytesToHex(concat(pushes));
+  let vmAccepted = false;
+  let vmError: string | undefined;
+  let reachedEngine = false;
+  try {
+    const spend = newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
+      lockingScript: LockingScript.fromHex(lockingHex),
+      otherInputs: [],
+      outputs: [],
+      unlockingScript: UnlockingScript.fromHex(unlockingHex),
+    });
+    reachedEngine = true;
+    vmAccepted = spend.validate();
+  } catch (e) {
+    vmAccepted = false;
+    vmError = e instanceof Error ? e.message : String(e);
+  }
+  return { vmAccepted, vmError, lockingHex, unlockingHex, reachedEngine };
+}
+
+// ---------------------------------------------------------------------------
 // Stateful continuation execution (BUG-100 class)
 // ---------------------------------------------------------------------------
 

@@ -183,13 +183,14 @@ The complete set of fixtures with a `compilers` allowlist is enumerated and pinn
 
 ##### Go-only crypto family
 
-These fixtures exercise the Baby Bear / Merkle Stack-IR codegen modules (BabyBear base field and Ext4, plus `merkleRootSha256`). The Go-only policy (see CLAUDE.md, "EVM/STARK proof-system primitives") covers more families than that, but no conformance fixture calls KoalaBear, Poseidon2, BN254 / Groth16, the SP1 FRI verifier (`verifySP1FRI`) or FiatShamir-KB. The `checkFriFold` method in `babybear-ext4` is a FRI colinearity relation written in contract source over BabyBear Ext4. It is not the SP1 FRI verifier codegen. Those families are covered only by Go unit and integration tests, and no conformance golden pins their bytes. For BN254 / Groth16 that means `compilers/go/codegen/bn254_generic_test.go`, `bn254_pairing_validation_test.go` and `bn254_groth16_test.go`, `packages/runar-go/bn254_real_pairing_test.go`, and `integration/go/groth16_test.go`, which runs the pipeline on `integration/go/contracts/Groth16Verifier.runar.go`. A BN254 / Groth16 conformance fixture is tracked as N-314. `tests/f278-go-only-coverage-claims.test.ts` fails if this list names a family that no fixture calls.
+These fixtures exercise the Baby Bear / Merkle / BN254 Stack-IR codegen modules (BabyBear base field and Ext4, `merkleRootSha256`, and the BN254 four-pair pairing check `bn254MultiPairing4`). The Go-only policy (see CLAUDE.md, "EVM/STARK proof-system primitives") covers more families than that, but no conformance fixture calls KoalaBear, Poseidon2, the Groth16 verifier shape (prepared-input `bn254G1ScalarMul` / `bn254G1Add` plus the pairing), the SP1 FRI verifier (`verifySP1FRI`) or FiatShamir-KB. The `checkFriFold` method in `babybear-ext4` is a FRI colinearity relation written in contract source over BabyBear Ext4. It is not the SP1 FRI verifier codegen. Those families are covered only by Go unit and integration tests, and no conformance golden pins their bytes. For the Groth16 verifier that means `compilers/go/codegen/bn254_generic_test.go`, `bn254_pairing_validation_test.go` and `bn254_groth16_test.go`, `packages/runar-go/bn254_real_pairing_test.go`, and `integration/go/groth16_test.go`, which runs the pipeline on `integration/go/contracts/Groth16Verifier.runar.go`. `bn254-pairing` (N-314) pins the pairing itself: a ~4.7 MB script whose committed golden is executed on `@bsv/sdk` Spend by the precompiled-hex spec `witnesses/real-crypto/bn254-pairing.json` (a valid Groth16-shaped instance accepts; a wrong proof point, a wrong public input and a one-bit G2 flip reject). It is pairing-only on purpose: every pair is a spend argument and there is no constructor, so the golden is the whole locking script and nothing has to be spliced into it before it runs. `tests/f278-go-only-coverage-claims.test.ts` fails if this list names a family that no fixture calls.
 
 | Fixture | Allowlist | Rationale |
 |---|---|---|
 | `babybear` | `["go"]` | BabyBear prime-field arithmetic; Stack-IR codegen ships in Go only. |
 | `babybear-ext4` | `["go"]` | BabyBear Ext4 extension-field operations; Stack-IR codegen ships in Go only. |
 | `merkle-proof` | `["go"]` | SHA-256 Merkle-root verification using the Go-only Merkle codegen helpers. |
+| `bn254-pairing` | `["go"]` | BN254 four-pair pairing-product check (`bn254MultiPairing4`); the pairing codegen ships in Go only. |
 
 ##### EVM/STARK proof-system primitives (Go-only by project policy)
 
@@ -818,7 +819,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **97 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **98 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
@@ -831,6 +832,7 @@ The suite currently contains **97 fixtures** under `tests/` — that directory i
 | `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
 | `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on **bigint** operands. The ByteString half of the language rule is NOT here — the fixture's two properties are both `bigint` (R-197); it is covered instead by `conformance/closed-findings/BitwiseBytes.runar.ts`, which requires all seven tiers to accept it and agree byte for byte | Yes |
 | `blake3` | BLAKE3 compression + full-hash builtins | Yes |
+| `bn254-pairing` | BN254 four-pair pairing-product check (`bn254MultiPairing4`, Go-only) | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
 | `byte-builtins` | `split`, `int2str`, `reverseBytes`, `ripemd160` and the `Sha256Hash` alias — five builtins that appeared in no fixture's ANF. Four of them the fuzzer still cannot generate; `split` it now can (`SPLIT_ARM_ENABLED` in `packages/runar-testing/src/fuzzer/generator.ts`), and the arm's first seeded run found the lowering defect that left the split's unnameable left half orphaned on the stack model. Spent at each builtin's boundaries by `conformance/byte_builtins_execution_test.go`, including the two hash methods' "the digest itself must not unlock it" rows. `ripemd160` arrived last: its only `.runar.go` spelling, `runar.Ripemd160`, is both a Rúnar type name and a Rúnar builtin name, and two tiers resolved the call as a type cast until that was fixed | Yes |

@@ -888,8 +888,11 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-10-21 (F-352): 91 -> 97 for F-352's six second-witness mutable-state fixtures
 (`state-array-set`, `state-digest-log`, `state-leaderboard`, `state-ledger`,
 `state-notary`, `state-owner-box`; all byte-exact, in `baselineMatches`).
+2026-10-22 (N-314): 97 -> 98 for N-314's Go-only `bn254-pairing` fixture
+(in `goOnlyFixtures`: the Lean model has no BN254 pairing lowering, so it
+compiles to `OP_RUNAR_UNKNOWN_BUILTIN` and is not byte-exact).
 -/
-def expectedFixtureTotal : Nat := 97
+def expectedFixtureTotal : Nat := 98
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -990,10 +993,13 @@ byte-exact theorem benefits from covering those fixtures too.
 therefore moved to `cryptoAxiomPending` (the right bucket for
 "Lean-port shipped, crypto-axiom proof still pending").
 
-Count: 0 (all former `goOnlyFixtures` have been promoted to
-`cryptoAxiomPending` after their Lean codegen modules landed).
+Count: 1 (all former `goOnlyFixtures` have been promoted to
+`cryptoAxiomPending` after their Lean codegen modules landed; N-314's
+`bn254-pairing` joined 2026-10-22 — the model has no BN254 pairing lowering).
 -/
-def goOnlyFixtures : List String := []
+def goOnlyFixtures : List String := [
+  "bn254-pairing"
+]
 
 /--
 Fixtures whose codegen IS shipped across all 7 reference tiers (TS, Go,
@@ -1288,7 +1294,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 97 := by rfl
+        + lowerDivergencePending.length = 98 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

@@ -141,10 +141,34 @@ describe('the effects table tracks the analyzer it was copied from', () => {
   });
 });
 
+/**
+ * N-314 (R144): goldens the TS stack lowerer cannot lower because their
+ * `compilers` allowlist excludes ts and TS carries no codegen for them (today
+ * the Go-only BN254 pairing). Skipped BY NAME, only when also allowlisted away
+ * from ts, and the skipped set is pinned below so a new one fails loudly.
+ * Every other allowlisted golden (babybear, merkle-proof, …) is still lowered.
+ */
+const EXPECTED_NOT_TS_LOWERABLE = ['bn254-pairing'];
+
+function excludesTs(name: string): boolean {
+  const sj = join(fixturesDir, name, 'source.json');
+  if (!existsSync(sj)) return false;
+  const cfg = JSON.parse(readFileSync(sj, 'utf8')) as { compilers?: string[] };
+  return Array.isArray(cfg.compilers) && !cfg.compilers.includes('ts');
+}
+
 describe('every branch in every golden leaves its arms balanced', () => {
-  const goldens = readdirSync(fixturesDir).sort()
+  const all = readdirSync(fixturesDir).sort()
     .map(name => ({ name, irPath: join(fixturesDir, name, 'expected-ir.json') }))
     .filter(g => existsSync(g.irPath));
+  const skipped = all
+    .filter(g => excludesTs(g.name) && EXPECTED_NOT_TS_LOWERABLE.includes(g.name))
+    .map(g => g.name);
+  const goldens = all.filter(g => !skipped.includes(g.name));
+
+  it('skips exactly the expected goldens whose allowlist excludes ts (N-314)', () => {
+    expect(skipped).toEqual(EXPECTED_NOT_TS_LOWERABLE);
+  });
 
   let branchCount = 0;
   const failures: string[] = [];

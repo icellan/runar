@@ -21,8 +21,8 @@
  * families that some fixture's source actually calls.
  * What it does not prove: that the fixture exercises the family thoroughly,
  * that its golden is correct, or that families documented as NOT covered by a
- * fixture are covered anywhere else. The real BN254/Groth16 fixture is tracked
- * as N-314.
+ * fixture are covered anywhere else. BN254 is now called by the `bn254-pairing`
+ * fixture (N-314); the Groth16 verifier shape still has no fixture.
  */
 
 import { describe, it, expect } from 'vitest';

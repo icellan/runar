@@ -35,7 +35,7 @@ const fixturesDir = join(repoRoot, 'conformance', 'tests');
 
 interface Golden { name: string; irPath: string; hexPath: string }
 
-const goldens: Golden[] = readdirSync(fixturesDir)
+const allGoldens: Golden[] = readdirSync(fixturesDir)
   .sort()
   .map(name => ({
     name,
@@ -44,11 +44,36 @@ const goldens: Golden[] = readdirSync(fixturesDir)
   }))
   .filter(g => existsSync(g.irPath) && existsSync(g.hexPath));
 
+/**
+ * N-314 (R144): goldens the TS compiler cannot compile because their
+ * `compilers` allowlist excludes ts and TS has no codegen for them (today the
+ * Go-only BN254 pairing). Skipped BY NAME, only when also allowlisted away
+ * from ts, and the skipped set is pinned below so a new one fails loudly.
+ * Every other allowlisted golden is still compiled.
+ */
+const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+
+function excludesTs(name: string): boolean {
+  const sj = join(fixturesDir, name, 'source.json');
+  if (!existsSync(sj)) return false;
+  const cfg = JSON.parse(readFileSync(sj, 'utf8')) as { compilers?: string[] };
+  return Array.isArray(cfg.compilers) && !cfg.compilers.includes('ts');
+}
+
+const skippedNotTs = allGoldens
+  .filter(g => excludesTs(g.name) && EXPECTED_NOT_TS_COMPILABLE.includes(g.name))
+  .map(g => g.name);
+const goldens = allGoldens.filter(g => !skippedNotTs.includes(g.name));
+
 describe('TS --ir loader vs the conformance goldens', () => {
   it('finds the golden corpus', () => {
     // Anti-vacuity: an empty list would make every assertion below a no-op,
     // which is exactly how a path typo hides a regression.
     expect(goldens.length).toBeGreaterThanOrEqual(70);
+  });
+
+  it('skips exactly the expected goldens whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs).toEqual(EXPECTED_NOT_TS_COMPILABLE);
   });
 
   it.each(goldens.map(g => [g.name, g] as const))(

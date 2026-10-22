@@ -379,7 +379,27 @@ describe('Multi-format: stateful contract', () => {
 // ---------------------------------------------------------------------------
 
 describe('Multi-format: Zig conformance', () => {
-  const zigConformanceCases = findZigConformanceCases();
+  // N-314 (R144): the golden-hex cases below compile the Zig surface with the
+  // TS compiler, so a fixture whose allowlist excludes ts AND which TS has no
+  // codegen for (today the Go-only BN254 pairing) cannot run here. Skipped BY
+  // NAME, only when also allowlisted away from ts; the skipped set is pinned
+  // below so a new one fails loudly. Its Zig surface is still parsed by the
+  // all-tier parser-only matrix.
+  const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+  const allZigCases = findZigConformanceCases();
+  const skippedNotTs = allZigCases
+    .filter(c => {
+      const compilers = loadSourceConfig(c.testName).compilers;
+      return Array.isArray(compilers) && !compilers.includes('ts')
+        && EXPECTED_NOT_TS_COMPILABLE.includes(c.testName);
+    })
+    .map(c => c.testName)
+    .sort();
+  const zigConformanceCases = allZigCases.filter(c => !skippedNotTs.includes(c.testName));
+
+  it('skips exactly the expected fixtures whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs).toEqual(EXPECTED_NOT_TS_COMPILABLE);
+  });
 
   it('discovers Zig conformance cases via source.json', () => {
     // Sanity: source.json indirection actually surfaces fixtures. If this
