@@ -42,10 +42,18 @@ pub fn optimize_stack_ops(ops: &[StackOp]) -> Vec<StackOp> {
                 _ => unreachable!("an arm returns to its if-op"),
             };
             match frame.then_done.take() {
-                Some(then_ops) => frame.out.push(StackOp::If { then_ops, else_ops: done }),
-                None if else_ops.is_empty() => {
-                    frame.out.push(StackOp::If { then_ops: done, else_ops: Vec::new() })
-                }
+                Some(then_ops) => frame.out.push(StackOp::If {
+                    then_ops,
+                    else_ops: done,
+                    then_locs: Vec::new(),
+                    else_locs: Vec::new(),
+                }),
+                None if else_ops.is_empty() => frame.out.push(StackOp::If {
+                    then_ops: done,
+                    else_ops: Vec::new(),
+                    then_locs: Vec::new(),
+                    else_locs: Vec::new(),
+                }),
                 None => {
                     frame.then_done = Some(done);
                     let child = new_frame(else_ops);
@@ -102,23 +110,105 @@ pub fn optimize_stack_ops_with_locs(
     ops: &[StackOp],
     source_locs: &[Option<crate::ir::SourceLocation>],
 ) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>) {
-    // Recursive nested-if optimization: inside an If, we keep the outer
-    // location for the IfOp itself; nested ops are optimised without their
-    // own locs (the analyzer treats nested-if peephole as best-effort).
-    let mut current_ops: Vec<StackOp> = ops.iter().map(optimize_nested_if).collect();
-    let mut current_locs: Vec<Option<crate::ir::SourceLocation>> =
-        if source_locs.len() == ops.len() { source_locs.to_vec() } else { vec![None; ops.len()] };
+    // N-222: the same bottom-up, explicit-stack walk as `optimize_stack_ops`
+    // (N-264), but every list — the top level AND each if-arm — is optimized
+    // together with its locations, so an arm op keeps its own statement's
+    // location instead of losing it. A list whose locations are missing or of
+    // the wrong length is treated as unlocated, as the top level always was.
+    type Loc = Option<crate::ir::SourceLocation>;
+    struct Frame<'o> {
+        ops: &'o [StackOp],
+        locs: Vec<Loc>,
+        next: usize,
+        out: Vec<StackOp>,
+        out_locs: Vec<Loc>,
+        then_done: Option<(Vec<StackOp>, Vec<Loc>)>,
+    }
+    fn new_frame<'o>(ops: &'o [StackOp], locs: &[Loc]) -> Frame<'o> {
+        Frame {
+            ops,
+            locs: if locs.len() == ops.len() { locs.to_vec() } else { vec![None; ops.len()] },
+            next: 0,
+            out: Vec::with_capacity(ops.len()),
+            out_locs: Vec::with_capacity(ops.len()),
+            then_done: None,
+        }
+    }
+    let mut stack: Vec<Frame> = vec![new_frame(ops, source_locs)];
+    let mut arm: Option<(Vec<StackOp>, Vec<Loc>)> = None;
+    loop {
+        let top = stack.len() - 1;
+        if let Some((done, done_locs)) = arm.take() {
+            let frame = &mut stack[top];
+            let frame_ops = frame.ops;
+            let idx = frame.next - 1;
+            let (else_ops, else_locs) = match &frame_ops[idx] {
+                StackOp::If { else_ops, else_locs, .. } => (else_ops, else_locs),
+                _ => unreachable!("an arm returns to its if-op"),
+            };
+            let if_loc = frame.locs[idx].clone();
+            match frame.then_done.take() {
+                Some((then_ops, then_locs)) => {
+                    frame.out.push(StackOp::If { then_ops, else_ops: done, then_locs, else_locs: done_locs });
+                    frame.out_locs.push(if_loc);
+                }
+                None if else_ops.is_empty() => {
+                    frame.out.push(StackOp::If {
+                        then_ops: done,
+                        else_ops: Vec::new(),
+                        then_locs: done_locs,
+                        else_locs: Vec::new(),
+                    });
+                    frame.out_locs.push(if_loc);
+                }
+                None => {
+                    frame.then_done = Some((done, done_locs));
+                    let child = new_frame(else_ops, else_locs);
+                    stack.push(child);
+                }
+            }
+            continue;
+        }
+        let frame = &mut stack[top];
+        if frame.next < frame.ops.len() {
+            let frame_ops = frame.ops;
+            let i = frame.next;
+            frame.next += 1;
+            match &frame_ops[i] {
+                StackOp::If { then_ops, then_locs, .. } => {
+                    let child = new_frame(then_ops, then_locs);
+                    stack.push(child);
+                }
+                other => {
+                    frame.out.push(other.clone());
+                    frame.out_locs.push(frame.locs[i].clone());
+                }
+            }
+            continue;
+        }
+        let done = stack.pop().unwrap();
+        let optimized = optimize_one_level_with_locs(done.out, done.out_locs);
+        if stack.is_empty() {
+            return optimized;
+        }
+        arm = Some(optimized);
+    }
+}
 
+/// The fixed-point rule loop over one located op list whose if-arms are done.
+fn optimize_one_level_with_locs(
+    mut ops: Vec<StackOp>,
+    mut locs: Vec<Option<crate::ir::SourceLocation>>,
+) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>) {
     for _ in 0..MAX_ITERATIONS {
-        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(current_ops, &current_locs);
-        current_ops = result_ops;
+        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(ops, &locs);
+        ops = result_ops;
+        locs = result_locs;
         if !changed {
             break;
         }
-        current_locs = result_locs;
     }
-
-    (current_ops, current_locs)
+    (ops, locs)
 }
 
 /// N-264: takes `ops` by value and MOVES each unmatched op into the result.
@@ -185,27 +275,6 @@ fn apply_one_pass_with_locs(
     }
 
     (result_ops, result_locs, changed)
-}
-
-fn optimize_nested_if(op: &StackOp) -> StackOp {
-    match op {
-        StackOp::If {
-            then_ops,
-            else_ops,
-        } => {
-            let optimized_then = optimize_stack_ops(then_ops);
-            let optimized_else = if else_ops.is_empty() {
-                Vec::new()
-            } else {
-                optimize_stack_ops(else_ops)
-            };
-            StackOp::If {
-                then_ops: optimized_then,
-                else_ops: optimized_else,
-            }
-        }
-        other => other.clone(),
-    }
 }
 
 /// N-264: takes `ops` by value; see `apply_one_pass_with_locs`.
@@ -1043,10 +1112,12 @@ mod tests {
                 StackOp::Opcode("OP_VERIFY".to_string()),
             ],
             else_ops: vec![StackOp::Swap, StackOp::Swap],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         }];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 1);
-        if let StackOp::If { then_ops, else_ops } = &result[0] {
+        if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
             assert_eq!(then_ops.len(), 1, "then branch should be optimized");
             assert!(matches!(&then_ops[0], StackOp::Opcode(c) if c == "OP_EQUALVERIFY"));
             assert!(else_ops.is_empty(), "else branch SWAP SWAP should be eliminated");

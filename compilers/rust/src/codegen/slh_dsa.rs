@@ -677,6 +677,8 @@ fn emit_slh_one_chain(
         emit(StackOp::If {
             then_ops: then_ops.clone(),
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 
@@ -951,6 +953,8 @@ fn emit_slh_merkle(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: u
         emit(StackOp::If {
             then_ops: then_branch,
             else_ops: else_branch,
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         // psp(3) ta8(2) kp4(1) authPathRest(1) result(0) | alt: leafIdx
     }
@@ -1162,6 +1166,8 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
             emit(StackOp::If {
                 then_ops: then_branch,
                 else_ops: else_branch,
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
             // psp(4) ta8(3) kp4(2) sigRest(1) result(0)
         }

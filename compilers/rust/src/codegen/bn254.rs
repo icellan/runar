@@ -1092,6 +1092,8 @@ fn bn254_build_jacobian_add_affine_inline(
     (it.e)(StackOp::If {
         then_ops: doubling_ops,
         else_ops: add_ops,
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     it.nm = final_nm;
 }
@@ -1389,6 +1391,8 @@ pub fn emit_bn254_g1_scalar_mul(emit: &mut dyn FnMut(StackOp)) {
         (t.e)(StackOp::If {
             then_ops: add_ops,
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 

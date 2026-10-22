@@ -569,33 +569,66 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
 /// so a chain of D helpers each calling the next under K nested ifs nests D*K
 /// if-ops, too deep for a thread stack. Same opcodes in the same order, and
 /// the first error stops the emission, as before.
+///
+/// N-222: an arm op's location comes from its if-op's `then_locs` /
+/// `else_locs`, with the TS reference's bookkeeping (`06-emit.ts` `emitOps`):
+/// an op's location is set before it when it has one, cleared after it, and
+/// an if-op's OP_ELSE / OP_ENDIF are emitted under whatever location its last
+/// arm op left. The caller sets the location of `root`'s ops. This used to
+/// leave the if-op's location pending across both arms, so every opcode under
+/// an `if` was attributed to the `if` statement.
 fn emit_ops(root: &[StackOp], ctx: &mut EmitContext) -> Result<(), String> {
-    // Each frame: the remaining ops of a list, and — for an if-op's then-arm —
-    // the else-arm still to emit (`None` for the root and for an else-arm).
-    let mut stack: Vec<(std::slice::Iter<'_, StackOp>, Option<Option<&[StackOp]>>)> =
-        vec![(root.iter(), None)];
-    while let Some((ops, arm)) = stack.last_mut() {
-        if let Some(op) = ops.next() {
-            if let StackOp::If { then_ops, else_ops } = op {
+    type Loc = Option<crate::ir::SourceLocation>;
+    // Each frame: the remaining ops of a list with their locations, and — for
+    // an if-op's then-arm — the else-arm still to emit (`None` for the root
+    // and for an else-arm).
+    struct Frame<'o> {
+        ops: std::slice::Iter<'o, StackOp>,
+        locs: &'o [Loc],
+        next: usize,
+        arm: Option<Option<(&'o [StackOp], &'o [Loc])>>,
+    }
+    let mut stack: Vec<Frame<'_>> = vec![Frame { ops: root.iter(), locs: &[], next: 0, arm: None }];
+    while let Some(frame) = stack.last_mut() {
+        if let Some(op) = frame.ops.next() {
+            let i = frame.next;
+            frame.next += 1;
+            if frame.arm.is_some() {
+                if let Some(Some(loc)) = frame.locs.get(i) {
+                    ctx.pending_source_loc = Some(loc.clone());
+                }
+            }
+            if let StackOp::If { then_ops, else_ops, then_locs, else_locs } = op {
                 ctx.emit_opcode("OP_IF")?;
-                stack.push((then_ops.iter(), Some(Some(&else_ops[..]))));
+                let locs: &[Loc] = if then_locs.len() == then_ops.len() { then_locs } else { &[] };
+                let else_locs: &[Loc] = if else_locs.len() == else_ops.len() { else_locs } else { &[] };
+                stack.push(Frame {
+                    ops: then_ops.iter(),
+                    locs,
+                    next: 0,
+                    arm: Some(Some((&else_ops[..], else_locs))),
+                });
             } else {
                 emit_leaf_op(op, ctx)?;
+                ctx.pending_source_loc = None;
             }
             continue;
         }
-        let arm = *arm;
+        let arm = frame.arm;
         stack.pop();
         match arm {
             // The root list.
             None => {}
             // A then-arm, followed by its else-arm when that is non-empty.
-            Some(Some(else_ops)) if !else_ops.is_empty() => {
+            Some(Some((else_ops, else_locs))) if !else_ops.is_empty() => {
                 ctx.emit_opcode("OP_ELSE")?;
-                stack.push((else_ops.iter(), Some(None)));
+                stack.push(Frame { ops: else_ops.iter(), locs: else_locs, next: 0, arm: Some(None) });
             }
-            // The if-op is done.
-            Some(_) => ctx.emit_opcode("OP_ENDIF")?,
+            // The if-op is done: clear its location like any other op's.
+            Some(_) => {
+                ctx.emit_opcode("OP_ENDIF")?;
+                ctx.pending_source_loc = None;
+            }
         }
     }
     Ok(())
@@ -1543,6 +1576,8 @@ mod tests {
             ops: vec![StackOp::If {
                 then_ops: vec![StackOp::Opcode("OP_DROP".to_string())],
                 else_ops: vec![],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             }],
             max_stack_depth: 1,
             source_locs: vec![],

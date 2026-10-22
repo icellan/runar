@@ -35,7 +35,7 @@ fn count_op_tree(ops: &[StackOp]) -> usize {
     let mut total = 0usize;
     for op in ops {
         total += 1;
-        if let StackOp::If { then_ops, else_ops } = op {
+        if let StackOp::If { then_ops, else_ops, .. } = op {
             total += count_op_tree(then_ops);
             total += count_op_tree(else_ops);
         }

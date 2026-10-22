@@ -37,7 +37,7 @@ const POW_EXPONENT_LIMIT: u32 = 32;
 // ---------------------------------------------------------------------------
 
 /// A single stack-machine operation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum StackOp {
     Push(PushValue),
     Dup,
@@ -53,6 +53,13 @@ pub enum StackOp {
     If {
         then_ops: Vec<StackOp>,
         else_ops: Vec<StackOp>,
+        /// N-222: per-op source locations of each arm, parallel to `then_ops`
+        /// / `else_ops` (a method's `source_locs` covers its top-level ops
+        /// only). Empty, or any other length, means "no location" for every
+        /// op of that arm — what a codegen module's literal arms carry, as in
+        /// TS, where only ops lowered from a located ANF binding have one.
+        then_locs: Vec<Option<crate::ir::SourceLocation>>,
+        else_locs: Vec<Option<crate::ir::SourceLocation>>,
     },
     Placeholder {
         param_index: usize,
@@ -104,6 +111,50 @@ pub enum StackOp {
     },
 }
 
+/// Hand-written to render exactly what `#[derive(Debug)]` rendered before
+/// N-222 added `then_locs` / `else_locs`: tests fingerprint lowered ops through
+/// their `{:?}` rendering, and source locations are neither opcodes nor
+/// operands, so they are left out.
+impl std::fmt::Debug for StackOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StackOp::Push(v) => f.debug_tuple("Push").field(v).finish(),
+            StackOp::Dup => f.write_str("Dup"),
+            StackOp::Swap => f.write_str("Swap"),
+            StackOp::Roll { depth } => f.debug_struct("Roll").field("depth", depth).finish(),
+            StackOp::Pick { depth } => f.debug_struct("Pick").field("depth", depth).finish(),
+            StackOp::Drop => f.write_str("Drop"),
+            StackOp::Nip => f.write_str("Nip"),
+            StackOp::Over => f.write_str("Over"),
+            StackOp::Rot => f.write_str("Rot"),
+            StackOp::Tuck => f.write_str("Tuck"),
+            StackOp::Opcode(code) => f.debug_tuple("Opcode").field(code).finish(),
+            StackOp::If { then_ops, else_ops, .. } => f
+                .debug_struct("If")
+                .field("then_ops", then_ops)
+                .field("else_ops", else_ops)
+                .finish(),
+            StackOp::Placeholder { param_index, param_name } => f
+                .debug_struct("Placeholder")
+                .field("param_index", param_index)
+                .field("param_name", param_name)
+                .finish(),
+            StackOp::PushCodeSepIndex => f.write_str("PushCodeSepIndex"),
+            StackOp::VerifyCodePartLen { delta, exact } => f
+                .debug_struct("VerifyCodePartLen")
+                .field("delta", delta)
+                .field("exact", exact)
+                .finish(),
+            StackOp::RawBytes { bytes, in_arity, out_arity } => f
+                .debug_struct("RawBytes")
+                .field("bytes", bytes)
+                .field("in_arity", in_arity)
+                .field("out_arity", out_arity)
+                .finish(),
+        }
+    }
+}
+
 /// N-264: an if-op's arms are dropped on an explicit work list. The derived
 /// drop glue recursed once per nested if-op, and private methods are inlined,
 /// so a chain of D helpers that each call the next under K nested ifs nests
@@ -111,14 +162,14 @@ pub enum StackOp {
 /// own, after the iterative lowering had built it.
 impl Drop for StackOp {
     fn drop(&mut self) {
-        let StackOp::If { then_ops, else_ops } = self else { return };
+        let StackOp::If { then_ops, else_ops, .. } = self else { return };
         if then_ops.is_empty() && else_ops.is_empty() {
             return;
         }
         let mut work = vec![std::mem::take(then_ops), std::mem::take(else_ops)];
         while let Some(mut list) = work.pop() {
             for op in list.iter_mut() {
-                if let StackOp::If { then_ops, else_ops } = op {
+                if let StackOp::If { then_ops, else_ops, .. } = op {
                     work.push(std::mem::take(then_ops));
                     work.push(std::mem::take(else_ops));
                 }
@@ -3058,6 +3109,10 @@ impl LoweringContext {
         protected_refs: HashSet<String>,
         terminal_assert: bool,
     ) -> LoweringContext {
+        // N-222: the arm's statements are done; what follows is reconcile
+        // bookkeeping that belongs to none of them (TS clears the location
+        // after every binding).
+        then_ctx.current_source_loc = None;
         then_ctx.drain_branch_private_residue(pre_if_names);
 
         if terminal_assert && then_ctx.sm.depth() > 1 {
@@ -3103,6 +3158,7 @@ impl LoweringContext {
         mut then_ctx: LoweringContext,
         mut else_ctx: LoweringContext,
     ) {
+        else_ctx.current_source_loc = None; // N-222, see lower_if_mid
         else_ctx.drain_branch_private_residue(pre_if_names);
 
         if terminal_assert && else_ctx.sm.depth() > 1 {
@@ -3354,6 +3410,8 @@ impl LoweringContext {
         let then_ops = then_ctx.ops;
         let else_ops = else_ctx.ops;
 
+        // N-222: the arms keep their own per-op locations, so each body op is
+        // attributed to its own statement rather than to the enclosing `if`.
         self.emit_op(StackOp::If {
             then_ops,
             else_ops: if else_ops.is_empty() {
@@ -3361,6 +3419,8 @@ impl LoweringContext {
             } else {
                 else_ops
             },
+            then_locs: then_ctx.source_locs,
+            else_locs: else_ctx.source_locs,
         });
 
         // Physical slots this function drops AFTER OP_ENDIF, while reconciling
@@ -5576,6 +5636,8 @@ impl LoweringContext {
                     StackOp::Swap,
                 ],
                 else_ops: vec![],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
         }
 
@@ -5701,6 +5763,8 @@ impl LoweringContext {
                 StackOp::Opcode("OP_DIV".to_string()),
             ],
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
 
         self.sm.push(binding_name);
@@ -6469,6 +6533,8 @@ impl LoweringContext {
                     StackOp::Opcode("OP_MUL".to_string()),           // exp base (acc*base)
                 ],
                 else_ops: vec![],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
         }
         // Stack: exp base result
@@ -6662,7 +6728,9 @@ impl LoweringContext {
 
         self.emit_op(StackOp::If {
             then_ops: newton_ops,
-            else_ops: vec![],  // n == 0, result is already 0 on stack
+            else_ops: vec![],  // n == 0, result is already 0 on stack,
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
 
         self.sm.push(binding_name);
@@ -6718,6 +6786,8 @@ impl LoweringContext {
                 else_ops: vec![
                     // Stack: a b (b == 0), just keep as-is
                 ],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
         }
 
@@ -6974,7 +7044,7 @@ fn collect_code_part_len_inputs(ops: &[StackOp], placeholders: &mut Vec<usize>, 
             continue;
         };
         match op {
-            StackOp::If { then_ops, else_ops } => {
+            StackOp::If { then_ops, else_ops, .. } => {
                 stack.push(else_ops.iter());
                 stack.push(then_ops.iter());
             }
@@ -6993,7 +7063,7 @@ fn assign_code_part_len(ops: &mut [StackOp], new_delta: i64, new_exact: bool) {
     while let Some(list) = work.pop() {
         for op in list.iter_mut() {
             match op {
-                StackOp::If { then_ops, else_ops } => {
+                StackOp::If { then_ops, else_ops, .. } => {
                     work.push(else_ops);
                     work.push(then_ops);
                 }
@@ -7576,7 +7646,7 @@ mod tests {
         for op in ops {
             match op {
                 StackOp::Opcode(code) => result.push(code.clone()),
-                StackOp::If { then_ops, else_ops } => {
+                StackOp::If { then_ops, else_ops, .. } => {
                     result.push("OP_IF".to_string());
                     result.extend(collect_all_opcodes(then_ops));
                     result.push("OP_ELSE".to_string());
@@ -7600,7 +7670,7 @@ mod tests {
 
     fn collect_opcodes_in_if_branches(ops: &[StackOp]) -> (Vec<String>, Vec<String>) {
         for op in ops {
-            if let StackOp::If { then_ops, else_ops } = op {
+            if let StackOp::If { then_ops, else_ops, .. } = op {
                 return (collect_all_opcodes(then_ops), collect_all_opcodes(else_ops));
             }
         }
@@ -8642,7 +8712,7 @@ mod tests {
                             max_depth
                         );
                     }
-                    StackOp::If { then_ops, else_ops } => {
+                    StackOp::If { then_ops, else_ops, .. } => {
                         check_ops(then_ops, max_depth);
                         check_ops(else_ops, max_depth);
                     }
@@ -8800,7 +8870,7 @@ mod tests {
             let mut count = 0;
             for op in ops {
                 match op {
-                    StackOp::If { then_ops, else_ops } => {
+                    StackOp::If { then_ops, else_ops, .. } => {
                         count += 1;
                         count += count_if_ops(then_ops);
                         count += count_if_ops(else_ops);

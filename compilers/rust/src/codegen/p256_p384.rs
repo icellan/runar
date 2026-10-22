@@ -1161,6 +1161,8 @@ fn c_emit_mul(
         (t.e)(StackOp::If {
             then_ops: add_ops,
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 
@@ -1340,7 +1342,7 @@ fn c_decompress_pub_key(
 
     let then_ops = vec![StackOp::Drop]; // remove neg_y, leaving y_cand
     let else_ops = vec![StackOp::Nip];  // remove y_cand, leaving neg_y
-    (t.e)(StackOp::If { then_ops, else_ops });
+    (t.e)(StackOp::If { then_ops, else_ops, then_locs: Vec::new(), else_locs: Vec::new() });
 
     // Remove one from tracker and rename the surviving item
     if let Some(neg_idx) = t.nm.iter().rposition(|n| n == "_dk_neg_y") {
@@ -1788,6 +1790,8 @@ pub fn emit_p256_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
         else_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x02]))],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     // Stack: [x_bytes, prefix_byte]
     emit(StackOp::Swap);
@@ -1907,6 +1911,8 @@ pub fn emit_p384_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
         else_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x02]))],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     // Stack: [x_bytes, prefix_byte]
     emit(StackOp::Swap);

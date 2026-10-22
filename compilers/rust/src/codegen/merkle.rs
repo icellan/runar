@@ -132,6 +132,8 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
             ],
             // direction = 0: want hash(current || sibling), already in order
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         // Stack: [a, b] where a||b is the correct concatenation order
 

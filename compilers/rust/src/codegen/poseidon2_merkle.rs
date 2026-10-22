@@ -154,6 +154,8 @@ pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
             ],
             // bit==0: already in correct order [current(8), sibling(8)]
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         // Stack: [..., future_sibs, left(8), right(8)]
 

@@ -238,6 +238,8 @@ impl<'a> ECTracker<'a> {
         (self.e)(StackOp::If {
             then_ops,
             else_ops,
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         if let Some(rn) = result_name {
             self.nm.push(rn.to_string());
@@ -1338,6 +1340,8 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
         (t.e)(StackOp::If {
             then_ops: add_ops,
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 
@@ -1488,6 +1492,8 @@ pub fn emit_ec_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
         else_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x02]))],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     // Stack: [x_bytes, prefix_byte]
     emit(StackOp::Swap);
