@@ -19,6 +19,16 @@ const std = @import("std");
 
 const conformance_base = "../../conformance/tests/";
 
+// N-389 (R145, "named set, keep coverage"): fixtures Zig is EXPECTED to
+// refuse. Zig refuses the BN254 pairing family (bn254MultiPairing4) by
+// policy. A fixture is skipped only when it is named here AND its
+// source.json allowlist excludes zig. Every other fixture, including the
+// Go-only ones Zig compiles byte-identically today (babybear,
+// babybear-ext4, merkle-proof, state-covenant), is compiled and
+// byte-checked, and a refusal there is a failure. Mirrors the Python
+// harness's EXPECTED_NOT_PYTHON_COMPILABLE (N-387).
+const EXPECTED_NOT_ZIG_COMPILABLE = [_][]const u8{"bn254-pairing"};
+
 /// Resolve a path to the built runar-zig binary.
 /// Preference: RUNAR_ZIG_BIN env var, then zig-out/bin/runar-zig, then PATH.
 fn resolveZigBinary(allocator: std.mem.Allocator) ![]const u8 {
@@ -112,6 +122,8 @@ fn findZigSource(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8)
 ///
 /// Returns true (allowed) when `source.json` is absent/unreadable/malformed,
 /// when it has no `compilers` field, or when that field includes "zig".
+/// N-389: a `compilers` value that is not a list of strings fails closed
+/// (`error.InvalidCompilersAllowlist`) instead of counting as "no allowlist".
 fn fixtureAllowlistedForZig(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !bool {
     const config_path = try std.fmt.allocPrint(allocator, "{s}/source.json", .{test_dir});
     defer allocator.free(config_path);
@@ -127,19 +139,38 @@ fn fixtureAllowlistedForZig(allocator: std.mem.Allocator, io: std.Io, test_dir: 
             const compilers_val = root.get("compilers") orelse return true;
             switch (compilers_val) {
                 .array => |arr| {
+                    var found = false;
                     for (arr.items) |item| {
                         switch (item) {
-                            .string => |s| if (std.mem.eql(u8, s, "zig")) return true,
-                            else => {},
+                            .string => |s| if (std.mem.eql(u8, s, "zig")) {
+                                found = true;
+                            },
+                            else => return error.InvalidCompilersAllowlist,
                         }
                     }
-                    return false;
+                    return found;
                 },
-                else => return true,
+                else => return error.InvalidCompilersAllowlist,
             }
         },
         else => return true,
     }
+}
+
+/// Independent (raw source.json) check that the allowlist excludes zig.
+/// Deliberately does not go through `fixtureAllowlistedForZig`.
+fn excludesZigRaw(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !bool {
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/source.json", .{test_dir});
+    defer allocator.free(config_path);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 * 1024 * 1024));
+    defer allocator.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const list = parsed.value.object.get("compilers") orelse return false;
+    for (list.array.items) |item| {
+        if (std.mem.eql(u8, item.string, "zig")) return false;
+    }
+    return true;
 }
 
 /// Run the Zig compiler binary with the given flags.
@@ -328,6 +359,9 @@ const FailureKind = enum {
     script_mismatch,
     missing_golden_ir,
     missing_golden_hex,
+    // N-389: a fixture named in EXPECTED_NOT_ZIG_COMPILABLE whose
+    // source.json allowlist does not exclude zig.
+    stale_expected_not_compilable,
 };
 
 const Failure = struct {
@@ -354,8 +388,12 @@ const ClassifyOutcome = struct {
 /// risking the real conformance corpus.
 ///
 /// N-124 fix (porting F-151's scan semantics):
-///   - A fixture whose source.json `compilers` allowlist excludes "zig" is
-///     SKIPPED outright.
+///   - N-389 (R145): a fixture is SKIPPED only when it is named in
+///     `not_compilable` AND its source.json `compilers` allowlist excludes
+///     "zig". A named fixture whose allowlist does not exclude zig is a
+///     `.stale_expected_not_compilable` FAILURE. An unnamed fixture is
+///     always compiled and byte-checked, even when its allowlist excludes
+///     zig.
 ///   - Any other fixture with no resolvable `.runar.zig` source is a
 ///     FAILURE (kind `.missing_source`). Before this fix, such fixtures
 ///     were appended only to a `missing` list that the aggregate test
@@ -372,10 +410,18 @@ fn classifyFixture(
     binary: []const u8,
     test_dir: []const u8,
     name: []const u8,
+    not_compilable: []const []const u8,
 ) !ClassifyOutcome {
     const allowlisted = try fixtureAllowlistedForZig(allocator, io, test_dir);
-    if (!allowlisted) {
-        return .{ .skipped = true };
+    for (not_compilable) |n| {
+        if (!std.mem.eql(u8, n, name)) continue;
+        if (!allowlisted) return .{ .skipped = true };
+        const detail = try std.fmt.allocPrint(
+            allocator,
+            "fixture '{s}' is named in EXPECTED_NOT_ZIG_COMPILABLE but its source.json allowlist does not exclude zig",
+            .{name},
+        );
+        return .{ .failure = .{ .name = name, .kind = .stale_expected_not_compilable, .detail = detail } };
     }
 
     const source_opt = try findZigSource(allocator, io, test_dir);
@@ -560,7 +606,7 @@ test "conformance-goldens: zig compiler produces byte-identical output for all f
         const test_dir = try std.fmt.allocPrint(allocator, "{s}{s}", .{ conformance_base, name });
         defer allocator.free(test_dir);
 
-        const outcome = try classifyFixture(allocator, io, binary, test_dir, name);
+        const outcome = try classifyFixture(allocator, io, binary, test_dir, name, &EXPECTED_NOT_ZIG_COMPILABLE);
         if (outcome.skipped) {
             try skipped.append(allocator, name);
         } else if (outcome.failure) |f| {
@@ -612,6 +658,31 @@ test "conformance-goldens: zig compiler produces byte-identical output for all f
     if (failures.items.len > 0) {
         std.debug.print("\n{d} of {d} fixtures failed conformance-goldens\n", .{ failures.items.len, total });
         return error.ConformanceGoldensFailed;
+    }
+
+    // N-389: the skipped set must be exactly the named set (names are in
+    // sorted order on both sides), and passed + skipped must account for
+    // every fixture.
+    try std.testing.expectEqual(EXPECTED_NOT_ZIG_COMPILABLE.len, skipped.items.len);
+    for (EXPECTED_NOT_ZIG_COMPILABLE, 0..) |n, k| {
+        try std.testing.expectEqualStrings(n, skipped.items[k]);
+    }
+    try std.testing.expectEqual(total, passed.items.len + skipped.items.len);
+    for (EXPECTED_NOT_ZIG_COMPILABLE) |n| {
+        var known = false;
+        for (fixture_names.items) |f| {
+            if (std.mem.eql(u8, f, n)) known = true;
+        }
+        if (!known) {
+            std.debug.print("EXPECTED_NOT_ZIG_COMPILABLE names unknown fixture '{s}'\n", .{n});
+            return error.UnknownExpectedNotCompilableFixture;
+        }
+        const named_dir = try std.fmt.allocPrint(allocator, "{s}{s}", .{ conformance_base, n });
+        defer allocator.free(named_dir);
+        if (!try excludesZigRaw(allocator, io, named_dir)) {
+            std.debug.print("'{s}' allowlist does not exclude zig\n", .{n});
+            return error.StaleExpectedNotCompilableEntry;
+        }
     }
 }
 
@@ -687,7 +758,7 @@ test "conformance-goldens: classifyFixture fails on a fixture with no .runar.zig
     defer allocator.free(dir);
     // No source.json, no *.runar.zig file written into `dir`.
 
-    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-missing-source");
+    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-missing-source", &.{});
     defer freeOutcome(allocator, outcome);
 
     if (outcome.failure == null) {
@@ -701,7 +772,8 @@ test "conformance-goldens: classifyFixture fails on a fixture with no .runar.zig
 }
 
 // What this proves: classifyFixture SKIPS (not fails) a fixture whose
-// source.json `compilers` allowlist excludes "zig" -- mirroring the Rust
+// source.json `compilers` allowlist excludes "zig" AND which is named as
+// expected-not-compilable (N-389) -- mirroring the Rust
 // harness's fixture_allowlisted_for_rust (F-285) and the Ruby harness's
 // read_compiler_allowlist (F-151). Without this, treating every
 // missing-source fixture as a failure (the fix above) would wrongly fail a
@@ -725,7 +797,7 @@ test "conformance-goldens: classifyFixture skips an allowlist-excluded fixture w
     defer n124DeleteFile(io, dir, "source.json");
     // No *.runar.zig file -- legitimate, since the allowlist excludes zig.
 
-    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-allowlist-excluded");
+    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-allowlist-excluded", &[_][]const u8{"n124-allowlist-excluded"});
     defer freeOutcome(allocator, outcome);
 
     if (outcome.failure != null) {
@@ -761,7 +833,7 @@ test "conformance-goldens: classifyFixture fails on a fixture with no expected-i
     defer n124DeleteFile(io, dir, "P2PKH.runar.zig");
     // expected-ir.json and expected-script.hex deliberately absent.
 
-    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-missing-golden-ir");
+    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-missing-golden-ir", &.{});
     defer freeOutcome(allocator, outcome);
 
     if (outcome.failure == null) {
@@ -805,7 +877,7 @@ test "conformance-goldens: classifyFixture fails on a fixture with no expected-s
     defer n124DeleteFile(io, dir, "expected-ir.json");
     // expected-script.hex deliberately absent.
 
-    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-missing-golden-hex");
+    const outcome = try classifyFixture(allocator, io, binary, dir, "n124-missing-golden-hex", &.{});
     defer freeOutcome(allocator, outcome);
 
     if (outcome.failure == null) {
@@ -837,3 +909,87 @@ const N124_P2PKH_SOURCE =
     \\};
     \\
 ;
+
+// ============================================================================
+// N-389 (R145): the sweep used to skip EVERY allowlist-excluded fixture,
+// dropping the byte check on Go-only fixtures Zig compiles in agreement
+// with Go, and treated a non-list `compilers` value as "no allowlist".
+// Exercised against synthetic, throwaway fixture directories only.
+// ============================================================================
+
+// What this proves: an allowlist-excluded fixture that is NOT named in the
+// not-compilable set is attempted, not skipped (here it has no source, so it
+// surfaces as .missing_source).
+//
+// What this does not prove: the byte comparison for such a fixture (the
+// real-corpus sweep covers babybear, babybear-ext4, merkle-proof and
+// state-covenant).
+test "conformance-goldens: classifyFixture compiles an excluded but unnamed fixture" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const binary = try resolveZigBinary(allocator);
+    defer allocator.free(binary);
+
+    const dir = try n124ScratchDir(allocator, io, "n389-unnamed");
+    defer allocator.free(dir);
+    try n124WriteFile(io, dir, "source.json", "{\"compilers\":[\"go\"]}");
+    defer n124DeleteFile(io, dir, "source.json");
+
+    const outcome = try classifyFixture(allocator, io, binary, dir, "n389-unnamed", &.{});
+    defer freeOutcome(allocator, outcome);
+
+    if (outcome.skipped) return error.UnnamedExcludedFixtureWasSkipped;
+    if (outcome.failure == null or outcome.failure.?.kind != .missing_source) {
+        std.debug.print("want failure kind missing_source, got {any}\n", .{outcome});
+        return error.WrongOutcome;
+    }
+}
+
+// What this proves: a named fixture whose allowlist does NOT exclude zig is
+// a .stale_expected_not_compilable failure, not a skip.
+//
+// What this does not prove: that the named set matches what zig refuses
+// today (the real-corpus sweep asserts that).
+test "conformance-goldens: classifyFixture flags a stale named entry" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const binary = try resolveZigBinary(allocator);
+    defer allocator.free(binary);
+
+    const dir = try n124ScratchDir(allocator, io, "n389-stale");
+    defer allocator.free(dir);
+    try n124WriteFile(io, dir, "source.json", "{\"compilers\":[\"go\",\"zig\"]}");
+    defer n124DeleteFile(io, dir, "source.json");
+
+    const outcome = try classifyFixture(allocator, io, binary, dir, "n389-stale", &[_][]const u8{"n389-stale"});
+    defer freeOutcome(allocator, outcome);
+
+    if (outcome.skipped) return error.StaleNamedEntryWasSkipped;
+    if (outcome.failure == null or outcome.failure.?.kind != .stale_expected_not_compilable) {
+        std.debug.print("want failure kind stale_expected_not_compilable, got {any}\n", .{outcome});
+        return error.WrongOutcome;
+    }
+}
+
+// What this proves: a non-list `compilers` value fails closed
+// (error.InvalidCompilersAllowlist) instead of being treated as "no
+// allowlist".
+//
+// What this does not prove: that the real corpus has such a value (it does
+// not).
+test "conformance-goldens: a non-list compilers value fails closed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const binary = try resolveZigBinary(allocator);
+    defer allocator.free(binary);
+
+    const dir = try n124ScratchDir(allocator, io, "n389-non-list");
+    defer allocator.free(dir);
+    try n124WriteFile(io, dir, "source.json", "{\"compilers\":\"go\"}");
+    defer n124DeleteFile(io, dir, "source.json");
+
+    try std.testing.expectError(
+        error.InvalidCompilersAllowlist,
+        classifyFixture(allocator, io, binary, dir, "n389-non-list", &.{}),
+    );
+}

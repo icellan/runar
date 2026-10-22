@@ -22,6 +22,7 @@ import org.junit.jupiter.api.io.TempDir;
 import runar.compiler.canonical.Jcs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -37,9 +38,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * resulting hex and IR match {@code expected-script.hex} /
  * {@code expected-ir.json} byte-for-byte.
  *
- * <p>Fixtures that carry a per-fixture {@code compilers} allowlist which
- * does not include {@code "java"} are skipped (these are scoped-out tiers
- * by project policy, e.g. Go-only EVM/STARK proof-system primitives).
+ * <p><strong>N-389 (R145, "named set, keep coverage"):</strong> a fixture
+ * whose per-fixture {@code compilers} allowlist does not include
+ * {@code "java"} is skipped ONLY when it is also named in
+ * {@link #EXPECTED_NOT_JAVA_COMPILABLE}; every other fixture is compiled and
+ * byte-checked even when its allowlist excludes java.
  *
  * <p>Before this test, Java's golden + cross-tier byte parity was enforced
  * only via the external {@code conformance/runner} daemon; if that CI step
@@ -79,6 +82,19 @@ class ConformanceGoldensTest {
         Pattern.compile("\"parserSkip\"\\s*:\\s*\\[([^\\]]*)]");
     private static final Pattern JAVA_SOURCE =
         Pattern.compile("\"\\.runar\\.java\"\\s*:\\s*\"([^\"]+)\"");
+
+    /**
+     * N-389 (R145): fixtures Java is EXPECTED to refuse. Java carries no
+     * codegen for the Go-only EVM/STARK proof-system families: it refuses
+     * with "Java tier carries partial port only" for BabyBear
+     * (babybear, babybear-ext4, state-covenant), the sha256-Merkle family
+     * (merkle-proof) and the BN254/Groth16 family (bn254-pairing). A fixture
+     * is skipped only when it is named here AND its source.json allowlist
+     * excludes java. Mirrors the Python harness's
+     * EXPECTED_NOT_PYTHON_COMPILABLE (N-387); sorted.
+     */
+    private static final List<String> EXPECTED_NOT_JAVA_COMPILABLE = List.of(
+        "babybear", "babybear-ext4", "bn254-pairing", "merkle-proof", "state-covenant");
 
     @Test
     void allFixturesProduceByteIdenticalHex() throws IOException {
@@ -128,6 +144,31 @@ class ConformanceGoldensTest {
         // Sanity: ensure we actually exercised at least one fixture.
         assertTrue(!passed.isEmpty(),
                    "no fixtures passed — check that conformance/tests is populated");
+
+        // N-389: the allowlist-skipped set must be exactly the named set
+        // (any other skip must be a documented parserSkip), every named
+        // entry must exist and really exclude java in its raw source.json,
+        // and passed + skipped must account for every fixture.
+        List<String> allowlistSkipped = new ArrayList<>();
+        for (String name : skipped) {
+            String body = Files.readString(conformanceDir.resolve(name).resolve("source.json"));
+            if (EXPECTED_NOT_JAVA_COMPILABLE.contains(name)) {
+                allowlistSkipped.add(name);
+            } else {
+                assertTrue(isJavaParserSkipped(body),
+                    "fixture '" + name + "' was skipped but is neither named in "
+                    + "EXPECTED_NOT_JAVA_COMPILABLE nor parserSkip-excluded");
+            }
+        }
+        assertEquals(EXPECTED_NOT_JAVA_COMPILABLE, allowlistSkipped);
+        for (String name : EXPECTED_NOT_JAVA_COMPILABLE) {
+            Path configPath = conformanceDir.resolve(name).resolve("source.json");
+            assertTrue(Files.exists(configPath),
+                "EXPECTED_NOT_JAVA_COMPILABLE names unknown fixture '" + name + "'");
+            assertTrue(excludesJavaRaw(Files.readString(configPath)),
+                "'" + name + "' allowlist does not exclude java");
+        }
+        assertEquals(fixtures.size(), passed.size() + skipped.size());
     }
 
     private enum Kind { PASSED, SKIPPED, FAILED }
@@ -143,6 +184,18 @@ class ConformanceGoldensTest {
      * risking the real conformance corpus.
      */
     private static FixtureOutcome classifyFixture(Path fixtureDir) throws IOException {
+        return classifyFixture(fixtureDir, EXPECTED_NOT_JAVA_COMPILABLE);
+    }
+
+    /**
+     * N-389 (R145): a fixture is SKIPPED on the allowlist only when it is
+     * named in {@code notCompilable} AND its {@code compilers} allowlist
+     * excludes java. A named fixture whose allowlist does not exclude java is
+     * a {@code stale-expected-not-compilable} failure. An unnamed fixture is
+     * always compiled, even when its allowlist excludes java.
+     */
+    private static FixtureOutcome classifyFixture(Path fixtureDir, List<String> notCompilable)
+            throws IOException {
         String name = fixtureDir.getFileName().toString();
         Path configPath = fixtureDir.resolve("source.json");
         if (!Files.exists(configPath)) {
@@ -151,10 +204,16 @@ class ConformanceGoldensTest {
         }
         String configBody = Files.readString(configPath);
 
-        // Per-fixture compilers allowlist (IR/hex parity scope): skip if
-        // java is excluded.
-        if (!isJavaAllowed(configBody)) {
-            return new FixtureOutcome(name, Kind.SKIPPED, null);
+        // Per-fixture compilers allowlist (IR/hex parity scope): skip only
+        // a NAMED fixture that excludes java (N-389).
+        boolean javaAllowed = isJavaAllowed(configBody);
+        if (notCompilable.contains(name)) {
+            if (!javaAllowed) {
+                return new FixtureOutcome(name, Kind.SKIPPED, null);
+            }
+            return new FixtureOutcome(name, Kind.FAILED,
+                "stale-expected-not-compilable: fixture '" + name
+                + "' is named in EXPECTED_NOT_JAVA_COMPILABLE but its source.json allowlist does not exclude java");
         }
 
         // Per-fixture parser opt-out (frontend-parity scope, a sibling of
@@ -238,15 +297,33 @@ class ConformanceGoldensTest {
      * explicitly includes {@code "java"}.
      */
     private static boolean isJavaAllowed(String configBody) {
-        Matcher m = COMPILERS_ARR.matcher(configBody);
-        if (!m.find()) return true; // no allowlist ⇒ all tiers required
-        String body = m.group(1);
-        // Parse the array entries as quoted strings.
-        Matcher tier = Pattern.compile("\"([^\"]+)\"").matcher(body);
-        while (tier.find()) {
-            if ("java".equals(tier.group(1))) return true;
+        Object cfg = MiniJson.parse(configBody);
+        if (!(cfg instanceof Map<?, ?> map) || !map.containsKey("compilers")) {
+            return true; // no allowlist ⇒ all tiers required
         }
-        return false;
+        // N-389: fail closed. A `compilers` value that is not a list of
+        // strings used to be treated as "no allowlist", silently admitting
+        // the fixture.
+        Object list = map.get("compilers");
+        if (!(list instanceof List<?> entries) || !entries.stream().allMatch(e -> e instanceof String)) {
+            throw new IllegalStateException(
+                "source.json 'compilers' must be a list of strings, got " + list);
+        }
+        return entries.contains("java");
+    }
+
+    /**
+     * Independent (raw regex) check that the allowlist excludes java.
+     * Deliberately does not go through {@link #isJavaAllowed}.
+     */
+    private static boolean excludesJavaRaw(String configBody) {
+        Matcher m = COMPILERS_ARR.matcher(configBody);
+        if (!m.find()) return false;
+        Matcher tier = Pattern.compile("\"([^\"]+)\"").matcher(m.group(1));
+        while (tier.find()) {
+            if ("java".equals(tier.group(1))) return false;
+        }
+        return true;
     }
 
     /**
@@ -601,7 +678,7 @@ class ConformanceGoldensTest {
         // No .runar.java entry, no .runar.java file — legitimate, since the
         // allowlist excludes java for this fixture.
 
-        FixtureOutcome outcome = classifyFixture(tmp);
+        FixtureOutcome outcome = classifyFixture(tmp, List.of(tmp.getFileName().toString()));
 
         assertEquals(Kind.SKIPPED, outcome.kind(),
             "an allowlist-excluded fixture must be skipped, not failed: " + outcome);
@@ -619,6 +696,49 @@ class ConformanceGoldensTest {
      * reason distinct from the IR/hex-only {@code compilers} allowlist, so
      * it needed its own skip path rather than being folded into a failure.
      */
+    /**
+     * N-389 (R145). What these three tests prove: an allowlist-excluded
+     * fixture that is NOT named in the not-compilable set is attempted, not
+     * skipped (here it has no source, so it surfaces as missing-source); a
+     * named fixture whose allowlist does not exclude java is a
+     * stale-expected-not-compilable failure; and a non-list {@code compilers}
+     * value fails closed.
+     *
+     * <p>What they do not prove: the byte comparison for such a fixture
+     * (java refuses every Go-only fixture today, so the real-corpus sweep
+     * names all five); the real corpus has no non-list {@code compilers}
+     * value.
+     */
+    @Test
+    void classifyFixtureCompilesAllowlistExcludedButUnnamedFixture(@TempDir Path tmp) throws IOException {
+        Files.writeString(tmp.resolve("source.json"), "{\"compilers\":[\"go\"]}");
+
+        FixtureOutcome outcome = classifyFixture(tmp);
+
+        assertEquals(Kind.FAILED, outcome.kind(),
+            "an allowlist-excluded fixture that is not named must be attempted, not skipped: " + outcome);
+        assertTrue(outcome.detail().startsWith("missing-source"),
+            "expected a missing-source failure, got: " + outcome.detail());
+    }
+
+    @Test
+    void classifyFixtureFlagsStaleNamedEntry(@TempDir Path tmp) throws IOException {
+        Files.writeString(tmp.resolve("source.json"), "{\"compilers\":[\"go\",\"java\"]}");
+
+        FixtureOutcome outcome = classifyFixture(tmp, List.of(tmp.getFileName().toString()));
+
+        assertEquals(Kind.FAILED, outcome.kind());
+        assertTrue(outcome.detail().startsWith("stale-expected-not-compilable"),
+            "expected a stale-expected-not-compilable failure, got: " + outcome.detail());
+    }
+
+    @Test
+    void classifyFixtureFailsClosedOnNonListCompilers(@TempDir Path tmp) throws IOException {
+        Files.writeString(tmp.resolve("source.json"), "{\"compilers\":\"go\"}");
+
+        assertThrows(IllegalStateException.class, () -> classifyFixture(tmp));
+    }
+
     @Test
     void classifyFixtureSkipsParserSkipExcludedFixtureWithNoSource(@TempDir Path tmp) throws IOException {
         Files.writeString(tmp.resolve("source.json"),

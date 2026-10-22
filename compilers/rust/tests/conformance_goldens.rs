@@ -18,6 +18,16 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// N-389 (R145, "named set, keep coverage"): fixtures Rust is EXPECTED to
+// refuse. Rust refuses the BN254 pairing family (bn254MultiPairing4) by
+// policy. A fixture is skipped only when it is named here AND its
+// source.json allowlist excludes rust. Every other fixture, including the
+// Go-only ones Rust compiles byte-identically today (babybear,
+// babybear-ext4, merkle-proof, state-covenant), is compiled and
+// byte-checked, and a refusal there is a failure. Mirrors the Python
+// harness's EXPECTED_NOT_PYTHON_COMPILABLE (N-387).
+const EXPECTED_NOT_RUST_COMPILABLE: &[&str] = &["bn254-pairing"];
+
 fn conformance_tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -110,6 +120,9 @@ enum FixtureOutcome {
     // is a failure, not a silent pass. See `compare_goldens` below.
     MissingGoldenIr,
     MissingGoldenHex,
+    // N-389: a fixture named in EXPECTED_NOT_RUST_COMPILABLE whose
+    // source.json allowlist does not exclude rust.
+    StaleExpectedNotCompilable,
     IrMismatch { expected: String, actual: String },
     ScriptMismatch { expected: String, actual: String },
 }
@@ -131,24 +144,115 @@ fn is_fixture_failure(outcome: &FixtureOutcome) -> bool {
 /// enforced elsewhere). See `conformance/README.md` ⇒ "Per-fixture compiler
 /// allowlist".
 fn fixture_allowlisted_for_rust(test_dir: &Path) -> bool {
+    match read_compiler_allowlist(test_dir) {
+        None => true,
+        Some(list) => list.iter().any(|s| s == "rust"),
+    }
+}
+
+/// Return the fixture's `source.json` `compilers` allowlist, or `None` when
+/// absent (= all compilers). Mirrors
+/// `conformance/runner/runner.ts::readFixtureCompilerAllowlist`.
+///
+/// N-217: a read or parse error panics (fail loud) rather than being
+/// swallowed as "no allowlist declared". N-389: a `compilers` value that is
+/// not a list of strings also panics -- it used to fall into `_ => true` and
+/// silently admit the fixture.
+fn read_compiler_allowlist(test_dir: &Path) -> Option<Vec<String>> {
     let config_path = test_dir.join("source.json");
     if !config_path.exists() {
-        return true;
+        return None;
     }
-    // N-217: fail loud (see find_rust_source above). A read or parse
-    // error here used to be swallowed (`Err(_) => return true`) and
-    // treated as "no allowlist declared", silently admitting the fixture
-    // instead of surfacing the real cause.
     let raw = fs::read_to_string(&config_path)
         .unwrap_or_else(|e| panic!("read {}: {}", config_path.display(), e));
     let cfg: Value = serde_json::from_str(&raw)
         .unwrap_or_else(|e| panic!("parse {}: {}", config_path.display(), e));
     match cfg.get("compilers") {
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .any(|v| v.as_str().map(|s| s == "rust").unwrap_or(false)),
-        _ => true,
+        None => None,
+        Some(Value::Array(arr)) => Some(
+            arr.iter()
+                .map(|v| {
+                    v.as_str().map(str::to_string).unwrap_or_else(|| {
+                        panic!(
+                            "{}: 'compilers' must be a list of strings, got {}",
+                            config_path.display(),
+                            cfg["compilers"]
+                        )
+                    })
+                })
+                .collect(),
+        ),
+        Some(other) => panic!(
+            "{}: 'compilers' must be a list of strings, got {}",
+            config_path.display(),
+            other
+        ),
     }
+}
+
+/// Independent (raw `source.json`) check that the allowlist excludes rust.
+/// Deliberately does not go through `read_compiler_allowlist`.
+fn excludes_rust_raw(test_dir: &Path) -> bool {
+    let config_path = test_dir.join("source.json");
+    if !config_path.exists() {
+        return false;
+    }
+    let raw = fs::read_to_string(&config_path).expect("read source.json");
+    let cfg: Value = serde_json::from_str(&raw).expect("parse source.json");
+    match cfg.get("compilers").and_then(|v| v.as_array()) {
+        Some(arr) => !arr.iter().any(|v| v.as_str() == Some("rust")),
+        None => false,
+    }
+}
+
+struct ScanResult {
+    pass: Vec<String>,
+    missing: Vec<String>,
+    skipped: Vec<String>,
+    failures: Vec<(String, FixtureOutcome)>,
+}
+
+/// Walk `dirs` and classify each fixture.
+///
+/// N-389 (R145): a fixture is skipped ONLY when it is named in
+/// `not_compilable` AND its allowlist excludes rust. A named fixture whose
+/// allowlist does not exclude rust is a `StaleExpectedNotCompilable`
+/// failure. Every unnamed fixture is compiled and byte-checked, even when
+/// its allowlist excludes rust.
+fn scan_fixtures(dirs: &[PathBuf], not_compilable: &[&str]) -> ScanResult {
+    let mut res = ScanResult {
+        pass: Vec::new(),
+        missing: Vec::new(),
+        skipped: Vec::new(),
+        failures: Vec::new(),
+    };
+    for dir in dirs {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        if not_compilable.contains(&name.as_str()) {
+            if fixture_allowlisted_for_rust(dir) {
+                res.failures.push((name, FixtureOutcome::StaleExpectedNotCompilable));
+            } else {
+                res.skipped.push(name);
+            }
+            continue;
+        }
+        let outcome = run_one_fixture(dir);
+        // F-285: `MissingSource` used to go only into `missing`, a bucket
+        // the final `assert!` never consulted. `missing` is kept for the
+        // diagnostic listing; `is_fixture_failure` is what the sweep
+        // asserts on.
+        if let FixtureOutcome::MissingSource = &outcome {
+            res.missing.push(name.clone());
+        }
+        if matches!(outcome, FixtureOutcome::Pass) {
+            res.pass.push(name);
+        } else if is_fixture_failure(&outcome) {
+            res.failures.push((name, outcome));
+        } else {
+            res.skipped.push(name);
+        }
+    }
+    res
 }
 
 fn run_one_fixture(test_dir: &Path) -> FixtureOutcome {
@@ -300,41 +404,12 @@ fn test_conformance_goldens_rust() {
         .collect();
     dirs.sort();
 
-    let mut pass: Vec<String> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
-    let mut opted_out: Vec<String> = Vec::new();
-    let mut failures: Vec<(String, FixtureOutcome)> = Vec::new();
-
-    for dir in &dirs {
-        let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        if !fixture_allowlisted_for_rust(dir) {
-            opted_out.push(name);
-            continue;
-        }
-        let outcome = run_one_fixture(dir);
-        // F-285: `MissingSource` used to go only into `missing`, a bucket
-        // the final `assert!` never consulted -- the summary line prints
-        // the count, but nothing failed the test. `missing` is kept for
-        // the diagnostic listing below; `is_fixture_failure` is what the
-        // assert at the end of this test actually consults now.
-        if let FixtureOutcome::MissingSource = &outcome {
-            missing.push(name.clone());
-        }
-        if matches!(outcome, FixtureOutcome::Pass) {
-            pass.push(name);
-        } else if is_fixture_failure(&outcome) {
-            failures.push((name, outcome));
-        } else {
-            // is_fixture_failure excludes exactly Pass | OptedOut; Pass is
-            // handled above, so only OptedOut reaches here. run_one_fixture
-            // never actually returns it today (the allowlist check above
-            // short-circuits first), but every outcome must land in some
-            // bucket -- a fixture silently landing in none of pass/missing/
-            // opted_out/failures is the exact "vanishes from the sweep"
-            // shape F-285 closes elsewhere.
-            opted_out.push(name);
-        }
-    }
+    let ScanResult {
+        pass,
+        missing,
+        skipped: opted_out,
+        failures,
+    } = scan_fixtures(&dirs, EXPECTED_NOT_RUST_COMPILABLE);
 
     // Print summary
     let total = dirs.len();
@@ -343,7 +418,7 @@ fn test_conformance_goldens_rust() {
     let fail_count = failures.len();
     let opt_count = opted_out.len();
     println!(
-        "\n=== Rust conformance-goldens summary: {} pass / {} fail / {} missing-source / {} opted-out (of {} fixtures) ===",
+        "\n=== Rust conformance-goldens summary: {} pass / {} fail / {} missing-source / {} skipped (named in EXPECTED_NOT_RUST_COMPILABLE, allowlist excludes rust) (of {} fixtures) ===",
         pass_count, fail_count, miss_count, opt_count, total
     );
     if !missing.is_empty() {
@@ -368,6 +443,12 @@ fn test_conformance_goldens_rust() {
             }
             FixtureOutcome::MissingGoldenHex => {
                 println!("  missing golden: expected-script.hex not found for fixture '{}'", name);
+            }
+            FixtureOutcome::StaleExpectedNotCompilable => {
+                println!(
+                    "  stale: '{}' is named in EXPECTED_NOT_RUST_COMPILABLE but its source.json allowlist does not exclude rust",
+                    name
+                );
             }
             FixtureOutcome::IrMismatch { expected, actual } => {
                 println!("  IR mismatch (expected {} chars, actual {} chars):", expected.len(), actual.len());
@@ -414,6 +495,16 @@ fn test_conformance_goldens_rust() {
         failures.len(),
         total
     );
+
+    // N-389 (R145): the skipped set must be exactly the named set; every
+    // named entry must exist and really exclude rust in its raw source.json.
+    assert_eq!(opted_out, EXPECTED_NOT_RUST_COMPILABLE.to_vec());
+    for n in EXPECTED_NOT_RUST_COMPILABLE {
+        let d = tests_dir.join(n);
+        assert!(d.is_dir(), "EXPECTED_NOT_RUST_COMPILABLE names unknown fixture {:?}", n);
+        assert!(excludes_rust_raw(&d), "{:?} allowlist does not exclude rust", n);
+    }
+    assert_eq!(pass.len() + opted_out.len(), total);
 }
 
 // ----------------------------------------------------------------------
@@ -617,6 +708,78 @@ fn test_find_rust_source_panics_on_malformed_source_json() {
 fn test_fixture_allowlisted_for_rust_panics_on_malformed_source_json() {
     let dir = f285_scratch_dir("n217-allowlist-malformed");
     fs::write(dir.join("source.json"), "{not valid json").expect("write source.json");
+
+    let _ = fixture_allowlisted_for_rust(&dir);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ----------------------------------------------------------------------
+// N-389 (R145): the sweep used to skip every allowlist-excluded fixture,
+// dropping the byte check on Go-only fixtures Rust compiles in agreement
+// with Go, and treated a non-list `compilers` value as "no allowlist".
+// Exercised against synthetic, throwaway fixture directories only.
+// ----------------------------------------------------------------------
+
+/// What this proves: a fixture whose allowlist excludes rust but which is
+/// NOT named in the not-compilable set is attempted, not skipped: here it
+/// has no source, so it surfaces as `MissingSource` in `failures` and not
+/// in `skipped`.
+///
+/// What this does not prove: the byte comparison for such a fixture (the
+/// real-corpus sweep covers babybear, babybear-ext4, merkle-proof and
+/// state-covenant).
+#[test]
+fn test_scan_fixtures_compiles_excluded_but_unnamed_fixture() {
+    let dir = f285_scratch_dir("n389-unnamed").join("go-only-unnamed");
+    fs::create_dir_all(&dir).expect("create fixture dir");
+    fs::write(dir.join("source.json"), r#"{"compilers":["go"]}"#).expect("write source.json");
+
+    let res = scan_fixtures(&[dir.clone()], &[]);
+
+    assert!(res.skipped.is_empty(), "unnamed fixture must not be skipped: {:?}", res.skipped);
+    assert_eq!(res.failures.len(), 1);
+    assert!(matches!(res.failures[0].1, FixtureOutcome::MissingSource));
+
+    let _ = fs::remove_dir_all(dir.parent().unwrap());
+}
+
+/// What this proves: a named fixture whose allowlist excludes rust is
+/// skipped, and one whose allowlist does not exclude rust (or has none) is
+/// a `StaleExpectedNotCompilable` failure.
+///
+/// What this does not prove: that the named set matches what rust refuses
+/// today (the real-corpus sweep asserts that).
+#[test]
+fn test_scan_fixtures_named_set_skips_and_flags_stale_entries() {
+    let root = f285_scratch_dir("n389-named");
+    let excluded = root.join("excluded");
+    let included = root.join("included");
+    fs::create_dir_all(&excluded).expect("create");
+    fs::create_dir_all(&included).expect("create");
+    fs::write(excluded.join("source.json"), r#"{"compilers":["go"]}"#).expect("write");
+    fs::write(included.join("source.json"), r#"{"compilers":["go","rust"]}"#).expect("write");
+
+    let res = scan_fixtures(&[excluded.clone(), included.clone()], &["excluded", "included"]);
+
+    assert_eq!(res.skipped, vec!["excluded".to_string()]);
+    assert_eq!(res.failures.len(), 1);
+    assert_eq!(res.failures[0].0, "included");
+    assert!(matches!(res.failures[0].1, FixtureOutcome::StaleExpectedNotCompilable));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// What this proves: a non-list `compilers` value fails closed (panics)
+/// instead of being treated as "no allowlist".
+///
+/// What this does not prove: that the real corpus has such a value (it
+/// does not).
+#[test]
+#[should_panic(expected = "must be a list of strings")]
+fn test_fixture_allowlisted_for_rust_panics_on_non_list_compilers() {
+    let dir = f285_scratch_dir("n389-non-list");
+    fs::write(dir.join("source.json"), r#"{"compilers":"go"}"#).expect("write source.json");
 
     let _ = fixture_allowlisted_for_rust(&dir);
 

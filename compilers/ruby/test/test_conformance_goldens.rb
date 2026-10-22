@@ -26,6 +26,16 @@ class ConformanceGoldensTest < Minitest::Test
   RUBY_COMPILER_DIR = File.expand_path('..', __dir__)
   RUBY_CLI = File.join(RUBY_COMPILER_DIR, 'bin/runar-compiler-ruby')
 
+  # N-389 (R145, "named set, keep coverage"): fixtures Ruby is EXPECTED to
+  # refuse. Ruby refuses the BN254 pairing family (bn254MultiPairing4) by
+  # policy. A fixture is skipped only when it is named here AND its
+  # source.json allowlist excludes ruby. Every other fixture, including the
+  # Go-only ones Ruby compiles byte-identically today (babybear,
+  # babybear-ext4, merkle-proof, state-covenant), is compiled and
+  # byte-checked, and a refusal there is a failure. Mirrors the Python
+  # harness's EXPECTED_NOT_PYTHON_COMPILABLE (N-387).
+  EXPECTED_NOT_RUBY_COMPILABLE = %w[bn254-pairing].freeze
+
   # ------------------------------------------------------------------
   # Helpers
   # ------------------------------------------------------------------
@@ -53,8 +63,27 @@ class ConformanceGoldensTest < Minitest::Test
     # misreported downstream as a generic "missing-source" failure.
     cfg = JSON.parse(File.read(config_path))
 
+    return nil unless cfg.key?('compilers')
+
+    # N-389: fail closed. A `compilers` value that is not a list of strings
+    # used to be treated as "no allowlist" (nil), silently admitting the
+    # fixture.
     list = cfg['compilers']
-    list.is_a?(Array) ? list : nil
+    unless list.is_a?(Array) && list.all? { |x| x.is_a?(String) }
+      raise ArgumentError,
+            "fixture '#{File.basename(test_dir)}': source.json 'compilers' must be a list of strings, got #{list.inspect}"
+    end
+    list
+  end
+
+  # Independent (raw source.json) check that the allowlist excludes ruby.
+  # Deliberately does not go through read_compiler_allowlist.
+  def excludes_ruby_raw?(test_dir)
+    config_path = File.join(test_dir, 'source.json')
+    return false unless File.exist?(config_path)
+
+    list = JSON.parse(File.read(config_path))['compilers']
+    !list.nil? && !list.include?('ruby')
   end
 
   # Resolve the Ruby-format source file for a conformance fixture.
@@ -144,9 +173,13 @@ class ConformanceGoldensTest < Minitest::Test
   # without depending on or risking the real conformance corpus.
   #
   # Classification (F-151 fix):
-  #   - A fixture whose source.json `compilers` allowlist excludes "ruby"
-  #     is SKIPPED outright (ruby is not a required conformance target for
-  #     it -- conformance/README.md "Per-fixture compiler allowlist").
+  #   - N-389 (R145): a fixture is SKIPPED only when it is named in
+  #     `not_compilable` (default EXPECTED_NOT_RUBY_COMPILABLE) AND its
+  #     source.json `compilers` allowlist excludes "ruby". A named fixture
+  #     whose allowlist does not exclude ruby is a
+  #     'stale-expected-not-compilable' FAILURE. An unnamed fixture is
+  #     always compiled and byte-checked, even when its allowlist excludes
+  #     ruby.
   #   - Any other fixture with no resolvable .runar.rb source is a FAILURE.
   #   - A fixture whose source compiles but ships no expected-ir.json or
   #     no expected-script.hex is a FAILURE (this harness is the sole
@@ -156,7 +189,7 @@ class ConformanceGoldensTest < Minitest::Test
   # Returns { passed: [name...], skipped: [name...], failures: [[name, kind,
   # expected, actual], ...] }.
   # ------------------------------------------------------------------
-  def scan_fixtures(dirs)
+  def scan_fixtures(dirs, not_compilable = EXPECTED_NOT_RUBY_COMPILABLE)
     passed = []
     skipped = []
     failures = []  # each entry: [name, kind, expected, actual]
@@ -165,8 +198,14 @@ class ConformanceGoldensTest < Minitest::Test
       name = File.basename(test_dir)
 
       allowlist = read_compiler_allowlist(test_dir)
-      if allowlist && !allowlist.include?('ruby')
-        skipped << name
+      if not_compilable.include?(name)
+        if allowlist && !allowlist.include?('ruby')
+          skipped << name
+        else
+          failures << [name, 'stale-expected-not-compilable', '',
+                       "fixture '#{name}' is named in EXPECTED_NOT_RUBY_COMPILABLE but its " \
+                       'source.json allowlist does not exclude ruby']
+        end
         next
       end
 
@@ -288,6 +327,16 @@ class ConformanceGoldensTest < Minitest::Test
 
     assert failures.empty?,
            "#{failures.length} of #{total} fixtures failed conformance-goldens; see stdout for details"
+
+    # N-389: the skipped set must be exactly the named set; every named
+    # entry must exist and really exclude ruby in its raw source.json.
+    assert_equal EXPECTED_NOT_RUBY_COMPILABLE.sort, skipped
+    EXPECTED_NOT_RUBY_COMPILABLE.each do |n|
+      dir = File.join(CONFORMANCE_DIR, n)
+      assert File.directory?(dir), "EXPECTED_NOT_RUBY_COMPILABLE names unknown fixture #{n.inspect}"
+      assert excludes_ruby_raw?(dir), "#{n.inspect} allowlist does not exclude ruby"
+    end
+    assert_equal total, passed.length + skipped.length
   end
 
   # ------------------------------------------------------------------
@@ -363,10 +412,10 @@ class ConformanceGoldensTest < Minitest::Test
       FileUtils.mkdir_p(fixture_dir)
       File.write(File.join(fixture_dir, 'source.json'), JSON.generate({ 'compilers' => ['go'] }))
       # No .runar.rb source -- legitimate, since the allowlist excludes ruby
-      # for this fixture (conformance/README.md "Per-fixture compiler
-      # allowlist").
+      # for this fixture AND the fixture is named as expected-not-compilable
+      # (N-389; conformance/README.md "Per-fixture compiler allowlist").
 
-      result = scan_fixtures([fixture_dir])
+      result = scan_fixtures([fixture_dir], ['go-only-fixture'])
 
       assert_empty result[:failures],
                    "a ruby-excluded fixture must not be reported as a failure (got: #{result.inspect})"
@@ -432,6 +481,58 @@ class ConformanceGoldensTest < Minitest::Test
       assert_raises(JSON::ParserError) do
         scan_fixtures([fixture_dir])
       end
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # N-389 (R145): the sweep used to skip EVERY allowlist-excluded fixture,
+  # dropping the byte check on Go-only fixtures Ruby compiles in agreement
+  # with Go, and treated a non-list `compilers` value as "no allowlist".
+  #
+  # What this proves: an allowlist-excluded fixture that is NOT named in
+  # the not-compilable set is attempted, not skipped (here it has no
+  # source, so it surfaces as a 'missing-source' failure); a named fixture
+  # whose allowlist does not exclude ruby is a stale-entry failure; and a
+  # non-list `compilers` value raises.
+  #
+  # What this does NOT prove: the byte comparison for such a fixture (the
+  # real-corpus sweep covers babybear, babybear-ext4, merkle-proof and
+  # state-covenant); the corpus has no non-list `compilers` value today.
+  # ------------------------------------------------------------------
+  def test_scan_fixtures_compiles_excluded_but_unnamed_fixture
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'go-only-unnamed')
+      FileUtils.mkdir_p(fixture_dir)
+      File.write(File.join(fixture_dir, 'source.json'), JSON.generate({ 'compilers' => ['go'] }))
+
+      result = scan_fixtures([fixture_dir], [])
+
+      assert_empty result[:skipped]
+      assert_equal ['missing-source'], result[:failures].map { |f| f[1] }
+    end
+  end
+
+  def test_scan_fixtures_flags_stale_named_entry
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'stale-named')
+      FileUtils.mkdir_p(fixture_dir)
+      File.write(File.join(fixture_dir, 'source.json'), JSON.generate({ 'compilers' => %w[go ruby] }))
+
+      result = scan_fixtures([fixture_dir], ['stale-named'])
+
+      assert_empty result[:skipped]
+      assert_equal ['stale-expected-not-compilable'], result[:failures].map { |f| f[1] }
+    end
+  end
+
+  def test_scan_fixtures_raises_on_non_list_compilers
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'non-list-compilers')
+      FileUtils.mkdir_p(fixture_dir)
+      File.write(File.join(fixture_dir, 'source.json'), JSON.generate({ 'compilers' => 'go' }))
+
+      error = assert_raises(ArgumentError) { scan_fixtures([fixture_dir], []) }
+      assert_match(/must be a list of strings/, error.message)
     end
   end
 end
