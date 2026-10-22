@@ -1325,7 +1325,10 @@ impl<'a> LoweringContext<'a> {
         // inside nested blocks resolves params against the SAME method scope
         // the parent reads from (issue #34).
         sub.param_types = self.param_types.clone();
-        sub.current_source_loc = self.current_source_loc.clone();
+        // N-393: `current_source_loc` is deliberately NOT copied from the parent.
+        // A nested block starts with none, as TS's `subContext()` does; each statement inside sets its own. Inheriting the parent's
+        // stamped the arms of a lowered `&&` / `||` / ternary (bindings emitted
+        // outside any statement) where TS leaves them unmapped.
         sub.param_alias_stack = self.param_alias_stack.clone();
         // Share the per-method scope so intrinsic auto-injection from
         // inside a nested block (if/else, ternary) registers on the

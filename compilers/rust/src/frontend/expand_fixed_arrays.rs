@@ -1157,7 +1157,7 @@ impl<'a> ExpandContext<'a> {
         &mut self,
         init_expr: &Expression,
         target: &Expression,
-        _loc: &SourceLocation,
+        loc: &SourceLocation,
     ) -> Option<StmtForm> {
         let (object, index) = match init_expr {
             Expression::IndexAccess { object, index } => (object.as_ref(), index.as_ref()),
@@ -1197,7 +1197,6 @@ impl<'a> ExpandContext<'a> {
         };
 
         let mut tail_else: Option<Vec<Statement>> = None;
-        let loc = default_loc();
         let mut i = (n - 1) as isize - 1;
         while i >= 0 {
             let slot = &meta.slot_names[i as usize];
@@ -1469,7 +1468,9 @@ impl<'a> ExpandContext<'a> {
             HoistTag::Idx => self.fresh_idx_name(),
             HoistTag::Val => self.fresh_val_name(),
         };
-        let loc = default_loc();
+        // N-393: the synthetic `__idx_K` / `__val_K` decl carries the original
+        // statement's location, as TS pass 03b does, not a line-0 anchor.
+        let loc = self.current_stmt_loc.clone().unwrap_or_else(default_loc);
         let decl = Statement::VariableDecl {
             name: name.clone(),
             var_type: None,

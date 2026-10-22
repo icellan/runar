@@ -85,3 +85,53 @@ fn stateful_method_tail_ops_are_unmapped_like_ts() {
 fn inlined_private_method_tail_ops_are_unmapped_like_ts() {
     assert_matches_reference("function-patterns", "examples/rust/function-patterns/FunctionPatterns.runar.rs");
 }
+
+// N-393 — the Rust tier still mapped ops that TS leaves unmapped, from two
+// causes found with `remediation-logs/N-385/cmp.py`:
+//
+//  1. `anf_lower.rs::sub_context` copied the parent's `current_source_loc`
+//     into every nested block. TS's `subContext()` starts with none, so the
+//     arms of a source-level `&&` / `||` / ternary (lowered as an ANF `if`
+//     whose arm bindings are emitted outside any statement) carried no
+//     location; Rust stamped them with the enclosing statement's.
+//  2. `expand_fixed_arrays.rs` built the synthetic dispatch / hoisted
+//     `__idx_K` / `__val_K` statements at `line 0, column 0` where TS (pass
+//     03b) gives them the original statement's location, so the ops lowered
+//     from them were mapped to a bogus anchor.
+//
+// What these prove: for each fixture below the Rust map maps exactly the
+// opcodes TS maps, each to the same statement (anchor rank), with
+// constant folding off. What they do NOT prove: anything about columns, other
+// tiers, or fold-ON maps; the TS runs are pinned, not recomputed.
+#[test]
+fn boolean_logic_short_circuit_arms_are_unmapped_like_ts() {
+    assert_matches_reference("boolean-logic", "examples/rust/boolean-logic/BooleanLogic.runar.rs");
+}
+
+#[test]
+fn conditional_data_output_arms_are_unmapped_like_ts() {
+    assert_matches_reference(
+        "conditional-data-output",
+        "examples/rust/conditional-data-output/ConditionalDataOutput.runar.rs",
+    );
+}
+
+#[test]
+fn token_ft_branch_ops_are_unmapped_like_ts() {
+    assert_matches_reference("token-ft", "examples/rust/token-ft/FungibleTokenExample.runar.rs");
+}
+
+#[test]
+fn tic_tac_toe_branch_ops_are_unmapped_like_ts() {
+    assert_matches_reference("tic-tac-toe", "examples/rust/tic-tac-toe/TicTacToe.runar.rs");
+}
+
+#[test]
+fn fixed_array_index_dispatch_is_mapped_like_ts() {
+    assert_matches_reference("fixed-array-index", "examples/rust/fixed-array-index/ArrayIndex.runar.rs");
+}
+
+#[test]
+fn fixed_array_write_dispatch_is_mapped_like_ts() {
+    assert_matches_reference("fixed-array-write", "examples/rust/fixed-array-write/ArrayWrite.runar.rs");
+}
