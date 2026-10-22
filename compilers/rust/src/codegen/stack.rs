@@ -980,6 +980,7 @@ impl<'a> BindingsTask<'a> {
     fn step(&mut self, ctx: &mut LoweringContext, arena: &'a HashMap<String, ANFMethod>) -> LowerStep<'a> {
         if self.awaiting_child {
             self.awaiting_child = false;
+            ctx.current_source_loc = None;
             self.i += 1;
         }
         let last_assert_idx = self.last_assert_idx;
@@ -1011,6 +1012,10 @@ impl<'a> BindingsTask<'a> {
                 self.awaiting_child = true;
                 return LowerStep::Child(child);
             }
+            // N-385: the TS reference clears the location after every binding,
+            // so the ops emitted after the last one (the method-tail cleanup,
+            // the dispatch OP_ELSE/OP_ENDIF) stay unmapped.
+            ctx.current_source_loc = None;
             self.i += 1;
         }
         LowerStep::Done
