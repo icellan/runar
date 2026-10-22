@@ -60,6 +60,49 @@ def _find_python_source(test_dir: Path) -> Optional[Path]:
     return None
 
 
+# N-387 (R145, "named set, keep coverage"): fixtures Python is EXPECTED to
+# refuse. Python refuses the BN254 pairing family (bn254MultiPairing4) by
+# policy -- it is scoped to the Go tier. A fixture is skipped only when it is
+# named here AND its source.json allowlist excludes python. Every other
+# fixture, including the Go-only ones Python compiles today (babybear,
+# babybear-ext4, merkle-proof, state-covenant), is compiled and byte-checked,
+# and a refusal there is a failure. Mirrors EXPECTED_NOT_TS_COMPILABLE (N-314).
+EXPECTED_NOT_PYTHON_COMPILABLE = ["bn254-pairing"]
+
+
+def _read_compiler_allowlist(test_dir: Path) -> Optional[list[str]]:
+    """Return the fixture's ``source.json`` ``compilers`` allowlist, or
+    ``None`` when absent (= all compilers).
+
+    Mirrors ``conformance/runner/runner.ts::readFixtureCompilerAllowlist``.
+    N-387: fail closed -- an unreadable/malformed ``source.json`` raises
+    (like ``_find_python_source``), and a ``compilers`` value that is not a
+    list of strings raises ``ValueError`` rather than being treated as "no
+    allowlist" (which would silently admit the fixture).
+    """
+    config_path = test_dir / "source.json"
+    if not config_path.exists():
+        return None
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    if "compilers" not in cfg:
+        return None
+    lst = cfg["compilers"]
+    if not isinstance(lst, list) or not all(isinstance(x, str) for x in lst):
+        raise ValueError(
+            f"fixture '{test_dir.name}': source.json 'compilers' must be a list of strings, got {lst!r}"
+        )
+    return lst
+
+
+def _excludes_python(test_dir: Path) -> bool:
+    """Independent (raw source.json) check that the allowlist excludes python."""
+    cfg_path = test_dir / "source.json"
+    if not cfg_path.exists():
+        return False
+    lst = json.loads(cfg_path.read_text(encoding="utf-8")).get("compilers")
+    return lst is not None and "python" not in lst
+
+
 def _canonicalize_value(v):
     if isinstance(v, dict):
         out = {}
@@ -134,7 +177,9 @@ def _compare_goldens(
     return None
 
 
-def _scan_fixtures(dirs: list[Path]) -> dict[str, list]:
+def _scan_fixtures(
+    dirs: list[Path], not_compilable: list[str] = EXPECTED_NOT_PYTHON_COMPILABLE
+) -> dict[str, list]:
     """Walk ``dirs`` (conformance fixture directories) and classify each one.
 
     F-323: a fixture with no resolvable ``.runar.py`` source used to go into a
@@ -144,14 +189,35 @@ def _scan_fixtures(dirs: list[Path]) -> dict[str, list]:
     ``missing-source``), the same classification Ruby's ``scan_fixtures``
     (F-151) uses.
 
-    Returns ``{"passed": [name, ...], "failures": [(name, kind, expected,
-    actual), ...]}``.
+    N-387: a fixture named in ``not_compilable`` (default
+    ``EXPECTED_NOT_PYTHON_COMPILABLE``) whose ``source.json`` ``compilers``
+    allowlist excludes ``python`` is reported in ``skipped``. A named fixture
+    whose allowlist does NOT exclude python is a ``stale-expected-not-
+    compilable`` failure. An unnamed fixture is always compiled, even when
+    its allowlist excludes python.
+
+    Returns ``{"passed": [name, ...], "skipped": [name, ...], "failures":
+    [(name, kind, expected, actual), ...]}``.
     """
     passed: list[str] = []
+    skipped: list[str] = []
     failures: list[tuple[str, str, str, str]] = []
 
     for test_dir in dirs:
         name = test_dir.name
+        allowlist = _read_compiler_allowlist(test_dir)
+        excluded = allowlist is not None and "python" not in allowlist
+        if name in not_compilable:
+            if not excluded:
+                failures.append((
+                    name, "stale-expected-not-compilable", "",
+                    f"fixture '{name}' is named in EXPECTED_NOT_PYTHON_COMPILABLE but its "
+                    f"source.json allowlist does not exclude python",
+                ))
+                continue
+            skipped.append(name)
+            continue
+
         source = _find_python_source(test_dir)
         if source is None:
             failures.append((name, "missing-source", "", f"no .runar.py source found for fixture '{name}'"))
@@ -185,7 +251,7 @@ def _scan_fixtures(dirs: list[Path]) -> dict[str, list]:
 
         passed.append(name)
 
-    return {"passed": passed, "failures": failures}
+    return {"passed": passed, "skipped": skipped, "failures": failures}
 
 
 def _short_diff(expected: str, actual: str, limit: int = 12) -> str:
@@ -215,14 +281,20 @@ def test_conformance_goldens_python(capsys):
 
     result = _scan_fixtures(dirs)
     passed: list[str] = result["passed"]
+    skipped: list[str] = result["skipped"]
     failures: list[tuple[str, str, str, str]] = result["failures"]
 
     total = len(dirs)
     lines: list[str] = []
     lines.append(
         f"\n=== Python conformance-goldens summary: {len(passed)} pass / "
-        f"{len(failures)} fail (of {total} fixtures) ==="
+        f"{len(failures)} fail / {len(skipped)} skipped "
+        f"(compilers allowlist excludes python) (of {total} fixtures) ==="
     )
+    if skipped:
+        lines.append('Skipped (source.json "compilers" allowlist excludes python):')
+        for n in skipped:
+            lines.append(f"  - {n}")
     for (name, kind, expected, actual) in failures[:5]:
         lines.append(f"\n--- FAIL: {name} ({kind}) ---")
         if kind == "ir-mismatch":
@@ -260,6 +332,15 @@ def test_conformance_goldens_python(capsys):
         f"{len(failures)} of {total} fixtures failed conformance-goldens; "
         f"see captured stdout for details"
     )
+
+    # N-387: the skipped set must be exactly the named set; every named
+    # entry must exist and really exclude python in its source.json.
+    assert skipped == sorted(EXPECTED_NOT_PYTHON_COMPILABLE)
+    by_name = {d.name: d for d in dirs}
+    for n in EXPECTED_NOT_PYTHON_COMPILABLE:
+        assert n in by_name, f"EXPECTED_NOT_PYTHON_COMPILABLE names unknown fixture {n!r}"
+        assert _excludes_python(by_name[n]), f"{n!r} allowlist does not exclude python"
+    assert len(passed) + len(skipped) == total
 
 
 # ----------------------------------------------------------------------
@@ -368,3 +449,79 @@ def test_scan_fixtures_fails_on_missing_source(tmp_path):
     assert "missing-source" in kinds, (
         f"expected a 'missing-source' failure, got failures={result['failures']!r}"
     )
+
+
+# ----------------------------------------------------------------------
+# N-387: the harness compiled every fixture, ignoring the source.json
+# `compilers` allowlist. bn254-pairing (compilers: ["go"]) is refused by
+# Python by policy, so the real-corpus test went red 1/98 after N-314. The
+# allowlist scopes which tiers must match the goldens
+# (conformance/README.md "Per-fixture compiler allowlist"); a fixture whose
+# allowlist excludes "python" is skipped, named and counted -- never silent.
+# ----------------------------------------------------------------------
+
+_REFUSED_PY_SOURCE = "this is not a valid runar contract (((\n"
+
+
+def _make_synthetic_fixture(root: Path, name: str, allowlist) -> Path:
+    fixture_dir = root / name
+    fixture_dir.mkdir()
+    cfg: dict = {}
+    if allowlist is not None:
+        cfg["compilers"] = allowlist
+    (fixture_dir / "source.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (fixture_dir / "Broken.runar.py").write_text(_REFUSED_PY_SOURCE, encoding="utf-8")
+    return fixture_dir
+
+
+def test_scan_fixtures_skips_only_named_excluded_fixture(tmp_path):
+    """What this proves: a fixture that is named AND whose allowlist excludes
+    python is skipped; one whose allowlist excludes python but is NOT named
+    is still compiled and fails when Python refuses it; one that includes
+    python is compiled and fails too.
+
+    What this does not prove: the real corpus (see
+    `test_conformance_goldens_python`).
+    """
+    named = _make_synthetic_fixture(tmp_path, "n387-named", ["go"])
+    unnamed = _make_synthetic_fixture(tmp_path, "n387-unnamed", ["go"])
+    included = _make_synthetic_fixture(tmp_path, "n387-included", ["go", "python"])
+
+    result = _scan_fixtures([named, unnamed, included], ["n387-named"])
+
+    assert result["skipped"] == ["n387-named"]
+    assert result["passed"] == []
+    assert [(n, k) for (n, k, _e, _a) in result["failures"]] == [
+        ("n387-unnamed", "compile-ir"),
+        ("n387-included", "compile-ir"),
+    ]
+
+
+def test_scan_fixtures_named_but_not_excluded_is_stale_failure(tmp_path):
+    """What this proves: a named entry whose allowlist includes python (or is
+    absent) fails as stale instead of being skipped, so the list cannot rot.
+
+    What this does not prove: anything about the real list.
+    """
+    inc = _make_synthetic_fixture(tmp_path, "n387-stale-inc", ["go", "python"])
+    none = _make_synthetic_fixture(tmp_path, "n387-stale-none", None)
+
+    result = _scan_fixtures([inc, none], ["n387-stale-inc", "n387-stale-none"])
+
+    assert result["skipped"] == []
+    assert [k for (_n, k, _e, _a) in result["failures"]] == ["stale-expected-not-compilable"] * 2
+
+
+@pytest.mark.parametrize("bad", ["python", {"python": True}, [1, "python"], 7])
+def test_malformed_allowlist_raises(tmp_path, bad):
+    """What this proves: a `compilers` value that is present but not a list
+    of strings raises instead of being treated as "no allowlist" (which
+    would silently admit the fixture) or as an exclusion.
+
+    What this does not prove: JSON-level malformation, which
+    `_find_python_source`'s F-323 test already covers.
+    """
+    fixture = _make_synthetic_fixture(tmp_path, "n387-bad-allowlist", bad)
+
+    with pytest.raises(ValueError, match="compilers"):
+        _read_compiler_allowlist(fixture)
