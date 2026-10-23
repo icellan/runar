@@ -715,13 +715,20 @@ public final class ZigParser {
             if (current().kind == Kind.IDENT && "runar".equals(current().value)) {
                 advance();
                 expect(Kind.DOT, ".");
-                String parent = expect(Kind.IDENT, "identifier").value;
+                Token parentTok = expect(Kind.IDENT, "identifier");
+                String parent = parentTok.value;
                 if ("StatefulSmartContract".equals(parent)) {
                     parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                 } else if ("UnsafeSmartContract".equals(parent)) {
                     parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 } else {
                     parentClass = ParentClass.SMART_CONTRACT;
+                    if (!"SmartContract".equals(parent)) {
+                        // N-014: an unknown base is refused, never folded to SmartContract.
+                        errors.add(file + ":" + parentTok.line + ":" + parentTok.col
+                            + ": unknown parent class: '" + parent
+                            + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
+                    }
                 }
             }
             match(Kind.SEMICOLON);

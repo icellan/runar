@@ -491,7 +491,7 @@ module RunarCompiler
         end
 
         unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          raise "unknown parent class: #{parent_class}"
+          raise "unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
         end
 
         expect(TOK_LBRACE)

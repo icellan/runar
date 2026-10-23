@@ -816,13 +816,18 @@ func (p *zigParser) parseContractMarker() {
 	if p.checkIdent("runar") {
 		p.advance()
 		p.expect(zigTokDot)
-		parent := p.expect(zigTokIdent).value
+		parentTok := p.expect(zigTokIdent)
+		parent := parentTok.value
 		if parent == "StatefulSmartContract" {
 			p.parentClass = "StatefulSmartContract"
 		} else if parent == "UnsafeSmartContract" {
 			p.parentClass = "UnsafeSmartContract"
 		} else {
 			p.parentClass = "SmartContract"
+			if parent != "SmartContract" {
+				// N-014: an unknown base is refused, never folded to SmartContract.
+				p.errors = append(p.errors, lexDiag(fmt.Sprintf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parent), p.fileName, parentTok.line, parentTok.col))
+			}
 		}
 	}
 

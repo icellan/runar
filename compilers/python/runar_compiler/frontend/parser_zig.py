@@ -745,13 +745,21 @@ class _ZigParser:
         if self._current().kind == TOK_IDENT and self._current().value == "runar":
             self._advance()
             self._expect(TOK_DOT, ".")
-            parent = self._expect(TOK_IDENT, "identifier").value
+            parent_tok = self._expect(TOK_IDENT, "identifier")
+            parent = parent_tok.value
             if parent == "StatefulSmartContract":
                 self._parent_class = "StatefulSmartContract"
             elif parent == "UnsafeSmartContract":
                 self._parent_class = "UnsafeSmartContract"
             else:
                 self._parent_class = "SmartContract"
+                if parent != "SmartContract":
+                    # N-014: an unknown base is refused, never folded to SmartContract.
+                    self._errors.append(
+                        f"{self._file}:{parent_tok.line}:{parent_tok.col}: "
+                        f"unknown parent class: '{parent}', expected SmartContract, "
+                        "StatefulSmartContract, or UnsafeSmartContract"
+                    )
 
         self._match(TOK_SEMICOLON)
 

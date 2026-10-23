@@ -611,7 +611,7 @@ const Parser = struct {
         if (std.mem.eql(u8, ct.text, "SmartContract")) return .smart_contract;
         if (std.mem.eql(u8, ct.text, "StatefulSmartContract")) return .stateful_smart_contract;
         if (std.mem.eql(u8, ct.text, "UnsafeSmartContract")) return .unsafe_smart_contract;
-        self.addErrorFmt("unknown contract type: '{s}'", .{ct.text});
+        self.addErrorFmt("unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", .{ct.text});
         return null;
     }
 

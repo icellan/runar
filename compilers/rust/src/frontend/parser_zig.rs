@@ -767,11 +767,18 @@ impl<'a> ZigParser<'a> {
         if matches!(self.peek(), Token::Ident(ref n) if n == "runar") {
             self.advance(); // runar
             self.expect(&Token::Dot);
+            let name_loc = self.loc();
             let name = self.expect_ident();
             if name == "StatefulSmartContract" {
                 parent = "StatefulSmartContract".to_string();
             } else if name == "UnsafeSmartContract" {
                 parent = "UnsafeSmartContract".to_string();
+            } else if name != "SmartContract" {
+                // N-014: an unknown base is refused, never folded to SmartContract.
+                self.errors.push(format!(
+                    "{}:{}:{}: unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
+                    name_loc.file, name_loc.line, name_loc.column, name
+                ));
             }
         }
 

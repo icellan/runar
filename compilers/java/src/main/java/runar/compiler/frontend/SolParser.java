@@ -567,7 +567,8 @@ public final class SolParser {
                     parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                     break;
                 default:
-                    throw new ParseException("unknown parent class: " + parentClassName);
+                    throw new ParseException("unknown parent class: '" + parentClassName
+                        + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
             }
 
             expect(TOK_LBRACE);

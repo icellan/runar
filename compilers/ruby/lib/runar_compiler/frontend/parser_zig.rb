@@ -736,6 +736,10 @@ module RunarCompiler
                           when "UnsafeSmartContract"   then "UnsafeSmartContract"
                           else "SmartContract"
                           end
+          if @parent_class == "SmartContract" && parent_tok.value != "SmartContract"
+            # N-014: an unknown base is refused, never folded to SmartContract.
+            add_error("#{@file}:#{parent_tok.line}:#{parent_tok.col}: unknown parent class: '#{parent_tok.value}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract")
+          end
         end
 
         match_tok(TOK_SEMICOLON)

@@ -269,9 +269,18 @@ class SolParser {
     // Optional: is SmartContract / StatefulSmartContract / UnsafeSmartContract
     let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
     if (this.match('is')) {
-      const parent = this.expect('ident').value;
+      const parentToken = this.expect('ident');
+      const parent = parentToken.value;
       if (parent === 'StatefulSmartContract') parentClass = 'StatefulSmartContract';
       else if (parent === 'UnsafeSmartContract') parentClass = 'UnsafeSmartContract';
+      else if (parent !== 'SmartContract') {
+        // N-014: an unknown base is refused, never folded to SmartContract.
+        this.errors.push(makeDiagnostic(
+          `unknown parent class: '${parent}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
+          'error',
+          { file: this.file, line: parentToken.line, column: parentToken.column },
+        ));
+      }
     }
 
     this.expect('{');

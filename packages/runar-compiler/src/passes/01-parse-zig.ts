@@ -482,13 +482,22 @@ class ZigParser extends ParserCore<ZigToken> {
     if (this.current().type === 'ident' && this.current().value === 'runar') {
       this.advance();
       this.expect('.');
-      const parent = this.expect('ident').value;
+      const parentToken = this.expect('ident');
+      const parent = parentToken.value;
       if (parent === 'StatefulSmartContract') {
         this.parentClass = 'StatefulSmartContract';
       } else if (parent === 'UnsafeSmartContract') {
         this.parentClass = 'UnsafeSmartContract';
       } else {
         this.parentClass = 'SmartContract';
+        if (parent !== 'SmartContract') {
+          // N-014: an unknown base is refused, never folded to SmartContract.
+          this.errors.push(makeDiagnostic(
+            `unknown parent class: '${parent}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
+            'error',
+            { file: this.file, line: parentToken.line, column: parentToken.column },
+          ));
+        }
       }
     }
 

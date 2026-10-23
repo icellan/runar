@@ -495,7 +495,7 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 	}
 
 	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
-		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
+		return nil, fmt.Errorf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parentClass)
 	}
 
 	p.expect(solTokLBrace)

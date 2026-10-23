@@ -420,7 +420,10 @@ class _SolParser:
             "StatefulSmartContract",
             "UnsafeSmartContract",
         ):
-            raise ValueError(f"unknown parent class: {parent_class}")
+            raise ValueError(
+                f"unknown parent class: '{parent_class}', expected SmartContract, "
+                "StatefulSmartContract, or UnsafeSmartContract"
+            )
 
         self.expect(TOK_LBRACE)
 
