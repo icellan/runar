@@ -170,6 +170,10 @@ export {
   bn254G1ScalarMul,
   bn254G1Negate,
   bn254G1OnCurve,
+  // BN254 pairing
+  bn254Pairing,
+  bn254MultiPairing3,
+  bn254MultiPairing4,
   // Merkle proof verification
   merkleRootSha256,
   merkleRootHash256,

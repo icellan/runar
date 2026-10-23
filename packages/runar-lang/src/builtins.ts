@@ -1022,6 +1022,47 @@ export function bn254G1OnCurve(_p: Point): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// BN254 optimal-ate pairing (Go-tier codegen; see CLAUDE.md on EVM/STARK scope)
+// ---------------------------------------------------------------------------
+
+/**
+ * BN254 optimal-ate pairing of one (G1, G2) pair. G1 is a Point; the G2 point
+ * is passed as its four Fp limbs (x0, x1, y0, y1).
+ */
+export function bn254Pairing(
+  _p: Point, _qx0: bigint, _qx1: bigint, _qy0: bigint, _qy1: bigint,
+): bigint {
+  return compilerStub('bn254Pairing');
+}
+
+/**
+ * BN254 multi-pairing check over three (G1, G2) pairs plus six precomputed
+ * Fp limbs; true when the pairing product is the identity in GT.
+ */
+export function bn254MultiPairing3(
+  _p1: Point, _q1x0: bigint, _q1x1: bigint, _q1y0: bigint, _q1y1: bigint,
+  _p2: Point, _q2x0: bigint, _q2x1: bigint, _q2y0: bigint, _q2y1: bigint,
+  _p3: Point, _q3x0: bigint, _q3x1: bigint, _q3y0: bigint, _q3y1: bigint,
+  _pre0: bigint, _pre1: bigint, _pre2: bigint, _pre3: bigint, _pre4: bigint, _pre5: bigint,
+  _pre6: bigint, _pre7: bigint, _pre8: bigint, _pre9: bigint, _pre10: bigint, _pre11: bigint,
+): boolean {
+  return compilerStub('bn254MultiPairing3') as unknown as boolean;
+}
+
+/**
+ * BN254 multi-pairing check over four (G1, G2) pairs:
+ * e(p1,q1) * e(p2,q2) * e(p3,q3) * e(p4,q4) == 1 in GT (Groth16 equation).
+ */
+export function bn254MultiPairing4(
+  _p1: Point, _q1x0: bigint, _q1x1: bigint, _q1y0: bigint, _q1y1: bigint,
+  _p2: Point, _q2x0: bigint, _q2x1: bigint, _q2y0: bigint, _q2y1: bigint,
+  _p3: Point, _q3x0: bigint, _q3x1: bigint, _q3y0: bigint, _q3y1: bigint,
+  _p4: Point, _q4x0: bigint, _q4x1: bigint, _q4y0: bigint, _q4y1: bigint,
+): boolean {
+  return compilerStub('bn254MultiPairing4') as unknown as boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Merkle proof verification
 // ---------------------------------------------------------------------------
 
