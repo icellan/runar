@@ -79,6 +79,14 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { reduceAnfProgram, type AnfProgram as ReducibleAnfProgram } from './reduce.js';
+import {
+  emitStatefulContinuation,
+  emitStatefulPrologue,
+  type ScaffoldContext,
+} from '../../packages/runar-compiler/src/passes/stateful-scaffold.js';
+import { continuationShape } from '../../packages/runar-compiler/src/passes/side-effect-summary.js';
+import { SIGHASH_DEFAULT } from '../../packages/runar-compiler/src/passes/sighash-directive.js';
+import type { ANFBinding as CompilerAnfBinding, ANFValue as CompilerAnfValue } from '../../packages/runar-compiler/src/ir/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -125,7 +133,12 @@ interface AnfProgram {
 // `check_preimage`, `deserialize_state`, `add_output`,
 // `add_raw_output`, `add_data_output`) which need a coordinating
 // preimage parameter + state-continuation discipline that's not worth
-// the generator complexity for an in-the-loop fuzzer. The kinds we
+// the generator complexity for an in-the-loop fuzzer. (N-395: a program
+// that draws an `update_prop` is fed to every tier as a
+// StatefulSmartContract, so `toIrProgram` adds the frontend's own
+// scaffolding — `check_preimage`, `deserialize_state`, `get_state_script`
+// and the change-output `if` — around the generated body; the generator
+// itself still draws none of them.) The kinds we
 // keep — load_const / load_param / load_prop / bin_op / unary_op /
 // call / array_literal / assert / update_prop — already exercise every
 // loader + every stack-lowering dispatch site touched by the
@@ -573,10 +586,11 @@ function generateProgram(rng: Rng, opts: GenOpts): AnfProgram {
   const numProps = rng.nextInt(0, opts.maxProperties);
   const properties: AnfProperty[] = [];
   for (let i = 0; i < numProps; i++) {
+    // `toIrProgram` makes a property mutable iff some method writes it (N-395).
     properties.push({
       name: `prop${i}`,
       type: 'bigint',
-      readonly: false,
+      readonly: true,
     });
   }
 
@@ -668,6 +682,103 @@ function arbAnfProgram(opts: GenOpts = DEFAULT_GEN_OPTS): fc.Arbitrary<AnfProgra
     const rng = mulberry32(seed);
     return generateProgram(rng, opts);
   });
+}
+
+// ---------------------------------------------------------------------------
+// The program every tier is fed (N-395).
+//
+// The generator draws user code only. Since N-087 every tier's `--ir` path
+// refuses a mutable property in a SmartContract, and since N-101 a
+// StatefulSmartContract method that lacks the scaffolding the frontend
+// injects, so the corpus program is turned into the IR a real contract with
+// that body lowers to: a property is mutable iff some method writes it; a
+// program with a write is a StatefulSmartContract whose public methods carry
+// the frontend's own prologue, continuation and auto-injected parameters
+// (emitted by the compiler's `stateful-scaffold.ts`, the module `04-anf-lower`
+// uses, with `t<n>` names numbered as it numbers them); every other program is
+// a SmartContract with readonly properties. Done at evaluation time, not in the
+// generator, so the fold-ON renderer and the shrinker work on user code and a
+// shrunk candidate is re-scaffolded for whatever writes it still has.
+// ---------------------------------------------------------------------------
+
+export interface IrProgram {
+  contractName: string;
+  parentClass: 'SmartContract' | 'StatefulSmartContract';
+  properties: AnfProperty[];
+  methods: Array<{ name: string; params: AnfParam[]; body: CompilerAnfBinding[]; isPublic: boolean }>;
+}
+
+class ScaffoldBuilder implements ScaffoldContext<ScaffoldBuilder> {
+  readonly bindings: CompilerAnfBinding[] = [];
+  constructor(private readonly counter: { next: number }) {}
+  emit(value: CompilerAnfValue): string {
+    const name = `t${this.counter.next++}`;
+    this.bindings.push({ name, value });
+    return name;
+  }
+  subContext(): ScaffoldBuilder {
+    return new ScaffoldBuilder(this.counter);
+  }
+  syncCounter(): void {}
+}
+
+function renameRefs(v: AnfValue, to: (ref: string) => string): AnfValue {
+  switch (v.kind) {
+    case 'bin_op': return { ...v, left: to(v.left), right: to(v.right) };
+    case 'unary_op': return { ...v, operand: to(v.operand) };
+    case 'call': return { ...v, args: v.args.map(to) };
+    case 'array_literal': return { ...v, elements: v.elements.map(to) };
+    case 'assert': return { ...v, value: to(v.value) };
+    case 'update_prop': return { ...v, value: to(v.value) };
+    default: return v;
+  }
+}
+
+function scaffoldMethod(m: AnfMethod): IrProgram['methods'][number] {
+  const mutatesState = m.body.some((b) => b.value.kind === 'update_prop');
+  const shape = continuationShape(
+    {
+      mutatesState, hasStateOutput: false, hasDataOutput: false, usesPreimage: false,
+      callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false, callsExtractPrevOutputScript: false,
+    },
+    SIGHASH_DEFAULT,
+  );
+  const ctx = new ScaffoldBuilder({ next: 0 });
+  // Only called for a program with a write, so the contract has mutable state.
+  emitStatefulPrologue(ctx, SIGHASH_DEFAULT, true);
+  const renamed = new Map<string, string>();
+  for (const b of m.body) {
+    const value = renameRefs(b.value, (r) => renamed.get(r) ?? r);
+    renamed.set(b.name, ctx.emit(value as unknown as CompilerAnfValue));
+  }
+  emitStatefulContinuation(ctx, shape, [], []);
+  const params = [...m.params];
+  if (shape.includesChange) params.push({ name: '_changePKH', type: 'Ripemd160' }, { name: '_changeAmount', type: 'bigint' });
+  if (shape.needsNewAmount) params.push({ name: '_newAmount', type: 'bigint' });
+  params.push({ name: 'txPreimage', type: 'SigHashPreimage' });
+  return { name: m.name, params, body: ctx.bindings, isPublic: m.isPublic };
+}
+
+export function toIrProgram(program: AnfProgram): IrProgram {
+  const written = new Set<string>();
+  for (const m of program.methods) {
+    for (const b of m.body) if (b.value.kind === 'update_prop') written.add(b.value.name);
+  }
+  const properties = program.properties.map((p) => ({ ...p, readonly: !written.has(p.name) }));
+  if (written.size === 0) {
+    return {
+      contractName: program.contractName,
+      parentClass: 'SmartContract',
+      properties,
+      methods: program.methods as unknown as IrProgram['methods'],
+    };
+  }
+  return {
+    contractName: program.contractName,
+    parentClass: 'StatefulSmartContract',
+    properties,
+    methods: program.methods.map((m) => (m.isPublic ? scaffoldMethod(m) : (m as unknown as IrProgram['methods'][number]))),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -946,8 +1057,27 @@ function runProc(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: 
 
 // ---------------------------------------------------------------------------
 // Per-tier compile-from-IR dispatch. Each returns the hex script (lowercase,
-// trimmed) on success or `null` on failure.
+// trimmed) on success, a `TierRejection` carrying what the compiler said when
+// it ran and refused (N-395), or `null` when the tier could not run at all.
 // ---------------------------------------------------------------------------
+
+/** A tier that ran and refused the program, with its diagnostic. */
+export interface TierRejection { rejected: string }
+export type TierOutcome = string | null | TierRejection;
+
+/**
+ * The refusing compiler's diagnostic, with the per-program input path replaced
+ * so the same refusal reads the same for every candidate the shrinker tries.
+ */
+function rejectionOf(r: { stdout: string; stderr: string; code: number }, inputFile: string): TierRejection {
+  const text = (r.stderr.trim() || r.stdout.trim()).split(inputFile).join('<input>');
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  return { rejected: lines.length > 0 ? lines.join(' | ').slice(0, 400) : `exit code ${r.code}` };
+}
+
+function outcomeOf(r: { stdout: string; stderr: string; code: number }, inputFile: string): TierOutcome {
+  return r.code === 0 ? r.stdout.trim().toLowerCase() : rejectionOf(r, inputFile);
+}
 
 interface TierContext {
   goBin: string | null;
@@ -978,7 +1108,7 @@ function runIrFile(
   irFile: string,
   ctx: TierContext,
   disableConstantFolding: boolean,
-): string | null {
+): TierOutcome {
   // fold-OFF: pass `--disable-constant-folding`. fold-ON: omit it so each
   // native tier runs its default (folding-enabled) pipeline. The flag is
   // spliced into argv only when set so the empty case doesn't leave a
@@ -987,12 +1117,12 @@ function runIrFile(
   if (tier === 'go') {
     if (!ctx.goBin) return null;
     const r = runProc(ctx.goBin, ['--ir', irFile, '--hex', ...foldArgs]);
-    return r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+    return outcomeOf(r, irFile);
   }
   if (tier === 'rust') {
     if (!ctx.rustBin) return null;
     const r = runProc(ctx.rustBin, ['--ir', irFile, '--hex', ...foldArgs]);
-    return r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+    return outcomeOf(r, irFile);
   }
   if (tier === 'zig') {
     if (!ctx.zigBin) return null;
@@ -1001,24 +1131,24 @@ function runIrFile(
     // ANF-IR consumer mode). Filename matters, so write to a `.json`
     // path. We re-use the same canonical IR bytes from `irFile`.
     const r = runProc(ctx.zigBin, ['--source', irFile, '--hex', ...foldArgs]);
-    return r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+    return outcomeOf(r, irFile);
   }
   if (tier === 'python') {
     if (!ctx.pythonAvail) return null;
     const r = runProc('python3', ['-m', 'runar_compiler', '--ir', irFile, '--hex', ...foldArgs], {
       cwd: resolve(ROOT, 'compilers/python'),
     });
-    return r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+    return outcomeOf(r, irFile);
   }
   if (tier === 'ruby') {
     if (!ctx.rubyBin) return null;
     const r = runProc('ruby', [ctx.rubyBin, '--ir', irFile, '--hex', ...foldArgs]);
-    return r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+    return outcomeOf(r, irFile);
   }
   if (tier === 'java') {
     if (!ctx.javaJar) return null;
     const r = runProc('java', ['-jar', ctx.javaJar, '--ir', irFile, '--hex', ...foldArgs]);
-    return r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+    return outcomeOf(r, irFile);
   }
   // 'ts'
   return null;
@@ -1028,14 +1158,14 @@ function runTsInProcess(
   program: AnfProgram,
   ctx: TierContext,
   disableConstantFolding: boolean,
-): string | null {
+): TierOutcome {
   if (!ctx.tsCompile) return null;
   try {
     const r = ctx.tsCompile(program, { disableConstantFolding });
-    return r.scriptHex ? r.scriptHex.toLowerCase() : null;
+    return r.scriptHex ? r.scriptHex.toLowerCase() : { rejected: 'empty script' };
   } catch (e) {
     if (process.env.FUZZ_DEBUG) console.error('ts-compile throw:', (e as Error).message);
-    return null;
+    return { rejected: (e as Error).message };
   }
 }
 
@@ -1043,8 +1173,8 @@ function runTsInProcess(
  * Fold-ON (N-003): compile a rendered `.runar.ts` from SOURCE with each tier's
  * default pipeline, i.e. constant folding ON (no `--disable-constant-folding`).
  */
-function runSourceFile(tier: CompilerName, srcFile: string, ctx: TierContext): string | null {
-  let r: { stdout: string; code: number } | null = null;
+function runSourceFile(tier: CompilerName, srcFile: string, ctx: TierContext): TierOutcome {
+  let r: { stdout: string; stderr: string; code: number } | null = null;
   if (tier === 'go' && ctx.goBin) r = runProc(ctx.goBin, ['--source', srcFile, '--hex']);
   if (tier === 'rust' && ctx.rustBin) r = runProc(ctx.rustBin, ['--source', srcFile, '--hex']);
   if (tier === 'zig' && ctx.zigBin) r = runProc(ctx.zigBin, ['--source', srcFile, '--hex']);
@@ -1056,23 +1186,27 @@ function runSourceFile(tier: CompilerName, srcFile: string, ctx: TierContext): s
   if (tier === 'ruby' && ctx.rubyBin) r = runProc('ruby', [ctx.rubyBin, '--source', srcFile, '--hex']);
   if (tier === 'java' && ctx.javaJar) r = runProc('java', ['-jar', ctx.javaJar, '--source', srcFile, '--hex']);
   if (tier === 'ts') return runTsSource(srcFile, ctx.tsCompileSource, false);
-  return r && r.code === 0 ? r.stdout.trim().toLowerCase() : null;
+  return r ? outcomeOf(r, srcFile) : null;
 }
 
 function runTsSource(
   srcFile: string,
   compile: TsCompileSource | null,
   disableConstantFolding: boolean,
-): string | null {
+): TierOutcome {
   if (!compile) return null;
   try {
     const r = compile(readFileSync(srcFile, 'utf-8'), { fileName: srcFile, disableConstantFolding });
-    return r.success && r.artifact?.script ? r.artifact.script.toLowerCase() : null;
+    if (r.success && r.artifact?.script) return r.artifact.script.toLowerCase();
+    const diags = (r as { diagnostics?: Array<{ message?: string }> }).diagnostics ?? [];
+    return { rejected: diags.map((d) => d.message ?? '').filter(Boolean).join(' | ').slice(0, 400) || 'compile failed' };
   } catch (e) {
     if (process.env.FUZZ_DEBUG) console.error('ts-compile throw:', (e as Error).message);
-    return null;
+    return { rejected: (e as Error).message };
   }
 }
+
+const hexOf = (o: TierOutcome): string | null => (typeof o === 'string' ? o : null);
 
 // ---------------------------------------------------------------------------
 // Findings persistence
@@ -1192,8 +1326,12 @@ export type ProgramClassification =
 export function classifyTierResults(
   outputs: Partial<Record<CompilerName, string>>,
   failed: readonly CompilerName[],
+  /** What each refusing tier said (N-395); appended to the reason. */
+  rejections: Partial<Record<CompilerName, string>> = {},
 ): ProgramClassification {
   const tierKeys = Object.keys(outputs) as CompilerName[];
+  const said = failed.filter((t) => rejections[t] !== undefined).map((t) => `${t}: ${rejections[t]}`);
+  const withMessages = (reason: string) => (said.length > 0 ? `${reason} [${said.join('; ')}]` : reason);
 
   if (tierKeys.length >= 2) {
     const ref = outputs[tierKeys[0]!]!;
@@ -1212,7 +1350,7 @@ export function classifyTierResults(
       );
     }
     if (reasons.length > 0) {
-      return { status: 'mismatch', reason: reasons.join('; ') };
+      return { status: 'mismatch', reason: withMessages(reasons.join('; ')) };
     }
     return { status: 'ok' };
   }
@@ -1222,7 +1360,7 @@ export function classifyTierResults(
     // installed binary failed — flag it.
     return {
       status: 'mismatch',
-      reason: `tier(s) rejected program: ${failed.join(',')}; accepted: ${tierKeys.join(',')}`,
+      reason: withMessages(`tier(s) rejected program: ${failed.join(',')}; accepted: ${tierKeys.join(',')}`),
     };
   }
 
@@ -1260,19 +1398,21 @@ export interface AnfDifferentialOptions {
   /** Generator knobs. */
   genOpts?: Partial<GenOpts>;
   /**
-   * Test seam: compile one program in one tier, returning lowercase hex or
-   * `null` (rejected). When set it replaces EVERY tier's real compiler
+   * Test seam: compile one program in one tier, returning lowercase hex,
+   * `{ rejected: message }` (ran and refused) or `null` (rejected, no
+   * message). When set it replaces EVERY tier's real compiler
    * (including the in-process TS one), every requested tier counts as
    * available, and no binary discovery runs. Lets a hermetic test inject a
-   * known divergence; production callers leave it unset.
+   * known divergence; production callers leave it unset. `program` is the IR
+   * every tier is fed (`toIrProgram` of the generated program).
    */
   compileTier?: (
     tier: CompilerName,
-    program: AnfProgram,
+    program: IrProgram,
     /** fold-OFF: the canonical IR `.json`; fold-ON: the rendered `.runar.ts`. */
     inputFile: string,
     disableConstantFolding: boolean,
-  ) => string | null;
+  ) => TierOutcome;
 }
 
 export interface AnfDifferentialReport {
@@ -1331,7 +1471,7 @@ export async function runAnfDifferential(
     const ctx = await initTierContext();
     compileTier = (tier, program, inputFile, fold) => {
       if (!fold) return runSourceFile(tier, inputFile, ctx);
-      return tier === 'ts' ? runTsInProcess(program, ctx, fold) : runIrFile(tier, inputFile, ctx, fold);
+      return tier === 'ts' ? runTsInProcess(program as unknown as AnfProgram, ctx, fold) : runIrFile(tier, inputFile, ctx, fold);
     };
     perTierAvailable = {
       ts: disableConstantFolding ? !!ctx.tsCompile : !!ctx.tsCompileSource,
@@ -1363,29 +1503,34 @@ export async function runAnfDifferential(
   const foldOn = !disableConstantFolding;
   const tsCompileSource = foldOn ? await loadTsCompileSource() : null;
   const sourceFileFor = (irFile: string) => irFile.replace(/\.json$/, '.runar.ts');
-  const evaluate = (prog: AnfProgram, canonicalBytes: string, irFile: string) => {
+  const evaluate = (prog: AnfProgram, irFile: string) => {
+    const ir = toIrProgram(prog);
     let inputFile = irFile;
     if (foldOn) {
       inputFile = sourceFileFor(irFile);
       writeFileSync(inputFile, renderAnfProgramToTypeScript(prog), 'utf-8');
     } else {
-      writeFileSync(irFile, canonicalBytes, 'utf-8');
+      writeFileSync(irFile, canon(ir), 'utf-8');
     }
     const outputs: Partial<Record<CompilerName, string>> = {};
     const failed: CompilerName[] = [];
+    const rejections: Partial<Record<CompilerName, string>> = {};
     for (const tier of tiers) {
-      const hex = compileTier(tier, prog, inputFile, disableConstantFolding);
-      if (hex === null) {
+      const out = compileTier(tier, ir, inputFile, disableConstantFolding);
+      if (typeof out === 'string') {
+        outputs[tier] = out;
+      } else if (out !== null) {
+        // Ran and refused: always a failure, and what it said is part of the
+        // reason, so the shrinker keeps the refusal it was handed (N-395).
+        failed.push(tier);
+        rejections[tier] = out.rejected;
+      } else if (classifyUnavailableTier(perTierAvailable[tier], opts.skipMissingTiers) !== 'skipped') {
         // Distinguish "no binary" from "binary present, rejected" (always a
         // failure). perTierAvailable tells us the difference.
-        if (classifyUnavailableTier(perTierAvailable[tier], opts.skipMissingTiers) !== 'skipped') {
-          failed.push(tier);
-        }
-      } else {
-        outputs[tier] = hex;
+        failed.push(tier);
       }
     }
-    return { outputs, classification: classifyTierResults(outputs, failed) };
+    return { outputs, classification: classifyTierResults(outputs, failed, rejections) };
   };
 
   // Shrink a mismatching program with `reduceAnfProgram` (F-173). A candidate
@@ -1402,7 +1547,7 @@ export async function runAnfDifferential(
   ): Finding['reduced'] => {
     const deadline = opts.timeBudgetMs !== undefined ? start + opts.timeBudgetMs : undefined;
     const reproduces = (p: AnfProgram): { outputs: Partial<Record<CompilerName, string>> } | null => {
-      const r = evaluate(p, canon(p), irFile);
+      const r = evaluate(p, irFile);
       return r.classification.status === 'mismatch' && r.classification.reason === reason ? r : null;
     };
     try {
@@ -1415,7 +1560,7 @@ export async function runAnfDifferential(
       const confirmed = reproduces(reducedProgram);
       if (!confirmed) return undefined;
       return {
-        programJson: canon(reducedProgram),
+        programJson: canon(toIrProgram(reducedProgram)),
         source: foldOn ? renderAnfProgramToTypeScript(reducedProgram) : undefined,
         outputs: confirmed.outputs,
         reason,
@@ -1443,7 +1588,7 @@ export async function runAnfDifferential(
     // 1) canonicalise to bytes
     let canonical: string;
     try {
-      canonical = canon(program);
+      canonical = canon(toIrProgram(program));
     } catch (e) {
       // A generator bug producing un-canonicalisable IR; surface it as a
       // mismatch so it can't silently disappear.
@@ -1465,7 +1610,7 @@ export async function runAnfDifferential(
     const irFile = join(tmpDir, `program-${process.pid}-${i}.json`);
 
     // 2) collect per-tier hex, 3) compare
-    const { outputs, classification } = evaluate(program, canonical, irFile);
+    const { outputs, classification } = evaluate(program, irFile);
     const tierKeys = Object.keys(outputs) as CompilerName[];
     let source: string | undefined;
     if (foldOn) {
@@ -1474,8 +1619,8 @@ export async function runAnfDifferential(
       // tier was compared on ARE the folded ones.
       const srcFile = sourceFileFor(irFile);
       source = renderAnfProgramToTypeScript(program);
-      const on = runTsSource(srcFile, tsCompileSource, false);
-      const off = runTsSource(srcFile, tsCompileSource, true);
+      const on = hexOf(runTsSource(srcFile, tsCompileSource, false));
+      const off = hexOf(runTsSource(srcFile, tsCompileSource, true));
       const compared = tiers.includes('ts') ? outputs.ts : on;
       if (on !== null && off !== null && on !== off && compared === on) foldedPrograms += 1;
     }
