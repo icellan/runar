@@ -1285,7 +1285,9 @@ public final class Validate {
                 walkExpressionsInBody(i.thenBody(), sink);
                 if (i.elseBody() != null) walkExpressionsInBody(i.elseBody(), sink);
             } else if (s instanceof ForStatement f) {
+                if (f.init() != null) walkExpressionsInStmt(f.init(), sink);
                 walkExpression(f.condition(), sink);
+                if (f.update() != null) walkExpressionsInStmt(f.update(), sink);
                 walkExpressionsInBody(f.body(), sink);
             } else if (s instanceof ReturnStatement r) {
                 if (r.value() != null) walkExpression(r.value(), sink);

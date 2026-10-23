@@ -1734,7 +1734,11 @@ def _walk_expressions_in_stmt(stmt: Statement, visitor) -> None:
         _walk_expressions_in_body(stmt.then, visitor)
         _walk_expressions_in_body(stmt.else_, visitor)
     elif isinstance(stmt, ForStmt):
+        if stmt.init is not None:
+            _walk_expressions_in_stmt(stmt.init, visitor)
         _walk_expr(stmt.condition, visitor)
+        if stmt.update is not None:
+            _walk_expressions_in_stmt(stmt.update, visitor)
         _walk_expressions_in_body(stmt.body, visitor)
     elif isinstance(stmt, ReturnStmt):
         if stmt.value is not None:

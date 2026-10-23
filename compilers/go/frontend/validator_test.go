@@ -2102,3 +2102,95 @@ class C extends StatefulSmartContract {
 `)
 	requireValidationError(t, result, "Output intrinsic 'addOutput'")
 }
+
+// ---------------------------------------------------------------------------
+// N-012: expression walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+//
+// Proves: both statement walkers (plain and WithLoc — the latter is the one
+// behind the asm() gate) visit all three header slots of a `for` statement, so
+// an asm(...) call planted in the init, condition or update of a loop in a
+// non-Unsafe contract is refused. The AST is hand-built (mutated after
+// parsing) because the for-update and literal-init rules make these shapes
+// unreachable from source today.
+// Does not prove: that any source program can reach this; only that a future
+// loosening of those rules cannot reopen the asm gate through the walkers.
+
+func TestValidate_N012_ForHeaderSlotsAreWalked(t *testing.T) {
+	const src = `
+import { SmartContract, assert } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly t: bigint;
+
+  constructor(t: bigint) {
+    super(t);
+    this.t = t;
+  }
+
+  public verify(a: bigint): void {
+    let s: bigint = 0n;
+    for (let i: bigint = 0n; i < 3n; i++) { s = s + a; }
+    assert(s === this.t);
+  }
+}
+`
+	asmCall := func() Expression { return CallExpr{Callee: Identifier{Name: "asm"}} }
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run(slot, func(t *testing.T) {
+			contract := mustParseTS(t, src)
+			body := contract.Methods[0].Body
+			idx := -1
+			for i, st := range body {
+				if _, ok := st.(ForStmt); ok {
+					idx = i
+				}
+			}
+			if idx < 0 {
+				t.Fatal("no ForStmt in method body")
+			}
+			loop := body[idx].(ForStmt)
+			switch slot {
+			case "init":
+				loop.Init.Init = asmCall()
+			case "condition":
+				loop.Condition = asmCall()
+			case "update":
+				loop.Update = ExpressionStmt{Expr: asmCall(), SourceLocation: loop.SourceLocation}
+			}
+			body[idx] = loop
+
+			res := Validate(contract)
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, "'asm' is only available in contracts extending UnsafeSmartContract") {
+					return
+				}
+			}
+			t.Fatalf("asm() in for-loop %s was not refused; got %v", slot, res.ErrorStrings())
+		})
+	}
+
+	// The plain walker is a separate function from the WithLoc one.
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run("plain-"+slot, func(t *testing.T) {
+			loop := mustParseTS(t, src).Methods[0].Body[1].(ForStmt)
+			switch slot {
+			case "init":
+				loop.Init.Init = asmCall()
+			case "condition":
+				loop.Condition = asmCall()
+			case "update":
+				loop.Update = ExpressionStmt{Expr: asmCall()}
+			}
+			seen := false
+			walkExpressionsInStatement(loop, func(e Expression) {
+				if isAsmCall(e) {
+					seen = true
+				}
+			})
+			if !seen {
+				t.Fatalf("walkExpressionsInStatement did not visit the for-loop %s", slot)
+			}
+		})
+	}
+}

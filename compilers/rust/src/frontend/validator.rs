@@ -2749,9 +2749,15 @@ fn walk_expressions_in_statement(stmt: &Statement, visitor: &mut impl FnMut(&Exp
             }
         }
         Statement::ForStatement {
-            condition, body, ..
+            init,
+            condition,
+            update,
+            body,
+            ..
         } => {
+            walk_expressions_in_statement(init, visitor);
             walk_expression(condition, visitor);
+            walk_expressions_in_statement(update, visitor);
             walk_expressions_in_body(body, visitor);
         }
         Statement::ReturnStatement { value, .. } => {
@@ -3454,5 +3460,94 @@ class BadHexInit3 extends SmartContract {
 "#,
         );
         f063_require(&errs, "ByteString literal 'zzz' has odd length (3)");
+    }
+
+    // N-012. Proves: the expression walker behind the asm() gate visits all
+    // three header slots (init, condition, update) of a `for` statement, so an
+    // asm(...) call planted in any of them in a non-Unsafe contract is refused.
+    // The AST is hand-built (mutated after parsing) because the for-update and
+    // literal-init rules make these shapes unreachable from source today.
+    // Does not prove: that any source program can reach this; only that a
+    // future loosening of those rules cannot reopen the asm gate.
+    fn n012_asm_call() -> Expression {
+        Expression::CallExpr {
+            callee: Box::new(Expression::Identifier { name: "asm".to_string() }),
+            args: vec![],
+            asm_return_type: None,
+        }
+    }
+
+    fn n012_refuses_asm_in(slot: &str) {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly t: bigint;
+
+    constructor(t: bigint) {
+        super(t);
+        this.t = t;
+    }
+
+    public verify(a: bigint) {
+        let s: bigint = 0n;
+        for (let i: bigint = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+    }
+}
+"#;
+        let mut contract = parse_contract(source);
+        let mut planted = false;
+        for stmt in contract.methods[0].body.iter_mut() {
+            if let Statement::ForStatement {
+                init,
+                condition,
+                update,
+                source_location,
+                ..
+            } = stmt
+            {
+                match slot {
+                    "init" => {
+                        if let Statement::VariableDecl { init: e, .. } = init.as_mut() {
+                            *e = n012_asm_call();
+                        }
+                    }
+                    "condition" => *condition = n012_asm_call(),
+                    _ => {
+                        **update = Statement::ExpressionStatement {
+                            expression: n012_asm_call(),
+                            source_location: source_location.clone(),
+                        };
+                    }
+                }
+                planted = true;
+            }
+        }
+        assert!(planted, "no ForStatement in method body");
+        let result = validate(&contract);
+        assert!(
+            result.errors.iter().any(|e| e
+                .message
+                .contains("'asm' is only available in contracts extending UnsafeSmartContract")),
+            "asm() in for-loop {} was not refused; got {:?}",
+            slot,
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n012_asm_in_for_init_refused() {
+        n012_refuses_asm_in("init");
+    }
+
+    #[test]
+    fn n012_asm_in_for_condition_refused() {
+        n012_refuses_asm_in("condition");
+    }
+
+    #[test]
+    fn n012_asm_in_for_update_refused() {
+        n012_refuses_asm_in("update");
     }
 }

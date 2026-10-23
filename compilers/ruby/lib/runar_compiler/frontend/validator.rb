@@ -2071,7 +2071,9 @@ module RunarCompiler
           walk_expressions_in_body(stmt.then, visitor)
           walk_expressions_in_body(stmt.else_, visitor)
         when ForStmt
+          walk_expressions_in_stmt(stmt.init, visitor)
           walk_expr(stmt.condition, visitor)
+          walk_expressions_in_stmt(stmt.update, visitor)
           walk_expressions_in_body(stmt.body, visitor)
         when ReturnStmt
           walk_expr(stmt.value, visitor) unless stmt.value.nil?

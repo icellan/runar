@@ -2466,7 +2466,9 @@ function walkExpressionsInStatement(
       if (stmt.else) walkExpressionsInBody(stmt.else, visitor);
       break;
     case 'for_statement':
+      walkExpressionsInStatement(stmt.init, visitor);
       walkExpr(stmt.condition, visitor);
+      walkExpressionsInStatement(stmt.update, visitor);
       walkExpressionsInBody(stmt.body, visitor);
       break;
     case 'return_statement':

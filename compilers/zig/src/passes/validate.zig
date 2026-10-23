@@ -1026,6 +1026,7 @@ fn walkStatementForAsm(
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| try walkStatementForAsm(allocator, u.*, contract, errors);
             for (fs.body) |s| try walkStatementForAsm(allocator, s, contract, errors);
         },
         .assert_stmt => |a| try walkExprForAsm(allocator, a.condition, contract, errors),
@@ -1885,6 +1886,7 @@ fn walkStatementsForPreimage(
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| try walkStatementsForPreimage(allocator, u.*, method_name, warnings);
             for (fs.body) |s| try walkStatementsForPreimage(allocator, s, method_name, warnings);
         },
         .assert_stmt => |a| try walkExprForPreimage(allocator, a.condition, method_name, warnings),
@@ -2092,6 +2094,7 @@ fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool)
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| scanStmtForLocktime(u.*, reads_locktime, has_guard);
             for (fs.body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
         },
         .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard, true),
@@ -3794,6 +3797,25 @@ test "zero-start counting-up for loop is accepted" {
     const for_stmt = types.ForStmt{ .var_name = "i", .init_value = 0, .bound = 4, .body = &.{} };
     try testing.expect(!try validateLoopHasError(testing.allocator, for_stmt, "must start at 0"));
     try testing.expect(!try validateLoopHasError(testing.allocator, for_stmt, "countdown"));
+}
+
+// -- N-012: the expression walkers cover a for-loop's update slot -------------
+//
+// Proves: the walker behind the asm() gate visits the `update` statement of a
+// `for` loop, so an `asm(...)` call planted there in a non-Unsafe contract is
+// refused. The AST is hand-built because the for-update rule makes the shape
+// unreachable from source today. Zig lowers a `for` header to constants
+// (`init_value`, `bound`, `bound_ident`), so the update is the only header slot
+// that can hold an expression; init and condition have nothing to walk here.
+// Does not prove: that any source program can reach this; only that a future
+// loosening of the update rule cannot reopen the asm gate through the walker.
+test "N-012: asm() planted in a for-loop update is refused outside UnsafeSmartContract" {
+    const allocator = testing.allocator;
+    var asm_args = [_]Expression{};
+    var asm_call = types.CallExpr{ .callee = "asm", .args = &asm_args };
+    const update = Statement{ .expr_stmt = .{ .expr = .{ .call = &asm_call } } };
+    const for_stmt = types.ForStmt{ .var_name = "i", .init_value = 0, .bound = 3, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update };
+    try testing.expect(try validateLoopHasError(allocator, for_stmt, "'asm' is only available in contracts extending UnsafeSmartContract"));
 }
 
 // -- #131 (H2): extractLocktime without extractSequence guard ----------------

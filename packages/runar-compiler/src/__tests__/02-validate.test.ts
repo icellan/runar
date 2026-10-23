@@ -951,3 +951,47 @@ describe('N-325: unknown parameter type names', () => {
     expect(hasError(result, 'is not a Rúnar type')).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// N-012: expression walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+
+// Proves: the validator's expression walker (the one behind the asm() gate)
+// visits all three header slots of a `for` statement, so an `asm(...)` call
+// planted in the init, condition or update of a loop in a NON-Unsafe contract
+// is refused. The AST is hand-built (mutated after parsing) because the parser
+// and the for-update / literal-init rules make these shapes unreachable from
+// source today.
+// Does not prove: that any source program can reach this; only that a future
+// loosening of those rules cannot reopen the asm gate through the walker.
+describe('N-012: for-loop header slots are walked', () => {
+  const FOR_SOURCE = `
+    class C extends SmartContract {
+      readonly t: bigint;
+      constructor(t: bigint) { super(t); this.t = t; }
+      public verify(a: bigint) {
+        let s = 0n;
+        for (let i = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+      }
+    }
+  `;
+  const asmCall = () => ({
+    kind: 'call_expr' as const,
+    callee: { kind: 'identifier' as const, name: 'asm' },
+    args: [],
+  });
+
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`refuses asm() planted in the for-loop ${slot}`, () => {
+      const contract = parseContract(FOR_SOURCE);
+      const loop = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!loop || loop.kind !== 'for_statement') throw new Error('no for_statement');
+      if (slot === 'init') loop.init = { ...loop.init, init: asmCall() };
+      else if (slot === 'condition') loop.condition = asmCall();
+      else loop.update = { kind: 'expression_statement', expression: asmCall(), sourceLocation: loop.sourceLocation };
+      const result = validate(contract);
+      expect(hasError(result, "'asm' is only available in contracts extending UnsafeSmartContract")).toBe(true);
+    });
+  }
+});

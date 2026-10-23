@@ -1792,7 +1792,9 @@ func walkExpressionsInStatementWithLoc(stmt Statement, visitor func(Expression, 
 		walkExpressionsInBodyWithLoc(s.Else, visitor)
 	case ForStmt:
 		loc := s.SourceLocation
+		walkExpressionsInStatementWithLoc(s.Init, visitor)
 		walkExprWithLoc(s.Condition, &loc, visitor)
+		walkExpressionsInStatementWithLoc(s.Update, visitor)
 		walkExpressionsInBodyWithLoc(s.Body, visitor)
 	case ReturnStmt:
 		if s.Value != nil {
@@ -1820,7 +1822,9 @@ func walkExpressionsInStatement(stmt Statement, visitor func(Expression)) {
 		walkExpressionsInBody(s.Then, visitor)
 		walkExpressionsInBody(s.Else, visitor)
 	case ForStmt:
+		walkExpressionsInStatement(s.Init, visitor)
 		walkExpr(s.Condition, visitor)
+		walkExpressionsInStatement(s.Update, visitor)
 		walkExpressionsInBody(s.Body, visitor)
 	case ReturnStmt:
 		if s.Value != nil {
