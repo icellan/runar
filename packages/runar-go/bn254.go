@@ -53,7 +53,25 @@ var bn254B = big.NewInt(3)
 // Points are represented as 64-byte ByteStrings (x[32] || y[32], big-endian).
 // Returns the sum P + Q. Handles identity (zero-point) and doubling cases.
 // The returned slice is always freshly allocated — never aliases p1 or p2.
+//
+// Panics (fails closed) exactly where the compiled bn254G1Add script aborts
+// (F-091): px != qx while py + qy == 0 mod p, the omega-partner pairs
+// Q = (w*px, -py), w a primitive cube root of unity, where the script's
+// unified slope is 0/0. The check precedes the identity handling, as in the
+// script. Bn254G1ScalarMul uses the unguarded bn254G1AddUnchecked: its script
+// is a different primitive.
 func Bn254G1Add(p1, p2 []byte) []byte {
+	x1, y1 := bn254DecodePoint(p1)
+	x2, y2 := bn254DecodePoint(p2)
+	if x1.Cmp(x2) != 0 && new(big.Int).Mod(new(big.Int).Add(y1, y2), bn254P).Sign() == 0 {
+		panic("runar: Bn254G1Add: omega-partner collision (px != qx, py + qy == 0 mod p); the compiled bn254G1Add script aborts on this input")
+	}
+	return bn254G1AddUnchecked(p1, p2)
+}
+
+// bn254G1AddUnchecked is the affine addition without the F-091 script-abort
+// mirror; see Bn254G1Add.
+func bn254G1AddUnchecked(p1, p2 []byte) []byte {
 	x1, y1 := bn254DecodePoint(p1)
 	x2, y2 := bn254DecodePoint(p2)
 
@@ -150,9 +168,9 @@ func Bn254G1ScalarMul(p []byte, s *big.Int) []byte {
 
 	for k.Sign() > 0 {
 		if k.Bit(0) == 1 {
-			result = Bn254G1Add(result, addend)
+			result = bn254G1AddUnchecked(result, addend)
 		}
-		addend = Bn254G1Add(addend, addend)
+		addend = bn254G1AddUnchecked(addend, addend)
 		k.Rsh(k, 1)
 	}
 
