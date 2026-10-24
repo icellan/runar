@@ -143,6 +143,15 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # N-220: --source and --ir are mutually exclusive input modes (Go F-183,
+    # Ruby F-335). Previously --source was run and --ir silently ignored.
+    if args.source and args.ir:
+        print(
+            "Error: --source and --ir are mutually exclusive; pass exactly one",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Handle --parse-only: read source, run parse + validate; print
     # "parser ok" on success or diagnostics on failure. Universal
     # parser-coverage entry point used by the conformance runner.

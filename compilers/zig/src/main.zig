@@ -26,6 +26,8 @@ const ParseOptionsError = error{
     UnknownFlag,
     UnsupportedFlag,
     MissingFlagValue,
+    /// N-220: a second input (`--source` / `--ir`) after the first one.
+    ConflictingInputs,
 };
 
 fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding: bool) ParseOptionsError!CompileOptions {
@@ -33,6 +35,12 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
+        // N-220: the input file is already fixed by the subcommand / first
+        // flag, so another --source or --ir is a second input mode. Go F-183
+        // and Ruby F-335 refuse this; we used to answer "unknown flag".
+        if (std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--ir")) {
+            return error.ConflictingInputs;
+        }
         if (std.mem.eql(u8, arg, "--emit-ir")) {
             opts.emit_ir = true;
             continue;
@@ -109,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
                 error.UnknownFlag => "error: unknown compile-ir flag\n",
                 error.UnsupportedFlag => "error: --disable-constant-folding is only valid for source compilation\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
+                error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -129,6 +138,7 @@ pub fn main(init: std.process.Init) !void {
                 error.UnknownFlag => "error: unknown compile flag\n",
                 error.UnsupportedFlag => "error: unsupported compile flag\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
+                error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -156,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
                 error.UnknownFlag => "error: unknown source flag\n",
                 error.UnsupportedFlag => "error: unsupported source flag\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
+                error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);

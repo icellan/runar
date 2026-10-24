@@ -158,6 +158,13 @@ module RunarCompiler
         exit 1
       end
 
+      # N-220: --hex and --asm are mutually exclusive output modes, matching
+      # the Go tier's F-183 refusal. The old code preferred --hex silently.
+      if options[:hex] && options[:asm]
+        $stderr.puts "Error: --hex and --asm are mutually exclusive; pass exactly one"
+        exit 1
+      end
+
       disable_cf = options[:disable_constant_folding] || false
 
       # Handle --parse-only: read source, run parse + validate, print

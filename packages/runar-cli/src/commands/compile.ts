@@ -78,6 +78,16 @@ export async function compileCommand(
   files: string[],
   options: CompileOptions,
 ): Promise<void> {
+  // N-220: source files and --from-ir are mutually exclusive input modes.
+  // The --from-ir branch below used to run and silently ignore `files`.
+  // Same sentence as the Go (F-183) / Ruby (F-335) CLIs, naming this CLI's
+  // own inputs.
+  if (options.fromIr && files.length > 0) {
+    console.error('Error: source files and --from-ir are mutually exclusive; pass exactly one');
+    process.exitCode = 1;
+    return;
+  }
+
   const outputDir = path.resolve(process.cwd(), options.output);
   fs.mkdirSync(outputDir, { recursive: true });
 

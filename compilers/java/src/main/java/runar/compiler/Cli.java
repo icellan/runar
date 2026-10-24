@@ -90,6 +90,13 @@ public final class Cli {
             return parsed.help ? 0 : 2;
         }
 
+        // N-220: --source and --ir are mutually exclusive input modes (Go F-183,
+        // Ruby F-335). This used to run --ir and silently ignore --source.
+        if (parsed.source != null && parsed.ir != null) {
+            err.println("Error: --source and --ir are mutually exclusive; pass exactly one");
+            return 2;
+        }
+
         if (parsed.ir != null) {
             return compileIr(parsed);
         }

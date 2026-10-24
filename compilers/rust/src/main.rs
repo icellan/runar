@@ -136,6 +136,13 @@ fn main() {
         process::exit(1);
     }
 
+    // N-220: --source and --ir are mutually exclusive input modes (Go F-183,
+    // Ruby F-335). Previously --source was run and --ir silently ignored.
+    if args.ir.is_some() && args.source.is_some() {
+        eprintln!("Error: --source and --ir are mutually exclusive; pass exactly one");
+        process::exit(1);
+    }
+
     // Handle --parse-only: read source, run parse + validate, emit
     // "parser ok" on success or diagnostics + non-zero exit on failure.
     // Used by the universal parser-coverage assertion.
