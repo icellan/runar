@@ -129,35 +129,12 @@ function tsArtifact(example: string): RunarArtifact {
   return r.artifact as unknown as RunarArtifact;
 }
 
-// Pre-existing and outside N-027: the Zig surface of TicTacToe v1 declares
-// `p2pkhPrefix: ... = runar.hexToBytes("1976a914")`, and the Go, Rust, Python,
-// Ruby and Java Zig parsers refuse that initializer ("initializer must be a
-// literal value") while the TS and Zig tiers accept it. That is a Zig-surface
-// literal-parser gap tracked separately. Those five compiles must either match
-// the reference (once the parsers are fixed) or refuse with exactly that
-// diagnostic; anything else fails.
-const KNOWN_ZIG_HEX_INITIALIZER_GAP = /initializer must be a literal value/;
-function knownGap(example: string, path: string, tier: string): boolean {
-  return example === 'TicTacToe' && path.endsWith('.runar.zig') && tier !== 'ts' && tier !== 'zig';
-}
-
 describe('N-027 — every shipped source, in every tier, is one script per example', () => {
   for (const [example, paths] of Object.entries(EXAMPLES)) {
     const reference = tsArtifact(example).script;
     for (const path of paths) {
       for (const [tier, compileIn] of Object.entries(TIERS)) {
         it(`${example}: ${basename(path)} in ${tier}`, () => {
-          if (knownGap(example, path, tier)) {
-            let script: string | undefined;
-            try {
-              script = compileIn(path);
-            } catch (e) {
-              expect(String(e)).toMatch(KNOWN_ZIG_HEX_INITIALIZER_GAP);
-              return;
-            }
-            expect(script).toBe(reference);
-            return;
-          }
           expect(compileIn(path)).toBe(reference);
         }, 300_000);
       }
