@@ -30,11 +30,9 @@ fn bin_path() -> PathBuf {
 }
 
 fn tempdir() -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("runar-rust-cli-emit-ir-source-map-{}", nanos));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("runar-rust-cli-emit-ir-source-map-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&path).expect("create tempdir");
     path
 }
@@ -109,4 +107,27 @@ fn emit_ir_with_emit_source_map_writes_the_source_map_and_prints_only_ir() {
         "stdout must carry ONLY the IR, not the compiled artifact; got: {}",
         stdout
     );
+}
+
+// N-377: proves tempdir() never hands two callers the same path, even when
+// called back to back. Does not prove uniqueness across processes beyond the
+// pid component.
+#[test]
+fn n377_tempdir_paths_are_unique() {
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let b = barrier.clone();
+            std::thread::spawn(move || {
+                b.wait();
+                (0..200).map(|_| tempdir()).collect::<Vec<PathBuf>>()
+            })
+        })
+        .collect();
+    let dirs: Vec<PathBuf> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+    let set: std::collections::HashSet<&PathBuf> = dirs.iter().collect();
+    for d in &dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    assert_eq!(set.len(), dirs.len(), "tempdir() returned duplicate paths");
 }
