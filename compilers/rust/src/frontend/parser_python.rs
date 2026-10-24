@@ -1536,7 +1536,7 @@ impl<'a> PyParser<'a> {
             };
 
             params.push(ParamNode {
-                name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
+                name: self.idents.declare(&raw_name, map_builtin_name(&raw_name)),
                 param_type,
             });
 
@@ -1758,7 +1758,7 @@ impl<'a> PyParser<'a> {
         self.advance(); // consume 'for'
 
         let raw_var = self.expect_ident();
-        let var_name = self.idents.declare(&raw_var, snake_to_camel(&raw_var));
+        let var_name = self.idents.declare(&raw_var, map_builtin_name(&raw_var));
 
         self.expect(&Token::In);
         self.expect(&Token::Range);
@@ -2026,7 +2026,7 @@ impl<'a> PyParser<'a> {
             };
 
             // N-046: rebinding a local of this method is an assignment in Python.
-            let name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
+            let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
             return self.bind_local(name, Some(type_node), init);
         }
 
@@ -2036,7 +2036,7 @@ impl<'a> PyParser<'a> {
             self.advance(); // consume '='
             let value = self.parse_expression();
             // N-046: rebinding a local of this method is an assignment in Python.
-            let name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
+            let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
             return self.bind_local(name, None, value);
         }
 

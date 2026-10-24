@@ -662,6 +662,15 @@ class PyParser {
     return name;
   }
 
+  /** N-017: declare a parameter, local or loop variable. References go through
+   *  `mapBuiltinName`, so the declaration must too — otherwise `safe_div = ...`
+   *  is declared `safeDiv` but read back as the builtin `safediv`. */
+  private declareBinding(raw: string): string {
+    const name = mapBuiltinName(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
   private peek(): Token { return this.current(); }
 
@@ -1064,7 +1073,7 @@ class PyParser {
 
       params.push({
         kind: 'param',
-        name: this.declare(rawName),
+        name: this.declareBinding(rawName),
         type: typeNode ?? { kind: 'custom_type', name: 'unknown' },
       });
 
@@ -1305,7 +1314,7 @@ class PyParser {
     this.advance(); // 'for'
 
     const iterVar = this.advance(); // loop variable
-    const varName = this.declare(iterVar.value);
+    const varName = this.declareBinding(iterVar.value);
 
     this.expect('in');
     this.expect('range');
@@ -1496,7 +1505,7 @@ class PyParser {
       } else {
         init = { kind: 'bigint_literal', value: 0n };
       }
-      const name = this.declare(rawName);
+      const name = this.declareBinding(rawName);
       // N-046: rebinding a local of this method is an assignment in Python.
       if (this.declaredLocals.has(name)) {
         return { kind: 'assignment', target: { kind: 'identifier', name }, value: init, sourceLocation: loc };
@@ -1519,7 +1528,7 @@ class PyParser {
       this.advance(); // consume ident
       this.advance(); // consume '='
       const value = this.parseExpression();
-      const name = this.declare(rawName);
+      const name = this.declareBinding(rawName);
       // N-046: rebinding a local of this method is an assignment in Python.
       if (this.declaredLocals.has(name)) {
         return { kind: 'assignment', target: { kind: 'identifier', name }, value, sourceLocation: loc };
