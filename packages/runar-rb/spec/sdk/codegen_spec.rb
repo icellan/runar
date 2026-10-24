@@ -171,6 +171,36 @@ RSpec.describe 'Runar::SDK::Codegen' do
     end
   end
 
+  # N-149: a Ruby keyword used as an ABI param/constructor name must not be
+  # emitted as a bare identifier. Proves: the wrapper generated for a
+  # contract whose constructor param / method / method params are Ruby
+  # keywords (`end`, `class`, `self`) is syntactically valid Ruby. Does not
+  # prove the wrapper behaves correctly when called.
+  describe 'Ruby keyword identifiers' do
+    it 'generates syntactically valid Ruby for keyword-named params and methods' do
+      artifact = Runar::SDK::RunarArtifact.new(
+        contract_name: 'Kw',
+        abi: Runar::SDK::ABI.new(
+          constructor_params: [Runar::SDK::ABIParam.new(name: 'end', type: 'bigint')],
+          methods: [
+            Runar::SDK::ABIMethod.new(
+              name: 'end',
+              params: [
+                Runar::SDK::ABIParam.new(name: 'class', type: 'bigint'),
+                Runar::SDK::ABIParam.new(name: 'self', type: 'bigint')
+              ],
+              is_public: true
+            )
+          ]
+        ),
+        script: 'aa',
+        state_fields: []
+      )
+      src = Runar::SDK::Codegen.generate_ruby(artifact)
+      expect { RubyVM::InstructionSequence.compile(src) }.not_to raise_error
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Type mapping
   # ---------------------------------------------------------------------------

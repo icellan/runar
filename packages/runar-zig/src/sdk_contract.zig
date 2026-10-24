@@ -252,6 +252,11 @@ pub const ContractError = error{
     /// other path would ship a placeholder/primary-only unlock and the
     /// resulting tx would be invalid (or, before this fix, silently drop
     /// the extra UTXOs while reporting success). Fail closed instead.
+    /// N-149: a non-stateful method declares intent-witness params
+    /// (`_prevOutScript_<i>` / `_serialisedOutputs`). The stateless unlock
+    /// builders (here and in the TS SDK) never push the witnesses, so
+    /// building the call would yield a script missing them; refuse instead.
+    StatelessIntentWitnessUnsupported,
     AdditionalContractInputsUnsupported,
 };
 
@@ -735,6 +740,13 @@ pub const RunarContract = struct {
 
         // Detect which params need auto-resolution
         const abi_method = self.findMethod(method_name).?;
+        // N-149: the stateless unlock builder never pushes intent-witness
+        // values; refuse rather than build a tx missing them.
+        if (!parent_stateful) {
+            for (abi_method.params) |p| {
+                if (types.isIntentWitnessParam(p.name)) return ContractError.StatelessIntentWitnessUnsupported;
+            }
+        }
         var needs_change = false;
         var needs_new_amount = false;
         for (abi_method.params) |p| {
@@ -1961,9 +1973,34 @@ pub const RunarContract = struct {
         }
 
         const abi_method = self.findMethod(method_name) orelse return ContractError.MethodNotFound;
-        if (args.len != abi_method.params.len) return ContractError.ArgCountMismatch;
+        // N-149: the stateless unlock builder never pushes intent-witness
+        // values; refuse rather than build a tx missing them.
+        {
+            for (abi_method.params) |p| {
+                if (types.isIntentWitnessParam(p.name)) return ContractError.StatelessIntentWitnessUnsupported;
+            }
+        }
+        // N-149: same user-arg filter as call() (shared `isSdkSuppliedParam`,
+        // is_stateful == false on this path): intent-witness params are
+        // SDK-supplied; SigHashPreimage is a user arg on a stateless contract.
+        var user_param_count: usize = 0;
+        for (abi_method.params) |p| {
+            if (!types.isSdkSuppliedParam(p, false)) user_param_count += 1;
+        }
+        if (args.len != user_param_count) return ContractError.ArgCountMismatch;
+        const stateless_user_params = try self.allocator.alloc(types.ABIParam, user_param_count);
+        defer self.allocator.free(stateless_user_params);
+        {
+            var idx: usize = 0;
+            for (abi_method.params) |p| {
+                if (!types.isSdkSuppliedParam(p, false)) {
+                    stateless_user_params[idx] = p;
+                    idx += 1;
+                }
+            }
+        }
         // N-045 (defence in depth): a fixed-width arg must have its declared width.
-        try checkFixedWidthArgs(abi_method.params, args);
+        try checkFixedWidthArgs(stateless_user_params, args);
 
         // ---- Resolve user args ------------------------------------------
         var resolved_args = try self.allocator.alloc(types.StateValue, args.len);
@@ -1978,7 +2015,7 @@ pub const RunarContract = struct {
         defer sig_idx_list.deinit(self.allocator);
 
         for (args, 0..) |arg, i| {
-            const param_type = abi_method.params[i].type_name;
+            const param_type = stateless_user_params[i].type_name;
             if (std.mem.eql(u8, param_type, "Sig") and arg == .int and arg.int == 0) {
                 try sig_idx_list.append(self.allocator, i);
                 resolved_args[i] = .{ .bytes = try self.allocator.dupe(u8, "00" ** 72) };
@@ -2223,23 +2260,11 @@ pub const RunarContract = struct {
         // witness params (`_prevOutScript_<i>`, `_serialisedOutputs`) from
         // the user-facing arg count check. Witness values come from
         // setPrevOutScript / setSerialisedOutputs, not the args slice.
-        const isAutoInjectedWitness = struct {
-            fn check(name: []const u8) bool {
-                return std.mem.startsWith(u8, name, "_prevOutScript_") or
-                    std.mem.eql(u8, name, "_serialisedOutputs");
-            }
-        }.check;
-
+        // Shared with call() and the typed-wrapper codegen (N-149); this
+        // path is only entered for stateful contracts.
         var user_param_count: usize = 0;
         for (abi_method.params) |p| {
-            if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
-                !std.mem.eql(u8, p.name, "_changePKH") and
-                !std.mem.eql(u8, p.name, "_changeAmount") and
-                !std.mem.eql(u8, p.name, "_newAmount") and
-                !isAutoInjectedWitness(p.name))
-            {
-                user_param_count += 1;
-            }
+            if (!types.isSdkSuppliedParam(p, true)) user_param_count += 1;
         }
         if (args.len != user_param_count) return ContractError.ArgCountMismatch;
 
@@ -2248,12 +2273,7 @@ pub const RunarContract = struct {
         {
             var idx: usize = 0;
             for (abi_method.params) |p| {
-                if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
-                    !std.mem.eql(u8, p.name, "_changePKH") and
-                    !std.mem.eql(u8, p.name, "_changeAmount") and
-                    !std.mem.eql(u8, p.name, "_newAmount") and
-                    !isAutoInjectedWitness(p.name))
-                {
+                if (!types.isSdkSuppliedParam(p, true)) {
                     user_params[idx] = p;
                     idx += 1;
                 }
@@ -5066,6 +5086,97 @@ test "finalizeCall errors on signature count mismatch" {
     // 0 signatures supplied for 1 expected → SignatureCountMismatch.
     const result = contract.finalizeCall(&prepared, &.{}, prov.provider());
     try std.testing.expectError(ContractError.SignatureCountMismatch, result);
+}
+
+// N-149: stateless call() / prepareCall() must filter user args through the
+// same shared `types.isSdkSuppliedParam` predicate.
+//
+// Proves: for a stateless ABI whose method has a SigHashPreimage param (a
+// user arg on a stateless contract -- SDK-supplied only when stateful), both
+// call() and prepareCall() count 2 user args: neither reports
+// ArgCountMismatch for 2, both do for 1. Does NOT prove the calls then
+// succeed on-chain.
+test "prepareCall and call agree on user-arg arity for a stateless SigHashPreimage param (N-149)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"Plain","version":"1","compilerVersion":"1.0","script":"5151","asm":"OP_1 OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"m","params":[{"name":"x","type":"int"},{"name":"txp","type":"SigHashPreimage"}],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "ef" ** 32,
+        .output_index = 0,
+        .satoshis = 5_000,
+        .script = "5151",
+    });
+
+    const two = [_]types.StateValue{ .{ .int = 7 }, .{ .bytes = "" } };
+    const one = [_]types.StateValue{.{ .int = 7 }};
+
+    if (contract.call("m", &two, prov.provider(), signer.signer(), null)) |txid| {
+        allocator.free(txid);
+    } else |err| {
+        try std.testing.expect(err != ContractError.ArgCountMismatch);
+    }
+    if (contract.prepareCall("m", &two, prov.provider(), signer.signer(), null)) |p| {
+        var prepared = p;
+        prepared.deinit(allocator);
+    } else |err| {
+        try std.testing.expect(err != ContractError.ArgCountMismatch);
+    }
+
+    try std.testing.expectError(ContractError.ArgCountMismatch, contract.call("m", &one, prov.provider(), signer.signer(), null));
+    try std.testing.expectError(ContractError.ArgCountMismatch, contract.prepareCall("m", &one, prov.provider(), signer.signer(), null));
+}
+
+// N-149: the stateless unlock builders never push intent-witness values (the
+// TS SDK's stateless final unlock does not either: it appends witnessHex only
+// to the size-estimation placeholder). A stateless method that declares a
+// witness param must therefore be refused by BOTH call() and prepareCall(),
+// not built into a tx whose unlock lacks the witness pushes.
+//
+// Proves: both entry points return StatelessIntentWitnessUnsupported for a
+// stateless ABI with a `_serialisedOutputs` param, even with the witness value
+// set and the correct (user) arg count. Does NOT prove the witness could be
+// supported on a stateless contract (the stack position is unspecified).
+test "stateless call and prepareCall refuse intent-witness params (N-149)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"Plain","version":"1","compilerVersion":"1.0","script":"5151","asm":"OP_1 OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"m","params":[{"name":"x","type":"int"},{"name":"_serialisedOutputs","type":"ByteString"}],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+    try contract.setSerialisedOutputs("aabb");
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "ef" ** 32,
+        .output_index = 0,
+        .satoshis = 5_000,
+        .script = "5151",
+    });
+
+    const one = [_]types.StateValue{.{ .int = 7 }};
+    try std.testing.expectError(ContractError.StatelessIntentWitnessUnsupported, contract.call("m", &one, prov.provider(), signer.signer(), null));
+    try std.testing.expectError(ContractError.StatelessIntentWitnessUnsupported, contract.prepareCall("m", &one, prov.provider(), signer.signer(), null));
 }
 
 test "prepareCall → finalizeCall round-trip broadcasts a tx" {

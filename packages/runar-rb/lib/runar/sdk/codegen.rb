@@ -133,6 +133,21 @@ module Runar
       SNAKE_RESERVED = %w[connect deploy contract get_locking_script].to_set.freeze
       private_constant :SNAKE_RESERVED
 
+      # Ruby reserved words cannot be used as local variable / parameter names.
+      RUBY_KEYWORDS = %w[
+        BEGIN END __ENCODING__ __FILE__ __LINE__ alias and begin break case class
+        def defined? do else elsif end ensure false for if in module next nil not
+        or redo rescue retry return self super then true undef unless until when
+        while yield
+      ].to_set.freeze
+      private_constant :RUBY_KEYWORDS
+
+      # snake_case identifier safe to use as a Ruby parameter / local name.
+      def to_snake_ident(name)
+        snake = to_snake_case(name)
+        RUBY_KEYWORDS.include?(snake) ? "#{snake}_" : snake
+      end
+
       def safe_method_name(name)
         snake = to_snake_case(name)
         SNAKE_RESERVED.include?(snake) ? "call_#{snake}" : snake
@@ -212,7 +227,7 @@ module Runar
         ctor_params = artifact.abi.constructor_params
         constructor_params = ctor_params.each_with_index.map do |p, i|
           {
-            'name'    => to_snake_case(p.name),
+            'name'    => to_snake_ident(p.name),
             'type'    => map_type(p.type),
             'abiType' => p.type,
             'isLast'  => i == ctor_params.length - 1,
@@ -230,7 +245,7 @@ module Runar
 
           user_params = user_params_raw.each_with_index.map do |p, i|
             {
-              'name'    => to_snake_case(p['name']),
+              'name'    => to_snake_ident(p['name']),
               'type'    => p['rb_type'],
               'abiType' => p['abi_type'],
               'isLast'  => i == user_params_raw.length - 1,
@@ -239,7 +254,7 @@ module Runar
 
           # SDK args expression
           sdk_args_parts = sdk_args_raw.map do |p|
-            p['hidden'] ? 'nil' : to_snake_case(p['name'])
+            p['hidden'] ? 'nil' : to_snake_ident(p['name'])
           end
           sdk_args_expr = sdk_args_parts.join(', ')
 
@@ -248,7 +263,7 @@ module Runar
           sig_params = sig_params_raw.each_with_index.map do |sp, i|
             idx = sdk_args_raw.index { |p| p['name'] == sp['name'] }
             {
-              'name'     => to_snake_case(sp['name']),
+              'name'     => to_snake_ident(sp['name']),
               'argIndex' => idx,
               'isLast'   => i == sig_params_raw.length - 1,
             }

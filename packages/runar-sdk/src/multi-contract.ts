@@ -45,7 +45,7 @@ import { encodeArg, encodePushData, encodeScriptNumber } from './contract.js';
 import { assertFixedWidthValue } from './state.js';
 import type { Signer } from './signers/index.js';
 import type { UTXO } from './types.js';
-import { isAutoInjectedWitnessParam } from './sdk-params.js';
+import { isAutoInjectedWitnessParam, isSdkSuppliedParam } from './sdk-params.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -114,8 +114,6 @@ export interface AssembledMultiContractCall {
 // ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
-
-const AUTO_PARAM_NAMES = new Set(['_changePKH', '_changeAmount', '_newAmount']);
 
 /**
  * Build and sign a transaction whose inputs are N covenant UTXOs from N
@@ -204,9 +202,14 @@ export async function assembleMultiContractCall(
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
     const methodUsesCodePart = method.usesCodePart ?? methodNeedsChange;
-    const userParams = method.params.filter(
-      (p) => p.type !== 'SigHashPreimage' && !AUTO_PARAM_NAMES.has(p.name),
-    );
+    // Shared SDK-supplied-param predicate (N-149). parentClass is the
+    // authoritative stateful signal (a zero-mutable StatefulSmartContract has
+    // empty stateFields yet still injects SigHashPreimage); older artifacts
+    // without it fall back to non-empty stateFields.
+    const isStateful = artifact.parentClass !== undefined
+      ? artifact.parentClass === 'StatefulSmartContract'
+      : (artifact.stateFields?.length ?? 0) > 0;
+    const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
     if (userParams.length !== inp.args.length) {
       throw new Error(
         `assembleMultiContractCall: input ${i}: method '${inp.method}' expects ${userParams.length} args, got ${inp.args.length}`,
