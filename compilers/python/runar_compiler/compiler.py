@@ -6,6 +6,7 @@ a Runar artifact. Direct port of ``compilers/go/compiler.go``.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field
@@ -514,20 +515,44 @@ def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -
 # wasteful push+drop sequences — diverging from both the fold-OFF goldens and
 # the Zig tier, whose compileFromIR never folds IR input. So the IR entry points
 # force folding off regardless of the flag; the peephole optimizer still folds.
-def compile_from_ir(ir_path: str, disable_constant_folding: bool = False) -> Artifact:
+def compile_from_ir(
+    ir_path: str,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> Artifact:
     """Read an ANF IR JSON file and compile it to a Runar artifact."""
     program = _load_ir(ir_path)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program, disable_constant_folding=True, constructor_args=constructor_args)
 
 
-def compile_from_ir_bytes(data: bytes, disable_constant_folding: bool = False) -> Artifact:
+def compile_from_ir_bytes(
+    data: bytes,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> Artifact:
     """Compile from raw ANF IR JSON bytes."""
     program = _load_ir_from_bytes(data)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program, disable_constant_folding=True, constructor_args=constructor_args)
 
 
-def compile_from_program(program: ANFProgram, disable_constant_folding: bool = False) -> Artifact:
-    """Compile a parsed ANF program to a Runar artifact."""
+def compile_from_program(
+    program: ANFProgram,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> Artifact:
+    """Compile a parsed ANF program to a Runar artifact.
+
+    N-095: ``constructor_args`` is validated and baked exactly as the source
+    pipeline does (and as TS ``compileFromANF`` / Rust F-103 do), before
+    folding and the EC optimizer. The caller's program is not mutated.
+    """
+    if constructor_args:
+        program = copy.copy(program)
+        program.properties = [copy.copy(p) for p in program.properties]
+        _apply_constructor_args(program, constructor_args)
+
     # Pass 4.25: Constant folding (on by default)
     if not disable_constant_folding:
         program = _fold_constants(program)

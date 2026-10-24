@@ -595,9 +595,9 @@ module RunarCompiler
   # dead-binding elimination), which stack-lowering emits as wasteful push+drop
   # sequences — diverging from the fold-OFF goldens and from the Zig tier, whose
   # compileFromIR never folds IR input. Force folding off here; peephole still folds.
-  def self.compile_from_ir(ir_path, disable_constant_folding: false)
+  def self.compile_from_ir(ir_path, disable_constant_folding: false, constructor_args: nil)
     program = _load_ir(ir_path)
-    compile_from_program(program, disable_constant_folding: true)
+    compile_from_program(program, disable_constant_folding: true, constructor_args: constructor_args)
   end
 
   # Compile from raw ANF IR JSON bytes.
@@ -605,17 +605,26 @@ module RunarCompiler
   # @param data [String] raw ANF IR JSON
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @return [Artifact]
-  def self.compile_from_ir_bytes(data, disable_constant_folding: false)
+  def self.compile_from_ir_bytes(data, disable_constant_folding: false, constructor_args: nil)
     program = _load_ir_from_bytes(data)
-    compile_from_program(program, disable_constant_folding: true)
+    compile_from_program(program, disable_constant_folding: true, constructor_args: constructor_args)
   end
 
   # Compile a parsed ANF program to a Runar artifact.
   #
   # @param program [IR::ANFProgram] the ANF program
   # @param disable_constant_folding [Boolean] skip constant folding pass
+  # @param constructor_args [Hash, nil] property values to bake. N-095: validated
+  #   and baked as the source pipeline does (and TS compileFromANF / Rust F-103),
+  #   before folding and the EC optimizer. The caller's program is not mutated.
   # @return [Artifact]
-  def self.compile_from_program(program, disable_constant_folding: false)
+  def self.compile_from_program(program, disable_constant_folding: false, constructor_args: nil)
+    unless constructor_args.nil? || (!constructor_args.is_a?(Array) && constructor_args.empty?)
+      program = program.dup
+      program.properties = program.properties.map(&:dup)
+      _apply_constructor_args(program, constructor_args)
+    end
+
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
