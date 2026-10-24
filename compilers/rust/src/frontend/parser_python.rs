@@ -1380,6 +1380,11 @@ impl<'a> PyParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_type(&mut self) -> TypeNode {
+        // `None` is a keyword token here; as a type it is Python's "returns nothing".
+        if *self.peek() == Token::NoneLit {
+            self.advance();
+            return TypeNode::Custom("None".to_string());
+        }
         let raw_name = self.expect_ident();
 
         // Check for FixedArray[T, N]
@@ -2511,8 +2516,27 @@ impl<'a> PyParser<'a> {
                     operand: Box::new(operand),
                 }
             }
-            _ => self.parse_postfix(),
+            _ => self.parse_power(),
         }
+    }
+
+    /// `**` is the documented spelling of the builtin `pow(base, exp)`
+    /// (docs/formats/python.md): right-associative, tighter than a unary minus
+    /// on its left, with a unary operand allowed on its right.
+    fn parse_power(&mut self) -> Expression {
+        let base = self.parse_postfix();
+        if *self.peek() == Token::DoubleStar {
+            self.advance();
+            let exp = self.nested(zero(), |p| p.parse_unary());
+            return Expression::CallExpr {
+                callee: Box::new(Expression::Identifier {
+                    name: "pow".to_string(),
+                }),
+                args: vec![base, exp],
+                asm_return_type: None,
+            };
+        }
+        base
     }
 
     fn parse_postfix(&mut self) -> Expression {

@@ -1797,7 +1797,20 @@ class PyParser {
       const operand = this.nest.nested(this.loc(), () => this.parseUnary());
       return { kind: 'unary_expr', op: '!', operand };
     }
-    return this.parsePostfix();
+    return this.parsePower();
+  }
+
+  // `**` is the documented spelling of the builtin `pow(base, exp)` (docs/formats/python.md).
+  // It binds tighter than a unary minus on its left and is right-associative; the
+  // exponent may itself be unary, as in Python.
+  private parsePower(): Expression {
+    const base = this.parsePostfix();
+    if (this.peek().type === '**') {
+      this.advance();
+      const exp = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'call_expr', callee: { kind: 'identifier', name: 'pow' }, args: [base, exp] };
+    }
+    return base;
   }
 
   private parsePostfix(): Expression {

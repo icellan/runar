@@ -1770,7 +1770,19 @@ module RunarCompiler
           operand = nested { parse_unary }
           return UnaryExpr.new(op: "!", operand: operand)
         end
-        parse_postfix
+        parse_power
+      end
+
+      # `**` is the documented spelling of the builtin `pow(base, exp)`
+      # (docs/formats/python.md): right-associative, tighter than a unary minus
+      # on its left, with a unary operand allowed on its right.
+      def parse_power
+        base = parse_postfix
+        if match_tok(TOK_STARSTAR)
+          exp = nested { parse_unary }
+          return CallExpr.new(callee: Identifier.new(name: "pow"), args: [base, exp])
+        end
+        base
       end
 
       def parse_postfix
