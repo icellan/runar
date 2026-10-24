@@ -302,4 +302,49 @@ export function assertRequiredIrFields(root: unknown): void {
     const declared = typeof method.sigHashType === 'number' ? method.sigHashType : SIGHASH_DEFAULT;
     checkSighashFlags(method, 'body', mp, method.name as string, method.isPublic as boolean, declared);
   });
+  assertIrIdentifiers(program);
+}
+
+/**
+ * N-207: the declared identifiers are non-empty, and a method's parameter
+ * names are distinct. Runs after the type walk above, so every field read
+ * here is a string. `""` is a string, so N-069 alone let an empty name
+ * through; and duplicate param names alias ONE stack slot — every
+ * `load_param` resolves to the last declared one, so `assert(p0 === p1)`
+ * over two params of the same name compiled to an always-true script.
+ * Diagnostics shared verbatim with the other six tiers and pinned by
+ * `conformance/negatives/ir-identifiers.test.ts`:
+ *   IR validation: <path> must be a non-empty string
+ *   IR validation: <path>.name '<name>' duplicates <earlier path>.name
+ */
+function nonEmpty(obj: Obj, key: string, path: string): void {
+  if (obj[key] === '') {
+    throw new Error(`IR validation: ${fieldPath(path, key)} must be a non-empty string`);
+  }
+}
+
+function assertIrIdentifiers(program: Obj): void {
+  nonEmpty(program, 'contractName', '');
+  (program.properties as Obj[]).forEach((prop, i) => {
+    nonEmpty(prop, 'name', `properties[${i}]`);
+    nonEmpty(prop, 'type', `properties[${i}]`);
+  });
+  (program.methods as Obj[]).forEach((method, i) => {
+    const mp = `methods[${i}]`;
+    nonEmpty(method, 'name', mp);
+    const seen = new Map<string, number>();
+    (method.params as Obj[]).forEach((param, j) => {
+      const pp = `${mp}.params[${j}]`;
+      nonEmpty(param, 'name', pp);
+      nonEmpty(param, 'type', pp);
+      const name = param.name as string;
+      const first = seen.get(name);
+      if (first !== undefined) {
+        throw new Error(
+          `IR validation: ${pp}.name '${name}' duplicates ${mp}.params[${first}].name`,
+        );
+      }
+      seen.set(name, j);
+    });
+  });
 }

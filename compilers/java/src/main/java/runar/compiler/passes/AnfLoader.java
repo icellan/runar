@@ -108,6 +108,7 @@ public final class AnfLoader {
             String path = "methods[" + i + "]";
             methods.add(toMethod(asObject(ml.get(i), path), path));
         }
+        checkIrIdentifiers(name, props, methods);
         // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
         checkReservedIrNames(props, methods);
 
@@ -701,6 +702,50 @@ public final class AnfLoader {
             }
         }
         return null;
+    }
+
+    /**
+     * N-207: the declared identifiers are non-empty, and a method's parameter
+     * names are distinct. Runs after the type walk, so every field is a
+     * string. {@code ""} is a string, so F-084 alone let an empty name
+     * through; and duplicate param names alias ONE stack slot (every
+     * {@code load_param} resolves to the last declared one, so
+     * {@code assert(p0 === p1)} over two params of the same name compiled to
+     * an always-true script). Shared verbatim with the other six tiers, pinned
+     * by {@code conformance/negatives/ir-identifiers.test.ts}:
+     * <pre>
+     *   IR validation: &lt;path&gt; must be a non-empty string
+     *   IR validation: &lt;path&gt;.name '&lt;name&gt;' duplicates &lt;earlier path&gt;.name
+     * </pre>
+     */
+    private static void checkIrIdentifiers(String contractName, List<AnfProperty> props, List<AnfMethod> methods) {
+        nonEmpty(contractName, "contractName");
+        for (int i = 0; i < props.size(); i++) {
+            nonEmpty(props.get(i).name(), "properties[" + i + "].name");
+            nonEmpty(props.get(i).type(), "properties[" + i + "].type");
+        }
+        for (int i = 0; i < methods.size(); i++) {
+            String mp = "methods[" + i + "]";
+            nonEmpty(methods.get(i).name(), mp + ".name");
+            Map<String, Integer> seen = new java.util.HashMap<>();
+            List<AnfParam> params = methods.get(i).params();
+            for (int j = 0; j < params.size(); j++) {
+                String pp = mp + ".params[" + j + "]";
+                nonEmpty(params.get(j).name(), pp + ".name");
+                nonEmpty(params.get(j).type(), pp + ".type");
+                Integer first = seen.putIfAbsent(params.get(j).name(), j);
+                if (first != null) {
+                    throw new RuntimeException("IR validation: " + pp + ".name '" + params.get(j).name()
+                        + "' duplicates " + mp + ".params[" + first + "].name");
+                }
+            }
+        }
+    }
+
+    private static void nonEmpty(String value, String path) {
+        if (value.isEmpty()) {
+            throw new RuntimeException("IR validation: " + path + " must be a non-empty string");
+        }
     }
 
     private static AnfProperty toProperty(Map<?, ?> obj, String path) {

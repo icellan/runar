@@ -21,7 +21,7 @@
 
 const std = @import("std");
 
-pub const Error = error{ IRRequiredFieldMissing, IRFieldWrongType };
+pub const Error = error{ IRRequiredFieldMissing, IRFieldWrongType, IRIdentifierInvalid };
 
 threadlocal var diag_buf: [1024]u8 = undefined;
 threadlocal var diag_len: usize = 0;
@@ -329,5 +329,49 @@ pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value
             else => SIGHASH_DEFAULT,
         };
         try checkSighashFlags(w, method, "body", mp, method.get("name").?.string, method.get("isPublic").?.bool, declared);
+    }
+    try assertIrIdentifiers(w, program);
+}
+
+/// N-207: the declared identifiers are non-empty, and a method's parameter
+/// names are distinct. Runs after the type walk above, so every field read
+/// here is a string. "" is a string, so N-069 alone let an empty name through;
+/// and duplicate param names alias ONE stack slot (every load_param resolves
+/// to the last declared one, so assert(p0 === p1) over two params of the same
+/// name compiled to an always-true script). Shared verbatim with the other six
+/// tiers, pinned by conformance/negatives/ir-identifiers.test.ts:
+///
+///   IR validation: <path> must be a non-empty string
+///   IR validation: <path>.name '<name>' duplicates <earlier path>.name
+fn nonEmpty(w: Walker, obj: Obj, path: []const u8, keys: []const []const u8) CheckError!void {
+    for (keys) |key| {
+        if (obj.get(key).?.string.len == 0) {
+            setDiag("IR validation: {s} must be a non-empty string", .{try w.fieldPath(path, key)});
+            return Error.IRIdentifierInvalid;
+        }
+    }
+}
+
+fn assertIrIdentifiers(w: Walker, program: Obj) CheckError!void {
+    try nonEmpty(w, program, "", &.{"contractName"});
+    for (program.get("properties").?.array.items, 0..) |p, i| {
+        const pp = try std.fmt.allocPrint(w.a, "properties[{d}]", .{i});
+        try nonEmpty(w, p.object, pp, &.{ "name", "type" });
+    }
+    for (program.get("methods").?.array.items, 0..) |m, i| {
+        const mp = try std.fmt.allocPrint(w.a, "methods[{d}]", .{i});
+        try nonEmpty(w, m.object, mp, &.{"name"});
+        const params = m.object.get("params").?.array.items;
+        for (params, 0..) |p, j| {
+            const pp = try std.fmt.allocPrint(w.a, "{s}.params[{d}]", .{ mp, j });
+            try nonEmpty(w, p.object, pp, &.{ "name", "type" });
+            const name = p.object.get("name").?.string;
+            for (params[0..j], 0..) |earlier, k| {
+                if (std.mem.eql(u8, earlier.object.get("name").?.string, name)) {
+                    setDiag("IR validation: {s}.name '{s}' duplicates {s}.params[{d}].name", .{ pp, name, mp, k });
+                    return Error.IRIdentifierInvalid;
+                }
+            }
+        }
     }
 }

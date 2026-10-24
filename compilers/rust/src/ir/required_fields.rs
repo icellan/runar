@@ -289,5 +289,61 @@ pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
         let is_public = method.get("isPublic").and_then(Value::as_bool).unwrap_or(false);
         check_sighash_flags(method, "body", &mp, name, is_public, declared)?;
     }
+    assert_ir_identifiers(program)
+}
+
+/// N-207: the declared identifiers are non-empty, and a method's parameter
+/// names are distinct. Runs after the type walk above, so every field read
+/// here is a string. `""` is a string, so N-069 alone let an empty name
+/// through; and duplicate param names alias ONE stack slot (every
+/// `load_param` resolves to the last declared one, so `assert(p0 === p1)` over
+/// two params of the same name compiled to an always-true script). Shared
+/// verbatim with the other six tiers, pinned by
+/// `conformance/negatives/ir-identifiers.test.ts`:
+///
+/// ```text
+/// IR validation: <path> must be a non-empty string
+/// IR validation: <path>.name '<name>' duplicates <earlier path>.name
+/// ```
+fn non_empty(obj: &Obj, path: &str, keys: &[&str]) -> R<()> {
+    for key in keys {
+        if obj.get(*key).and_then(Value::as_str) == Some("") {
+            return Err(format!(
+                "IR validation: {} must be a non-empty string",
+                field_path(path, key)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_ir_identifiers(program: &Obj) -> R<()> {
+    let list = |obj: &Obj, key: &str| -> Vec<Obj> {
+        obj.get(key)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_object().cloned()).collect())
+            .unwrap_or_default()
+    };
+    non_empty(program, "", &["contractName"])?;
+    for (i, prop) in list(program, "properties").iter().enumerate() {
+        non_empty(prop, &format!("properties[{}]", i), &["name", "type"])?;
+    }
+    for (i, method) in list(program, "methods").iter().enumerate() {
+        let mp = format!("methods[{}]", i);
+        non_empty(method, &mp, &["name"])?;
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (j, param) in list(method, "params").iter().enumerate() {
+            let pp = format!("{}.params[{}]", mp, j);
+            non_empty(param, &pp, &["name", "type"])?;
+            let name = param.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            if let Some(first) = seen.get(&name) {
+                return Err(format!(
+                    "IR validation: {}.name '{}' duplicates {}.params[{}].name",
+                    pp, name, mp, first
+                ));
+            }
+            seen.insert(name, j);
+        }
+    }
     Ok(())
 }

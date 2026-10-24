@@ -258,6 +258,45 @@ module RunarCompiler
           declared = method["sigHashType"].nil? ? SIGHASH_DEFAULT : method["sigHashType"].to_i
           check_sighash_flags(method, "body", mp, method["name"], method["isPublic"], declared)
         end
+        assert_identifiers!(program)
+      end
+
+      # N-207: the declared identifiers are non-empty, and a method's parameter
+      # names are distinct. Runs after the type walk above, so every field read
+      # here is a string. "" is a string, so N-069 alone let an empty name
+      # through; and duplicate param names alias ONE stack slot (every
+      # load_param resolves to the last declared one, so assert(p0 === p1) over
+      # two params of the same name compiled to an always-true script). Shared
+      # verbatim with the other six tiers, pinned by
+      # conformance/negatives/ir-identifiers.test.ts:
+      #
+      #   IR validation: <path> must be a non-empty string
+      #   IR validation: <path>.name '<name>' duplicates <earlier path>.name
+      def non_empty(obj, path, *keys)
+        keys.each do |key|
+          raise ArgumentError, "IR validation: #{field_path(path, key)} must be a non-empty string" if obj[key] == ""
+        end
+      end
+
+      def assert_identifiers!(program)
+        non_empty(program, "", "contractName")
+        program["properties"].each_with_index do |prop, i|
+          non_empty(prop, "properties[#{i}]", "name", "type")
+        end
+        program["methods"].each_with_index do |method, i|
+          mp = "methods[#{i}]"
+          non_empty(method, mp, "name")
+          seen = {}
+          method["params"].each_with_index do |param, j|
+            pp = "#{mp}.params[#{j}]"
+            non_empty(param, pp, "name", "type")
+            name = param["name"]
+            if seen.key?(name)
+              raise ArgumentError, "IR validation: #{pp}.name '#{name}' duplicates #{mp}.params[#{seen[name]}].name"
+            end
+            seen[name] = j
+          end
+        end
       end
     end
   end

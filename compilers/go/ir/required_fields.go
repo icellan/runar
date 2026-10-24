@@ -382,5 +382,59 @@ func assertRequiredIRFields(data []byte) error {
 			return err
 		}
 	}
+	return assertIRIdentifiers(program)
+}
+
+// N-207: the declared identifiers are non-empty, and a method's parameter
+// names are distinct. Runs after the type walk above, so every field read
+// here is a string. "" is a string, so N-069 alone let an empty name through;
+// and duplicate param names alias ONE stack slot (every load_param resolves to
+// the last declared one, so assert(p0 === p1) over two params of the same name
+// compiled to an always-true script). Shared verbatim with the other six
+// tiers, pinned by conformance/negatives/ir-identifiers.test.ts:
+//
+//	IR validation: <path> must be a non-empty string
+//	IR validation: <path>.name '<name>' duplicates <earlier path>.name
+func irNonEmpty(obj irObj, key, path string) error {
+	if obj[key] == "" {
+		return fmt.Errorf("IR validation: %s must be a non-empty string", irFieldPath(path, key))
+	}
+	return nil
+}
+
+func assertIRIdentifiers(program irObj) error {
+	if err := irNonEmpty(program, "contractName", ""); err != nil {
+		return err
+	}
+	for i, p := range program["properties"].([]any) {
+		pp := fmt.Sprintf("properties[%d]", i)
+		for _, k := range []string{"name", "type"} {
+			if err := irNonEmpty(p.(irObj), k, pp); err != nil {
+				return err
+			}
+		}
+	}
+	for i, m := range program["methods"].([]any) {
+		mp := fmt.Sprintf("methods[%d]", i)
+		method := m.(irObj)
+		if err := irNonEmpty(method, "name", mp); err != nil {
+			return err
+		}
+		seen := map[string]int{}
+		for j, p := range method["params"].([]any) {
+			pp := fmt.Sprintf("%s.params[%d]", mp, j)
+			param := p.(irObj)
+			for _, k := range []string{"name", "type"} {
+				if err := irNonEmpty(param, k, pp); err != nil {
+					return err
+				}
+			}
+			name := param["name"].(string)
+			if first, dup := seen[name]; dup {
+				return fmt.Errorf("IR validation: %s.name '%s' duplicates %s.params[%d].name", pp, name, mp, first)
+			}
+			seen[name] = j
+		}
+	}
 	return nil
 }

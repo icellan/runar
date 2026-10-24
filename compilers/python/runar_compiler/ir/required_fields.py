@@ -284,3 +284,39 @@ def assert_required_ir_fields(root: Any) -> None:
             method, "body", mp, method["name"], method["isPublic"],
             _SIGHASH_DEFAULT if declared is None else int(declared),
         )
+    _assert_ir_identifiers(program)
+
+
+# N-207: the declared identifiers are non-empty, and a method's parameter names
+# are distinct. Runs after the type walk above, so every field read here is a
+# string. "" is a string, so N-069 alone let an empty name through; and
+# duplicate param names alias ONE stack slot (every load_param resolves to the
+# last declared one, so assert(p0 === p1) over two params of the same name
+# compiled to an always-true script). Shared verbatim with the other six tiers,
+# pinned by conformance/negatives/ir-identifiers.test.ts:
+#
+#     IR validation: <path> must be a non-empty string
+#     IR validation: <path>.name '<name>' duplicates <earlier path>.name
+def _non_empty(obj: dict, path: str, *keys: str) -> None:
+    for key in keys:
+        if obj[key] == "":
+            raise ValueError(f"IR validation: {_path(path, key)} must be a non-empty string")
+
+
+def _assert_ir_identifiers(program: dict) -> None:
+    _non_empty(program, "", "contractName")
+    for i, prop in enumerate(program["properties"]):
+        _non_empty(prop, f"properties[{i}]", "name", "type")
+    for i, method in enumerate(program["methods"]):
+        mp = f"methods[{i}]"
+        _non_empty(method, mp, "name")
+        seen: dict = {}
+        for j, param in enumerate(method["params"]):
+            pp = f"{mp}.params[{j}]"
+            _non_empty(param, pp, "name", "type")
+            name = param["name"]
+            if name in seen:
+                raise ValueError(
+                    f"IR validation: {pp}.name '{name}' duplicates {mp}.params[{seen[name]}].name"
+                )
+            seen[name] = j

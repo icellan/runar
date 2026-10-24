@@ -30,6 +30,8 @@
  *     separate item, not something this test-quality fix should silently
  *     tighten across all seven tiers. Rewritten below to pin the current,
  *     real behavior instead of a fictional one, with this note attached.
+ *     (N-207 later made that hardening: every tier now refuses an empty
+ *     identifier, and the six cases pin the shared refusal.)
  *   - An unknown `kind` does NOT throw inside `loadANFFromJSON`. The loader
  *     does no kind-allowlist check at all (deliberately: the comment on
  *     `checkValue`'s `default` case says "Unknown kinds are refused
@@ -56,8 +58,8 @@
  * JSON; and that an unknown ANF kind, while not rejected by the loader
  * itself, is rejected before any script bytes are produced for it
  * (`compileFromANF`).
- * What this file does not prove: that identifiers may not be empty (they
- * currently can be — see above), that the `runar-cli compile --from-ir`
+ * What this file does not prove: that the other six tiers refuse empty
+ * identifiers too (conformance/negatives/ir-identifiers.test.ts does), that the `runar-cli compile --from-ir`
  * process boundary behaves the same (that's the CLI's own test surface), or
  * full schema coverage of every ANF value kind (see the dedicated
  * `n069-ir-required-fields.test.ts`, `n087-ir-parent-class.test.ts`,
@@ -248,35 +250,35 @@ describe('IR Loader: loadANFFromJSON (the real --from-ir entry point)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Empty names/types: NOT rejected by the real loader (toy-loader-only
-  // behavior — documented explicitly per remediation brief F-289)
+  // Empty names/types: REFUSED by the real loader (N-207)
   // -------------------------------------------------------------------------
 
-  describe('empty identifiers: accepted by the real loader (not toy-loader-only anymore)', () => {
-    // The original file's six "empty X -> error" tests asserted a rule the
-    // toy loader invented. `assertRequiredIrFields` (the real check) only
-    // validates presence and JSON type, not non-emptiness, so an empty
-    // string satisfies "is a string" and passes. These are kept — now
-    // pinning the REAL, current behavior rather than a fictional stricter
-    // one — so a future change that starts rejecting empty identifiers (a
-    // legitimate, separate hardening item) shows up here as a deliberate,
-    // visible diff instead of silently passing either way.
+  describe('empty identifiers: refused by the real loader (N-207)', () => {
+    // These six used to pin ACCEPTANCE: N-069's `assertRequiredIrFields`
+    // checked presence and JSON type only, and "" is a string. N-207 made
+    // every tier's --ir loader refuse an empty identifier with one shared
+    // diagnostic (cross-tier gate: conformance/negatives/ir-identifiers.test.ts),
+    // so each case now pins that exact refusal.
 
-    it('does not throw for an empty contractName', () => {
+    it('throws for an empty contractName', () => {
       const json = JSON.stringify({ contractName: '', properties: [], methods: [] });
-      expect(() => loadANFFromJSON(json)).not.toThrow();
+      expect(() => loadANFFromJSON(json)).toThrow(
+        'IR validation: contractName must be a non-empty string',
+      );
     });
 
-    it('does not throw for an empty method name', () => {
+    it('throws for an empty method name', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
         methods: [{ name: '', params: [], body: [], isPublic: false }],
       });
-      expect(() => loadANFFromJSON(json)).not.toThrow();
+      expect(() => loadANFFromJSON(json)).toThrow(
+        'IR validation: methods[0].name must be a non-empty string',
+      );
     });
 
-    it('does not throw for an empty method param name', () => {
+    it('throws for an empty method param name', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
@@ -289,10 +291,12 @@ describe('IR Loader: loadANFFromJSON (the real --from-ir entry point)', () => {
           },
         ],
       });
-      expect(() => loadANFFromJSON(json)).not.toThrow();
+      expect(() => loadANFFromJSON(json)).toThrow(
+        'IR validation: methods[0].params[0].name must be a non-empty string',
+      );
     });
 
-    it('does not throw for an empty method param type', () => {
+    it('throws for an empty method param type', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [],
@@ -305,25 +309,31 @@ describe('IR Loader: loadANFFromJSON (the real --from-ir entry point)', () => {
           },
         ],
       });
-      expect(() => loadANFFromJSON(json)).not.toThrow();
+      expect(() => loadANFFromJSON(json)).toThrow(
+        'IR validation: methods[0].params[0].type must be a non-empty string',
+      );
     });
 
-    it('does not throw for an empty property name', () => {
+    it('throws for an empty property name', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [{ name: '', type: 'bigint', readonly: true }],
         methods: [],
       });
-      expect(() => loadANFFromJSON(json)).not.toThrow();
+      expect(() => loadANFFromJSON(json)).toThrow(
+        'IR validation: properties[0].name must be a non-empty string',
+      );
     });
 
-    it('does not throw for an empty property type', () => {
+    it('throws for an empty property type', () => {
       const json = JSON.stringify({
         contractName: 'Test',
         properties: [{ name: 'x', type: '', readonly: true }],
         methods: [],
       });
-      expect(() => loadANFFromJSON(json)).not.toThrow();
+      expect(() => loadANFFromJSON(json)).toThrow(
+        'IR validation: properties[0].type must be a non-empty string',
+      );
     });
   });
 

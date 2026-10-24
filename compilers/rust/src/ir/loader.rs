@@ -824,7 +824,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("contractName is required"),
+            err.contains("IR validation: contractName must be a non-empty string"),
             "expected contractName error, got: {}",
             err
         );
@@ -841,7 +841,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: properties[0].name must be a non-empty string"),
             "expected empty name error, got: {}",
             err
         );
@@ -858,7 +858,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty type"),
+            err.contains("IR validation: properties[0].type must be a non-empty string"),
             "expected empty type error, got: {}",
             err
         );
@@ -875,7 +875,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: methods[0].name must be a non-empty string"),
             "expected empty method name error, got: {}",
             err
         );
@@ -897,7 +897,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: methods[0].params[0].name must be a non-empty string"),
             "expected empty param name error, got: {}",
             err
         );
@@ -919,7 +919,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty type"),
+            err.contains("IR validation: methods[0].params[0].type must be a non-empty string"),
             "expected empty param type error, got: {}",
             err
         );
