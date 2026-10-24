@@ -253,6 +253,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             continue;
         }
 
+        // N-020: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, l, c - 1));
         pos += 1; col += 1;
     }
 

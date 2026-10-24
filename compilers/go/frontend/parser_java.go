@@ -480,7 +480,10 @@ func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 			continue
 		}
 
-		// Unknown char: skip
+		// N-020: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a.plus(§ b)` as
+		// `a.plus(b)`.
+		errs = append(errs, lexDiag(fmt.Sprintf("Unexpected character '%c'", ch), fileName, l, c))
 		pos++
 		col++
 	}

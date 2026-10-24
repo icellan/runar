@@ -378,7 +378,9 @@ func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 			continue
 		}
 
-		// Skip unrecognised character
+		// N-020: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+		errs = append(errs, lexDiag(fmt.Sprintf("Unexpected character '%c'", ch), fileName, l, c))
 		pos++
 		col++
 	}
