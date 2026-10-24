@@ -516,6 +516,14 @@ module RunarCompiler
           new_index = rewrite_expression(stmt.target.index, prelude)
           new_obj = rewrite_expression(target_object, prelude)
           new_value = rewrite_expression(stmt.value, prelude)
+          # `this.grid[1][i] = v`: see the matching check in rewrite_index_access (N-036).
+          if new_obj.is_a?(PropertyAccessExpr) && @synthetic_arrays.key?(new_obj.property)
+            add_error(
+              "Runtime index assignment on a nested FixedArray is not supported",
+              loc: stmt.source_location
+            )
+            return prelude
+          end
           return prelude + [
             AssignmentStmt.new(
               target: IndexAccessExpr.new(object: new_obj, index: new_index),
@@ -792,6 +800,16 @@ module RunarCompiler
         if base_name.nil?
           object = rewrite_expression(expr.object, prelude)
           index = rewrite_expression(expr.index, prelude)
+          # `this.grid[1][i]`: the literal outer hop has become the synthetic
+          # sub-array `grid__1`, and indexing it at runtime has no slot to
+          # address. Refuse here rather than in stack lowering (N-036).
+          if object.is_a?(PropertyAccessExpr) && @synthetic_arrays.key?(object.property)
+            add_error(
+              "Runtime index access on a nested FixedArray is not supported",
+              loc: expr_source_location(expr)
+            )
+            return BigIntLiteral.new(value: 0)
+          end
           return IndexAccessExpr.new(object: object, index: index)
         end
 

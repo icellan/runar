@@ -567,6 +567,18 @@ public final class ExpandFixedArrays {
                 Expression newIndex = rewriteExpression(idx.index(), prelude);
                 Expression newObj = rewriteExpression(idx.object(), prelude);
                 Expression newValue = rewriteExpression(stmt.value(), prelude);
+                // `this.grid[1][i] = v`: the literal outer hop has become the
+                // synthetic sub-array `grid__1`, and indexing it at runtime has
+                // no slot to address. Refuse here rather than in stack lowering
+                // (N-036).
+                if (newObj instanceof PropertyAccessExpr npa
+                    && syntheticArrays.containsKey(npa.property())) {
+                    error(
+                        "Runtime index assignment on a nested FixedArray is not supported",
+                        stmt.sourceLocation()
+                    );
+                    return new ArrayList<>(prelude);
+                }
                 List<Statement> outAll = new ArrayList<>(prelude);
                 outAll.add(new AssignmentStatement(
                     new IndexAccessExpr(newObj, newIndex),
@@ -873,6 +885,15 @@ public final class ExpandFixedArrays {
             if (baseName == null) {
                 Expression obj = rewriteExpression(expr.object(), prelude);
                 Expression idx = rewriteExpression(expr.index(), prelude);
+                // `this.grid[1][i]`: see the matching check in rewriteAssignment (N-036).
+                if (obj instanceof PropertyAccessExpr opa
+                    && syntheticArrays.containsKey(opa.property())) {
+                    error(
+                        "Runtime index access on a nested FixedArray is not supported",
+                        new SourceLocation("", 0, 0)
+                    );
+                    return new BigIntLiteral(BigInteger.ZERO);
+                }
                 return new IndexAccessExpr(obj, idx);
             }
 

@@ -711,6 +711,17 @@ const Ctx = struct {
         }
 
         const base_name = self.tryResolveArrayBase(ia.object) orelse {
+            // `this.grid[1n][i] = v` / `this.grid[i][j] = v`: the object is itself
+            // an index chain rooted on a FixedArray. Rewriting it reports a
+            // runtime first-level index; a literal first level resolves to the
+            // synthetic sub-array `grid__1`, which cannot be indexed at runtime.
+            // Without this the statement was dropped here with no diagnostic
+            // (N-036).
+            var scratch: std.ArrayListUnmanaged(Statement) = .empty;
+            const new_obj = try self.rewriteExpression(&scratch, ia.object);
+            if (new_obj == .property_access and self.synthetic_arrays.contains(new_obj.property_access.property)) {
+                try self.pushError("Runtime index assignment on a nested FixedArray is not supported");
+            }
             // Not a fixed-array property — leave untouched. This shouldn't
             // happen in practice because the parser only emits index_target
             // for `this.x[...]` shapes, but be defensive.
@@ -956,6 +967,13 @@ const Ctx = struct {
             // Not a fixed-array property; recurse.
             const new_obj = try self.rewriteExpression(prelude, ia.object);
             const new_idx = try self.rewriteExpression(prelude, ia.index);
+            // `this.grid[1n][i]`: the literal outer hop has become the synthetic
+            // sub-array `grid__1`, and indexing it at runtime has no slot to
+            // address. Refuse here rather than in stack lowering (N-036).
+            if (new_obj == .property_access and self.synthetic_arrays.contains(new_obj.property_access.property)) {
+                try self.pushError("Runtime index access on a nested FixedArray is not supported");
+                return .{ .literal_int = 0 };
+            }
             const new_ia = try self.allocator.create(IndexAccess);
             new_ia.* = ia;
             new_ia.object = new_obj;

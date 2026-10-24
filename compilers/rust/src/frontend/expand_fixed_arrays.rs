@@ -626,6 +626,18 @@ impl<'a> ExpandContext<'a> {
             let new_index = self.rewrite_expression(index, &mut prelude);
             let new_obj = self.rewrite_expression(object, &mut prelude);
             let new_value = self.rewrite_expression(&value, &mut prelude);
+            // `self.grid[1][i] = v`: the literal outer hop has become the
+            // synthetic sub-array `grid__1`, and indexing it at runtime has no
+            // slot to address. Refuse here rather than in stack lowering (N-036).
+            if as_literal_index(&new_index).is_none()
+                && self.try_resolve_array_base(&new_obj).is_some()
+            {
+                self.errors.push(Diagnostic::error(
+                    "Runtime index assignment on a nested FixedArray is not supported",
+                    Some(loc.clone()),
+                ));
+                return prelude;
+            }
             let mut out = prelude;
             out.push(Statement::Assignment {
                 target: Expression::IndexAccess {

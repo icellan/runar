@@ -519,6 +519,16 @@ class _ExpandContext:
             new_index = self._rewrite_expression(stmt.target.index, prelude)
             new_obj = self._rewrite_expression(target_object, prelude)
             new_value = self._rewrite_expression(stmt.value, prelude)
+            # `self.grid[1][i] = v`: see the matching check in _rewrite_index_access (N-036).
+            if (
+                isinstance(new_obj, PropertyAccessExpr)
+                and new_obj.property in self.synthetic_arrays
+            ):
+                self._add_error(
+                    "Runtime index assignment on a nested FixedArray is not supported",
+                    stmt.source_location,
+                )
+                return list(prelude)
             return [
                 *prelude,
                 replace(
@@ -781,6 +791,18 @@ class _ExpandContext:
             # Not a fixed-array property — recurse into sub-expressions.
             obj = self._rewrite_expression(expr.object, prelude)
             idx = self._rewrite_expression(expr.index, prelude)
+            # `self.grid[1][i]`: the literal outer hop has become the synthetic
+            # sub-array `grid__1`, and indexing it at runtime has no slot to
+            # address. Refuse here rather than in stack lowering (N-036).
+            if (
+                isinstance(obj, PropertyAccessExpr)
+                and obj.property in self.synthetic_arrays
+            ):
+                self._add_error(
+                    "Runtime index access on a nested FixedArray is not supported",
+                    SourceLocation(),
+                )
+                return BigIntLiteral(value=0)
             return replace(expr, object=obj, index=idx)
 
         meta = self.array_map.get(base_name) or self.synthetic_arrays.get(base_name)

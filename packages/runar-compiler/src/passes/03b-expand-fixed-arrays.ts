@@ -630,6 +630,15 @@ class ExpandContext {
       const newIndex = this.rewriteExpression(stmt.target.index, prelude);
       const newObj = this.rewriteExpression(targetObject, prelude);
       const newValue = this.rewriteExpression(stmt.value, prelude);
+      // `this.grid[1n][i] = v`: see the matching check in rewriteIndexAccess (N-036).
+      if (newObj.kind === 'property_access' && this.syntheticArrays.has(newObj.property)) {
+        this.errors.push(makeDiagnostic(
+          `Runtime index assignment on a nested FixedArray is not supported`,
+          'error',
+          stmt.sourceLocation,
+        ));
+        return [...prelude];
+      }
       return [
         ...prelude,
         {
@@ -972,6 +981,17 @@ class ExpandContext {
       // downstream byte-slice lowering still works.
       const object = this.rewriteExpression(expr.object, prelude);
       const index = this.rewriteExpression(expr.index, prelude);
+      // `this.grid[1n][i]`: the literal outer hop has become the synthetic
+      // sub-array `grid__1`, and indexing it at runtime has no slot to
+      // address. Refuse here rather than in stack lowering (N-036).
+      if (object.kind === 'property_access' && this.syntheticArrays.has(object.property)) {
+        this.errors.push(makeDiagnostic(
+          `Runtime index access on a nested FixedArray is not supported`,
+          'error',
+          expr.sourceLocation,
+        ));
+        return { kind: 'bigint_literal', value: 0n, sourceLocation: expr.sourceLocation };
+      }
       return { ...expr, object, index };
     }
 
@@ -1016,7 +1036,7 @@ class ExpandContext {
     // error if we detect nesting at runtime dispatch time.
     if (meta.slotIsArray) {
       this.errors.push(makeDiagnostic(
-        `Runtime index access on a nested FixedArray is not supported in the TS spike`,
+        `Runtime index access on a nested FixedArray is not supported`,
         'error',
         loc,
       ));
@@ -1266,7 +1286,7 @@ class ExpandContext {
 
     if (meta.slotIsArray) {
       this.errors.push(makeDiagnostic(
-        `Runtime index assignment on a nested FixedArray is not supported in the TS spike`,
+        `Runtime index assignment on a nested FixedArray is not supported`,
         'error',
         loc,
       ));

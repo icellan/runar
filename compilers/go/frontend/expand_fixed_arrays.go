@@ -518,6 +518,13 @@ func (ctx *expandContext) rewriteAssignment(stmt AssignmentStmt) []Statement {
 		newIndex := ctx.rewriteExpression(idx.Index, &prelude)
 		newObj := ctx.rewriteExpression(idx.Object, &prelude)
 		newValue := ctx.rewriteExpression(stmt.Value, &prelude)
+		// `this.grid[1n][i] = v`: see the matching check in rewriteIndexAccess (N-036).
+		if pa, ok := newObj.(PropertyAccessExpr); ok {
+			if _, synthetic := ctx.syntheticArrays[pa.Property]; synthetic {
+				ctx.pushError("Runtime index assignment on a nested FixedArray is not supported", stmt.SourceLocation)
+				return prelude
+			}
+		}
 		newIdx := idx
 		newIdx.Index = newIndex
 		newIdx.Object = newObj
@@ -832,6 +839,15 @@ func (ctx *expandContext) rewriteIndexAccess(expr IndexAccessExpr, prelude *[]St
 		// Not a fixed-array property — recurse into sub-expressions.
 		obj := ctx.rewriteExpression(expr.Object, prelude)
 		idx := ctx.rewriteExpression(expr.Index, prelude)
+		// `this.grid[1n][i]`: the literal outer hop has become the synthetic
+		// sub-array `grid__1`, and indexing it at runtime has no slot to
+		// address. Refuse here rather than in stack lowering (N-036).
+		if pa, ok := obj.(PropertyAccessExpr); ok {
+			if _, synthetic := ctx.syntheticArrays[pa.Property]; synthetic {
+				ctx.pushError("Runtime index access on a nested FixedArray is not supported", SourceLocation{})
+				return BigIntLiteral{Value: big.NewInt(0)}
+			}
+		}
 		e := expr
 		e.Object = obj
 		e.Index = idx
@@ -871,7 +887,7 @@ func (ctx *expandContext) rewriteIndexAccess(expr IndexAccessExpr, prelude *[]St
 	ctx.orderRead = true
 
 	if meta.slotIsArray {
-		ctx.pushError("Runtime index access on a nested FixedArray is not supported in the v1 spike", loc)
+		ctx.pushError("Runtime index access on a nested FixedArray is not supported", loc)
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
 	return ctx.buildReadDispatchTernary(meta, indexRef)
@@ -1039,7 +1055,7 @@ func (ctx *expandContext) rewriteArrayWrite(stmt AssignmentStmt, prelude *[]Stat
 	}
 
 	if meta.slotIsArray {
-		ctx.pushError("Runtime index assignment on a nested FixedArray is not supported in the v1 spike", loc)
+		ctx.pushError("Runtime index assignment on a nested FixedArray is not supported", loc)
 		return *prelude
 	}
 
