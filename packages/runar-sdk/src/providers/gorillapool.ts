@@ -136,13 +136,17 @@ export class GorillaPoolProvider implements Provider {
    * no locking script, so each entry's tx is fetched via /tx/{txid}/raw
    * (hash-verified); the output must exist, its value must equal the
    * listing's, and its script is returned. Any non-2xx (404 included) throws.
-   * The listing is not filtered: 1-sat ordinal outputs are returned too.
+   * N-159: entries whose `origin` is set (1-sat ordinal inscriptions, BSV-20 /
+   * BSV-21 token outputs) are dropped before any fetch — spending one as a
+   * fee input destroys the inscription or token. They remain available via
+   * getInscriptionsByAddress / getBSV20Utxos / getBSV21Utxos.
    */
   async getUtxos(address: string): Promise<UTXO[]> {
     const entries = await this.getJson<GpTxo[]>(`/txos/address/${address}/unspent`, 'getUtxos');
     const txs = new Map<string, BsvTransaction>();
     const utxos: UTXO[] = [];
     for (const e of entries) {
+      if (e.origin != null) continue;
       let tx = txs.get(e.txid);
       if (!tx) {
         tx = BsvTransaction.fromBinary(await this.fetchVerifiedRaw(e.txid, 'getUtxos'));

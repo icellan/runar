@@ -102,13 +102,18 @@ class GorillaPoolProvider(Provider):
         The listing carries no locking script, so each entry's tx is fetched via
         /tx/{txid}/raw (hash-verified); the output must exist, its value must
         equal the listing's, and its script is returned. Any non-2xx (404
-        included) raises. The listing is not filtered: 1-sat ordinal outputs
-        are returned too.
+        included) raises. N-159: entries whose ``origin`` is set (1-sat ordinal
+        inscriptions, BSV-20 / BSV-21 token outputs) are dropped before any
+        fetch -- spending one as a fee input destroys the inscription or token.
+        They remain available via get_inscriptions_by_address /
+        get_bsv20_utxos / get_bsv21_utxos.
         """
         entries = json.loads(self._get(f'/txos/address/{address}/unspent'))
         txs: dict[str, TransactionData] = {}
         utxos: list[Utxo] = []
         for e in entries:
+            if e.get('origin') is not None:
+                continue
             txid, vout, sats = e['txid'], e['vout'], e['satoshis']
             tx = txs.get(txid)
             if tx is None:

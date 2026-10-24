@@ -14,6 +14,12 @@ value != raw tx value, inscription content not matching its hash) are refused,
 get_contract_utxo refuses (no documented route), and broadcast posts
 {"rawtx": hex}.
 
+N-159: the synthetic listing for 1SyntheticOrdinalAndPlain... holds a 1-sat
+BSV-20 inscription output (origin set) before a plain P2PKH output, both in
+the recorded tx 8c28...; getUtxos must return only the plain one, so an
+inscription the indexer reports is never offered as a funding input. Does
+NOT prove: that the live listing populates `origin` for every inscription
+or token output, nor anything about outputs that carry `data` but no origin.
 Does NOT prove: that the live API still serves these shapes; that POST /api/tx
 accepts {"rawtx"} (schema-documented, never sent live); pagination beyond the
 API's default page (100).

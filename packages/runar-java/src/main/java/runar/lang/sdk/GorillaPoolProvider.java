@@ -93,8 +93,11 @@ public final class GorillaPoolProvider implements Provider {
      * carries no locking script, so each entry's tx is fetched via the
      * hash-verified {@code /tx/{txid}/raw}; the output must exist, its value
      * must equal the listing's, and its non-empty script is returned. Any
-     * non-2xx (404 included) throws. Not filtered: 1-sat ordinal outputs are
-     * returned too.
+     * non-2xx (404 included) throws. N-159: entries whose {@code origin} is
+     * set (1-sat ordinal inscriptions, BSV-20 / BSV-21 token outputs) are
+     * dropped before any fetch — spending one as a fee input destroys the
+     * inscription or token. Token outputs remain available via
+     * {@link #getBSV20Utxos} / {@link #getBSV21Utxos}.
      */
     @Override
     public List<UTXO> listUtxos(String address) {
@@ -110,6 +113,9 @@ public final class GorillaPoolProvider implements Provider {
         List<UTXO> utxos = new ArrayList<>(entries.size());
         for (Object e : entries) {
             Map<String, Object> u = Json.asObject(e);
+            if (u.get("origin") != null) {
+                continue;
+            }
             String txid = Json.asString(u.get("txid"));
             int vout = Json.asInt(u.get("vout"));
             long sats = Json.asLong(u.get("satoshis"));

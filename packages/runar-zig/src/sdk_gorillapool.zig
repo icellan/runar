@@ -243,7 +243,9 @@ pub const GorillaPoolProvider = struct {
     /// /tx/{txid}/raw; the output must exist, its value must equal the
     /// listing's, and its (non-empty) script is returned. Any transport error
     /// (a 404 included) or malformed entry is an error, never an empty list.
-    /// The listing is not filtered: 1-sat ordinal outputs are returned too.
+    /// N-159: entries whose `origin` is set (1-sat ordinal inscriptions,
+    /// BSV-20 / BSV-21 token outputs) are dropped before any fetch — spending
+    /// one as a fee input destroys the inscription or token.
     fn getUtxosImpl(ctx: *anyopaque, allocator: std.mem.Allocator, address: []const u8) provider_mod.ProviderError![]types.UTXO {
         const self: *GorillaPoolProvider = @ptrCast(@alignCast(ctx));
 
@@ -270,6 +272,9 @@ pub const GorillaPoolProvider = struct {
         for (items) |item| {
             if (item != .object) return provider_mod.ProviderError.NetworkError;
             const obj = item.object;
+            if (obj.get("origin")) |origin| {
+                if (origin != .null) continue;
+            }
             const txid_v = obj.get("txid") orelse return provider_mod.ProviderError.NetworkError;
             const vout_v = obj.get("vout") orelse return provider_mod.ProviderError.NetworkError;
             const sats_v = obj.get("satoshis") orelse return provider_mod.ProviderError.NetworkError;
@@ -589,6 +594,13 @@ test "F-027 getTransaction rejects a body that hashes to another txid" {
 }
 
 // ---------------------------------------------------------------------------
+// N-159: the synthetic listing for 1SyntheticOrdinalAndPlain... holds a 1-sat
+// BSV-20 inscription output (origin set) before a plain P2PKH output, both in
+// the recorded tx 8c28...; getUtxos must return only the plain one, so an
+// inscription the indexer reports is never offered as a funding input. Does
+// NOT prove: that the live listing populates `origin` for every inscription
+// or token output, nor anything about outputs that carry `data` but no origin.
+//
 // N-025: the provider calls the routes the GorillaPool API actually serves.
 //
 // The old routes (/tx/{txid}/hex, /address/{a}/utxos, /script/{h}/utxos) do
@@ -747,6 +759,7 @@ test "N-025 GorillaPoolProvider replays the recorded documented endpoints" {
             }
         }
     }
-    // getRawTransaction x3, getUtxos x4, getContractUtxo x1, broadcast x1.
-    try std.testing.expectEqual(@as(usize, 9), replayed);
+    // getRawTransaction x3, getUtxos x5 (N-159 added the mixed ordinal + plain
+    // listing), getContractUtxo x1, broadcast x1.
+    try std.testing.expectEqual(@as(usize, 10), replayed);
 }

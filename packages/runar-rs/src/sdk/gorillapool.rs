@@ -396,13 +396,19 @@ impl Provider for GorillaPoolProvider {
     /// no locking script, so each entry's tx is fetched via /tx/{txid}/raw
     /// (hash-verified); the output must exist, its value must equal the
     /// listing's, and its script is returned. Any non-2xx (404 included) is
-    /// an error. The listing is not filtered: 1-sat ordinal outputs are
-    /// returned too.
+    /// an error. N-159: entries whose `origin` is set (1-sat ordinal
+    /// inscriptions, BSV-20 / BSV-21 token outputs) are dropped before any
+    /// fetch — spending one as a fee input destroys the inscription or token.
+    /// They remain available via get_inscriptions_by_address /
+    /// get_bsv20_utxos / get_bsv21_utxos.
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String> {
         let entries = self.get_json_array(&format!("/txos/address/{}/unspent", address), "getUtxos")?;
         let mut txs: std::collections::HashMap<String, BsvTransaction> = std::collections::HashMap::new();
         let mut utxos = Vec::with_capacity(entries.len());
         for e in &entries {
+            if !e["origin"].is_null() {
+                continue;
+            }
             let txid = e["txid"].as_str().ok_or("GorillaPool getUtxos: entry without txid")?.to_string();
             let vout = e["vout"].as_u64().ok_or("GorillaPool getUtxos: entry without vout")?;
             let sats = e["satoshis"].as_u64().ok_or("GorillaPool getUtxos: entry without integer satoshis")?;
@@ -628,6 +634,12 @@ mod tests {
     // (txid mismatch, listing value != raw tx value, content not matching its
     // hash) are refused, get_contract_utxo refuses, broadcast posts
     // {"rawtx": hex}.
+    // N-159: the synthetic listing for 1SyntheticOrdinalAndPlain... holds a 1-sat
+    // BSV-20 inscription output (origin set) before a plain P2PKH output, both in
+    // the recorded tx 8c28...; getUtxos must return only the plain one, so an
+    // inscription the indexer reports is never offered as a funding input. Does
+    // NOT prove: that the live listing populates `origin` for every inscription
+    // or token output, nor anything about outputs that carry `data` but no origin.
     // Does NOT prove: that the live API still serves these shapes; that POST
     // /api/tx accepts {"rawtx"} (schema-documented, never sent live);
     // pagination beyond the API's default page.

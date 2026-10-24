@@ -79,15 +79,18 @@ module Runar
       # no locking script, so each entry's tx is fetched via /tx/{txid}/raw
       # (hash-verified); the output must exist, its value must equal the
       # listing's, and its script is returned. Any non-2xx (404 included)
-      # raises. The listing is not filtered: 1-sat ordinal outputs are
-      # returned too.
+      # raises. N-159: entries whose `origin` is set (1-sat ordinal
+      # inscriptions, BSV-20 / BSV-21 token outputs) are dropped before any
+      # fetch -- spending one as a fee input destroys the inscription or
+      # token. They remain available via get_inscriptions_by_address /
+      # get_bsv20_utxos / get_bsv21_utxos.
       #
       # @param address [String] BSV address
       # @return [Array<Utxo>]
       def get_utxos(address)
         entries = api_get("/txos/address/#{address}/unspent", 'getUtxos')
         txs = {}
-        entries.map do |e|
+        entries.reject { |e| !e['origin'].nil? }.map do |e|
           txid = e['txid']
           vout = e['vout']
           tx = (txs[txid] ||= self.class.decode_raw_tx(txid.downcase, fetch_verified_raw(txid, 'getUtxos')))

@@ -221,7 +221,10 @@ func (p *GorillaPoolProvider) Broadcast(tx *transaction.Transaction) (string, er
 // no locking script, so each entry's tx is fetched via /tx/{txid}/raw
 // (hash-verified); the output must exist, its value must equal the listing's,
 // and its non-empty script is returned. Any non-2xx (404 included) is an
-// error. The listing is not filtered: 1-sat ordinal outputs are returned too.
+// error. N-159: entries whose origin is set (1-sat ordinal inscriptions,
+// BSV-20 / BSV-21 token outputs) are dropped before any fetch — spending one
+// as a fee input destroys the inscription or token. They remain available via
+// GetInscriptionsByAddress / GetBSV20Utxos / GetBSV21Utxos.
 func (p *GorillaPoolProvider) GetUtxos(address string) ([]UTXO, error) {
 	var entries []gpTxo
 	if err := p.getJSON(fmt.Sprintf("/txos/address/%s/unspent", address), "getUtxos", &entries); err != nil {
@@ -230,6 +233,9 @@ func (p *GorillaPoolProvider) GetUtxos(address string) ([]UTXO, error) {
 	txs := map[string]*transaction.Transaction{}
 	utxos := make([]UTXO, 0, len(entries))
 	for _, e := range entries {
+		if e.Origin != nil {
+			continue
+		}
 		tx, ok := txs[e.Txid]
 		if !ok {
 			raw, err := p.fetchVerifiedRaw(e.Txid, "getUtxos")

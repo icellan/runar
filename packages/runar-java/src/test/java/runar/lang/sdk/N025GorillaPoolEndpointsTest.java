@@ -27,6 +27,12 @@ import static org.junit.jupiter.api.Assertions.*;
  * getContractUtxos refuses without a request (no documented route), and
  * broadcastRaw posts exactly {"rawtx": hex}.
  *
+ * <p>N-159: the synthetic listing for 1SyntheticOrdinalAndPlain... holds a 1-sat
+ * BSV-20 inscription output (origin set) before a plain P2PKH output, both in
+ * the recorded tx 8c28...; getUtxos must return only the plain one, so an
+ * inscription the indexer reports is never offered as a funding input. Does
+ * NOT prove: that the live listing populates `origin` for every inscription
+ * or token output, nor anything about outputs that carry `data` but no origin.
  * <p>Does NOT prove: that the live API still serves these shapes; that POST
  * /api/tx accepts {"rawtx"} (schema-documented, never sent live); pagination
  * beyond the API's default page (100). The inscription calls in the vector
@@ -167,7 +173,8 @@ class N025GorillaPoolEndpointsTest {
                 }
             }
         }
-        assertEquals(20, replayed, "applicable calls replayed");
+        // N-159 added a 21st applicable call (mixed ordinal + plain getUtxos listing).
+        assertEquals(21, replayed, "applicable calls replayed");
         assertTrue(failures.isEmpty(), failures.size() + " failure(s):\n" + String.join("\n", failures));
     }
 }
