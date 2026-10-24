@@ -1230,6 +1230,17 @@ jobs:
         # step needs no extra assertion. Runs in the `conformance` job because
         # it needs the same seven compiler binaries already downloaded above.
         run: npx tsx conformance/analyzer/run.ts
+      - name: Live source-map runner (7 tiers, fail-closed)
+        # N-372: the vitest step above only collects conformance/source-map/*.test.ts
+        # (committed-golden checks). run.ts compiles every (fixture, tier) pair
+        # live and applies the structural, source-anchor and whole-map shape
+        # rules (N-370), so a regression in a live compile that was never
+        # re-stamped into a golden is invisible without it. Known anchor rows in
+        # anchor-known-issues.json stay tolerated exactly as the runner decides.
+        # run.ts reports an unavailable tier as a SKIP row and still exits 0, so
+        # this step also fails on any SKIP row: all seven compilers are
+        # downloaded in this job and must actually have run.
+        run: out=$(mktemp) && npx tsx conformance/source-map/run.ts > "$out" 2>&1; rc=$?; cat "$out"; test $rc -eq 0 && ! grep -Eq ' SKIP( |$)' "$out"
       - name: Derived-artifact freshness
         # Analyzer reports, sdk-output input.json / locking hex, source-map
         # goldens, decompiler templates + coverage, and the script-size
