@@ -87,6 +87,13 @@ const GO_ONLY_BUILTINS: Map<string, string> = new Map([
   ['bn254Pairing',       'BN254 pairing'],
   ['bn254MultiPairing3', 'BN254 pairing'],
   ['bn254MultiPairing4', 'BN254 pairing'],
+  // N-403: the remaining Go-only builtins, labels as in Python's GO_ONLY_BUILTINS
+  // and Rust's go_only_builtin_family.
+  ['verifySP1FRI',                        'SP1 FRI'],
+  ['merkleRootPoseidon2KB',               'Poseidon2 Merkle'],
+  ['assertGroth16WitnessAssisted',        'BN254 + Groth16'],
+  ['assertGroth16WitnessAssistedWithMSM', 'BN254 + Groth16'],
+  ['groth16PublicInput',                  'BN254 + Groth16'],
 ]);
 
 const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([

@@ -976,4 +976,21 @@ export class Neg extends SmartContract {
 }
 `,
   },
+  {
+    // N-403: the other Go-only builtins get the same refusal as the BN254 pairing names.
+    target: "belongs to the * family, which is scoped to the Go tier by project policy",
+    name: 'groth16-public-input-go-only-builtin',
+    source: `import { SmartContract, assert } from 'runar-lang';
+
+export class Neg extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public go(x: bigint) {
+    assert(groth16PublicInput(x, x) !== undefined);
+  }
+}
+`,
+  },
 ];
