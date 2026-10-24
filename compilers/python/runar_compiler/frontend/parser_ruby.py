@@ -1063,6 +1063,9 @@ class _RbParser:
                 elif self._peek().kind == TOK_FALSE:
                     self._advance()
                     embed_always = False
+                else:
+                    self._bad_boolean_prop_option("embed_always")
+                    break
 
             elif self._check_ident("readonly"):
                 self._advance()  # 'readonly'
@@ -1073,6 +1076,9 @@ class _RbParser:
                 elif self._peek().kind == TOK_FALSE:
                     self._advance()
                     is_readonly = False
+                else:
+                    self._bad_boolean_prop_option("readonly")
+                    break
 
             elif self._check_ident("default"):
                 self._advance()  # 'default'
@@ -1104,6 +1110,18 @@ class _RbParser:
             initializer=initializer,
             embed_always=embed_always,
             source_location=loc,
+        )
+
+    def _bad_boolean_prop_option(self, option: str) -> None:
+        """N-313: ``readonly:`` / ``embed_always:`` take a literal true or false.
+
+        Any other value is refused, never silently dropped. Same text in all
+        seven tiers.
+        """
+        tok = self._peek()
+        got = "<end of line>" if tok.kind in (TOK_NEWLINE, TOK_EOF) else tok.value
+        self._errors.append(
+            f"invalid value '{got}' for prop option '{option}' (expected true or false)"
         )
 
     def _parse_type(self) -> TypeNode:

@@ -1093,6 +1093,9 @@ module RunarCompiler
             elsif peek.kind == TOK_FALSE
               advance
               embed_always = false
+            else
+              bad_boolean_prop_option("embed_always")
+              break
             end
           elsif check_ident("readonly")
             advance # 'readonly'
@@ -1103,6 +1106,9 @@ module RunarCompiler
             elsif peek.kind == TOK_FALSE
               advance
               is_readonly = false
+            else
+              bad_boolean_prop_option("readonly")
+              break
             end
           elsif check_ident("default")
             advance # 'default'
@@ -1136,6 +1142,15 @@ module RunarCompiler
       # This parser's error-string convention: +file:line:col: message+.
       def located_message(location, message)
         "#{@file}:#{location.line}:#{location.column}: #{message}"
+      end
+
+      # N-313: +readonly:+ and +embed_always:+ take a literal +true+ or +false+.
+      # Any other value is refused, never silently dropped. Same text in all
+      # seven tiers.
+      def bad_boolean_prop_option(option)
+        tok = peek
+        got = [TOK_NEWLINE, TOK_EOF].include?(tok.kind) ? "<end of line>" : tok.value
+        @errors << "#{@file}:#{tok.line}:#{tok.col}: invalid value '#{got}' for prop option '#{option}' (expected true or false)"
       end
 
       def parse_type

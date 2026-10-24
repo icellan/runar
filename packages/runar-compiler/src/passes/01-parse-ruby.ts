@@ -1012,6 +1012,9 @@ class RbParser {
         } else if (this.peek().type === 'false') {
           this.advance();
           embedAlways = false;
+        } else {
+          this.badBooleanPropOption('embed_always');
+          break;
         }
       } else if (this.checkIdent('readonly')) {
         this.advance(); // 'readonly'
@@ -1022,6 +1025,9 @@ class RbParser {
         } else if (this.peek().type === 'false') {
           this.advance();
           isReadonly = false;
+        } else {
+          this.badBooleanPropOption('readonly');
+          break;
         }
       } else if (this.checkIdent('default')) {
         this.advance(); // 'default'
@@ -1059,6 +1065,21 @@ class RbParser {
       ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
+  }
+
+  /**
+   * N-313: `readonly:` and `embed_always:` take a literal `true` or `false`.
+   * Any other value (`maybe`, `1`, a missing value) is refused, never
+   * silently dropped. Same text in all seven tiers, at the value's line:col.
+   */
+  private badBooleanPropOption(option: string): void {
+    const tok = this.peek();
+    const got = tok.type === 'NEWLINE' || tok.type === 'eof' ? '<end of line>' : (tok.value || tok.type);
+    this.errors.push(makeDiagnostic(
+      `invalid value '${got}' for prop option '${option}' (expected true or false)`,
+      'error',
+      this.loc(),
+    ));
   }
 
   private parseType(): TypeNode {

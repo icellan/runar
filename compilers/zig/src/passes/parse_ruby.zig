@@ -926,6 +926,14 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
+    /// N-313: `readonly:` and `embed_always:` take a literal `true` or `false`.
+    /// Any other value is refused, never silently dropped. Same text in all
+    /// seven tiers.
+    fn badBooleanPropOption(self: *Parser, option: []const u8) void {
+        const got: []const u8 = if (self.check(.newline) or self.check(.eof)) "<end of line>" else self.peek().text;
+        self.addErrorFmt("invalid value '{s}' for prop option '{s}' (expected true or false)", .{ got, option });
+    }
+
     fn skipNewlines(self: *Parser) void {
         while (self.check(.newline)) _ = self.bump();
     }
@@ -1301,6 +1309,9 @@ const Parser = struct {
                 } else if (self.check(.kw_false)) {
                     _ = self.bump();
                     embed_always = false;
+                } else {
+                    self.badBooleanPropOption("embed_always");
+                    break;
                 }
             } else if (self.checkIdent("readonly")) {
                 _ = self.bump(); // 'readonly'
@@ -1311,6 +1322,9 @@ const Parser = struct {
                 } else if (self.check(.kw_false)) {
                     _ = self.bump();
                     is_readonly = false;
+                } else {
+                    self.badBooleanPropOption("readonly");
+                    break;
                 }
             } else if (self.checkIdent("default")) {
                 _ = self.bump(); // 'default'

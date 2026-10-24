@@ -1004,6 +1004,9 @@ public final class RbParser {
                     } else if (peek().kind == TK.FALSE) {
                         advance();
                         embedAlways = false;
+                    } else {
+                        badBooleanPropOption("embed_always");
+                        break;
                     }
                 } else if (checkIdent("readonly")) {
                     advance();
@@ -1014,6 +1017,9 @@ public final class RbParser {
                     } else if (peek().kind == TK.FALSE) {
                         advance();
                         isReadonly = false;
+                    } else {
+                        badBooleanPropOption("readonly");
+                        break;
                     }
                 } else if (checkIdent("default")) {
                     advance();
@@ -1048,6 +1054,17 @@ public final class RbParser {
                 null,
                 embedAlways
             );
+        }
+
+        /** N-313: {@code readonly:} / {@code embed_always:} take a literal true or
+         *  false. Any other value is refused, never silently dropped. Same text
+         *  in all seven tiers. */
+        private void badBooleanPropOption(String option) {
+            Token t = peek();
+            String got = (t.kind == TK.NEWLINE || t.kind == TK.EOF) ? "<end of line>" : t.value;
+            errors.add(file + ":" + t.line + ":" + t.col
+                + ": invalid value '" + got + "' for prop option '" + option
+                + "' (expected true or false)");
         }
 
         TypeNode parseType() {

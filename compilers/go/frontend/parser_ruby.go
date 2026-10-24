@@ -783,6 +783,17 @@ func (p *rbParser) skipNewlines() {
 // Type parsing
 // ---------------------------------------------------------------------------
 
+// badBooleanPropOption refuses a `readonly:` / `embed_always:` value that is
+// not a literal true or false (N-313). Same text in all seven tiers.
+func (p *rbParser) badBooleanPropOption(option string) {
+	tok := p.peek()
+	got := tok.value
+	if tok.kind == rbTokNewline || tok.kind == rbTokEOF {
+		got = "<end of line>"
+	}
+	p.addError(fmt.Sprintf("line %d: invalid value '%s' for prop option '%s' (expected true or false)", tok.line, got, option))
+}
+
 func (p *rbParser) parseRbType() TypeNode {
 	tok := p.advance()
 	rawName := tok.value
@@ -1115,6 +1126,9 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 			} else if p.check(rbTokFalse) {
 				p.advance()
 				embedAlways = false
+			} else {
+				p.badBooleanPropOption("embed_always")
+				break
 			}
 		} else if p.checkIdent("readonly") {
 			p.advance() // 'readonly'
@@ -1125,6 +1139,9 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 			} else if p.check(rbTokFalse) {
 				p.advance()
 				isReadonly = false
+			} else {
+				p.badBooleanPropOption("readonly")
+				break
 			}
 		} else if p.checkIdent("default") {
 			p.advance() // 'default'

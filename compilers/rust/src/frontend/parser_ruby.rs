@@ -1347,6 +1347,9 @@ impl<'a> RbParser<'a> {
                 } else if *self.peek() == Token::FalseLit {
                     self.advance();
                     embed_always = false;
+                } else {
+                    self.bad_boolean_prop_option("embed_always");
+                    break;
                 }
             } else if self.check_ident("readonly") {
                 self.advance(); // 'readonly'
@@ -1357,6 +1360,9 @@ impl<'a> RbParser<'a> {
                 } else if *self.peek() == Token::FalseLit {
                     self.advance();
                     is_readonly = false;
+                } else {
+                    self.bad_boolean_prop_option("readonly");
+                    break;
                 }
             } else if self.check_ident("default") {
                 self.advance(); // 'default'
@@ -1402,6 +1408,21 @@ impl<'a> RbParser<'a> {
     // -----------------------------------------------------------------------
     // Types
     // -----------------------------------------------------------------------
+
+    /// N-313: `readonly:` and `embed_always:` take a literal `true` or `false`.
+    /// Any other value is refused, never silently dropped. Same text in all
+    /// seven tiers.
+    fn bad_boolean_prop_option(&mut self, option: &str) {
+        let got = if *self.peek() == Token::Newline || *self.peek() == Token::Eof {
+            "<end of line>".to_string()
+        } else {
+            rb_token_text(self.peek())
+        };
+        self.errors.push(format!(
+            "invalid value '{}' for prop option '{}' (expected true or false)",
+            got, option
+        ));
+    }
 
     fn parse_type(&mut self) -> TypeNode {
         let raw_name = self.expect_ident();
