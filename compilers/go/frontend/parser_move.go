@@ -198,7 +198,7 @@ func (p *moveParser) tokenize(source string) []moveToken {
 		startCol := col
 
 		// N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
-		// A `#` not followed by `[` is skipped below like any unknown character.
+		// A `#` not followed by `[` is refused below like any unknown character.
 		if ch == '#' && i+1 < len(source) && source[i+1] == '[' {
 			tokens = append(tokens, moveToken{kind: moveTokHash, value: "#", line: line, col: startCol})
 			i++
@@ -405,8 +405,12 @@ func (p *moveParser) tokenize(source string) []moveToken {
 			continue
 		}
 
-		// Skip unknown characters
-		i++
+		// N-214: an unrecognised character (including a `#` not followed by
+		// `[`) is refused, as the TS reference does, rather than skipped:
+		// skipping compiled `a + § b` as `a + b`.
+		d, size := unexpectedCharDiag(source, i, p.fileName, line, startCol)
+		p.errors = append(p.errors, d)
+		i += size
 		col++
 	}
 

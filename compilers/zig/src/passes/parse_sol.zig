@@ -100,7 +100,7 @@ pub fn parseSol(allocator: Allocator, source: []const u8, file_name: []const u8)
         const e1 = lex_diag.prepend(allocator, r.errors, file_name, quoted_msg, t.quoted);
         break :blk lex_diag.prepend(allocator, e1, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
     };
-    return .{ .contract = r.contract, .errors = errs };
+    return .{ .contract = r.contract, .errors = lex_diag.prependUnexpected(allocator, errs, file_name, t.unexpected) };
 }
 
 
@@ -173,6 +173,8 @@ const Tokenizer = struct {
     source: []const u8,
     /// F-011: the first unterminated quoted literal, if any.
     unterminated: ?lex_diag.Pos = null,
+    /// N-214: the first unrecognised character, if any.
+    unexpected: ?lex_diag.Unexpected = null,
     /// N-019: the first TERMINATED quoted literal (this surface has none) and
     /// the quote character that opened it.
     quoted: ?lex_diag.Pos = null,
@@ -231,6 +233,16 @@ const Tokenizer = struct {
                 }
             } else break;
         }
+    }
+
+    /// N-214: record the first character this surface does not recognise
+    /// (its whole UTF-8 sequence, one column; `advance` took its first byte)
+    /// and hand it on as a one-character token.
+    fn unexpectedChar(self: *Tokenizer, start: usize, sl: u32, sc: u32) Token {
+        self.pos = start + lex_diag.charLen(self.source, start);
+        const text = self.source[start..self.pos];
+        if (self.unexpected == null) self.unexpected = .{ .at = .{ .line = sl, .col = sc }, .text = text };
+        return .{ .kind = .ident, .text = text, .line = sl, .col = sc };
     }
 
     fn next(self: *Tokenizer) Token {
@@ -370,7 +382,7 @@ const Tokenizer = struct {
                 _ = self.advance();
                 break :blk .{ .kind = .pipe_pipe, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .pipe, .text = t, .line = sl, .col = sc },
-            else => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
+            else => self.unexpectedChar(start, sl, sc),
         };
     }
 

@@ -640,7 +640,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
             continue;
         }
 
-        // Skip unknown characters silently
+        // N-214: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, l, c - 1));
         pos += 1;
         col += 1;
     }

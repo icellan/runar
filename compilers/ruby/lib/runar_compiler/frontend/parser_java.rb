@@ -432,7 +432,9 @@ module RunarCompiler
           next
         end
 
-        # Skip unknown
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, start_line, start_col)
         i += 1
         col += 1
       end

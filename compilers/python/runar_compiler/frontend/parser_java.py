@@ -462,7 +462,9 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 tokens.append(Token(TOK_IDENT, word, l, c))
             continue
 
-        # Unknown character — skip
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, l, c))
         pos += 1
         col += 1
 

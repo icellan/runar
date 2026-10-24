@@ -91,7 +91,8 @@ pub fn parseRuby(allocator: Allocator, source: []const u8, file_name: []const u8
     // F-011: report an unterminated literal (the tokenizer records it).
     var t = Tokenizer.init(allocator, source);
     _ = t.tokenize();
-    const errors = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    const at_errs = lex_diag.prepend(allocator, r.errors, file_name, "Unexpected token in expression: '@'", t.bare_at);
+    const errors = lex_diag.prepend(allocator, lex_diag.prependUnexpected(allocator, at_errs, file_name, t.unexpected), file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
     return .{ .contract = r.contract, .errors = prependUnterminatedBegin(allocator, errors, file_name, t.block_comment_start) };
 }
 
@@ -227,6 +228,10 @@ const Tokenizer = struct {
     unterminated: ?lex_diag.Pos = null,
     /// N-021: line number of an open `=begin` embedded document, or 0.
     block_comment_start: u32 = 0,
+    /// N-214: the first unrecognised character, if any.
+    unexpected: ?lex_diag.Unexpected = null,
+    /// N-214: the first bare `@` (no instance-variable name), if any.
+    bare_at: ?lex_diag.Pos = null,
 
     fn init(allocator: Allocator, source: []const u8) Tokenizer {
         return .{ .allocator = allocator, .source = source, .tokens = .empty };
@@ -309,6 +314,11 @@ const Tokenizer = struct {
                             .line = line_num,
                             .col = col,
                         }) catch {};
+                    } else if (self.bare_at == null) {
+                        // N-214: a bare `@` was dropped, so `a + @ b` compiled
+                        // as `a + b`. The TS reference lexes it as its own
+                        // token and refuses it in the expression.
+                        self.bare_at = .{ .line = line_num, .col = col };
                     }
                     continue;
                 }
@@ -476,8 +486,12 @@ const Tokenizer = struct {
                     continue;
                 }
 
-                // Skip unknown characters
-                pos += 1;
+                // N-214: an unrecognised character is refused, as the TS
+                // reference does, rather than skipped: skipping compiled
+                // `a + § b` as `a + b`.
+                const n = lex_diag.charLen(raw_line, pos);
+                if (self.unexpected == null) self.unexpected = .{ .at = .{ .line = line_num, .col = col }, .text = raw_line[pos .. pos + n] };
+                pos += n;
             }
 
             // Emit NEWLINE at end of significant line (only if not inside parens and we added tokens)

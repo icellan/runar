@@ -44,17 +44,25 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 // goParseErrorText renders go/parser's error with 0-based columns. go/scanner
 // formats its positions 1-based; every Rúnar diagnostic column is 0-based
 // (N-078, R88a), so each position is rebased the way locAt rebases AST ones.
+var goIllegalCharRe = regexp.MustCompile(`^illegal character U\+[0-9A-F]+ '(.+)'$`)
+
 func goParseErrorText(err error) string {
 	list, ok := err.(scanner.ErrorList)
 	if !ok || len(list) == 0 {
 		return err.Error()
 	}
 	e := list[0]
+	msg := e.Msg
+	// N-214: go/scanner's "illegal character U+00A7 '§'" is the TS reference's
+	// "Unexpected character '§'" (same character, same position).
+	if m := goIllegalCharRe.FindStringSubmatch(msg); m != nil {
+		msg = "Unexpected character '" + m[1] + "'"
+	}
 	text := e.Error()
 	if e.Pos.IsValid() && e.Pos.Column > 0 {
 		// Formatted here, not by token.Position.String, which drops a
 		// column of 0.
-		text = fmt.Sprintf("%s:%d:%d: %s", e.Pos.Filename, e.Pos.Line, e.Pos.Column-1, e.Msg)
+		text = fmt.Sprintf("%s:%d:%d: %s", e.Pos.Filename, e.Pos.Line, e.Pos.Column-1, msg)
 	}
 	if len(list) > 1 {
 		text += fmt.Sprintf(" (and %d more errors)", len(list)-1)

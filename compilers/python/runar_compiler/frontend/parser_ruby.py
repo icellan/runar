@@ -452,8 +452,10 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 if name:
                     tokens.append(Token(TOK_IVAR, name, line_num, col))
                 else:
-                    # Bare @ (unusual, but safe to skip)
-                    pass
+                    # N-214: a bare `@` was skipped, so `a + @ b` compiled as
+                    # `a + b`. The TS reference lexes it as its own token and
+                    # refuses it in the expression; refuse it with TS's diagnostic.
+                    lex.append(lex_error("Unexpected token in expression: '@'", file_name, line_num, col))
                 continue
 
             # Three-dot range operator (must be tried before two-dot)
@@ -634,7 +636,9 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                     tokens.append(Token(TOK_IDENT, word, line_num, col))
                 continue
 
-            # Skip unrecognized characters
+            # N-214: an unrecognised character is refused, as the TS reference
+            # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line_num, col))
             pos += 1
 
         # Emit NEWLINE at end of significant line (only if not inside parens)

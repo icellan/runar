@@ -498,7 +498,11 @@ fn tokenize(
                     let name: String = chars[start..pos].iter().collect();
                     tokens.push(Token::Ivar(name));
                 } else {
-                    // bare @ — unlikely but handle gracefully
+                    // N-214: a bare `@` became an identifier named `@`, refused
+                    // only by the type checker, at the wrong place. The TS
+                    // reference lexes it as its own token and refuses it in the
+                    // expression; refuse it here with TS's diagnostic.
+                    errors.push(lex_error("Unexpected token in expression: '@'", file, line_num, start - 1));
                     tokens.push(Token::Ident("@".to_string()));
                 }
                 continue;
@@ -844,7 +848,9 @@ fn tokenize(
                 continue;
             }
 
-            // Skip unrecognised characters
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, line_num, pos));
             pos += 1;
         }
         positions.resize(tokens.len(), at);

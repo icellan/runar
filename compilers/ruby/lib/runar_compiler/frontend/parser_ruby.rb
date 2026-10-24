@@ -416,7 +416,14 @@ module RunarCompiler
               pos += 1
             end
             name = line[name_start...pos]
-            tokens << Token.new(kind: TOK_IVAR, value: name, line: line_num, col: col) if name && !name.empty?
+            if name && !name.empty?
+              tokens << Token.new(kind: TOK_IVAR, value: name, line: line_num, col: col)
+            else
+              # N-214: a bare `@` was dropped, so `a + @ b` compiled as
+              # `a + b`. The TS reference lexes it as its own token and
+              # refuses it in the expression; refuse it with TS's diagnostic.
+              lex << Frontend.lex_error("Unexpected token in expression: '@'", file_name, line_num, col)
+            end
             next
           end
 
@@ -623,7 +630,9 @@ module RunarCompiler
             next
           end
 
-          # Skip unrecognized characters
+          # N-214: an unrecognised character is refused, as the TS reference
+          # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+          lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line_num, col)
           pos += 1
         end
 

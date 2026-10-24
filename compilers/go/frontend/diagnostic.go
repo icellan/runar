@@ -1,6 +1,9 @@
 package frontend
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 // Severity represents the level of a compiler diagnostic.
 type Severity string
@@ -154,4 +157,13 @@ func BareJavaPropertyAssignmentMsg(name string) string {
 // lexDiag builds a tokenizer diagnostic located at line:col of file.
 func lexDiag(msg, file string, line, col int) Diagnostic {
 	return Diagnostic{Message: msg, Severity: SeverityError, Loc: &SourceLocation{File: file, Line: line, Column: col}}
+}
+
+// unexpectedCharDiag is N-214's refusal of a character a byte tokenizer does
+// not recognise at src[i] (the TS reference's "Unexpected character '<c>'").
+// It decodes the whole UTF-8 sequence, so `§` is reported as one character,
+// and returns its byte length so the caller can step over it as one column.
+func unexpectedCharDiag(src string, i int, file string, line, col int) (Diagnostic, int) {
+	r, size := utf8.DecodeRuneInString(src[i:])
+	return lexDiag(fmt.Sprintf("Unexpected character '%c'", r), file, line, col), size
 }

@@ -369,8 +369,11 @@ func (p *solParser) tokenize(source string) []solToken {
 			continue
 		}
 
-		// Skip unknown characters
-		i++
+		// N-214: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+		d, size := unexpectedCharDiag(source, i, p.fileName, line, startCol)
+		p.errors = append(p.errors, d)
+		i += size
 		col++
 	}
 

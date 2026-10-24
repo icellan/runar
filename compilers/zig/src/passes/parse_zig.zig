@@ -87,7 +87,7 @@ pub fn parseZig(allocator: Allocator, source: []const u8, file_name: []const u8)
     while (guard <= source.len) : (guard += 1) {
         if (t.next().kind == .eof) break;
     }
-    const lex_errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    const lex_errs = lex_diag.prepend(allocator, lex_diag.prependUnexpected(allocator, r.errors, file_name, t.unexpected), file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
     // N-344: a `const` local cannot be reassigned.
     const errs = if (r.contract) |c| const_reassign.check(allocator, file_name, c, lex_errs) else lex_errs;
     return .{ .contract = r.contract, .errors = errs };
@@ -131,6 +131,8 @@ const Tokenizer = struct {
     source: []const u8,
     /// F-011: the first unterminated quoted literal, if any.
     unterminated: ?lex_diag.Pos = null,
+    /// N-214: the first unrecognised character, if any.
+    unexpected: ?lex_diag.Unexpected = null,
     pos: usize,
     line: u32,
     col: u32,
@@ -173,6 +175,16 @@ const Tokenizer = struct {
                 }
             } else break;
         }
+    }
+
+    /// N-214: record the first character this surface does not recognise
+    /// (its whole UTF-8 sequence, one column; `advance` took its first byte)
+    /// and hand it on as a one-character token.
+    fn unexpectedChar(self: *Tokenizer, start: usize, sl: u32, sc: u32) Token {
+        self.pos = start + lex_diag.charLen(self.source, start);
+        const text = self.source[start..self.pos];
+        if (self.unexpected == null) self.unexpected = .{ .at = .{ .line = sl, .col = sc }, .text = text };
+        return .{ .kind = .ident, .text = text, .line = sl, .col = sc };
     }
 
     fn next(self: *Tokenizer) Token {
@@ -246,7 +258,7 @@ const Tokenizer = struct {
             '%' => if (c2 == '=') blk: { _ = self.advance(); break :blk .{ .kind = .percent_eq, .text = self.source[start..self.pos], .line = sl, .col = sc }; } else .{ .kind = .percent, .text = t, .line = sl, .col = sc },
             '&' => if (c2 == '&') blk: { _ = self.advance(); break :blk .{ .kind = .amp_amp, .text = self.source[start..self.pos], .line = sl, .col = sc }; } else .{ .kind = .ampersand, .text = t, .line = sl, .col = sc },
             '|' => if (c2 == '|') blk: { _ = self.advance(); break :blk .{ .kind = .pipe_pipe, .text = self.source[start..self.pos], .line = sl, .col = sc }; } else .{ .kind = .pipe, .text = t, .line = sl, .col = sc },
-            else => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
+            else => self.unexpectedChar(start, sl, sc),
         };
     }
 

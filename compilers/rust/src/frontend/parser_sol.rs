@@ -416,7 +416,9 @@ fn tokenize(
             continue;
         }
 
-        // Skip unrecognized characters
+        // N-214: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error_at_index(&format!("Unexpected character '{}'", ch), file, &chars, i));
         i += 1;
     }
 

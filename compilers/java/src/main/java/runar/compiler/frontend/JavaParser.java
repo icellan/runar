@@ -195,7 +195,14 @@ public final class JavaParser {
                 String shared = sharedLiteralDiagnostic(source, (int) d.getPosition());
                 String where = javacDiagnosticLocation(source, filename, d);
                 if (shared != null) errors.add(where + shared);
-                errors.add(where + d.getMessage(null));
+                // N-214: javac's "illegal character: '\u00a7'" is the TS
+                // reference's "Unexpected character '§'", at the same position.
+                long p = d.getPosition();
+                if ("compiler.err.illegal.char".equals(d.getCode()) && p >= 0 && p < source.length()) {
+                    errors.add(where + "Unexpected character '" + source.charAt((int) p) + "'");
+                } else {
+                    errors.add(where + d.getMessage(null));
+                }
             }
         }
         if (!errors.isEmpty()) {

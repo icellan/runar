@@ -436,6 +436,12 @@ public final class RbParser {
                     String name = line.substring(nameStart, pos);
                     if (!name.isEmpty()) {
                         tokens.add(new Token(TK.IVAR, name, lineNum, col));
+                    } else {
+                        // N-214: a bare `@` was dropped, so `a + @ b` compiled
+                        // as `a + b`. The TS reference lexes it as its own token
+                        // and refuses it in the expression; refuse it with TS's
+                        // diagnostic.
+                        lex.add(LexDiag.at(filename, lineNum, col, "Unexpected token in expression: '@'"));
                     }
                     continue;
                 }
@@ -617,8 +623,9 @@ public final class RbParser {
                     continue;
                 }
 
-                // Unknown character — skip rather than crash. Mirrors the
-                // Python tokeniser behaviour.
+                // N-214: an unrecognised character is refused, as the TS reference
+                // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+                lex.add(LexDiag.at(filename, lineNum, col, "Unexpected character '" + ch + "'"));
                 pos++;
             }
 

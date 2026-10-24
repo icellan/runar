@@ -431,7 +431,9 @@ public final class ZigParser {
                 continue;
             }
 
-            // Skip unknown character
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, tokLine, tokCol, "Unexpected character '" + ch + "'"));
             pos++;
             col++;
         }

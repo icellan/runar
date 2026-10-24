@@ -416,8 +416,12 @@ func (p *zigParser) tokenize(source string) []zigToken {
 			continue
 		}
 
-		// Skip unknown characters
-		advance()
+		// N-214: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+		d, size := unexpectedCharDiag(source, pos, p.fileName, tokenLine, tokenCol)
+		p.errors = append(p.errors, d)
+		pos += size
+		col++
 	}
 
 	tokens = append(tokens, zigToken{kind: zigTokEOF, value: "", line: line, col: col})

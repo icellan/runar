@@ -249,7 +249,7 @@ public final class MoveParser {
             }
 
             // N-093: `#[` opens an attribute (`#[embed_always]`,
-            // `#[sighash(...)]`). A `#` not followed by `[` is skipped below
+            // `#[sighash(...)]`). A `#` not followed by `[` is refused below
             // like any unknown character.
             if (ch == '#' && i + 1 < n && source.charAt(i + 1) == '[') {
                 out.add(new Token(Kind.HASH, "#", line, startCol));
@@ -279,7 +279,9 @@ public final class MoveParser {
                 continue;
             }
 
-            // Skip unknown characters
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }

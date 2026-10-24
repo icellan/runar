@@ -547,7 +547,9 @@ public final class RustParser {
                 continue;
             }
 
-            // Unknown char — skip
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, startLine, startCol, "Unexpected character '" + ch + "'"));
             pos++;
             col++;
         }

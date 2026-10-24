@@ -96,6 +96,27 @@ pub fn diagCol(col: u32) u32 {
 
 var fallback = [_][]const u8{UNTERMINATED_STRING_LITERAL};
 
+/// N-214: the first character a hand-written tokenizer does not recognise,
+/// as its whole UTF-8 sequence so `§` is one character (the TS reference's
+/// "Unexpected character '<c>'"). It used to become a one-byte identifier,
+/// refused later as "Undefined variable", or not at all.
+pub const Unexpected = struct { at: Pos, text: []const u8 };
+
+/// N-214: the byte length of the UTF-8 sequence starting at `source[start]`
+/// (1 for an invalid lead byte), clamped to the end of `source`.
+pub fn charLen(source: []const u8, start: usize) usize {
+    const n: usize = std.unicode.utf8ByteSequenceLength(source[start]) catch 1;
+    return @min(n, source.len - start);
+}
+
+/// N-214: `errors` with `file:line:col: Unexpected character '<c>'` in front,
+/// when `u` is set.
+pub fn prependUnexpected(allocator: std.mem.Allocator, errors: [][]const u8, file_name: []const u8, u: ?Unexpected) [][]const u8 {
+    const x = u orelse return errors;
+    const msg = std.fmt.allocPrint(allocator, "Unexpected character '{s}'", .{x.text}) catch return fallback[0..];
+    return prepend(allocator, errors, file_name, msg, x.at);
+}
+
 /// `errors` with `file:line:col: msg` in front, when `at` is set. An
 /// allocation failure still refuses the source (it never drops the error).
 pub fn prepend(allocator: std.mem.Allocator, errors: [][]const u8, file_name: []const u8, msg: []const u8, at: ?Pos) [][]const u8 {

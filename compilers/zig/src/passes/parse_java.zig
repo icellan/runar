@@ -88,7 +88,7 @@ pub fn parseJava(allocator: Allocator, source: []const u8, file_name: []const u8
     while (guard <= source.len) : (guard += 1) {
         if (t.next().kind == .eof) break;
     }
-    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    const errs = lex_diag.prepend(allocator, lex_diag.prependUnexpected(allocator, r.errors, file_name, t.unexpected), file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
     return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, errs, file_name, lex_diag.JAVA_CHAR_LITERAL, t.char_literal) };
 }
 
@@ -167,6 +167,8 @@ const Tokenizer = struct {
     source: []const u8,
     /// F-011: the first unterminated quoted literal, if any.
     unterminated: ?lex_diag.Pos = null,
+    /// N-214: the first unrecognised character, if any.
+    unexpected: ?lex_diag.Unexpected = null,
     /// F-011: the first Java char literal, if any (refused like the TS reference).
     char_literal: ?lex_diag.Pos = null,
     pos: usize,
@@ -223,6 +225,16 @@ const Tokenizer = struct {
                 }
             } else break;
         }
+    }
+
+    /// N-214: record the first character this surface does not recognise
+    /// (its whole UTF-8 sequence, one column; `advance` took its first byte)
+    /// and hand it on as a one-character token.
+    fn unexpectedChar(self: *Tokenizer, start: usize, sl: u32, sc: u32) Token {
+        self.pos = start + lex_diag.charLen(self.source, start);
+        const text = self.source[start..self.pos];
+        if (self.unexpected == null) self.unexpected = .{ .at = .{ .line = sl, .col = sc }, .text = text };
+        return .{ .kind = .ident, .text = text, .line = sl, .col = sc };
     }
 
     fn next(self: *Tokenizer) Token {
@@ -372,7 +384,10 @@ const Tokenizer = struct {
                 _ = self.advance();
                 break :blk2 .{ .kind = .pipe_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .pipe, .text = t, .line = sl, .col = sc },
-            else => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
+            // A char literal's quote was recorded above (F-011); it keeps its
+            // own diagnostic.
+            '\'' => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
+            else => self.unexpectedChar(start, sl, sc),
         };
     }
 

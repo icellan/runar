@@ -411,6 +411,11 @@ fn tokenize(
         // other tier refuses the same source. No `.runar.zig` in the repo (92
         // files, string literals and comments excluded) contains a character
         // this arm reaches, so nothing that parsed before stops parsing.
+        //
+        // N-214: the token alone gave a refusal with no position ("Unexpected
+        // token in expression: Unknown('§')"); report TS's diagnostic at the
+        // character too, ahead of whatever the parser then says.
+        errors.push(lex_error_at_index(&format!("Unexpected character '{}'", ch), file, &chars, pos));
         tokens.push(Token::Unknown(ch));
         pos += 1;
     }

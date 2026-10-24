@@ -248,6 +248,12 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				name := line[start:pos]
 				if len(name) > 0 {
 					tokens = append(tokens, rbToken{kind: rbTokIvar, value: name, line: lineNum, col: col})
+				} else {
+					// N-214: a bare `@` was dropped, so `a + @ b` compiled as
+					// `a + b`. The TS reference lexes it as its own token and
+					// refuses it in the expression; refuse it here with TS's
+					// diagnostic.
+					p.errors = append(p.errors, lexDiag("Unexpected token in expression: '@'", p.fileName, lineNum, col))
 				}
 				continue
 			}
@@ -488,8 +494,11 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				continue
 			}
 
-			// Skip unknown characters
-			pos++
+			// N-214: an unrecognised character is refused, as the TS reference
+			// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+			d, size := unexpectedCharDiag(line, pos, p.fileName, lineNum, col)
+			p.errors = append(p.errors, d)
+			pos += size
 		}
 
 		// Emit NEWLINE at end of significant line (only if not inside parens)
