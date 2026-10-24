@@ -995,3 +995,91 @@ describe('N-012: for-loop header slots are walked', () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// N-401: statement walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+
+// Proves: the validator's statement-level walkers (the method-call collector
+// behind the recursion check, and the output-intrinsic search behind the
+// no-addOutput-in-a-loop rule) visit all three header slots of a `for`
+// statement. A `this.m()` call planted only in a loop's init, condition or
+// update is seen by the call-graph (so self-recursion through a header is
+// refused), and an `addOutput` planted only in a NESTED loop's header is found
+// from the enclosing loop. The checkReadonlyWrites walker already visits all
+// three slots; the readonly case pins that so it cannot regress.
+// The AST is hand-built (mutated after parsing) because the parser and the
+// for-update / literal-init rules make these shapes unreachable from source.
+// Does not prove: that any source program can reach these shapes today.
+describe('N-401: statement walkers visit for-loop header slots', () => {
+  const thisCall = (name: string) => ({
+    kind: 'call_expr' as const,
+    callee: { kind: 'property_access' as const, property: name },
+    args: [],
+  });
+  const plant = (loop: any, slot: 'init' | 'condition' | 'update', expr: any): void => {
+    if (slot === 'init') loop.init = { ...loop.init, init: expr };
+    else if (slot === 'condition') loop.condition = expr;
+    else loop.update = { kind: 'expression_statement', expression: expr, sourceLocation: loop.sourceLocation };
+  };
+
+  const REC_SOURCE = `
+    class C extends SmartContract {
+      readonly t: bigint;
+      constructor(t: bigint) { super(t); this.t = t; }
+      public m(a: bigint) {
+        let s = 0n;
+        for (let i = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+      }
+    }
+  `;
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`sees a method call planted only in the for-loop ${slot} (recursion check)`, () => {
+      const contract = parseContract(REC_SOURCE);
+      const loop = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!loop || loop.kind !== 'for_statement') throw new Error('no for_statement');
+      plant(loop, slot, thisCall('m'));
+      expect(hasError(validate(contract), 'Recursion detected')).toBe(true);
+    });
+  }
+
+  const NESTED_SOURCE = `
+    class C extends StatefulSmartContract {
+      count: bigint;
+      constructor(count: bigint) { super(count); this.count = count; }
+      public m(a: bigint) {
+        let s = 0n;
+        for (let i = 0n; i < 3n; i++) {
+          for (let j = 0n; j < 3n; j++) { s = s + a; }
+        }
+        this.count = s;
+      }
+    }
+  `;
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`finds an addOutput planted only in a nested for-loop ${slot}`, () => {
+      const contract = parseContract(NESTED_SOURCE);
+      const outer = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!outer || outer.kind !== 'for_statement') throw new Error('no for_statement');
+      const inner = outer.body.find((s) => s.kind === 'for_statement');
+      if (!inner || inner.kind !== 'for_statement') throw new Error('no nested for_statement');
+      plant(inner, slot, thisCall('addOutput'));
+      expect(hasError(validate(contract), "Output intrinsic 'addOutput'")).toBe(true);
+    });
+  }
+
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`refuses a readonly write planted only in the for-loop ${slot}`, () => {
+      const contract = parseContract(REC_SOURCE);
+      const loop = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!loop || loop.kind !== 'for_statement') throw new Error('no for_statement');
+      plant(loop, slot, {
+        kind: 'increment_expr',
+        operand: { kind: 'property_access', property: 't' },
+        prefix: false,
+      });
+      expect(hasError(validate(contract), "Cannot assign to readonly property 't'")).toBe(true);
+    });
+  }
+});

@@ -1048,6 +1048,19 @@ class _ValidationContext:
                 return found
             return self._find_output_intrinsic(list(stmt.then) + list(stmt.else_), seen)
         if isinstance(stmt, ForStmt):
+            if stmt.init is not None:
+                found = self._find_output_intrinsic_in_statement(stmt.init, seen)
+                if found is not None:
+                    return found
+            found = self._find_output_intrinsic_in_expr(
+                stmt.condition, stmt.source_location, seen
+            )
+            if found is not None:
+                return found
+            if stmt.update is not None:
+                found = self._find_output_intrinsic_in_statement(stmt.update, seen)
+                if found is not None:
+                    return found
             return self._find_output_intrinsic(stmt.body, seen)
         return None
 
@@ -2117,7 +2130,11 @@ def _collect_method_calls_in_stmt(stmt: Statement, calls: set[str], bare: bool =
         _collect_method_calls(stmt.then, calls, bare)
         _collect_method_calls(stmt.else_, calls, bare)
     elif isinstance(stmt, ForStmt):
+        if stmt.init is not None:
+            _collect_method_calls_in_stmt(stmt.init, calls, bare)
         _collect_method_calls_in_expr(stmt.condition, calls, bare)
+        if stmt.update is not None:
+            _collect_method_calls_in_stmt(stmt.update, calls, bare)
         _collect_method_calls(stmt.body, calls, bare)
     elif isinstance(stmt, ReturnStmt):
         if stmt.value is not None:

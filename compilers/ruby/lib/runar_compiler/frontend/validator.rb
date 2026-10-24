@@ -1391,6 +1391,15 @@ module RunarCompiler
 
           find_output_intrinsic((stmt.then || []) + (stmt.else_ || []), seen)
         when ForStmt
+          found = find_output_intrinsic_in_statement(stmt.init, seen) unless stmt.init.nil?
+          return found unless found.nil?
+
+          found = find_output_intrinsic_in_expr(stmt.condition, stmt.source_location, seen)
+          return found unless found.nil?
+
+          found = find_output_intrinsic_in_statement(stmt.update, seen) unless stmt.update.nil?
+          return found unless found.nil?
+
           find_output_intrinsic(stmt.body, seen)
         end
       end
@@ -2134,7 +2143,9 @@ module RunarCompiler
           collect_method_calls(stmt.then, calls, bare)
           collect_method_calls(stmt.else_, calls, bare)
         when ForStmt
+          collect_method_calls_in_stmt(stmt.init, calls, bare) unless stmt.init.nil?
           collect_method_calls_in_expr(stmt.condition, calls, bare)
+          collect_method_calls_in_stmt(stmt.update, calls, bare) unless stmt.update.nil?
           collect_method_calls(stmt.body, calls, bare)
         when ReturnStmt
           collect_method_calls_in_expr(stmt.value, calls, bare) unless stmt.value.nil?

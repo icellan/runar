@@ -878,6 +878,7 @@ fn walkReadonlyWrites(
                     try errors.append(allocator, .{
                         .message = msg,
                         .severity = .@"error",
+                        .owned_message = true,
                     });
                 }
                 try walkExprForReadonlyMutation(allocator, contract, a.value, errors);
@@ -896,7 +897,10 @@ fn walkReadonlyWrites(
                 try walkReadonlyWrites(allocator, contract, if_s.then_body, errors);
                 if (if_s.else_body) |eb| try walkReadonlyWrites(allocator, contract, eb, errors);
             },
-            .for_stmt => |f| try walkReadonlyWrites(allocator, contract, f.body, errors),
+            .for_stmt => |f| {
+                if (f.update) |u| try walkReadonlyWrites(allocator, contract, u[0..1], errors);
+                try walkReadonlyWrites(allocator, contract, f.body, errors);
+            },
         }
     }
 }
@@ -1470,7 +1474,12 @@ fn findOutputIntrinsicInStatement(
             }
             break :blk null;
         },
-        .for_stmt => |f| findOutputIntrinsic(allocator, contract, f.body, seen),
+        .for_stmt => |f| blk: {
+            if (f.update) |u| {
+                if (try findOutputIntrinsicInStatement(allocator, contract, u.*, seen)) |site| break :blk site;
+            }
+            break :blk try findOutputIntrinsic(allocator, contract, f.body, seen);
+        },
     };
 }
 
@@ -2338,6 +2347,7 @@ fn collectMethodCalls(allocator: Allocator, stmt: Statement, calls: *StringSet, 
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| try collectMethodCalls(allocator, u.*, calls, self_receiver);
             for (fs.body) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
         },
         .assert_stmt => |a| try collectMethodCallsInExpr(allocator, a.condition, calls, self_receiver),
@@ -4369,4 +4379,65 @@ test "validate: N-325 parameter with an unknown type name is refused" {
     }
     try testing.expect(saw_ctor);
     try testing.expect(saw_method);
+}
+
+// -- N-401: the statement walkers cover a for-loop's update slot --------------
+//
+// Proves: the three statement walkers N-012 left behind -- walkReadonlyWrites,
+// collectMethodCalls and findOutputIntrinsic -- each visit the `update`
+// statement of a `for` loop. A readonly write or a `this.m()` call planted only
+// in the update is seen, and an addOutput planted only in a NESTED loop's
+// update is found from the enclosing loop. The AST is hand-built because the
+// for-update rule makes these shapes unreachable from source today. Zig lowers
+// a `for` header to constants (`init_value`, `bound`, `bound_ident`), so the
+// update is the only header slot that can hold a statement; init and condition
+// have nothing to walk here.
+// Does not prove: that any source program can reach these shapes today.
+test "N-401: a readonly write planted only in a for-loop update is refused" {
+    const update = Statement{ .assign = .{ .target = "x", .value = .{ .literal_int = 1 }, .target_is_property = true } };
+    const for_stmt = types.ForStmt{ .var_name = "i", .init_value = 0, .bound = 3, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update };
+    try testing.expect(try validateLoopHasError(testing.allocator, for_stmt, "cannot assign to readonly property 'x'"));
+}
+
+test "N-401: collectMethodCalls sees a call planted only in a for-loop update" {
+    const allocator = testing.allocator;
+    var args = [_]Expression{};
+    var call = types.MethodCall{ .object = "this", .method = "m", .args = &args };
+    const update = Statement{ .expr_stmt = .{ .expr = .{ .method_call = &call } } };
+    const loop = Statement{ .for_stmt = .{ .var_name = "i", .init_value = 0, .bound = 3, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update } };
+    var calls = StringSet{};
+    defer calls.deinit(allocator);
+    try collectMethodCalls(allocator, loop, &calls, true);
+    try testing.expect(calls.contains("m"));
+}
+
+test "N-401: findOutputIntrinsic sees an addOutput planted only in a nested for-loop update" {
+    const allocator = testing.allocator;
+    var ao_args = [_]Expression{ .{ .literal_int = 1000 }, .{ .property_access = .{ .object = "this", .property = "count" } } };
+    var ao_call = types.MethodCall{ .object = "this", .method = "addOutput", .args = &ao_args };
+    const update = Statement{ .expr_stmt = .{ .expr = .{ .method_call = &ao_call } } };
+    var inner_body = [_]Statement{.{ .for_stmt = .{ .var_name = "j", .init_value = 0, .bound = 2, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update } }};
+    var body = [_]Statement{
+        .{ .for_stmt = .{ .var_name = "i", .init_value = 0, .bound = 2, .body = &inner_body, .bound_is_const = true, .init_is_const = true } },
+        .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "step", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{makeProperty("count", .bigint, false)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("count")};
+    var super_args = [_]Expression{.{ .identifier = "count" }};
+    var params = [_]types.ParamNode{makeParam("count")};
+    const contract = ContractNode{
+        .name = "Looper",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer seen.deinit(allocator);
+    const site = try findOutputIntrinsic(allocator, contract, &body, &seen);
+    try testing.expect(site != null);
+    try testing.expectEqualStrings("addOutput", site.?.intrinsic);
 }

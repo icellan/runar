@@ -1282,6 +1282,17 @@ func (ctx *validationContext) findOutputIntrinsicInStatement(
 		body := append(append([]Statement{}, s.Then...), s.Else...)
 		return ctx.findOutputIntrinsic(body, seen)
 	case ForStmt:
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInStatement(s.Init, seen); found {
+			return intrinsic, via, l, true
+		}
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInExpr(s.Condition, &s.SourceLocation, seen); found {
+			return intrinsic, via, l, true
+		}
+		if s.Update != nil {
+			if intrinsic, via, l, found := ctx.findOutputIntrinsicInStatement(s.Update, seen); found {
+				return intrinsic, via, l, true
+			}
+		}
 		return ctx.findOutputIntrinsic(s.Body, seen)
 	default:
 		return "", "", nil, false
@@ -2439,7 +2450,11 @@ func collectMethodCallsInStmt(stmt Statement, calls map[string]bool, bare bool) 
 		collectMethodCalls(s.Then, calls, bare)
 		collectMethodCalls(s.Else, calls, bare)
 	case ForStmt:
+		collectMethodCallsInStmt(s.Init, calls, bare)
 		collectMethodCallsInExpr(s.Condition, calls, bare)
+		if s.Update != nil {
+			collectMethodCallsInStmt(s.Update, calls, bare)
+		}
 		collectMethodCalls(s.Body, calls, bare)
 	case ReturnStmt:
 		if s.Value != nil {

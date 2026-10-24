@@ -1250,8 +1250,14 @@ function findOutputIntrinsicInStatement(
       if (inCond) return inCond;
       return findOutputIntrinsic([...stmt.then, ...(stmt.else ?? [])], ctx, seen);
     }
-    case 'for_statement':
+    case 'for_statement': {
+      const inHeader =
+        findOutputIntrinsicInStatement(stmt.init, ctx, seen) ??
+        fromExpr(stmt.condition) ??
+        findOutputIntrinsicInStatement(stmt.update, ctx, seen);
+      if (inHeader) return inHeader;
       return findOutputIntrinsic(stmt.body, ctx, seen);
+    }
     default:
       return undefined;
   }
@@ -1826,7 +1832,9 @@ function collectMethodCallsInStatement(
       if (stmt.else) collectMethodCalls(stmt.else, calls, bareCalls);
       break;
     case 'for_statement':
+      collectMethodCallsInStatement(stmt.init, calls, bareCalls);
       collectMethodCallsInExpr(stmt.condition, calls, bareCalls);
+      collectMethodCallsInStatement(stmt.update, calls, bareCalls);
       collectMethodCalls(stmt.body, calls, bareCalls);
       break;
     case 'return_statement':

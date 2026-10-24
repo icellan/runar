@@ -2194,3 +2194,114 @@ class C extends SmartContract {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// N-401: statement walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+//
+// Proves: the method-call collector (behind the recursion check) and the
+// output-intrinsic search (behind the no-addOutput-in-a-loop rule) visit all
+// three header slots of a `for` statement. A call planted only in the init,
+// condition or update is collected, and an addOutput planted only in a NESTED
+// loop's header is found from the enclosing loop. The AST is hand-built
+// because the for-update and literal-init rules make these shapes unreachable
+// from source today.
+// Does not prove: that any source program can reach these shapes today.
+
+func TestValidate_N401_CollectMethodCallsVisitsForHeader(t *testing.T) {
+	thisCall := func() Expression {
+		return CallExpr{Callee: PropertyAccessExpr{Property: "m"}}
+	}
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run(slot, func(t *testing.T) {
+			loop := ForStmt{
+				Init:      VariableDeclStmt{Name: "i", Init: BigIntLiteral{Value: big.NewInt(0)}},
+				Condition: BoolLiteral{Value: true},
+				Update:    ExpressionStmt{Expr: BoolLiteral{Value: true}},
+			}
+			switch slot {
+			case "init":
+				loop.Init.Init = thisCall()
+			case "condition":
+				loop.Condition = thisCall()
+			case "update":
+				loop.Update = ExpressionStmt{Expr: thisCall()}
+			}
+			calls := map[string]bool{}
+			collectMethodCalls([]Statement{loop}, calls, true)
+			if !calls["m"] {
+				t.Fatalf("collectMethodCalls did not visit the for-loop %s; got %v", slot, calls)
+			}
+		})
+	}
+}
+
+func TestValidate_N401_OutputIntrinsicSearchVisitsNestedForHeader(t *testing.T) {
+	const src = `
+import { StatefulSmartContract } from 'runar-lang';
+
+class C extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public m(a: bigint): void {
+    let s: bigint = 0n;
+    for (let i: bigint = 0n; i < 3n; i++) {
+      for (let j: bigint = 0n; j < 3n; j++) { s = s + a; }
+    }
+    this.count = s;
+  }
+}
+`
+	addOutput := func() Expression {
+		return CallExpr{Callee: PropertyAccessExpr{Property: "addOutput"}}
+	}
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run(slot, func(t *testing.T) {
+			contract := mustParseTS(t, src)
+			body := contract.Methods[0].Body
+			outerIdx := -1
+			for i, st := range body {
+				if _, ok := st.(ForStmt); ok {
+					outerIdx = i
+				}
+			}
+			if outerIdx < 0 {
+				t.Fatal("no ForStmt in method body")
+			}
+			outer := body[outerIdx].(ForStmt)
+			innerIdx := -1
+			for i, st := range outer.Body {
+				if _, ok := st.(ForStmt); ok {
+					innerIdx = i
+				}
+			}
+			if innerIdx < 0 {
+				t.Fatal("no nested ForStmt")
+			}
+			inner := outer.Body[innerIdx].(ForStmt)
+			switch slot {
+			case "init":
+				inner.Init.Init = addOutput()
+			case "condition":
+				inner.Condition = addOutput()
+			case "update":
+				inner.Update = ExpressionStmt{Expr: addOutput(), SourceLocation: inner.SourceLocation}
+			}
+			outer.Body[innerIdx] = inner
+			body[outerIdx] = outer
+
+			res := Validate(contract)
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, "Output intrinsic 'addOutput'") {
+					return
+				}
+			}
+			t.Fatalf("addOutput in nested for-loop %s was not found; got %v", slot, res.ErrorStrings())
+		})
+	}
+}

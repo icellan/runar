@@ -1607,6 +1607,23 @@ public final class Validate {
                 return findOutputIntrinsic(both, seen);
             }
             if (stmt instanceof ForStatement fs) {
+                if (fs.init() != null) {
+                    IntrinsicSite inInit = findOutputIntrinsicInStatement(fs.init(), seen);
+                    if (inInit != null) {
+                        return inInit;
+                    }
+                }
+                IntrinsicSite inCond =
+                    findOutputIntrinsicInExpr(fs.condition(), fs.sourceLocation(), seen);
+                if (inCond != null) {
+                    return inCond;
+                }
+                if (fs.update() != null) {
+                    IntrinsicSite inUpdate = findOutputIntrinsicInStatement(fs.update(), seen);
+                    if (inUpdate != null) {
+                        return inUpdate;
+                    }
+                }
                 return findOutputIntrinsic(fs.body(), seen);
             }
             return null;
@@ -2289,7 +2306,9 @@ public final class Validate {
                 collectMethodCalls(i.elseBody(), out, bare);
             }
         } else if (s instanceof ForStatement f) {
+            if (f.init() != null) collectMethodCallsInStmt(f.init(), out, bare);
             collectMethodCallsInExpr(f.condition(), out, bare);
+            if (f.update() != null) collectMethodCallsInStmt(f.update(), out, bare);
             collectMethodCalls(f.body(), out, bare);
         } else if (s instanceof ReturnStatement r) {
             if (r.value() != null) {

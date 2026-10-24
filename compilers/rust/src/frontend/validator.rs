@@ -1276,7 +1276,20 @@ fn find_output_intrinsic_in_statement(
                 .as_ref()
                 .and_then(|e| find_output_intrinsic(e, contract, seen))
         }
-        Statement::ForStatement { body, .. } => find_output_intrinsic(body, contract, seen),
+        Statement::ForStatement { init, condition, update, body, source_location } => {
+            if let Some(found) = find_output_intrinsic_in_statement(init, contract, seen) {
+                return Some(found);
+            }
+            if let Some(found) =
+                find_output_intrinsic_in_expr(condition, source_location, contract, seen)
+            {
+                return Some(found);
+            }
+            if let Some(found) = find_output_intrinsic_in_statement(update, contract, seen) {
+                return Some(found);
+            }
+            find_output_intrinsic(body, contract, seen)
+        }
     }
 }
 
@@ -1913,9 +1926,15 @@ fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<Strin
             }
         }
         Statement::ForStatement {
-            condition, body, ..
+            init,
+            condition,
+            update,
+            body,
+            ..
         } => {
+            collect_method_calls_in_statement(init, calls, bare);
             collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls_in_statement(update, calls, bare);
             collect_method_calls(body, calls, bare);
         }
         Statement::ReturnStatement { value, .. } => {
@@ -3549,5 +3568,157 @@ class C extends SmartContract {
     #[test]
     fn n012_asm_in_for_update_refused() {
         n012_refuses_asm_in("update");
+    }
+
+    // N-401. Proves: the method-call collector (behind the recursion check) and
+    // the output-intrinsic search (behind the no-addOutput-in-a-loop rule)
+    // visit all three header slots (init, condition, update) of a `for`
+    // statement. A call planted only in a header slot is collected, and an
+    // addOutput planted only in a NESTED loop's header is found from the
+    // enclosing loop. The AST is hand-built (mutated after parsing) because
+    // the for-update and literal-init rules make these shapes unreachable from
+    // source today.
+    // Does not prove: that any source program can reach these shapes today.
+    fn n401_this_call(name: &str) -> Expression {
+        Expression::CallExpr {
+            callee: Box::new(Expression::PropertyAccess { property: name.to_string() }),
+            args: vec![],
+            asm_return_type: None,
+        }
+    }
+
+    fn n401_plant(stmt: &mut Statement, slot: &str, expr: Expression) {
+        if let Statement::ForStatement { init, condition, update, source_location, .. } = stmt {
+            match slot {
+                "init" => {
+                    if let Statement::VariableDecl { init: e, .. } = init.as_mut() {
+                        *e = expr;
+                    }
+                }
+                "condition" => *condition = expr,
+                _ => {
+                    **update = Statement::ExpressionStatement {
+                        expression: expr,
+                        source_location: source_location.clone(),
+                    };
+                }
+            }
+        } else {
+            panic!("not a ForStatement");
+        }
+    }
+
+    fn n401_collects_call_in(slot: &str) {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly t: bigint;
+
+    constructor(t: bigint) {
+        super(t);
+        this.t = t;
+    }
+
+    public m(a: bigint) {
+        let s: bigint = 0n;
+        for (let i: bigint = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+    }
+}
+"#;
+        let mut contract = parse_contract(source);
+        let mut planted = false;
+        for stmt in contract.methods[0].body.iter_mut() {
+            if matches!(stmt, Statement::ForStatement { .. }) {
+                n401_plant(stmt, slot, n401_this_call("m"));
+                planted = true;
+            }
+        }
+        assert!(planted, "no ForStatement in method body");
+        let mut calls = HashSet::new();
+        collect_method_calls(&contract.methods[0].body, &mut calls, true);
+        assert!(
+            calls.contains("m"),
+            "collect_method_calls did not visit the for-loop {}; got {:?}",
+            slot,
+            calls
+        );
+    }
+
+    #[test]
+    fn n401_collect_method_calls_visits_for_init() {
+        n401_collects_call_in("init");
+    }
+
+    #[test]
+    fn n401_collect_method_calls_visits_for_condition() {
+        n401_collects_call_in("condition");
+    }
+
+    #[test]
+    fn n401_collect_method_calls_visits_for_update() {
+        n401_collects_call_in("update");
+    }
+
+    fn n401_finds_nested_add_output_in(slot: &str) {
+        let source = r#"
+import { StatefulSmartContract } from 'runar-lang';
+
+class C extends StatefulSmartContract {
+    count: bigint;
+
+    constructor(count: bigint) {
+        super(count);
+        this.count = count;
+    }
+
+    public m(a: bigint) {
+        let s: bigint = 0n;
+        for (let i: bigint = 0n; i < 3n; i++) {
+            for (let j: bigint = 0n; j < 3n; j++) { s = s + a; }
+        }
+        this.count = s;
+    }
+}
+"#;
+        let mut contract = parse_contract(source);
+        let mut planted = false;
+        for stmt in contract.methods[0].body.iter_mut() {
+            if let Statement::ForStatement { body, .. } = stmt {
+                for inner in body.iter_mut() {
+                    if matches!(inner, Statement::ForStatement { .. }) {
+                        n401_plant(inner, slot, n401_this_call("addOutput"));
+                        planted = true;
+                    }
+                }
+            }
+        }
+        assert!(planted, "no nested ForStatement in method body");
+        let result = validate(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Output intrinsic 'addOutput'")),
+            "addOutput in nested for-loop {} was not found; got {:?}",
+            slot,
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n401_output_intrinsic_search_visits_nested_for_init() {
+        n401_finds_nested_add_output_in("init");
+    }
+
+    #[test]
+    fn n401_output_intrinsic_search_visits_nested_for_condition() {
+        n401_finds_nested_add_output_in("condition");
+    }
+
+    #[test]
+    fn n401_output_intrinsic_search_visits_nested_for_update() {
+        n401_finds_nested_add_output_in("update");
     }
 }
