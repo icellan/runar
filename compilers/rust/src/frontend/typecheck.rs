@@ -1546,13 +1546,13 @@ terminal (no state mutation)",
             if let Some(sig) = self.builtins.get(name.as_str()) {
                 let sig_params = sig.params.clone();
                 let sig_return_type = sig.return_type;
-                return self.check_call_args(name, &sig_params, sig_return_type, args, env);
+                return self.check_call_args(name, &sig_params, sig_return_type, args, env, false);
             }
 
             // Check if it's a known contract method
             if let Some((params, return_type)) = self.method_sigs.get(name).cloned() {
                 let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-                return self.check_call_args(name, &param_strs, &return_type, args, env);
+                return self.check_call_args(name, &param_strs, &return_type, args, env, false);
             }
 
             // Check if it's a local variable -- F-208: Rúnar has no
@@ -1622,7 +1622,7 @@ terminal (no state mutation)",
             // Check contract method signatures
             if let Some((params, return_type)) = self.method_sigs.get(property).cloned() {
                 let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-                return self.check_call_args(property, &param_strs, &return_type, args, env);
+                return self.check_call_args(property, &param_strs, &return_type, args, env, true);
             }
 
             self.add_error(format!(
@@ -1663,6 +1663,7 @@ terminal (no state mutation)",
                         &return_type,
                         args,
                         env,
+                        true,
                     );
                 }
             }
@@ -1700,6 +1701,7 @@ terminal (no state mutation)",
         return_type: &str,
         args: &[Expression],
         env: &mut TypeEnv,
+        is_method: bool,
     ) -> TType {
         // Special case: assert can take 1 or 2 args
         if func_name == "assert" {
@@ -1727,7 +1729,9 @@ terminal (no state mutation)",
         // Special case: checkSig — strict type enforcement
         // arg0 must be Sig (not just any ByteString subtype)
         // arg1 must be PubKey (not just any ByteString subtype)
-        if func_name == "checkSig" {
+        // N-404: only the builtin. A contract method that happens to be named
+        // checkSig is checked against its own signature, as in every other tier.
+        if func_name == "checkSig" && !is_method {
             if args.len() != 2 {
                 self.add_error(format!(
                     "checkSig() expects 2 argument(s), got {}",

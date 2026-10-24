@@ -478,6 +478,15 @@ function snakeToCamel(name: string): string {
   return snakeToCamelCore(n);
 }
 
+/** N-404: the AST name of a contract METHOD (declaration and `self.<m>(...)`
+ *  call). Generic snake->camel, except `require_output_p2pkh`, which keeps the
+ *  intrinsic's spelling like every other tier: a method of that name then hits
+ *  the same `requireOutputP2PKH` refusal a native `.runar.ts` method does,
+ *  rather than being accepted under the distinct name `requireOutputP2pkh`. */
+function methodAstName(raw: string): string {
+  return raw === 'require_output_p2pkh' ? 'requireOutputP2PKH' : snakeToCamel(raw);
+}
+
 /** Map Python built-in function names to AST callee names. */
 function mapBuiltinName(name: string): string {
   // Exact-match special cases (names that don't follow simple snake_case → camelCase)
@@ -1034,7 +1043,8 @@ class PyParser {
     }
 
     const isPublic = decorators.includes('public');
-    const methodName = this.declare(rawName);
+    const methodName = methodAstName(rawName);
+    this.declared.push([rawName, methodName]);
 
     const sighash = resolveNativeSighash(methodName, isPublic, sighashSpecs);
     if (sighash && 'error' in sighash) {
@@ -1777,10 +1787,11 @@ class PyParser {
       if (this.peek().type === '.') {
         this.advance(); // '.'
         const propTok = this.advance();
-        const propName = snakeToCamel(propTok.value);
+        const isCall = this.peek().type === '(';
+        const propName = isCall ? methodAstName(propTok.value) : snakeToCamel(propTok.value);
 
         // Check if it's a method call
-        if (this.peek().type === '(') {
+        if (isCall) {
           const args = this.parseCallArgs();
           // Handle self.method(...) → this.method(...)
           if (expr.kind === 'identifier' && (expr as { name: string }).name === 'this') {

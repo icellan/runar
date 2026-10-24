@@ -123,6 +123,19 @@ fn literal_int_value(expr: &Expression) -> Option<BigInt> {
     }
 }
 
+/// N-404: the AST name of a contract METHOD (declaration and `self.<m>(...)`
+/// call). Generic snake->camel, except `require_output_p2pkh`, which keeps the
+/// intrinsic's spelling like every other tier, so a method of that name hits
+/// the `requireOutputP2PKH` refusal instead of being accepted as
+/// `requireOutputP2pkh`.
+fn method_ast_name(name: &str) -> String {
+    if name == "require_output_p2pkh" {
+        "requireOutputP2PKH".to_string()
+    } else {
+        snake_to_camel(name)
+    }
+}
+
 fn snake_to_camel(name: &str) -> String {
     // Preserve dunder names (__init__, __foo__) unchanged
     if name.len() >= 4 && name.starts_with("__") && name.ends_with("__") {
@@ -1489,7 +1502,7 @@ impl<'a> PyParser<'a> {
         }
 
         let is_public = decorators.contains(&"public".to_string());
-        let method_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
+        let method_name = self.idents.declare(&raw_name, method_ast_name(&raw_name));
 
         let sighash_type = match resolve_native_sighash(&method_name, is_public, sighash_specs) {
             Some(Ok(v)) => Some(v),
@@ -2491,10 +2504,11 @@ impl<'a> PyParser<'a> {
                 Token::Dot => {
                     self.advance(); // '.'
                     let raw_prop = self.expect_ident();
-                    let prop = snake_to_camel(&raw_prop);
+                    let is_call = *self.peek() == Token::LParen;
+                    let prop = if is_call { method_ast_name(&raw_prop) } else { snake_to_camel(&raw_prop) };
 
                     // Check if it's a method call
-                    if *self.peek() == Token::LParen {
+                    if is_call {
                         let args = self.parse_call_args();
                         // F-213: the member node, then the call around it.
                         let arg_refs: Vec<&Expression> = args.iter().collect();
