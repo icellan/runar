@@ -958,4 +958,22 @@ export class Neg extends SmartContract {
       { imports: 'StatefulSmartContract, assert, ByteString, len, extractPrevOutputScript' },
     ),
   },
+  {
+    // N-398: the Go-only refusal for a real builtin that this tier has no codegen for.
+    target: "belongs to the * family, which is scoped to the Go tier by project policy",
+    name: 'bn254-pairing-go-only-builtin',
+    source: `import { SmartContract, assert, bn254Pairing } from 'runar-lang';
+import type { Point } from 'runar-lang';
+
+export class Neg extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public go(p: Point, x: bigint) {
+    assert(bn254Pairing(p, x, x, x, x) !== undefined);
+  }
+}
+`,
+  },
 ];

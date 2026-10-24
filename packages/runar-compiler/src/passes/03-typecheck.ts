@@ -79,6 +79,16 @@ interface FuncSig {
   returnType: TType;
 }
 
+// N-398: builtins runar-lang exports and the Go tier implements, that this tier
+// deliberately has no codegen for (proof-system families scoped to the Go tier
+// by project policy, CLAUDE.md). Keyed by name, valued by the family named in
+// the diagnostic; labels match Python's GO_ONLY_BUILTINS.
+const GO_ONLY_BUILTINS: Map<string, string> = new Map([
+  ['bn254Pairing',       'BN254 pairing'],
+  ['bn254MultiPairing3', 'BN254 pairing'],
+  ['bn254MultiPairing4', 'BN254 pairing'],
+]);
+
 const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['sha256',       { params: ['ByteString'], returnType: 'Sha256' }],
   ['ripemd160',    { params: ['ByteString'], returnType: 'Ripemd160' }],
@@ -1308,11 +1318,24 @@ class TypeChecker {
         return '<unknown>';
       }
 
-      this.errors.push(makeDiagnostic(
-        `Unknown function '${callee.name}'. Only Rúnar built-in functions and contract methods are allowed.`,
-        'error',
-        expr.sourceLocation,
-      ));
+      const goOnlyFamily = GO_ONLY_BUILTINS.get(callee.name);
+      if (goOnlyFamily !== undefined) {
+        // N-398: a real Rúnar builtin (runar-lang exports it, builtin-arity.ts
+        // lists it) scoped to the Go tier by project policy. "Unknown function"
+        // would send the author hunting for a typo. Same sentence as Python's
+        // GO_ONLY_BUILTINS (R-258/R-259) and Rust's go_only_builtin_family (N-238).
+        this.errors.push(makeDiagnostic(
+          `builtin '${callee.name}' belongs to the ${goOnlyFamily} family, which is scoped to the Go tier by project policy -- see CLAUDE.md ("EVM/STARK proof-system primitives") and conformance/README.md ("Per-fixture compiler allowlist"). Compile this contract with the Go compiler, or opt the fixture out of the TypeScript tier via source.json's "compilers" allowlist.`,
+          'error',
+          expr.sourceLocation,
+        ));
+      } else {
+        this.errors.push(makeDiagnostic(
+          `Unknown function '${callee.name}'. Only Rúnar built-in functions and contract methods are allowed.`,
+          'error',
+          expr.sourceLocation,
+        ));
+      }
       for (const arg of args) {
         this.inferExprType(arg, env);
       }
