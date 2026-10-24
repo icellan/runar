@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unexpectedClassBodyTokenMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
@@ -819,6 +819,13 @@ class PyParser {
       this.skipNewlines();
       if (this.peek().type === 'DEDENT' || this.peek().type === 'eof') break;
 
+      // `pass` is a valid (empty) class-body statement.
+      if (this.peek().type === 'pass') {
+        this.advance();
+        this.expectStatementEnd();
+        continue;
+      }
+
       // Decorators
       const decorators: string[] = [];
       const sighashSpecs: Array<string | null> = [];
@@ -856,8 +863,9 @@ class PyParser {
         continue;
       }
 
-      // Skip unknown tokens
-      this.advance();
+      // N-033: any other token is refused, never skipped (a skipped stray
+      // token is how a line of the class body vanished without a word).
+      this.refuseClassBodyToken(this.peek());
     }
 
     this.match('DEDENT');
@@ -884,8 +892,9 @@ class PyParser {
     const rawName = nameTok.value;
 
     if (this.peek().type !== ':') {
-      // Not a property — might be a stray identifier; skip the line
-      while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') this.advance();
+      // N-033: not a property — a stray identifier line is refused, not skipped.
+      this.pos--;
+      this.refuseClassBodyToken(nameTok);
       return null;
     }
     this.advance(); // ':'
@@ -930,6 +939,18 @@ class PyParser {
       ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
+  }
+
+  /**
+   * N-033: refuse a class-body token that begins no property, method,
+   * decorator or `pass`, at that token, then skip the rest of its line.
+   * Mirrors N-004's .runar.rb refusal and shares its diagnostic.
+   */
+  private refuseClassBodyToken(tok: Token): void {
+    const text = tok.type === 'INDENT' ? 'INDENT' : tok.value;
+    this.errors.push(makeDiagnostic(unexpectedClassBodyTokenMessage(text), 'error', { file: this.file, line: tok.line, column: tok.column }));
+    this.advance();
+    while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'DEDENT' && this.peek().type !== 'eof') this.advance();
   }
 
   private parseType(): TypeNode {

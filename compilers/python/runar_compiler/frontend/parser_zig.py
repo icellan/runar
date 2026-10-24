@@ -779,7 +779,8 @@ class _ZigParser:
             self._advance()
             initializer = self._parse_expression()
 
-        self._match(TOK_COMMA)
+        # N-033: fields are separated by `,`; only the last before `}` may omit it.
+        self._expect_list_separator(TOK_RBRACE)
 
         return PropertyNode(
             name=name,
@@ -912,7 +913,9 @@ class _ZigParser:
                 ))
 
             index += 1
-            self._match(TOK_COMMA)
+            # N-033: parameters are separated by `,` (a trailing one is allowed).
+            if not self._expect_list_separator(TOK_RPAREN):
+                break
 
         self._expect(TOK_RPAREN, ")")
         return params, receiver_name, stateful_ctx_names
@@ -1044,7 +1047,9 @@ class _ZigParser:
             self._expect(TOK_ASSIGN, "=")
             value = self._parse_expression()
             assignments.append(self._create_property_assignment(field, value))
-            self._match(TOK_COMMA)
+            # N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+            if not self._expect_list_separator(TOK_RBRACE):
+                break
 
         self._expect(TOK_RBRACE, "}")
         return assignments
@@ -1674,6 +1679,17 @@ class _ZigParser:
                 self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_LIST_COMMA}")
             break
         return elements
+
+    def _expect_list_separator(self, close: int) -> bool:
+        """N-033: after a field, parameter or struct-init entry, consume the
+        ``,`` that separates it from the next one. Reports ZIG_LIST_COMMA at
+        the current token and returns False when that token is neither ``,``
+        nor ``close``; never consumes ``close``."""
+        if self._match(TOK_COMMA) or self._current().kind == close:
+            return True
+        t = self._current()
+        self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_LIST_COMMA}")
+        return False
 
     def _parse_postfix_chain(self, expr: Expression) -> Expression:
         """Parse postfix operations (call, member access, index access)."""

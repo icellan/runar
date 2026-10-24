@@ -614,7 +614,9 @@ module RunarCompiler
             next
           end
 
-          # Skip unknown
+          # N-033: a character the TS reference does not tokenize (`;`, `{`,
+          # `}`, `$`, `?`, ...) is refused, never skipped.
+          lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line_num, col)
           pos += 1
         end
 
@@ -828,6 +830,13 @@ module RunarCompiler
           skip_newlines
           break if check(TOK_DEDENT) || check(TOK_EOF)
 
+          # `pass` is a valid (empty) class-body statement.
+          if check_ident("pass")
+            advance
+            expect_statement_end
+            next
+          end
+
           # Decorators
           decorators = []
           sighash_specs = []
@@ -863,8 +872,8 @@ module RunarCompiler
             next
           end
 
-          # Skip unknown
-          advance
+          # N-033: any other token is refused, never skipped.
+          refuse_class_body_token
         end
 
         match_tok(TOK_DEDENT)
@@ -884,16 +893,25 @@ module RunarCompiler
 
       # -- Property parsing --------------------------------------------------
 
+      # N-033: a class-body token that begins no property, method, decorator
+      # or `pass` is refused at that token (N-004's diagnostic), and the rest
+      # of its line is skipped.
+      def refuse_class_body_token
+        tok = advance
+        text = tok.kind == TOK_INDENT ? "INDENT" : tok.value
+        @errors << Frontend.lex_error(Frontend.unexpected_class_body_token_message(text), @file_name, tok.line, tok.col)
+        advance until check(TOK_NEWLINE) || check(TOK_DEDENT) || check(TOK_EOF)
+      end
+
       def parse_property(parent_class)
         location = loc
         name_tok = advance
         raw_name = name_tok.value
 
         unless check(TOK_COLON)
-          # Not a property — skip rest of line
-          until check(TOK_NEWLINE) || check(TOK_EOF) || check(TOK_DEDENT)
-            advance
-          end
+          # N-033: not a property — a stray identifier line is refused.
+          @pos -= 1
+          refuse_class_body_token
           return nil
         end
         advance # ':'

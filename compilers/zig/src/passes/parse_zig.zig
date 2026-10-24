@@ -648,7 +648,8 @@ const Parser = struct {
         }
         if (has_default) fwd.append(self.allocator, name_tok.text) catch {};
         if (parsed_type.explicit_readonly) explicit_readonly_fields.append(self.allocator, name_tok.text) catch {};
-        if (self.current.kind == .comma) { _ = self.bump(); } else if (self.current.kind == .semicolon) { _ = self.bump(); }
+        // N-033: fields are separated by `,`; only the last before `}` may omit it.
+        _ = self.expectListSeparator(.rbrace);
         const expr_val: ?Expression = if (initializer) |init_ptr| init_ptr.* else null;
 
         // Capture FixedArray shape (outer + optional nested length) so
@@ -790,7 +791,8 @@ const Parser = struct {
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             if (self.parseParam()) |p| params.append(self.allocator, p) catch {};
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: parameters are separated by `,` (a trailing one is allowed).
+            if (!self.expectListSeparator(.rparen)) break;
         }
         _ = self.expect(.rparen);
         // N-093: the constructor is not a spending entry point, so a
@@ -882,7 +884,8 @@ const Parser = struct {
                 .target = field.text,
                 .value = value,
             }) catch {};
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+            if (!self.expectListSeparator(.rbrace)) break;
         }
         _ = self.expect(.rbrace);
     }
@@ -896,7 +899,8 @@ const Parser = struct {
         if (has_receiver) {
             _ = self.bump();
             if (self.current.kind == .colon) { _ = self.bump(); self.skipTypeAnnotation(); }
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: the receiver is separated from the next parameter by `,`.
+            _ = self.expectListSeparator(.rparen);
         }
         // N-050: a `pub fn` without a receiver is a namespace (static)
         // function, not a contract method. A private one stays a helper (the
@@ -906,7 +910,8 @@ const Parser = struct {
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             if (self.parseParam()) |p| params.append(self.allocator, p) catch {};
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: parameters are separated by `,` (a trailing one is allowed).
+            if (!self.expectListSeparator(.rparen)) break;
         }
         _ = self.expect(.rparen);
         // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
@@ -1649,6 +1654,20 @@ const Parser = struct {
             },
             else => blk: { self.addErrorFmt("unexpected token: '{s}'", .{self.current.text}); break :blk null; },
         };
+    }
+
+    /// N-033: after a field, parameter or struct-init entry, consume the `,`
+    /// that separates it from the next one. Reports ZIG_LIST_COMMA at the
+    /// current token and returns false when that token is neither `,` nor
+    /// `close`; never consumes `close`.
+    fn expectListSeparator(self: *Parser, close: TokenKind) bool {
+        if (self.current.kind == .comma) {
+            _ = self.bump();
+            return true;
+        }
+        if (self.current.kind == close) return true;
+        self.addError(lex_diag.ZIG_LIST_COMMA);
+        return false;
     }
 
     fn parseArgList(self: *Parser) []Expression {

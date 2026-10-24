@@ -452,22 +452,12 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			if parenDepth > 0 {
 				parenDepth--
 			}
-		case '{':
-			oneKind = pyTokLBrace
-			parenDepth++
-		case '}':
-			oneKind = pyTokRBrace
-			if parenDepth > 0 {
-				parenDepth--
-			}
 		case ',':
 			oneKind = pyTokComma
 		case '.':
 			oneKind = pyTokDot
 		case ':':
 			oneKind = pyTokColon
-		case ';':
-			oneKind = pyTokSemicolon
 		case '=':
 			oneKind = pyTokAssign
 		case '<':
@@ -507,8 +497,11 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			continue
 		}
 
-		// Skip unknown characters
-		i++
+		// N-033: a character the TS reference does not tokenize (`;`, `{`,
+		// `}`, `$`, `?`, ...) is refused, never skipped.
+		d, size := unexpectedCharDiag(source, i, p.fileName, line, col)
+		p.errors = append(p.errors, d)
+		i += size
 		col++
 	}
 
@@ -1146,8 +1139,8 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 			continue
 		}
 
-		// Skip unknown tokens to avoid infinite loops
-		p.advance()
+		// N-033: any other token is refused, never skipped.
+		p.refuseClassBodyToken()
 	}
 
 	p.match(pyTokDedent)
@@ -1203,6 +1196,21 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 		Methods:     methods,
 		SourceFile:  p.fileName,
 	}, nil
+}
+
+// refuseClassBodyToken is N-033: a class-body token that begins no property,
+// method, decorator or `pass` is refused at that token (N-004's diagnostic),
+// and the rest of its line is skipped.
+func (p *pyParser) refuseClassBodyToken() {
+	tok := p.advance()
+	text := tok.value
+	if tok.kind == pyTokIndent {
+		text = "INDENT"
+	}
+	p.errors = append(p.errors, lexDiag(UnexpectedClassBodyTokenMsg(text), p.fileName, tok.line, tok.col))
+	for !p.check(pyTokNewline) && !p.check(pyTokDedent) && !p.check(pyTokEOF) {
+		p.advance()
+	}
 }
 
 // isPyPropertyDecl checks if current position is a property declaration: name: Type

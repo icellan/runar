@@ -42,7 +42,7 @@ use super::ast::{
 };
 use super::diagnostic::{
     invalid_escape_sequence_message, lex_error, static_method_message,
-    unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
+    unexpected_class_body_token_message, unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
@@ -406,6 +406,8 @@ fn py_token_text(tok: &Token) -> String {
         Token::Colon => ":".into(),
         Token::Comma => ",".into(),
         Token::Dot => ".".into(),
+        Token::Ident(name) => name.clone(),
+        Token::NumberLit(n) => n.to_string(),
         Token::Indent => "INDENT".into(),
         Token::Dedent => "DEDENT".into(),
         Token::Newline => "NEWLINE".into(),
@@ -957,7 +959,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> (Vec<Toke
                 continue;
             }
 
-            // Skip unrecognized characters
+            // N-033: a character the TS reference does not tokenize (`;`,
+            // `{`, `$`, `?`, ...) is refused, never skipped.
+            errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, line_num, pos));
             pos += 1;
         }
         positions.resize(tokens.len(), at);
@@ -1197,6 +1201,13 @@ impl<'a> PyParser<'a> {
                 break;
             }
 
+            // `pass` is a valid (empty) class-body statement.
+            if *self.peek() == Token::Pass {
+                self.advance();
+                self.expect_statement_end();
+                continue;
+            }
+
             // Decorators
             let mut decorators: Vec<String> = Vec::new();
             let mut sighash_specs: Vec<Option<String>> = Vec::new();
@@ -1241,8 +1252,8 @@ impl<'a> PyParser<'a> {
                 continue;
             }
 
-            // Skip unknown tokens
-            self.advance();
+            // N-033: any other token is refused, never skipped.
+            self.refuse_class_body_token();
         }
 
         self.match_tok(&Token::Dedent);
@@ -1292,16 +1303,25 @@ impl<'a> PyParser<'a> {
     // Properties
     // -----------------------------------------------------------------------
 
-    fn parse_property(&mut self, parent_class: &str) -> Option<PropertyNode> {
-        let raw_name = self.expect_ident();
+    /// N-033: a class-body token that begins no property, method, decorator
+    /// or `pass` is refused at that token (N-004's diagnostic), and the rest
+    /// of its line is skipped.
+    fn refuse_class_body_token(&mut self) {
+        let loc = self.loc();
+        let tok = self.advance();
+        self.errors.push(Diagnostic::error(unexpected_class_body_token_message(&py_token_text(&tok)), Some(loc)));
+        while !matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+            self.advance();
+        }
+    }
 
-        if *self.peek() != Token::Colon {
-            // Not a property -- might be a stray identifier; skip the line
-            while *self.peek() != Token::Newline && *self.peek() != Token::Eof {
-                self.advance();
-            }
+    fn parse_property(&mut self, parent_class: &str) -> Option<PropertyNode> {
+        if self.tokens.get(self.pos + 1) != Some(&Token::Colon) {
+            // N-033: not a property -- a stray identifier line is refused.
+            self.refuse_class_body_token();
             return None;
         }
+        let raw_name = self.expect_ident();
         self.advance(); // consume ':'
 
         // Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the

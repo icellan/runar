@@ -28,7 +28,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message, unsupported_statement_message
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message, unexpected_class_body_token_message, unsupported_statement_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
@@ -560,12 +560,9 @@ def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> 
             ")": TOK_RPAREN,
             "[": TOK_LBRACKET,
             "]": TOK_RBRACKET,
-            "{": TOK_LBRACE,
-            "}": TOK_RBRACE,
             ",": TOK_COMMA,
             ".": TOK_DOT,
             ":": TOK_COLON,
-            ";": TOK_SEMICOLON,
             "=": TOK_ASSIGN,
             "<": TOK_LT,
             ">": TOK_GT,
@@ -593,7 +590,9 @@ def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> 
             col += 1
             continue
 
-        # Skip unknown
+        # N-033: a character the TS reference does not tokenize (`;`, `{`,
+        # `}`, `$`, `?`, ...) is refused, never skipped.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line, start_col))
         i += 1
         col += 1
 
@@ -898,7 +897,8 @@ class _PyParser:
                     properties.append(prop)
                 continue
 
-            self.advance()
+            # N-033: any other token is refused, never skipped.
+            self._refuse_class_body_token()
 
         self.match(TOK_DEDENT)
 
@@ -939,6 +939,16 @@ class _PyParser:
             methods=methods,
             source_file=self.file_name,
         )
+
+    def _refuse_class_body_token(self) -> None:
+        """N-033: a class-body token that begins no property, method,
+        decorator or ``pass`` is refused at that token (N-004's diagnostic),
+        and the rest of its line is skipped."""
+        tok = self.advance()
+        text = "INDENT" if tok.kind == TOK_INDENT else tok.value
+        self.errors.append(lex_error(unexpected_class_body_token_message(text), self.file_name, tok.line, tok.col))
+        while not (self.check(TOK_NEWLINE) or self.check(TOK_DEDENT) or self.check(TOK_EOF)):
+            self.advance()
 
     def _is_property_decl(self) -> bool:
         if self.pos + 1 >= len(self.tokens):

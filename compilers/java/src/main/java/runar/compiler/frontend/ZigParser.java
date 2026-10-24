@@ -747,7 +747,8 @@ public final class ZigParser {
                 advance();
                 initializer = parseExpression();
             }
-            match(Kind.COMMA);
+            // N-033: fields are separated by `,`; only the last before `}` may omit it.
+            expectListSeparator(Kind.RBRACE);
 
             return new PropertyNode(name, pt.type, pt.readonly, initializer, l, null, pt.embedAlways);
         }
@@ -875,7 +876,8 @@ public final class ZigParser {
                     params.add(new ParamNode(paramName, pt.type));
                 }
                 index++;
-                match(Kind.COMMA);
+                // N-033: parameters are separated by `,` (a trailing one is allowed).
+                if (!expectListSeparator(Kind.RPAREN)) break;
             }
             expect(Kind.RPAREN, ")");
             return new ParamListResult(params, receiverName, statefulCtx);
@@ -1016,7 +1018,8 @@ public final class ZigParser {
                 expect(Kind.ASSIGN, "=");
                 Expression value = parseExpression();
                 out.add(createPropertyAssignment(field, value));
-                match(Kind.COMMA);
+                // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+                if (!expectListSeparator(Kind.RBRACE)) break;
             }
             expect(Kind.RBRACE, "}");
             return out;
@@ -1622,6 +1625,19 @@ public final class ZigParser {
                 break;
             }
             return elements;
+        }
+
+        /**
+         * N-033: after a field, parameter or struct-init entry, consume the
+         * {@code ,} that separates it from the next one. Reports ZIG_LIST_COMMA
+         * at the current token and returns false when that token is neither
+         * {@code ,} nor {@code close}; never consumes {@code close}.
+         */
+        boolean expectListSeparator(Kind close) {
+            if (match(Kind.COMMA) || current().kind == close) return true;
+            Token t = current();
+            errors.add(LexDiag.at(file, t.line, t.col, LexDiag.ZIG_LIST_COMMA));
+            return false;
         }
 
         Expression parsePostfixChain(Expression expr) {

@@ -90,10 +90,13 @@ pub fn parsePython(allocator: Allocator, source: []const u8, file_name: []const 
     // F-011: report an unterminated literal (the tokenizer records it).
     var unterminated: ?lex_diag.Pos = null;
     var escape: ?LiteralError = null;
-    _ = tokenizeRawLex(allocator, source, &unterminated, &escape);
+    var unexpected: ?lex_diag.Unexpected = null;
+    _ = tokenizeRawLex(allocator, source, &unterminated, &escape, &unexpected);
     // F-203: report the first literal refused for its escapes / characters.
     const errs = if (escape) |e| lex_diag.prepend(allocator, r.errors, file_name, e.msg, e.pos) else r.errors;
-    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, errs, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, unterminated) };
+    // N-033: report the first character the tokenizer does not recognise.
+    const errs2 = lex_diag.prependUnexpected(allocator, errs, file_name, unexpected);
+    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, errs2, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, unterminated) };
 }
 
 
@@ -190,7 +193,8 @@ const Tokenizer = struct {
 fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
     var unterminated: ?lex_diag.Pos = null;
     var escape: ?LiteralError = null;
-    return tokenizeRawLex(allocator, source, &unterminated, &escape);
+    var unexpected: ?lex_diag.Unexpected = null;
+    return tokenizeRawLex(allocator, source, &unterminated, &escape, &unexpected);
 }
 
 /// F-203: the first .runar.py literal refused by `decodePyLiteral`.
@@ -198,7 +202,7 @@ const LiteralError = struct { pos: lex_diag.Pos, msg: []const u8 };
 
 /// `tokenizeRaw`, also recording the first unterminated literal (F-011) and
 /// the first literal refused for an escape or character (F-203).
-fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_diag.Pos, escape: *?LiteralError) []Token {
+fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_diag.Pos, escape: *?LiteralError, unexpected: *?lex_diag.Unexpected) []Token {
     var tokens = std.ArrayListUnmanaged(Token).empty;
     var i: usize = 0;
     var line: u32 = 1;
@@ -455,6 +459,7 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
             '|' => .pipe,
             '^' => .caret,
             '@' => .at_sign,
+            '!' => .bang,
             else => null,
         };
 
@@ -465,8 +470,11 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
             continue;
         }
 
-        // Skip unknown characters
-        i += 1;
+        // N-033: a character the TS reference does not tokenize (`;`, `{`,
+        // `}`, `$`, `?`, ...) is refused, never skipped.
+        const n = lex_diag.charLen(source, i);
+        if (unexpected.* == null) unexpected.* = .{ .at = .{ .line = line, .col = start_col + 1 }, .text = source[i .. i + n] };
+        i += n;
         col += 1;
     }
 
@@ -1151,8 +1159,8 @@ const Parser = struct {
                 continue;
             }
 
-            // Skip unknown tokens
-            _ = self.bump();
+            // N-033: any other token is refused, never skipped.
+            self.refuseClassBodyToken();
         }
 
         _ = self.match(.dedent);
@@ -1172,6 +1180,16 @@ const Parser = struct {
     }
 
     /// Check if current position is a property declaration: ident followed by ':'
+    /// N-033: a class-body token that begins no property, method, decorator
+    /// or `pass` is refused at that token (N-004's diagnostic), and the rest
+    /// of its line is skipped.
+    fn refuseClassBodyToken(self: *Parser) void {
+        const text = if (self.current.kind == .indent) "INDENT" else self.current.text;
+        self.addErrorFmt(lex_diag.UNEXPECTED_CLASS_BODY_TOKEN_FMT, .{text});
+        _ = self.bump();
+        while (self.current.kind != .newline and self.current.kind != .dedent and self.current.kind != .eof) _ = self.bump();
+    }
+
     fn isPyPropertyDecl(self: *Parser) bool {
         const next_tok = self.tokenizer.peek();
         return next_tok.kind == .colon;

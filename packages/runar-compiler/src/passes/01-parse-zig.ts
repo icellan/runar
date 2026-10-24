@@ -516,7 +516,9 @@ class ZigParser extends ParserCore<ZigToken> {
       initializer = this.parseExpression();
     }
 
-    if (this.current().type === ',') this.advance();
+    // N-033: Zig separates fields with `,`; only the last field before `}`
+    // may omit it.
+    this.expectListSeparator('}');
 
     return {
       kind: 'property',
@@ -651,7 +653,8 @@ class ZigParser extends ParserCore<ZigToken> {
       }
 
       index++;
-      if (this.current().type === ',') this.advance();
+      // N-033: parameters are separated by `,` (a trailing one is allowed).
+      if (!this.expectListSeparator(')')) break;
     }
 
     this.expect(')');
@@ -794,7 +797,8 @@ class ZigParser extends ParserCore<ZigToken> {
       this.expect('=');
       const value = this.parseExpression();
       assignments.push(this.createPropertyAssignment(field, value));
-      if (this.current().type === ',') this.advance();
+      // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+      if (!this.expectListSeparator('}')) break;
     }
 
     this.expect('}');
@@ -1518,6 +1522,23 @@ class ZigParser extends ParserCore<ZigToken> {
       break;
     }
     return elements;
+  }
+
+  /**
+   * N-033: after a field, parameter or struct-init entry, consume the `,`
+   * that separates it from the next one. Returns false (after reporting
+   * ZIG_LIST_COMMA at the current token) when the next token is neither `,`
+   * nor `close`; returns true otherwise, without consuming `close`.
+   */
+  private expectListSeparator(close: string): boolean {
+    if (this.current().type === ',') {
+      this.advance();
+      return true;
+    }
+    if (this.current().type === close) return true;
+    const t = this.current();
+    this.errors.push(makeDiagnostic(ZIG_LIST_COMMA, 'error', { file: this.file, line: t.line, column: t.column }));
+    return false;
   }
 
   protected parsePostfixChain(expr: Expression, selfNames: Set<string>): Expression {

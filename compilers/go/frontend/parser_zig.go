@@ -849,7 +849,8 @@ func (p *zigParser) parseField() PropertyNode {
 		initializer = p.parseExpression()
 	}
 
-	p.match(zigTokComma)
+	// N-033: fields are separated by `,`; only the last before `}` may omit it.
+	p.expectListSeparator(zigTokRBrace)
 
 	return PropertyNode{
 		Name:           name,
@@ -1007,7 +1008,10 @@ func (p *zigParser) parseParamList() (params []ParamNode, receiverName string, s
 		}
 
 		index++
-		p.match(zigTokComma)
+		// N-033: parameters are separated by `,` (a trailing one is allowed).
+		if !p.expectListSeparator(zigTokRParen) {
+			break
+		}
 	}
 
 	p.expect(zigTokRParen)
@@ -1088,7 +1092,10 @@ func (p *zigParser) parseStructReturnAssignments() []Statement {
 			Value:          value,
 			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
 		})
-		p.match(zigTokComma)
+		// N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+		if !p.expectListSeparator(zigTokRBrace) {
+			break
+		}
 	}
 
 	p.expect(zigTokRBrace)
@@ -1830,6 +1837,19 @@ func (p *zigParser) parseListElements(close zigTokenKind) []Expression {
 		break
 	}
 	return elements
+}
+
+// expectListSeparator is N-033: after a field, parameter or struct-init
+// entry, consume the `,` that separates it from the next one. It reports
+// ZigListCommaMsg at the current token and returns false when that token is
+// neither `,` nor close; it never consumes close.
+func (p *zigParser) expectListSeparator(close zigTokenKind) bool {
+	if p.match(zigTokComma) || p.check(close) {
+		return true
+	}
+	t := p.peek()
+	p.errors = append(p.errors, lexDiag(ZigListCommaMsg, p.fileName, t.line, t.col))
+	return false
 }
 
 func (p *zigParser) parsePostfixChain(expr Expression) Expression {

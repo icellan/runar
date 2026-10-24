@@ -693,12 +693,9 @@ public final class PyParser {
                 case ')' -> TokKind.RPAREN;
                 case '[' -> TokKind.LBRACKET;
                 case ']' -> TokKind.RBRACKET;
-                case '{' -> TokKind.LBRACE;
-                case '}' -> TokKind.RBRACE;
                 case ',' -> TokKind.COMMA;
                 case '.' -> TokKind.DOT;
                 case ':' -> TokKind.COLON;
-                case ';' -> TokKind.SEMICOLON;
                 case '=' -> TokKind.ASSIGN;
                 case '<' -> TokKind.LT;
                 case '>' -> TokKind.GT;
@@ -727,7 +724,9 @@ public final class PyParser {
                 continue;
             }
 
-            // Skip unknown characters (mirror Python parser behaviour).
+            // N-033: a character the TS reference does not tokenize (`;`,
+            // `{`, `}`, `$`, `?`, ...) is refused, never skipped.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }
@@ -1078,7 +1077,8 @@ public final class PyParser {
                     continue;
                 }
 
-                advance();
+                // N-033: any other token is refused, never skipped.
+                refuseClassBodyToken();
             }
 
             match(TokKind.DEDENT);
@@ -1110,6 +1110,18 @@ public final class PyParser {
             }
 
             return new ContractNode(contractName, parentClass, properties, constructor, methods, fileName);
+        }
+
+        /**
+         * N-033: a class-body token that begins no property, method,
+         * decorator or {@code pass} is refused at that token (N-004's
+         * diagnostic), and the rest of its line is skipped.
+         */
+        void refuseClassBodyToken() {
+            Token t = advance();
+            String text = t.kind == TokKind.INDENT ? "INDENT" : t.value;
+            errors.add(LexDiag.at(fileName, t.line, t.col, LexDiag.unexpectedClassBodyToken(text)));
+            while (!check(TokKind.NEWLINE) && !check(TokKind.DEDENT) && !check(TokKind.EOF)) advance();
         }
 
         boolean isPropertyDecl() {

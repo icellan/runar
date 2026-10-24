@@ -762,7 +762,8 @@ module RunarCompiler
           initializer = parse_expression
         end
 
-        match_tok(TOK_COMMA)
+        # N-033: fields are separated by `,`; only the last before `}` may omit it.
+        expect_list_separator(TOK_RBRACE)
 
         PropertyNode.new(
           name: name,
@@ -900,7 +901,8 @@ module RunarCompiler
           end
 
           index += 1
-          match_tok(TOK_COMMA)
+          # N-033: parameters are separated by `,` (a trailing one is allowed).
+          break unless expect_list_separator(TOK_RPAREN)
         end
 
         expect(TOK_RPAREN)
@@ -1069,7 +1071,8 @@ module RunarCompiler
           expect(TOK_ASSIGN)
           value = parse_expression
           assignments << create_property_assignment(field_tok.value, value)
-          match_tok(TOK_COMMA)
+          # N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+          break unless expect_list_separator(TOK_RBRACE)
         end
 
         expect(TOK_RBRACE)
@@ -1706,6 +1709,18 @@ module RunarCompiler
           break
         end
         elements
+      end
+
+      # N-033: after a field, parameter or struct-init entry, consume the `,`
+      # that separates it from the next one. Reports ZIG_LIST_COMMA at the
+      # current token and returns false when that token is neither `,` nor
+      # +close+; never consumes +close+.
+      def expect_list_separator(close)
+        return true if match_tok(TOK_COMMA) || check(close)
+
+        t = peek
+        @errors << Frontend.lex_error(ZIG_LIST_COMMA, @file_name, t.line, t.col)
+        false
       end
 
       def parse_postfix_chain(expr)

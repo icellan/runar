@@ -807,8 +807,8 @@ impl<'a> ZigParser<'a> {
             initializer = Some(self.parse_expression());
         }
 
-        // Trailing comma
-        self.match_tok(&Token::Comma);
+        // N-033: fields are separated by `,`; only the last before `}` may omit it.
+        self.expect_list_separator(&Token::RBrace);
 
         Some(PropertyNode {
             name,
@@ -1104,7 +1104,10 @@ impl<'a> ZigParser<'a> {
             }
 
             index += 1;
-            self.match_tok(&Token::Comma);
+            // N-033: parameters are separated by `,` (a trailing one is allowed).
+            if !self.expect_list_separator(&Token::RParen) {
+                break;
+            }
         }
 
         self.expect(&Token::RParen);
@@ -1170,7 +1173,10 @@ impl<'a> ZigParser<'a> {
                 value,
                 source_location: self.loc(),
             });
-            self.match_tok(&Token::Comma);
+            // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+            if !self.expect_list_separator(&Token::RBrace) {
+                break;
+            }
         }
 
         self.expect(&Token::RBrace);
@@ -2144,6 +2150,25 @@ impl<'a> ZigParser<'a> {
             break;
         }
         elements
+    }
+
+    /// N-033: after a field, parameter or struct-init entry, consume the `,`
+    /// that separates it from the next one. Reports ZIG_LIST_COMMA at the
+    /// current token and returns false when that token is neither `,` nor
+    /// `close`; never consumes `close`.
+    fn expect_list_separator(&mut self, close: &Token) -> bool {
+        if self.match_tok(&Token::Comma) || self.peek() == close {
+            return true;
+        }
+        let loc = self.loc();
+        self.errors.push(format!(
+            "{}:{}:{}: {}",
+            loc.file,
+            loc.line,
+            loc.column.saturating_sub(1),
+            ZIG_LIST_COMMA
+        ));
+        false
     }
 
     /// Parse postfix operations: `.prop`, `(args)`, `[index]`.
