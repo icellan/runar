@@ -50,6 +50,17 @@ export interface CompilerInfo {
 // Report generation
 // ---------------------------------------------------------------------------
 
+/**
+ * N-374: a tier is "available" only if it actually ran. A result is not
+ * evidence of that when the child could not even be spawned (`spawn java
+ * ENOENT`): every fixture then carries a defined-but-failed result, and
+ * "has any result" used to read as available.
+ */
+const SPAWN_ENOENT_RE = /\bspawn \S+ ENOENT\b/;
+function tierRan(outputs: CompilerOutput[]): boolean {
+  return outputs.some((o) => o.success || !SPAWN_ENOENT_RE.test(o.error ?? ''));
+}
+
 /** Build a structured ConformanceReport from raw runner results. */
 export function generateReport(results: ConformanceResult[]): ConformanceReport {
   const timestamp = new Date().toISOString();
@@ -128,7 +139,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const goDurations = goSuccess.map((r) => r.goCompiler!.durationMs);
   compilers.push({
     name: 'Go',
-    available: goResults.length > 0,
+    available: tierRan(goResults.map((r) => r.goCompiler!)),
     testsRun: goResults.length,
     testsSucceeded: goSuccess.length,
     averageDurationMs: goDurations.length > 0
@@ -142,7 +153,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const rustDurations = rustSuccess.map((r) => r.rustCompiler!.durationMs);
   compilers.push({
     name: 'Rust',
-    available: rustResults.length > 0,
+    available: tierRan(rustResults.map((r) => r.rustCompiler!)),
     testsRun: rustResults.length,
     testsSucceeded: rustSuccess.length,
     averageDurationMs: rustDurations.length > 0
@@ -156,7 +167,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const pythonDurations = pythonSuccess.map((r) => r.pythonCompiler!.durationMs);
   compilers.push({
     name: 'Python',
-    available: pythonResults.length > 0,
+    available: tierRan(pythonResults.map((r) => r.pythonCompiler!)),
     testsRun: pythonResults.length,
     testsSucceeded: pythonSuccess.length,
     averageDurationMs: pythonDurations.length > 0
@@ -170,7 +181,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const zigDurations = zigSuccess.map((r) => r.zigCompiler!.durationMs);
   compilers.push({
     name: 'Zig',
-    available: zigResults.length > 0,
+    available: tierRan(zigResults.map((r) => r.zigCompiler!)),
     testsRun: zigResults.length,
     testsSucceeded: zigSuccess.length,
     averageDurationMs: zigDurations.length > 0
@@ -184,7 +195,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const rubyDurations = rubySuccess.map((r) => r.rubyCompiler!.durationMs);
   compilers.push({
     name: 'Ruby',
-    available: rubyResults.length > 0,
+    available: tierRan(rubyResults.map((r) => r.rubyCompiler!)),
     testsRun: rubyResults.length,
     testsSucceeded: rubySuccess.length,
     averageDurationMs: rubyDurations.length > 0
@@ -207,7 +218,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const javaDurations = javaSuccess.map((r) => r.javaCompiler!.durationMs);
   compilers.push({
     name: 'Java',
-    available: javaResults.length > 0,
+    available: tierRan(javaResults.map((r) => r.javaCompiler!)),
     testsRun: javaResults.length,
     testsSucceeded: javaSuccess.length,
     averageDurationMs: javaDurations.length > 0

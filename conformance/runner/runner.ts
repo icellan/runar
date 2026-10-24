@@ -1110,11 +1110,15 @@ function shouldUseJavaDaemon(): boolean {
   return true;
 }
 
-function getOrStartJavaDaemon(): JavaDaemon | null {
+export function getOrStartJavaDaemon(): JavaDaemon | null {
   if (!shouldUseJavaDaemon()) return null;
   if (javaDaemonInstance) return javaDaemonInstance;
   if (javaDaemonAttempted) return null;
   javaDaemonAttempted = true;
+  // The daemon spawns `java` itself, so the probe must cover `java` as well as
+  // the jar (findJavaBinary checks both). Probing the jar alone started a
+  // daemon whose spawn ENOENTed on every fixture (N-374).
+  if (findJavaBinary() === null) return null;
   const jar = findJavaJarPath();
   if (!jar) return null;
   try {
