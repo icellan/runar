@@ -1084,13 +1084,29 @@ public final class PyParser {
             match(TokKind.DEDENT);
 
             if (constructor == null) {
+                // N-032: auto-generate from the uninitialized properties
+                // (declaration order): super(...) first, then self.p = p.
+                SourceLocation ctorLoc = new SourceLocation(fileName, 1, 0);
+                List<ParamNode> ctorParams = new ArrayList<>();
+                List<Expression> superArgs = new ArrayList<>();
+                List<Statement> ctorBody = new ArrayList<>();
+                for (PropertyNode pn : properties) {
+                    if (pn.initializer() == null) {
+                        ctorParams.add(new ParamNode(pn.name(), pn.type()));
+                        superArgs.add(new Identifier(pn.name()));
+                    }
+                }
+                ctorBody.add(new ExpressionStatement(
+                    new CallExpr(new Identifier("super"), superArgs), ctorLoc));
+                for (PropertyNode pn : properties) {
+                    if (pn.initializer() == null) {
+                        ctorBody.add(new AssignmentStatement(
+                            new PropertyAccessExpr(pn.name()),
+                            new Identifier(pn.name()), ctorLoc));
+                    }
+                }
                 constructor = new MethodNode(
-                    "constructor",
-                    new ArrayList<>(),
-                    new ArrayList<>(),
-                    Visibility.PUBLIC,
-                    new SourceLocation(fileName, 1, 0)
-                );
+                    "constructor", ctorParams, ctorBody, Visibility.PUBLIC, ctorLoc);
             }
 
             return new ContractNode(contractName, parentClass, properties, constructor, methods, fileName);
@@ -1204,7 +1220,6 @@ public final class PyParser {
             // Transform `super().__init__(...)` (or `super().constructor(...)`)
             // into the canonical `super(...)` call form.
             List<Statement> ctorBody = new ArrayList<>();
-            boolean foundSuper = false;
             for (Statement stmt : body) {
                 Statement transformed = stmt;
                 if (stmt instanceof ExpressionStatement es
@@ -1218,21 +1233,9 @@ public final class PyParser {
                         new CallExpr(new Identifier("super"), call.args()),
                         es.sourceLocation()
                     );
-                    foundSuper = true;
                 }
                 ctorBody.add(transformed);
             }
-            if (!foundSuper) {
-                List<Expression> superArgs = new ArrayList<>(params.size());
-                for (ParamNode p : params) {
-                    superArgs.add(new Identifier(p.name()));
-                }
-                ctorBody.add(0, new ExpressionStatement(
-                    new CallExpr(new Identifier("super"), superArgs),
-                    location
-                ));
-            }
-
             return new MethodNode("constructor", params, ctorBody, Visibility.PUBLIC, location);
         }
 

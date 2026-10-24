@@ -1111,7 +1111,7 @@ class PyParser {
       kind: 'expression_statement',
       expression: {
         kind: 'call_expr',
-        callee: { kind: 'member_expr', object: { kind: 'identifier', name: 'super' }, property: '' },
+        callee: { kind: 'identifier', name: 'super' },
         args: superArgs,
       },
       sourceLocation: { file: this.file, line: 1, column: 0 },

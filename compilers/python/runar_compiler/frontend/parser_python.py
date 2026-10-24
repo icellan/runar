@@ -903,12 +903,32 @@ class _PyParser:
         self.match(TOK_DEDENT)
 
         if constructor is None:
+            # N-032: auto-generate from the uninitialized properties (declaration
+            # order): super(...) first, then self.p = p.
+            uninit = [p for p in properties if p.initializer is None]
+            ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
             constructor = MethodNode(
                 name="constructor",
-                params=[],
-                body=[],
+                params=[ParamNode(name=p.name, type=p.type) for p in uninit],
+                body=[
+                    ExpressionStmt(
+                        expr=CallExpr(
+                            callee=Identifier(name="super"),
+                            args=[Identifier(name=p.name) for p in uninit],
+                        ),
+                        source_location=ctor_loc,
+                    ),
+                    *[
+                        AssignmentStmt(
+                            target=PropertyAccessExpr(property=p.name),
+                            value=Identifier(name=p.name),
+                            source_location=ctor_loc,
+                        )
+                        for p in uninit
+                    ],
+                ],
                 visibility="public",
-                source_location=SourceLocation(file=self.file_name, line=1, column=0),
+                source_location=ctor_loc,
             )
 
         return ContractNode(
@@ -993,7 +1013,6 @@ class _PyParser:
 
         # Transform super().__init__(...) -> super(...) form
         constructor_body: list[Statement] = []
-        found_super = False
 
         for stmt in body:
             if isinstance(stmt, ExpressionStmt):
@@ -1011,19 +1030,8 @@ class _PyParser:
                                     ),
                                     source_location=stmt.source_location,
                                 ))
-                                found_super = True
                                 continue
             constructor_body.append(stmt)
-
-        if not found_super:
-            super_args = [Identifier(name=p.name) for p in params]
-            constructor_body.insert(0, ExpressionStmt(
-                expr=CallExpr(
-                    callee=Identifier(name="super"),
-                    args=super_args,
-                ),
-                source_location=location,
-            ))
 
         return MethodNode(
             name="constructor",

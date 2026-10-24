@@ -1344,7 +1344,6 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 	// Note: __init__ is converted to "constructor" by pyConvertName during parsing,
 	// so we check for both "constructor" and "__init__".
 	var constructorBody []Statement
-	foundSuper := false
 
 	for _, stmt := range body {
 		if es, ok := stmt.(ExpressionStmt); ok {
@@ -1361,7 +1360,6 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 								},
 								SourceLocation: es.SourceLocation,
 							})
-							foundSuper = true
 							continue
 						}
 					}
@@ -1369,23 +1367,6 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 			}
 		}
 		constructorBody = append(constructorBody, stmt)
-	}
-
-	// If no super() call was found, generate one with all param names
-	if !foundSuper {
-		superArgs := make([]Expression, len(params))
-		for i, param := range params {
-			superArgs[i] = Identifier{Name: param.Name}
-		}
-		constructorBody = append([]Statement{
-			ExpressionStmt{
-				Expr: CallExpr{
-					Callee: Identifier{Name: "super"},
-					Args:   superArgs,
-				},
-				SourceLocation: loc,
-			},
-		}, constructorBody...)
 	}
 
 	return MethodNode{
