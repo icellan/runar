@@ -15,7 +15,6 @@ class TestParserSolEdges < Minitest::Test
   def test_immutable_keyword_flags_readonly
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Demo is SmartContract {
           Addr immutable owner;
@@ -40,7 +39,6 @@ class TestParserSolEdges < Minitest::Test
   def test_stateful_no_immutable_is_mutable
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Counter is StatefulSmartContract {
           int count;
@@ -65,7 +63,6 @@ class TestParserSolEdges < Minitest::Test
   def test_multiple_methods
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Multi is SmartContract {
           int immutable x;
@@ -89,7 +86,6 @@ class TestParserSolEdges < Minitest::Test
   def test_bool_type_parses
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract B is SmartContract {
           bool immutable flag;
@@ -114,7 +110,6 @@ class TestParserSolEdges < Minitest::Test
   def test_bytes_type_parses
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Bytes is SmartContract {
           ByteString immutable data;
@@ -156,7 +151,6 @@ class TestParserSolEdges < Minitest::Test
   def test_arithmetic_in_method_body
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Arith is SmartContract {
           int immutable target;
@@ -178,7 +172,6 @@ class TestParserSolEdges < Minitest::Test
   def test_methods_with_distinct_param_counts
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract M is SmartContract {
           int immutable x;

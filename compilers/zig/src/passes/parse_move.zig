@@ -91,7 +91,17 @@ pub fn parseMove(allocator: Allocator, source: []const u8, file_name: []const u8
     while (guard <= source.len) : (guard += 1) {
         if (t.next().kind == .eof) break;
     }
-    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    // N-019: a terminated quoted literal is refused as an unexpected character
+    // (as the TS reference); the earlier of the two diagnostics comes first.
+    const quoted_msg: []const u8 = if (t.quoted_char == '"') "Unexpected character '\"'" else "Unexpected character '''";
+    const quoted_first = if (t.quoted) |q| (if (t.unterminated) |u| (q.line < u.line or (q.line == u.line and q.col < u.col)) else true) else false;
+    const errs = if (quoted_first) blk: {
+        const e1 = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+        break :blk lex_diag.prepend(allocator, e1, file_name, quoted_msg, t.quoted);
+    } else blk: {
+        const e1 = lex_diag.prepend(allocator, r.errors, file_name, quoted_msg, t.quoted);
+        break :blk lex_diag.prepend(allocator, e1, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    };
     return .{ .contract = r.contract, .errors = errs };
 }
 
@@ -174,6 +184,10 @@ const Tokenizer = struct {
     source: []const u8,
     /// F-011: the first unterminated quoted literal, if any.
     unterminated: ?lex_diag.Pos = null,
+    /// N-019: the first TERMINATED quoted literal (this surface has none) and
+    /// the quote character that opened it.
+    quoted: ?lex_diag.Pos = null,
+    quoted_char: u8 = '"',
     pos: usize,
     line: u32,
     col: u32,
@@ -257,6 +271,10 @@ const Tokenizer = struct {
             const content_end = self.pos;
             if (self.pos < self.source.len and self.source[self.pos] == quote) {
                 _ = self.advance();
+                if (self.quoted == null) {
+                    self.quoted = .{ .line = sl, .col = sc };
+                    self.quoted_char = quote;
+                }
             } else if (self.unterminated == null) {
                 self.unterminated = .{ .line = sl, .col = sc };
             }

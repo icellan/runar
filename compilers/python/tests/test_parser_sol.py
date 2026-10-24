@@ -21,7 +21,6 @@ P2PKH_SOURCE = """\
 // SPDX-License-Identifier: MIT
 pragma runar ^1.0.0;
 
-import "runar-lang";
 
 contract P2PKH is SmartContract {
     Addr immutable pubKeyHash;
@@ -68,7 +67,6 @@ class TestSolMethodsAndParams:
     def test_methods_and_params(self):
         source = """\
 pragma runar ^1.0.0;
-import "runar-lang";
 
 contract Adder is SmartContract {
     int immutable target;
@@ -102,7 +100,6 @@ class TestSolStateful:
     def test_stateful_counter(self):
         source = """\
 pragma runar ^1.0.0;
-import "runar-lang";
 
 contract Counter is StatefulSmartContract {
     int count;
@@ -133,7 +130,6 @@ class TestSolMultipleProperties:
     def test_two_props_in_declaration_order(self):
         source = """\
 pragma runar ^1.0.0;
-import "runar-lang";
 
 contract TwoProps is SmartContract {
     Addr immutable addr;

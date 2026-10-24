@@ -198,6 +198,9 @@ public final class MoveParser {
                 if (i < n && source.charAt(i) == quote) {
                     i++;
                     col++;
+                    // N-019: this surface has no quoted literal; a terminated one
+                    // is refused as an unexpected character (as the TS reference).
+                    lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + quote + "'"));
                 } else {
                     lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }

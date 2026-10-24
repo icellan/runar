@@ -208,6 +208,9 @@ func (p *solParser) tokenize(source string) []solToken {
 			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+				// N-019: this surface has no quoted literal; a terminated one
+				// is refused as an unexpected character (as the TS reference).
+				p.errors = append(p.errors, lexDiag(fmt.Sprintf("Unexpected character '%c'", quote), p.fileName, line, startCol))
 			} else {
 				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}

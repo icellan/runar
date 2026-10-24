@@ -415,6 +415,9 @@ module RunarCompiler
           end
           if k < n && source[k] == ch
             closing_quote_at = k
+            # N-019: this surface has no quoted literal; a terminated one is
+            # refused as an unexpected character (as the TS reference).
+            lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line, start_col)
           else
             lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end

@@ -441,6 +441,9 @@ fn tokenize(
             tokens.push(Token::StringLit(val));
             if i < len && chars[i] == quote {
                 i += 1;
+                // N-019: this surface has no quoted literal; a terminated one
+                // is refused as an unexpected character (as the TS reference).
+                errors.push(lex_error_at_index(&format!("Unexpected character '{}'", quote), file, &chars, open));
             } else {
                 errors.push(lex_error_at_index(UNTERMINATED_STRING_LITERAL, file, &chars, open));
             }
