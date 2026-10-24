@@ -90,6 +90,27 @@ describe('R-103 missing-tier visibility', () => {
       expect(out).toContain('RUNAR_CONFORMANCE_STRICT');
     });
 
+    // N-373: the footer used to hard-code "This PASS covers N tiers" even on a
+    // run that FAILED. Proves the footer never says PASS on a failed run and
+    // still reports the tier count; does not prove the process exit code.
+    it('N-373: a failed run with a dropped tier never calls itself a PASS in the footer', () => {
+      const r = report({ TypeScript: true, Go: true, Zig: false });
+      r.passed = 0;
+      r.failed = 1;
+      r.results = [
+        { testName: 'demo', status: 'fail', irMatch: false, scriptMatch: false, errors: ['x'], timings: {} },
+      ];
+      const out = capture(r);
+      const footer = out.slice(out.indexOf('INCOMPLETE COVERAGE'));
+      expect(footer).not.toMatch(/PASS/);
+      expect(footer).toContain('covers 2 tiers, not 3');
+    });
+
+    it('N-373: a passing run with a dropped tier keeps its tier-count footer without claiming more', () => {
+      const out = capture(report({ TypeScript: true, Go: true, Zig: false }));
+      expect(out).toContain('covers 2 tiers, not 3');
+    });
+
     it('says nothing of the sort when every tier ran', () => {
       const out = capture(report({ TypeScript: true, Go: true, Zig: true, Ruby: true }));
       expect(out).not.toContain('INCOMPLETE COVERAGE');

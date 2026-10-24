@@ -398,7 +398,7 @@ export function printReportToConsole(report: ConformanceReport): void {
       `${BOLD}${absent.join(', ')}${RESET}.`,
     );
     console.log(
-      `  This PASS covers ${report.compilers.length - absent.length} tiers, not ${report.compilers.length}. ` +
+      `  This run covers ${report.compilers.length - absent.length} tiers, not ${report.compilers.length}. ` +
       `Set RUNAR_CONFORMANCE_STRICT=1 to exit non-zero instead.`,
     );
   }
