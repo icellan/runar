@@ -303,6 +303,23 @@ def _non_empty(obj: dict, path: str, *keys: str) -> None:
             raise ValueError(f"IR validation: {_path(path, key)} must be a non-empty string")
 
 
+# N-408: a binding's name is non-empty at every nesting level (a method body,
+# an `if` arm, a `loop` body), named by the path the type walk uses:
+# methods[0].body[1].value.then[0].name
+def _non_empty_binding_names(obj: dict, key: str, path: str) -> None:
+    lp = _path(path, key)
+    for i, binding in enumerate(obj[key]):
+        bp = f"{lp}[{i}]"
+        _non_empty(binding, bp, "name")
+        value = binding["value"]
+        vp = f"{bp}.value"
+        if value["kind"] == "if":
+            _non_empty_binding_names(value, "then", vp)
+            _non_empty_binding_names(value, "else", vp)
+        elif value["kind"] == "loop":
+            _non_empty_binding_names(value, "body", vp)
+
+
 def _assert_ir_identifiers(program: dict) -> None:
     _non_empty(program, "", "contractName")
     for i, prop in enumerate(program["properties"]):
@@ -320,3 +337,4 @@ def _assert_ir_identifiers(program: dict) -> None:
                     f"IR validation: {pp}.name '{name}' duplicates {mp}.params[{seen[name]}].name"
                 )
             seen[name] = j
+        _non_empty_binding_names(method, "body", mp)

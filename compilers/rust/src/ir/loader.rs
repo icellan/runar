@@ -292,44 +292,15 @@ fn is_hex_string(s: &str) -> bool {
 }
 
 fn validate_ir(program: &ANFProgram) -> Result<(), String> {
-    if program.contract_name.is_empty() {
-        return Err("IR validation: contractName is required".into());
-    }
-
-    for (i, prop) in program.properties.iter().enumerate() {
-        if prop.name.is_empty() {
-            return Err(format!("IR validation: property[{}] has empty name", i));
-        }
-        if prop.prop_type.is_empty() {
-            return Err(format!(
-                "IR validation: property {} has empty type",
-                prop.name
-            ));
-        }
-    }
+    // N-207 / N-408: empty contractName, property / method / param names and
+    // types and binding names are refused by assert_required_ir_fields
+    // (required_fields.rs) with one shared diagnostic, before this runs.
 
     // R-126 / CL-BUG-164: an add_output must name exactly one state value per
     // MUTABLE property. Counted once, up front.
     let mutable_count = program.properties.iter().filter(|p| !p.readonly).count();
 
-    for (i, method) in program.methods.iter().enumerate() {
-        if method.name.is_empty() {
-            return Err(format!("IR validation: method[{}] has empty name", i));
-        }
-        for (j, param) in method.params.iter().enumerate() {
-            if param.name.is_empty() {
-                return Err(format!(
-                    "IR validation: method {} param[{}] has empty name",
-                    method.name, j
-                ));
-            }
-            if param.param_type.is_empty() {
-                return Err(format!(
-                    "IR validation: method {} param {} has empty type",
-                    method.name, param.name
-                ));
-            }
-        }
+    for method in program.methods.iter() {
         validate_bindings(&method.body, &method.name, mutable_count, 1)?;
     }
 
@@ -422,14 +393,7 @@ fn validate_bindings(
     mutable_count: usize,
     enclosing_loop_count: usize,
 ) -> Result<(), String> {
-    for (i, binding) in bindings.iter().enumerate() {
-        if binding.name.is_empty() {
-            return Err(format!(
-                "IR validation: method {} binding[{}] has empty name",
-                method_name, i
-            ));
-        }
-
+    for binding in bindings.iter() {
         // R-177: a `!KNOWN_KINDS.contains(kind_name(&binding.value))` check
         // used to sit here. It could not fire for two independent reasons:
         // `kind_name` maps an ALREADY-DESERIALISED ANFValue to its name, so it
@@ -943,7 +907,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: methods[0].body[0].name must be a non-empty string"),
             "expected empty binding name error, got: {}",
             err
         );

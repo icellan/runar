@@ -278,6 +278,26 @@ module RunarCompiler
         end
       end
 
+      # N-408: a binding's name is non-empty at every nesting level (a method
+      # body, an `if` arm, a `loop` body), named by the path the type walk
+      # uses: methods[0].body[1].value.then[0].name
+      def non_empty_binding_names(obj, key, path)
+        lp = field_path(path, key)
+        obj[key].each_with_index do |binding, i|
+          bp = "#{lp}[#{i}]"
+          non_empty(binding, bp, "name")
+          value = binding["value"]
+          vp = "#{bp}.value"
+          case value["kind"]
+          when "if"
+            non_empty_binding_names(value, "then", vp)
+            non_empty_binding_names(value, "else", vp)
+          when "loop"
+            non_empty_binding_names(value, "body", vp)
+          end
+        end
+      end
+
       def assert_identifiers!(program)
         non_empty(program, "", "contractName")
         program["properties"].each_with_index do |prop, i|
@@ -296,6 +316,7 @@ module RunarCompiler
             end
             seen[name] = j
           end
+          non_empty_binding_names(method, "body", mp)
         end
       end
     end

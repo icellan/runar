@@ -323,6 +323,27 @@ function nonEmpty(obj: Obj, key: string, path: string): void {
   }
 }
 
+/**
+ * N-408: a binding's name is non-empty, at every nesting level (a method body,
+ * an `if` arm, a `loop` body). The path is the one `checkBindings` walks:
+ * `methods[0].body[1].value.then[0].name`. Shared with the other six tiers.
+ */
+function nonEmptyBindingNames(obj: Obj, key: string, path: string): void {
+  const lp = fieldPath(path, key);
+  (obj[key] as Obj[]).forEach((b, i) => {
+    const bp = `${lp}[${i}]`;
+    nonEmpty(b, 'name', bp);
+    const value = b.value as Obj;
+    const vp = `${bp}.value`;
+    if (value.kind === 'if') {
+      nonEmptyBindingNames(value, 'then', vp);
+      nonEmptyBindingNames(value, 'else', vp);
+    } else if (value.kind === 'loop') {
+      nonEmptyBindingNames(value, 'body', vp);
+    }
+  });
+}
+
 function assertIrIdentifiers(program: Obj): void {
   nonEmpty(program, 'contractName', '');
   (program.properties as Obj[]).forEach((prop, i) => {
@@ -346,5 +367,6 @@ function assertIrIdentifiers(program: Obj): void {
       }
       seen.set(name, j);
     });
+    nonEmptyBindingNames(method, 'body', mp);
   });
 }

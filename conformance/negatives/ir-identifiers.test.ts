@@ -36,6 +36,12 @@ import { isCiEnv } from '../env.js';
  * (e.g. an undeclared `load_prop` once the property name is blanked) does not
  * count.
  *
+ * N-408 extends the matrix with an EMPTY BINDING NAME (top level, inside an
+ * `if` arm, inside a `loop` body). Go, Rust, Python and Ruby already refused
+ * it (with their own, divergent wording, `method <m> binding[<i>] has empty
+ * name`), but TS, Zig and Java accepted it. The shared message names the
+ * binding's path in the same style as the other identifier paths.
+ *
  * What this does NOT prove: that identifiers are otherwise well-formed
  * (whitespace-only, reserved words, non-ASCII), that property names are
  * unique, or that a param may not shadow a property — none of that is in
@@ -82,6 +88,46 @@ const equalityIr = (p0: string, p1: string): Ir => ({
         { name: 't1', value: { kind: 'load_param', name: p1 } },
         { name: 't2', value: { kind: 'bin_op', op: '===', left: 't0', right: 't1' } },
         { name: 't3', value: { kind: 'assert', value: 't2' } },
+      ],
+    },
+  ],
+});
+
+/**
+ * `m(flag) { if (flag) <thenName> else <elseName>; loop 2x <loopName>; assert(flag) }` with the arm
+ * bindings and an optional loop named as given (N-408).
+ */
+const nestedIr = (thenName: string, elseName: string, loopBodyName = 'l0'): Ir => ({
+  contractName: 'X',
+  properties: [],
+  methods: [
+    {
+      name: 'm',
+      isPublic: true,
+      params: [{ name: 'flag', type: 'boolean' }],
+      body: [
+        { name: 't0', value: { kind: 'load_param', name: 'flag' } },
+        {
+          name: 't1',
+          value: {
+            kind: 'if',
+            cond: 't0',
+            then: [{ name: thenName, value: { kind: 'load_const', value: true } }],
+            else: [{ name: elseName, value: { kind: 'load_const', value: true } }],
+          },
+        },
+        {
+          name: 't2',
+          value: {
+            kind: 'loop',
+            count: 2,
+            start: 0,
+            step: 1,
+            iterVar: 'i',
+            body: [{ name: loopBodyName, value: { kind: 'load_const', value: 1 } }],
+          },
+        },
+        { name: 't3', value: { kind: 'assert', value: 't0' } },
       ],
     },
   ],
@@ -146,6 +192,27 @@ const CASES: Case[] = [
     ir: equalityIr('a', 'a'),
     error: "IR validation: methods[0].params[1].name 'a' duplicates methods[0].params[0].name",
   },
+  // -- N-408: an empty binding name ------------------------------------------
+  {
+    name: 'binding-name-empty',
+    ir: mutate((ir) => (ir.methods[0].body[1].name = '')),
+    error: EMPTY('methods[0].body[1].name'),
+  },
+  {
+    name: 'binding-name-empty-in-then-arm',
+    ir: nestedIr('', 'e0'),
+    error: EMPTY('methods[0].body[1].value.then[0].name'),
+  },
+  {
+    name: 'binding-name-empty-in-else-arm',
+    ir: nestedIr('a0', ''),
+    error: EMPTY('methods[0].body[1].value.else[0].name'),
+  },
+  {
+    name: 'binding-name-empty-in-loop-body',
+    ir: nestedIr('a0', 'e0', ''),
+    error: EMPTY('methods[0].body[2].value.body[0].name'),
+  },
 ];
 
 const DIR = mkdtempSync(join(tmpdir(), 'n207-ir-identifiers-'));
@@ -156,6 +223,7 @@ const write = (name: string, ir: unknown): string => {
 };
 const CONTROL = write('control', REQUIRED.control);
 const DISTINCT_EQUALITY = write('distinct-equality', equalityIr('a', 'b'));
+const NESTED_NAMED = write('nested-named', nestedIr('a0', 'e0'));
 
 const TIERS: Tier[] = buildIrTiers();
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -189,7 +257,7 @@ describe('N-207: --ir loaders refuse empty identifiers and duplicate param names
 
   it('every case differs from the control and carries an "IR validation:" diagnostic', () => {
     const control = JSON.stringify(REQUIRED.control);
-    expect(CASES.length).toBeGreaterThanOrEqual(9);
+    expect(CASES.length).toBeGreaterThanOrEqual(13);
     for (const c of CASES) {
       expect(JSON.stringify(c.ir), c.name).not.toBe(control);
       expect(c.error, c.name).toMatch(/^IR validation: /);
@@ -211,6 +279,7 @@ describe('N-207: --ir loaders refuse empty identifiers and duplicate param names
   it('ts loads the control and the distinct-name equality IR', () => {
     expect(() => loadANFFromJSON(JSON.stringify(REQUIRED.control))).not.toThrow();
     expect(() => loadANFFromJSON(JSON.stringify(equalityIr('a', 'b')))).not.toThrow();
+    expect(() => loadANFFromJSON(JSON.stringify(nestedIr('a0', 'e0')))).not.toThrow();
   });
 
   for (const c of CASES) {
@@ -228,9 +297,11 @@ describe('N-207: --ir loaders refuse empty identifiers and duplicate param names
   // -- the seven --ir CLIs ----------------------------------------------------
 
   for (const tier of available) {
-    it(`${tier.id} ACCEPTS the control and the distinct-name equality IR`, () => {
+    it(`${tier.id} ACCEPTS the control, the distinct-name equality IR and the named nested IR`, () => {
       expect(judge(tier, CONTROL).verdict).toBe('accepted');
       expect(judge(tier, DISTINCT_EQUALITY).verdict).toBe('accepted');
+      // N-408: the nested control, so the three nested refusals are discriminating.
+      expect(judge(tier, NESTED_NAMED).verdict).toBe('accepted');
     });
 
     for (const c of CASES) {

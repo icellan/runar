@@ -148,38 +148,16 @@ module RunarCompiler
     def self.validate_ir(program)
       errors = []
 
-      if program.contract_name.nil? || program.contract_name.empty?
-        errors << "contractName is required"
-      end
+      # N-207 / N-408: an empty contractName, property / method / param name or
+      # type, or binding name is refused by RequiredFields (required_fields.rb)
+      # with one shared diagnostic, before this runs.
 
       # R-126 / CL-BUG-164: an add_output must name exactly one state value per
       # MUTABLE property. Counted once, up front.
       mutable_count = program.properties.count { |p| !p.readonly }
 
-      program.methods.each_with_index do |m, i|
-        if m.name.nil? || m.name.empty?
-          errors << "method[#{i}] has empty name"
-        end
-
-        m.params.each_with_index do |param, j|
-          if param.name.nil? || param.name.empty?
-            errors << "method #{m.name} param[#{j}] has empty name"
-          end
-          if param.type.nil? || param.type.empty?
-            errors << "method #{m.name} param #{param.name} has empty type"
-          end
-        end
-
+      program.methods.each do |m|
         errors.concat(_validate_bindings(m.body, m.name, mutable_count, 1))
-      end
-
-      program.properties.each_with_index do |prop, i|
-        if prop.name.nil? || prop.name.empty?
-          errors << "property[#{i}] has empty name"
-        end
-        if prop.type.nil? || prop.type.empty?
-          errors << "property #{prop.name} has empty type"
-        end
       end
 
       # N-265: --ir never runs frontend/validator.rb's recursion + N-180
@@ -554,11 +532,7 @@ module RunarCompiler
     def self._validate_bindings(bindings, method_name, mutable_count, enclosing_loop_count = 1)
       errors = []
 
-      bindings.each_with_index do |binding, i|
-        if binding.name.nil? || binding.name.empty?
-          errors << "method #{method_name} binding[#{i}] has empty name"
-        end
-
+      bindings.each do |binding|
         kind = binding.value.kind
         if kind.nil? || kind.empty?
           errors << "method #{method_name} binding #{binding.name} has empty kind"

@@ -317,6 +317,30 @@ fn non_empty(obj: &Obj, path: &str, keys: &[&str]) -> R<()> {
     Ok(())
 }
 
+/// N-408: a binding's name is non-empty at every nesting level (a method
+/// body, an `if` arm, a `loop` body), named by the path `check_bindings`
+/// walks: `methods[0].body[1].value.then[0].name`.
+fn non_empty_binding_names(obj: &Obj, key: &str, path: &str) -> R<()> {
+    let lp = field_path(path, key);
+    let bindings = obj.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    for (i, b) in bindings.iter().enumerate() {
+        let Some(binding) = b.as_object() else { continue };
+        let bp = format!("{}[{}]", lp, i);
+        non_empty(binding, &bp, &["name"])?;
+        let Some(value) = binding.get("value").and_then(Value::as_object) else { continue };
+        let vp = format!("{}.value", bp);
+        match value.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "if" => {
+                non_empty_binding_names(value, "then", &vp)?;
+                non_empty_binding_names(value, "else", &vp)?;
+            }
+            "loop" => non_empty_binding_names(value, "body", &vp)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn assert_ir_identifiers(program: &Obj) -> R<()> {
     let list = |obj: &Obj, key: &str| -> Vec<Obj> {
         obj.get(key)
@@ -344,6 +368,7 @@ fn assert_ir_identifiers(program: &Obj) -> R<()> {
             }
             seen.insert(name, j);
         }
+        non_empty_binding_names(method, "body", &mp)?;
     }
     Ok(())
 }

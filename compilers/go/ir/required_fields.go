@@ -402,6 +402,35 @@ func irNonEmpty(obj irObj, key, path string) error {
 	return nil
 }
 
+// irNonEmptyBindingNames is N-408: a binding's name is non-empty at every
+// nesting level (a method body, an `if` arm, a `loop` body), named by the path
+// the type walk uses: methods[0].body[1].value.then[0].name.
+func irNonEmptyBindingNames(obj irObj, key, path string) error {
+	lp := irFieldPath(path, key)
+	for i, b := range obj[key].([]any) {
+		bp := fmt.Sprintf("%s[%d]", lp, i)
+		binding := b.(irObj)
+		if err := irNonEmpty(binding, "name", bp); err != nil {
+			return err
+		}
+		value := binding["value"].(irObj)
+		vp := bp + ".value"
+		switch value["kind"] {
+		case "if":
+			for _, arm := range []string{"then", "else"} {
+				if err := irNonEmptyBindingNames(value, arm, vp); err != nil {
+					return err
+				}
+			}
+		case "loop":
+			if err := irNonEmptyBindingNames(value, "body", vp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func assertIRIdentifiers(program irObj) error {
 	if err := irNonEmpty(program, "contractName", ""); err != nil {
 		return err
@@ -434,6 +463,9 @@ func assertIRIdentifiers(program irObj) error {
 				return fmt.Errorf("IR validation: %s.name '%s' duplicates %s.params[%d].name", pp, name, mp, first)
 			}
 			seen[name] = j
+		}
+		if err := irNonEmptyBindingNames(method, "body", mp); err != nil {
+			return err
 		}
 	}
 	return nil

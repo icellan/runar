@@ -352,6 +352,26 @@ fn nonEmpty(w: Walker, obj: Obj, path: []const u8, keys: []const []const u8) Che
     }
 }
 
+/// N-408: a binding's name is non-empty at every nesting level (a method
+/// body, an `if` arm, a `loop` body), named by the path `checkBindings`
+/// walks: methods[0].body[1].value.then[0].name
+fn nonEmptyBindingNames(w: Walker, obj: Obj, key: []const u8, path: []const u8) CheckError!void {
+    const lp = try w.fieldPath(path, key);
+    for (obj.get(key).?.array.items, 0..) |b, i| {
+        const bp = try std.fmt.allocPrint(w.a, "{s}[{d}]", .{ lp, i });
+        try nonEmpty(w, b.object, bp, &.{"name"});
+        const value = b.object.get("value").?.object;
+        const vp = try std.fmt.allocPrint(w.a, "{s}.value", .{bp});
+        const kind = value.get("kind").?.string;
+        if (std.mem.eql(u8, kind, "if")) {
+            try nonEmptyBindingNames(w, value, "then", vp);
+            try nonEmptyBindingNames(w, value, "else", vp);
+        } else if (std.mem.eql(u8, kind, "loop")) {
+            try nonEmptyBindingNames(w, value, "body", vp);
+        }
+    }
+}
+
 fn assertIrIdentifiers(w: Walker, program: Obj) CheckError!void {
     try nonEmpty(w, program, "", &.{"contractName"});
     for (program.get("properties").?.array.items, 0..) |p, i| {
@@ -373,5 +393,6 @@ fn assertIrIdentifiers(w: Walker, program: Obj) CheckError!void {
                 }
             }
         }
+        try nonEmptyBindingNames(w, m.object, "body", mp);
     }
 }

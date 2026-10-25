@@ -739,6 +739,29 @@ public final class AnfLoader {
                         + "' duplicates " + mp + ".params[" + first + "].name");
                 }
             }
+            nonEmptyBindingNames(methods.get(i).body(), mp + ".body");
+        }
+    }
+
+    /**
+     * N-408: a binding's name is non-empty at every nesting level (a method
+     * body, an {@code if} arm, a {@code loop} body), named by the path the type
+     * walk uses: {@code methods[0].body[1].value.then[0].name}.
+     */
+    private static void nonEmptyBindingNames(List<AnfBinding> bindings, String path) {
+        if (bindings == null) {
+            return;
+        }
+        for (int i = 0; i < bindings.size(); i++) {
+            String bp = path + "[" + i + "]";
+            nonEmpty(bindings.get(i).name(), bp + ".name");
+            AnfValue v = bindings.get(i).value();
+            if (v instanceof runar.compiler.ir.anf.If branch) {
+                nonEmptyBindingNames(branch.thenBranch(), bp + ".value.then");
+                nonEmptyBindingNames(branch.elseBranch(), bp + ".value.else");
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                nonEmptyBindingNames(loop.body(), bp + ".value.body");
+            }
         }
     }
 
