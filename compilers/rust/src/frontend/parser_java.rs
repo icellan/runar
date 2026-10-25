@@ -722,8 +722,8 @@ impl<'a> JavaParser<'a> {
                 "UnsafeSmartContract" => "UnsafeSmartContract".to_string(),
                 other => {
                     self.error(format!(
-                        "contract class in {} must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got {}",
-                        self.file, other
+                        "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
+                        other
                     ));
                     return None;
                 }

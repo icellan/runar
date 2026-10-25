@@ -803,7 +803,7 @@ class PyParser {
       parentClass !== 'UnsafeSmartContract'
     ) {
       this.errors.push(makeDiagnostic(
-        `Unknown parent class: ${parentClass}`,
+        `unknown parent class: '${parentClass}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
         'error',
         { file: this.file, line: parentToken.line, column: parentToken.column },
       ));

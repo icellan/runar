@@ -864,7 +864,7 @@ module RunarCompiler
         skip_newlines
 
         unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          @errors << "#{@file}:#{first_part.line}: unknown parent class: #{parent_class}"
+          @errors << "#{@file}:#{first_part.line}: unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
           return nil
         end
 

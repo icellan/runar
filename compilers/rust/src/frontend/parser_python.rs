@@ -1185,7 +1185,7 @@ impl<'a> PyParser<'a> {
             && parent_class != "UnsafeSmartContract"
         {
             self.errors.push(Diagnostic::error(format!(
-                "Unknown parent class: {}",
+                "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
                 parent_class
             ), None));
             return None;

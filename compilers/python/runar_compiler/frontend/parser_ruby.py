@@ -854,7 +854,8 @@ class _RbParser:
             "UnsafeSmartContract",
         ):
             self._errors.append(
-                f"{self._file}:{first_part.line}: unknown parent class: {parent_class}"
+                f"{self._file}:{first_part.line}: unknown parent class: '{parent_class}', "
+                "expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
             )
             return None
 

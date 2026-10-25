@@ -754,7 +754,7 @@ class RbParser {
       parentClass !== 'UnsafeSmartContract'
     ) {
       this.errors.push(makeDiagnostic(
-        `Unknown parent class: ${parentClass}`,
+        `unknown parent class: '${parentClass}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
         'error',
         { file: this.file, line: firstPart.line, column: firstPart.column },
       ));

@@ -573,8 +573,8 @@ module RunarCompiler
                          when "StatefulSmartContract" then "StatefulSmartContract"
                          when "UnsafeSmartContract"   then "UnsafeSmartContract"
                          else
-                           fatal("contract class in #{@file_name} must extend " \
-                                 "SmartContract, StatefulSmartContract, or UnsafeSmartContract, got #{base_name}")
+                           fatal("unknown parent class: '#{base_name}', expected " \
+                                 "SmartContract, StatefulSmartContract, or UnsafeSmartContract")
                          end
         else
           fatal("contract class in #{@file_name} must extend " \

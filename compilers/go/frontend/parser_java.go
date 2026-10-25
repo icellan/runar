@@ -643,7 +643,7 @@ func (p *javaParser) parseClass() *ContractNode {
 	case "UnsafeSmartContract":
 		parentClass = "UnsafeSmartContract"
 	default:
-		p.addError(fmt.Sprintf("contract class %s must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got %s", className, parentName))
+		p.addError(fmt.Sprintf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parentName))
 		return nil
 	}
 

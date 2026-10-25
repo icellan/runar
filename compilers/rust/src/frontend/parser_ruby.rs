@@ -1071,7 +1071,7 @@ impl<'a> RbParser<'a> {
             && parent_class != "UnsafeSmartContract"
         {
             self.errors.push(format!(
-                "Unknown parent class: {}",
+                "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
                 parent_class
             ));
             return None;

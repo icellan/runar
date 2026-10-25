@@ -786,7 +786,8 @@ public final class RbParser {
                 case "StatefulSmartContract" -> parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                 case "UnsafeSmartContract" -> parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 default -> {
-                    errors.add(file + ":" + firstPart.line + ": unknown parent class: " + parentClassName);
+                    errors.add(file + ":" + firstPart.line + ": unknown parent class: '" + parentClassName
+                        + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
                     return null;
                 }
             }

@@ -417,8 +417,8 @@ public final class JavaParser {
             case "StatefulSmartContract" -> ParentClass.STATEFUL_SMART_CONTRACT;
             case "UnsafeSmartContract" -> ParentClass.UNSAFE_SMART_CONTRACT;
             default -> throw new ParseException(
-                "contract class in " + filename
-                    + " must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got " + name
+                "unknown parent class: '" + name
+                    + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
             );
         };
     }

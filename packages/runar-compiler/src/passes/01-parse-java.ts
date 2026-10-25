@@ -409,7 +409,7 @@ class JavaParser {
       parentClass = 'UnsafeSmartContract';
     } else {
       this.errorAt(nameTok,
-        `contract class must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got ${parentName}`);
+        `unknown parent class: '${parentName}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`);
       return { contract: null, errors: this.errors };
     }
 

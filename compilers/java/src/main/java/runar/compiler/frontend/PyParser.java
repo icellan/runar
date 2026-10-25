@@ -993,7 +993,8 @@ public final class PyParser {
                 case "SmartContract" -> parentClass = ParentClass.SMART_CONTRACT;
                 case "StatefulSmartContract" -> parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                 case "UnsafeSmartContract" -> parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
-                default -> throw new ParseException("unknown parent class: " + parentClassName);
+                default -> throw new ParseException("unknown parent class: '" + parentClassName
+                    + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
             }
 
             expect(TokKind.COLON);

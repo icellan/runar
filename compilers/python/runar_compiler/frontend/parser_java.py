@@ -601,8 +601,8 @@ class _JavaParser:
             parent_class = "UnsafeSmartContract"
         else:
             raise _JavaParseError(
-                f"contract class in {self.file_name} must extend SmartContract, "
-                f"StatefulSmartContract, or UnsafeSmartContract, got {parent_name}"
+                f"unknown parent class: '{parent_name}', expected SmartContract, "
+                "StatefulSmartContract, or UnsafeSmartContract"
             )
 
         # Ignore implements clause entirely.

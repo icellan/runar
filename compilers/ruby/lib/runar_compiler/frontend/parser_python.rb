@@ -818,8 +818,8 @@ module RunarCompiler
         skip_newlines
 
         unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          add_error("Unknown parent class: #{parent_class}")
-          raise "Unknown parent class: #{parent_class}"
+          add_error("unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract")
+          raise "unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
         end
 
         properties = []

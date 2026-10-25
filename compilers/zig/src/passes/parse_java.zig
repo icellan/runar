@@ -624,8 +624,8 @@ const Parser = struct {
                     parent_class = .unsafe_smart_contract;
                 } else {
                     self.addErrorFmt(
-                        "contract class '{s}' must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got '{s}'",
-                        .{ contract_name, parent_name },
+                        "unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
+                        .{parent_name},
                     );
                     return .{ .contract = null, .errors = self.errors.items };
                 }
