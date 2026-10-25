@@ -720,16 +720,14 @@ module Runar
 
         # Placeholder unlocking scripts are built HERE (before funding coin-
         # selection) so their byte sizes feed the funding fee estimate. Intent-
-        # witness hex is suffixed so size estimation accounts for the witness
+        # witness hex is included (before the selector, N-412) so size estimation accounts for the witness
         # pushes; the real ABI-correct unlock is rebuilt by build_stateful_unlock
         # below for stateful methods.
         unlocking_script = if needs_op_push_tx
                              build_stateful_prefix('00' * 72, method_uses_code_part) +
-                               build_unlocking_script(method_name, resolved_args) +
-                               intent_witness_hex
+                               build_unlocking_script(method_name, resolved_args, intent_witness_hex)
                            else
-                             build_unlocking_script(method_name, resolved_args) +
-                               intent_witness_hex
+                             build_unlocking_script(method_name, resolved_args, intent_witness_hex)
                            end
 
         # Build placeholder unlocking scripts for extra contract inputs.
@@ -1118,11 +1116,18 @@ module Runar
 
       # Build the unlocking script for a method call without broadcasting.
       #
+      # N-412: +witness_hex+ is the method's pre-encoded intent-witness
+      # pushes (build_intent_witness_hex). The auto-injected
+      # _prevOutScript_<i> / _serialisedOutputs params are the LAST ABI
+      # params, so they go after the args and before the selector -- the slot
+      # the stateful unlock gives them too (after the preimage).
+      #
       # @param method_name [String]
       # @param args        [Array]
+      # @param witness_hex [String]
       # @return [String] hex-encoded unlocking script
-      def build_unlocking_script(method_name, args)
-        script              = args.map { |a| encode_arg(a) }.join
+      def build_unlocking_script(method_name, args, witness_hex = '')
+        script              = args.map { |a| encode_arg(a) }.join + witness_hex
         public_methods_list = get_public_methods
 
         if public_methods_list.length > 1
@@ -1374,15 +1379,13 @@ module Runar
         end
 
         # Build placeholder unlocking script (terminal has no change output).
-        # Intent-witness hex is suffixed for sizing — the real ABI-correct
+        # Intent-witness hex is included (before the selector, N-412) — the real ABI-correct
         # unlock is built by build_stateful_terminal_unlock below for stateful.
         term_unlock_script = if needs_op_push_tx
                                build_stateful_prefix('00' * 72, method_uses_code_part) +
-                                 build_unlocking_script(method_name, resolved_args) +
-                                 intent_witness_hex
+                                 build_unlocking_script(method_name, resolved_args, intent_witness_hex)
                              else
-                               build_unlocking_script(method_name, resolved_args) +
-                                 intent_witness_hex
+                               build_unlocking_script(method_name, resolved_args, intent_witness_hex)
                              end
 
         # Terminal calls (auction close/claim/withdraw) typically assert
@@ -1469,7 +1472,7 @@ module Runar
             resolved_args[preimage_index] = preimage_hex
           end
 
-          real_unlock = build_unlocking_script(method_name, resolved_args)
+          real_unlock = build_unlocking_script(method_name, resolved_args, intent_witness_hex)
           if needs_op_push_tx && !final_op_push_tx_sig.empty?
             real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) + real_unlock
             tmp_tx      = SDK.insert_unlocking_script(term_tx, 0, real_unlock)
@@ -1481,7 +1484,7 @@ module Runar
             final_op_push_tx_sig          = final_sig
             final_preimage                = final_pre
             real_unlock = build_stateful_prefix(final_sig, false) +
-                          build_unlocking_script(method_name, resolved_args)
+                          build_unlocking_script(method_name, resolved_args, intent_witness_hex)
           end
           term_tx = SDK.insert_unlocking_script(term_tx, 0, real_unlock)
           final_preimage = resolved_args[preimage_index] if final_preimage.empty? && needs_op_push_tx
@@ -1818,7 +1821,7 @@ module Runar
           signed_tx, final_op_push_tx_sig, final_preimage =
             stateless_preimage_pass(
               signed_tx, contract_utxo, resolved_args, method_name,
-              code_sep_idx, needs_op_push_tx, preimage_index
+              code_sep_idx, needs_op_push_tx, preimage_index, intent_witness_hex
             )
 
           # N-227 (port of N-085): the BIP-143 scriptCode is everything AFTER
@@ -1840,7 +1843,7 @@ module Runar
             # into signed_tx's input 0 (resolved_args[preimage_index] was
             # mutated in place by that call).
             real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) +
-                          build_unlocking_script(method_name, resolved_args)
+                          build_unlocking_script(method_name, resolved_args, intent_witness_hex)
 
             # N-258: a zero-mutable-field StatefulSmartContract merge. Each
             # extra contract input gets a REAL unlock of the same layout as the
@@ -1864,7 +1867,7 @@ module Runar
               end
               sig_indices.each { |idx| args_for[idx] = signer.sign(tx, i + 1, sig_subscript, mu.satoshis) }
               args_for[preimage_index] = extra_pre
-              build_stateful_prefix(extra_sig, false) + build_unlocking_script(method_name, args_for)
+              build_stateful_prefix(extra_sig, false) + build_unlocking_script(method_name, args_for, intent_witness_hex)
             end
             extra_real_unlocks = extra_contract_utxos.each_index.map { |i| build_extra_unlock.call(signed_tx, i) }
 
@@ -1898,7 +1901,7 @@ module Runar
             signed_tx, final_op_push_tx_sig, final_preimage =
               stateless_preimage_pass(
                 signed_tx, contract_utxo, resolved_args, method_name,
-                code_sep_idx, needs_op_push_tx, preimage_index
+                code_sep_idx, needs_op_push_tx, preimage_index, intent_witness_hex
               )
 
             # N-258: re-derive every extra input's preimage and Sig against the
@@ -2045,7 +2048,7 @@ module Runar
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
       def stateless_preimage_pass(signed_tx, contract_utxo, resolved_args, method_name,
-                                  code_sep_idx, needs_op_push_tx, preimage_index)
+                                  code_sep_idx, needs_op_push_tx, preimage_index, intent_witness_hex = '')
         final_op_push_tx_sig = ''
         final_preimage       = ''
 
@@ -2058,7 +2061,7 @@ module Runar
           resolved_args[preimage_index] = preimage_hex
         end
 
-        real_unlock = build_unlocking_script(method_name, resolved_args)
+        real_unlock = build_unlocking_script(method_name, resolved_args, intent_witness_hex)
         if needs_op_push_tx && !final_op_push_tx_sig.empty?
           real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) + real_unlock
           tmp_tx      = SDK.insert_unlocking_script(signed_tx, 0, real_unlock)
@@ -2070,7 +2073,7 @@ module Runar
           final_op_push_tx_sig          = final_sig
           final_preimage                = final_pre
           real_unlock = build_stateful_prefix(final_sig, false) +
-                        build_unlocking_script(method_name, resolved_args)
+                        build_unlocking_script(method_name, resolved_args, intent_witness_hex)
         end
         signed_tx = SDK.insert_unlocking_script(signed_tx, 0, real_unlock)
 
@@ -2162,10 +2165,10 @@ module Runar
           pi = prepared.preimage_index
           resolved_args[pi] = prepared.preimage if pi >= 0
           build_stateful_prefix('', false) +
-            build_unlocking_script(prepared.method_name, resolved_args)
+            build_unlocking_script(prepared.method_name, resolved_args, prepared.intent_witness_hex)
 
         else
-          build_unlocking_script(prepared.method_name, resolved_args)
+          build_unlocking_script(prepared.method_name, resolved_args, prepared.intent_witness_hex)
         end
       end
       # rubocop:enable Metrics/AbcSize

@@ -922,7 +922,7 @@ public final class RunarContract {
         // Pre-resolve intent-intrinsic witness hex (throws
         // WitnessValueMissingError if any auto-injected param wasn't set).
         String intentWitnessHex = buildIntentWitnessHex(m);
-        String unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;
+        String unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
 
         TransactionBuilder.CallResult result = TransactionBuilder.buildCallTransaction(
             artifact, currentUtxo, unlockHex, null, 0, provider, signer, null
@@ -939,7 +939,7 @@ public final class RunarContract {
                     + String.format("%02x", methodSigHash & 0xff);
                 resolved.set(idx, sigHex);
             }
-            unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;
+            unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
             result = TransactionBuilder.buildCallTransaction(
                 artifact, currentUtxo, unlockHex, null, 0, provider, signer, null
             );
@@ -1715,7 +1715,7 @@ public final class RunarContract {
         } else {
             // Pure stateless terminal — sign each Sig against the
             // contract-input sighash on the final tx layout.
-            String placeholderUnlock = buildUnlockingScript(m, resolved) + intentWitnessHex;
+            String placeholderUnlock = buildUnlockingScript(m, resolved, intentWitnessHex);
             RawTx tx = buildTx.get();
             tx.setUnlockingScript(0, placeholderUnlock);
             if (!sigIndices.isEmpty()) {
@@ -1729,7 +1729,7 @@ public final class RunarContract {
                     resolved.set(idx, sigHex);
                 }
             }
-            contractUnlock = buildUnlockingScript(m, resolved) + intentWitnessHex;
+            contractUnlock = buildUnlockingScript(m, resolved, intentWitnessHex);
         }
 
         RawTx finalTx = buildTx.get();
@@ -2388,7 +2388,7 @@ public final class RunarContract {
                     + "' (index " + i + ")");
         }
 
-        String unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;
+        String unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
         Map<String, Object> continuation = artifact.isStateful() ? new java.util.LinkedHashMap<>(state) : null;
         long newSats = artifact.isStateful() ? currentUtxo.satoshis() : 0;
 
@@ -2678,7 +2678,7 @@ public final class RunarContract {
         } else {
             // Pure stateless terminal — finalizeCall splices Sig pushes
             // into the rebuilt unlock.
-            String placeholderUnlock = buildUnlockingScript(m, resolved) + intentWitnessHex;
+            String placeholderUnlock = buildUnlockingScript(m, resolved, intentWitnessHex);
             RawTx tx = buildTx.get();
             tx.setUnlockingScript(0, placeholderUnlock);
             byte[] sh = sigIndices.isEmpty()
@@ -2793,7 +2793,7 @@ public final class RunarContract {
             return finishPushTx(m, prepared.methodName, RawTxParser.parse(prepared.txHex()),
                 prepared.pushTx, resolved, provider);
         }
-        String unlockHex = buildUnlockingScript(m, resolved) + prepared.intentWitnessHex;
+        String unlockHex = buildUnlockingScript(m, resolved, prepared.intentWitnessHex);
 
         // Rebuild the tx with the real unlocking script. The outputs
         // (and therefore BIP-143 sighash inputs) are identical to the
@@ -2824,13 +2824,23 @@ public final class RunarContract {
         return null;
     }
 
-    private String buildUnlockingScript(RunarArtifact.ABIMethod m, List<Object> args) {
+    /**
+     * Args, then {@code witnessHex} (the method's pre-encoded intent-witness
+     * pushes from {@link #buildIntentWitnessHex}), then the selector. N-412:
+     * the auto-injected {@code _prevOutScript_<i>} / {@code _serialisedOutputs}
+     * params are the LAST ABI params, so the script reads them directly
+     * beneath the selector, the slot {@code buildPushTxUnlock} gives them too
+     * (after the preimage). Appending them after the selector put them on top
+     * of it, where a multi-method dispatcher reads its selector.
+     */
+    private String buildUnlockingScript(RunarArtifact.ABIMethod m, List<Object> args, String witnessHex) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < args.size(); i++) {
             Object arg = args.get(i);
             String type = i < m.params().size() ? m.params().get(i).type() : "ByteString";
             sb.append(ContractScript.encodeConstructorArg(arg, type));
         }
+        if (witnessHex != null) sb.append(witnessHex);
         // Append a method-selector push when the contract exposes more
         // than one public method. The compiler emits a router that
         // pops this index off the stack and dispatches accordingly.

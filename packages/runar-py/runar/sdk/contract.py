@@ -837,15 +837,16 @@ class RunarContract:
         # Non-terminal path
         # -------------------------------------------------------------------
         # Initial unlocking script (with placeholders). Intent-witness hex is
-        # suffixed so size estimation accounts for the witness pushes; the
+        # included (before the selector, N-412) so size estimation accounts
+        # for the witness pushes; the
         # real ABI-correct unlock is rebuilt by _build_stateful_unlock below
         # for stateful methods.
         if needs_op_push_tx:
             # Prepend placeholder prefix (optionally _codePart + _opPushTxSig)
             unlocking_script = self._build_stateful_prefix('00' * 72, method_uses_code_part) + \
-                self.build_unlocking_script(method_name, resolved_args) + witness_hex
+                self.build_unlocking_script(method_name, resolved_args, witness_hex)
         else:
-            unlocking_script = self.build_unlocking_script(method_name, resolved_args) + witness_hex
+            unlocking_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
         new_locking_script = ''
         new_satoshis = 0
@@ -1438,7 +1439,7 @@ class RunarContract:
                 final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
             # Don't sign Sig params -- keep placeholders
-            real_unlocking_script = self.build_unlocking_script(method_name, resolved_args)
+            real_unlocking_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
             if needs_op_push_tx and final_op_push_tx_sig:
                 real_unlocking_script = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlocking_script
                 tmp_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
@@ -1450,7 +1451,7 @@ class RunarContract:
                 final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
                 real_unlocking_script = self._build_stateful_prefix(final_sig, False) + \
-                    self.build_unlocking_script(method_name, resolved_args)
+                    self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
                 # N-258: a zero-mutable-field StatefulSmartContract merge. Each
                 # extra contract input gets a REAL unlock of the same layout as
@@ -1481,7 +1482,7 @@ class RunarContract:
                         input_args[idx] = signer.sign(tx, i + 1, sig_subscript, mu.satoshis)
                     input_args[preimage_index] = extra_pre
                     return self._build_stateful_prefix(extra_op_sig, False) + \
-                        self.build_unlocking_script(method_name, input_args)
+                        self.build_unlocking_script(method_name, input_args, witness_hex)
 
                 extra_real_unlocks = [
                     _build_extra_unlock(tmp_tx, i) for i in range(len(extra_contract_utxos))
@@ -1543,7 +1544,7 @@ class RunarContract:
                 final_op_push_tx_sig = rebuilt_sig
                 final_preimage = rebuilt_pre
                 real_unlocking_script = self._build_stateful_prefix(rebuilt_sig, False) + \
-                    self.build_unlocking_script(method_name, resolved_args)
+                    self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
                 # N-258: re-derive every extra input's preimage and Sig against
                 # the rebuilt tx (its change output is final now).
@@ -1655,9 +1656,9 @@ class RunarContract:
             if prepared.preimage_index >= 0:
                 resolved_args[prepared.preimage_index] = prepared.preimage
             primary_unlock = self._build_stateful_prefix('', False) + \
-                self.build_unlocking_script(prepared.method_name, resolved_args)
+                self.build_unlocking_script(prepared.method_name, resolved_args, prepared.intent_witness_hex)
         else:
-            primary_unlock = self.build_unlocking_script(prepared.method_name, resolved_args)
+            primary_unlock = self.build_unlocking_script(prepared.method_name, resolved_args, prepared.intent_witness_hex)
 
         final_tx = insert_unlocking_script(prepared.tx_hex, 0, primary_unlock)
 
@@ -1817,11 +1818,19 @@ class RunarContract:
 
         return script
 
-    def build_unlocking_script(self, method_name: str, args: list) -> str:
-        """Build the unlocking script for a method call."""
+    def build_unlocking_script(self, method_name: str, args: list, witness_hex: str = '') -> str:
+        """Build the unlocking script for a method call.
+
+        ``witness_hex`` is the method's pre-encoded intent-witness pushes
+        (``_build_intent_witness_hex``). N-412: the auto-injected
+        ``_prevOutScript_<i>`` / ``_serialisedOutputs`` params are the LAST ABI
+        params, so they go after the args and before the selector -- the slot
+        the stateful unlock gives them too (after the preimage).
+        """
         script = ''
         for arg in args:
             script += _encode_arg(arg)
+        script += witness_hex
 
         public_methods = self._get_public_methods()
         if len(public_methods) > 1:
@@ -1959,15 +1968,14 @@ class RunarContract:
             else:
                 term_outputs.append(item)
 
-        # Build placeholder unlocking script (witness_hex suffixed for sizing
-        # — the real ABI-correct unlock is built by
+        # Build placeholder unlocking script (witness_hex in its ABI slot,
+        # before the selector -- N-412; the real unlock is built by
         # build_stateful_terminal_unlock below for stateful methods).
         if needs_op_push_tx:
             term_unlock_script = self._build_stateful_prefix('00' * 72, False) + \
-                self.build_unlocking_script(method_name, resolved_args)
+                self.build_unlocking_script(method_name, resolved_args, witness_hex)
         else:
-            term_unlock_script = self.build_unlocking_script(method_name, resolved_args)
-        term_unlock_script += witness_hex
+            term_unlock_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
         # Funding (and terminal fee) inputs are signed by funding_signer when
         # set (issue #134). The method's own Sig args stay with the connected
@@ -2078,7 +2086,7 @@ class RunarContract:
                 resolved_args[preimage_index] = preimage_hex
 
             # Don't sign Sig params -- keep 72-byte placeholders
-            real_unlock = self.build_unlocking_script(method_name, resolved_args)
+            real_unlock = self.build_unlocking_script(method_name, resolved_args, witness_hex)
             if needs_op_push_tx and final_op_push_tx_sig:
                 real_unlock = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlock
                 tmp_tx = insert_unlocking_script(term_tx, 0, real_unlock)
@@ -2090,7 +2098,7 @@ class RunarContract:
                 final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
                 real_unlock = self._build_stateful_prefix(final_sig, False) + \
-                    self.build_unlocking_script(method_name, resolved_args)
+                    self.build_unlocking_script(method_name, resolved_args, witness_hex)
             term_tx = insert_unlocking_script(term_tx, 0, real_unlock)
             if not final_preimage and needs_op_push_tx:
                 final_preimage = resolved_args[preimage_index]

@@ -3221,6 +3221,15 @@
       "reviewer": "siggi",
       "date": "2026-10-21",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-call/stateless-witness.json",
+      "sha256": "0068c8b37d8dddb157e85093183248f98cc63e90034c89519f1af6a1cd17a03a",
+      "verified-against": "second-implementation",
+      "reason": "N-412 (R154/R155, user decisions 2026-10-25). NEW golden: a stateless intent-witness call vector (StatelessWitness, a SmartContract calling extractPrevOutputScript so its ABI carries a trailing _prevOutScript_0 witness) stamped by the TS SDK's call()/prepareCall()/finalizeCall() via conformance/sdk-call/generate-stateless-witness.ts (--check reproduces it). Oracles actually run: @bsv/sdk Spend accepts the peek, spend (real OP_CHECKSIG) and prepare/finalize contract inputs, and rejects a flipped witness byte and the pre-fix shape with the witness push omitted (conformance/sdk-call/stateless-witness.test.ts); the Go, Rust, Python, Ruby and Zig SDKs reproduce the whole broadcast tx byte for byte; Java reproduces the input-0 unlock layout (its stateless call funds no P2PKH input, so the tx differs).",
+      "reviewer": "siggi",
+      "date": "2026-10-25",
+      "review-status": "reviewed"
     }
   ]
 }

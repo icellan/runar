@@ -1232,17 +1232,16 @@ export class RunarContract {
       }
 
       let termUnlockScript: string;
+      // Witness values are part of the size-estimation script too so the
+      // BIP-143 preimage sees the same input weight that the final unlock
+      // will produce; buildUnlockingScript puts them in their ABI slot
+      // (before the method selector, N-412).
       if (needsOpPushTx) {
         termUnlockScript = encodePushData('00'.repeat(72)) +
-          this.buildUnlockingScript(methodName, resolvedArgs);
+          this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
       } else {
-        termUnlockScript = this.buildUnlockingScript(methodName, resolvedArgs);
+        termUnlockScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
       }
-      // Witness values are appended to the size-estimation script too so
-      // the BIP-143 preimage sees the same input weight that the final
-      // stateful unlock will produce (the real final unlock is built by
-      // `buildUnlock` below which inserts witnessHex in the correct ABI slot).
-      termUnlockScript += witnessHex;
 
       // Sequence (issue #131): all-final inputs make nLockTime a consensus
       // no-op — when a non-zero locktime is set, default to 0xfffffffe so the
@@ -1327,7 +1326,7 @@ export class RunarContract {
           resolvedArgs[preimageIndex] = preimageHex;
         }
         // Don't sign Sig params — keep 72-byte placeholders
-        let realUnlock = this.buildUnlockingScript(methodName, resolvedArgs);
+        let realUnlock = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
         if (needsOpPushTx && finalOpPushTxSig) {
           realUnlock = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlock;
           termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
@@ -1339,7 +1338,7 @@ export class RunarContract {
           finalOpPushTxSig = finalSig;
           finalPreimage = finalPre;
           realUnlock = this.buildStatefulPrefix(finalSig) +
-            this.buildUnlockingScript(methodName, resolvedArgs);
+            this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
         }
         termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
         invalidateTxCache(termTx);
@@ -1435,16 +1434,16 @@ export class RunarContract {
     // -------------------------------------------------------------------
 
     // Build the initial unlocking script (with placeholders). Intent-witness
-    // hex is suffixed so size estimation (and any downstream
+    // hex is included (before the selector, N-412) so size estimation (and any downstream
     // assertScriptHexUnderLimit / fee math) accounts for the witness pushes.
     // The real ABI-correct unlock is rebuilt by buildStatefulUnlock below for
     // stateful methods.
     let unlockingScript: string;
     if (needsOpPushTx) {
       unlockingScript = encodePushData('00'.repeat(72)) +
-        this.buildUnlockingScript(methodName, resolvedArgs) + witnessHex;
+        this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
     } else {
-      unlockingScript = this.buildUnlockingScript(methodName, resolvedArgs) + witnessHex;
+      unlockingScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
     }
 
     let newLockingScript: string | undefined;
@@ -1971,7 +1970,7 @@ export class RunarContract {
         resolvedArgs[preimageIndex] = preimageHex;
       }
       // Don't sign Sig params — keep placeholders
-      let realUnlockingScript = this.buildUnlockingScript(methodName, resolvedArgs);
+      let realUnlockingScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
       if (needsOpPushTx && finalOpPushTxSig) {
         realUnlockingScript = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlockingScript;
         tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
@@ -1983,7 +1982,7 @@ export class RunarContract {
         finalOpPushTxSig = finalSig;
         finalPreimage = finalPre;
         realUnlockingScript = this.buildStatefulPrefix(finalSig) +
-          this.buildUnlockingScript(methodName, resolvedArgs);
+          this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
 
         // N-258: a zero-mutable-field StatefulSmartContract merge. Each
         // extra contract input gets a REAL unlock of the same layout as the
@@ -2009,7 +2008,7 @@ export class RunarContract {
             inputArgs[idx] = await signer.sign(currentHex, i + 1, sigSubscript, mu.satoshis);
           }
           inputArgs[preimageIndex] = extraPre;
-          return this.buildStatefulPrefix(extraOpSig) + this.buildUnlockingScript(methodName, inputArgs);
+          return this.buildStatefulPrefix(extraOpSig) + this.buildUnlockingScript(methodName, inputArgs, witnessHex);
         };
         const extraRealUnlocks: string[] = [];
         for (let i = 0; i < extraContractUtxos.length; i++) {
@@ -2080,7 +2079,7 @@ export class RunarContract {
         finalOpPushTxSig = rebuiltSig;
         finalPreimage = rebuiltPre;
         realUnlockingScript = this.buildStatefulPrefix(rebuiltSig) +
-          this.buildUnlockingScript(methodName, resolvedArgs);
+          this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
 
         // N-258: re-derive every extra input's preimage and Sig against the
         // rebuilt tx (its change output is final now).
@@ -2210,9 +2209,9 @@ export class RunarContract {
         resolvedArgs[prepared._preimageIndex] = prepared.preimage;
       }
       primaryUnlock = this.buildStatefulPrefix('') +
-        this.buildUnlockingScript(prepared._methodName, resolvedArgs);
+        this.buildUnlockingScript(prepared._methodName, resolvedArgs, prepared._intentWitnessHex);
     } else {
-      primaryUnlock = this.buildUnlockingScript(prepared._methodName, resolvedArgs);
+      primaryUnlock = this.buildUnlockingScript(prepared._methodName, resolvedArgs, prepared._intentWitnessHex);
     }
 
     // Insert primary unlock into the transaction
@@ -2491,16 +2490,24 @@ export class RunarContract {
    * Build the unlocking script for a method call.
    *
    * The unlocking script pushes the method arguments onto the stack in
-   * order, followed by a method selector (the method index as a Script
-   * number) if the contract has multiple public methods.
+   * order, then `witnessHex` (the pre-encoded intent-witness pushes from
+   * buildIntentWitnessHex — the method's trailing auto-injected params),
+   * followed by a method selector (the method index as a Script number) if
+   * the contract has multiple public methods.
    */
-  buildUnlockingScript(methodName: string, args: unknown[]): string {
+  buildUnlockingScript(methodName: string, args: unknown[], witnessHex = ''): string {
     let script = '';
 
     // Push each argument
     for (const arg of args) {
       script += encodeArg(arg);
     }
+
+    // N-412: the auto-injected intent-witness params (`_prevOutScript_<i>`,
+    // `_serialisedOutputs`) are the LAST ABI params, so the script reads them
+    // directly beneath the selector — the same slot the stateful unlock
+    // gives them (after the preimage, before the selector).
+    script += witnessHex;
 
     // If there are multiple public methods, push the method selector
     const publicMethods = this.artifact.abi.methods.filter((m) => m.isPublic);

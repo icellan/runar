@@ -998,23 +998,18 @@ impl RunarContract {
         // -------------------------------------------------------------------
 
         // Initial unlocking script (with placeholders). Intent-witness hex is
-        // suffixed so size estimation accounts for the witness pushes; the real
-        // ABI-correct unlock is rebuilt by build_stateful_unlock below for
-        // stateful methods.
+        // included (in its ABI slot, before the selector — N-412) so size
+        // estimation accounts for the witness pushes; the real unlock is
+        // rebuilt by build_stateful_unlock below for stateful methods.
         let unlocking_script = if needs_op_push_tx {
             // Prepend placeholder prefix (optionally _codePart + _opPushTxSig) before user args
             format!(
-                "{}{}{}",
+                "{}{}",
                 self.build_stateful_prefix(&"00".repeat(72), method_uses_code_part),
-                self.build_unlocking_script(method_name, &resolved_args)?,
-                witness_hex,
+                self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?,
             )
         } else {
-            format!(
-                "{}{}",
-                self.build_unlocking_script(method_name, &resolved_args)?,
-                witness_hex,
-            )
+            self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?
         };
 
         let mut new_locking_script: Option<String> = None;
@@ -1754,7 +1749,7 @@ impl RunarContract {
                 }
             }
             // Don't sign Sig params — keep placeholders
-            let mut real_unlocking_script = self.build_unlocking_script(method_name, &resolved_args)?;
+            let mut real_unlocking_script = self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?;
             if needs_op_push_tx && !final_op_push_tx_sig.is_empty() {
                 real_unlocking_script = format!("{}{}", self.build_stateful_prefix(&final_op_push_tx_sig, false), real_unlocking_script);
 
@@ -1770,7 +1765,7 @@ impl RunarContract {
                 real_unlocking_script = format!(
                     "{}{}",
                     self.build_stateful_prefix(&final_op_push_tx_sig, false),
-                    self.build_unlocking_script(method_name, &resolved_args)?
+                    self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?
                 );
 
                 // N-258: a zero-mutable-field StatefulSmartContract merge. Each
@@ -1810,7 +1805,7 @@ impl RunarContract {
                     Ok(format!(
                         "{}{}",
                         self.build_stateful_prefix(&extra_op_sig, false),
-                        self.build_unlocking_script(method_name, &input_args)?
+                        self.build_unlocking_script_with_witness(method_name, &input_args, &witness_hex)?
                     ))
                 };
                 let mut extra_real_unlocks: Vec<String> = Vec::with_capacity(extra_contract_utxos.len());
@@ -1900,7 +1895,7 @@ impl RunarContract {
                 real_unlocking_script = format!(
                     "{}{}",
                     self.build_stateful_prefix(&final_op_push_tx_sig, false),
-                    self.build_unlocking_script(method_name, &resolved_args)?
+                    self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?
                 );
 
                 // N-258: re-derive every extra input's preimage and Sig
@@ -2040,10 +2035,10 @@ impl RunarContract {
             format!(
                 "{}{}",
                 self.build_stateful_prefix("", false),
-                self.build_unlocking_script(&prepared.method_name, &resolved_args)?,
+                self.build_unlocking_script_with_witness(&prepared.method_name, &resolved_args, &prepared.intent_witness_hex)?,
             )
         } else {
-            self.build_unlocking_script(&prepared.method_name, &resolved_args)?
+            self.build_unlocking_script_with_witness(&prepared.method_name, &resolved_args, &prepared.intent_witness_hex)?
         };
 
         // Insert primary unlock into the transaction
@@ -2173,23 +2168,18 @@ impl RunarContract {
             options.and_then(|o| o.sequence),
         ));
 
-        // Build placeholder unlocking script (witness_hex suffixed for sizing
-        // — the real ABI-correct unlock is built by build_unlock below for
-        // stateful methods).
+        // Build placeholder unlocking script (witness_hex in its ABI slot,
+        // before the selector — N-412; the real unlock is built by
+        // build_unlock below for stateful methods).
         // Terminal never needs code part (needsCodePart = false)
         let term_unlock_script = if needs_op_push_tx {
             format!(
-                "{}{}{}",
+                "{}{}",
                 self.build_stateful_prefix(&"00".repeat(72), false),
-                self.build_unlocking_script(method_name, resolved_args)?,
-                witness_hex,
+                self.build_unlocking_script_with_witness(method_name, resolved_args, witness_hex)?,
             )
         } else {
-            format!(
-                "{}{}",
-                self.build_unlocking_script(method_name, resolved_args)?,
-                witness_hex,
-            )
+            self.build_unlocking_script_with_witness(method_name, resolved_args, witness_hex)?
         };
 
         // Optional fee input (issue #118): a plain P2PKH UTXO consumed entirely
@@ -2281,7 +2271,7 @@ impl RunarContract {
                 }
             }
             // Don't sign Sig params — keep 72-byte placeholders
-            let mut real_unlock = self.build_unlocking_script(method_name, resolved_args)?;
+            let mut real_unlock = self.build_unlocking_script_with_witness(method_name, resolved_args, witness_hex)?;
             if needs_op_push_tx && !final_op_push_tx_sig.is_empty() {
                 real_unlock = format!("{}{}", self.build_stateful_prefix(&final_op_push_tx_sig, false), real_unlock);
                 let tmp_tx = insert_unlocking_script(&term_tx, 0, &real_unlock)?;
@@ -2296,7 +2286,7 @@ impl RunarContract {
                 real_unlock = format!(
                     "{}{}",
                     self.build_stateful_prefix(&final_op_push_tx_sig, false),
-                    self.build_unlocking_script(method_name, resolved_args)?
+                    self.build_unlocking_script_with_witness(method_name, resolved_args, witness_hex)?
                 );
             }
             term_tx = insert_unlocking_script(&term_tx, 0, &real_unlock)?;
@@ -2603,12 +2593,28 @@ impl RunarContract {
         method_name: &str,
         args: &[SdkValue],
     ) -> Result<String, String> {
+        self.build_unlocking_script_with_witness(method_name, args, "")
+    }
+
+    /// `build_unlocking_script` with the method's pre-encoded intent-witness
+    /// pushes (`build_intent_witness_hex`) placed after the args and before
+    /// the selector. N-412: the auto-injected `_prevOutScript_<i>` /
+    /// `_serialisedOutputs` params are the LAST ABI params, so the script
+    /// reads them directly beneath the selector — the slot the stateful
+    /// unlock gives them too (after the preimage, before the selector).
+    fn build_unlocking_script_with_witness(
+        &self,
+        method_name: &str,
+        args: &[SdkValue],
+        witness_hex: &str,
+    ) -> Result<String, String> {
         let mut script = String::new();
 
         // Push each argument
         for arg in args {
             script.push_str(&encode_arg(arg));
         }
+        script.push_str(witness_hex);
 
         // If there are multiple public methods, push the method selector
         let public_methods: Vec<&AbiMethod> = self

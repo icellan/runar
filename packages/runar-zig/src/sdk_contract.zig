@@ -252,11 +252,6 @@ pub const ContractError = error{
     /// other path would ship a placeholder/primary-only unlock and the
     /// resulting tx would be invalid (or, before this fix, silently drop
     /// the extra UTXOs while reporting success). Fail closed instead.
-    /// N-149: a non-stateful method declares intent-witness params
-    /// (`_prevOutScript_<i>` / `_serialisedOutputs`). The stateless unlock
-    /// builders (here and in the TS SDK) never push the witnesses, so
-    /// building the call would yield a script missing them; refuse instead.
-    StatelessIntentWitnessUnsupported,
     AdditionalContractInputsUnsupported,
 };
 
@@ -740,13 +735,6 @@ pub const RunarContract = struct {
 
         // Detect which params need auto-resolution
         const abi_method = self.findMethod(method_name).?;
-        // N-149: the stateless unlock builder never pushes intent-witness
-        // values; refuse rather than build a tx missing them.
-        if (!parent_stateful) {
-            for (abi_method.params) |p| {
-                if (types.isIntentWitnessParam(p.name)) return ContractError.StatelessIntentWitnessUnsupported;
-            }
-        }
         var needs_change = false;
         var needs_new_amount = false;
         for (abi_method.params) |p| {
@@ -1379,7 +1367,7 @@ pub const RunarContract = struct {
                     self.allocator.free(eu);
                 }
             } else {
-                const su = try self.buildUnlockingScript(method_name, resolved_args);
+                const su = try self.buildUnlockingScriptWithWitness(method_name, resolved_args, witness_hex);
                 contract_input_bytes += contractInputSerializedBytes(su.len);
                 self.allocator.free(su);
             }
@@ -1422,8 +1410,8 @@ pub const RunarContract = struct {
         // below so its auto-injected checkPreimage gets a preimage AND its user
         // checkSig is signed over the trimmed subscript (issue #44).
         if (!parent_stateful) {
-            // Build unlocking script: args + method selector
-            const unlock = try self.buildUnlockingScript(method_name, resolved_args);
+            // Build unlocking script: args + intent witness + method selector (N-412)
+            const unlock = try self.buildUnlockingScriptWithWitness(method_name, resolved_args, witness_hex);
             defer self.allocator.free(unlock);
 
             // Terminal stateless: outputs are the caller-supplied
@@ -1490,7 +1478,7 @@ pub const RunarContract = struct {
 
             // Rebuild the unlocking script with real signatures
             if (sig_indices.items.len > 0) {
-                const real_unlock = try self.buildUnlockingScript(method_name, resolved_args);
+                const real_unlock = try self.buildUnlockingScriptWithWitness(method_name, resolved_args, witness_hex);
                 defer self.allocator.free(real_unlock);
                 const new_tx = try insertUnlockingScript(self.allocator, signed_tx, 0, real_unlock);
                 self.allocator.free(signed_tx);
@@ -1973,13 +1961,12 @@ pub const RunarContract = struct {
         }
 
         const abi_method = self.findMethod(method_name) orelse return ContractError.MethodNotFound;
-        // N-149: the stateless unlock builder never pushes intent-witness
-        // values; refuse rather than build a tx missing them.
-        {
-            for (abi_method.params) |p| {
-                if (types.isIntentWitnessParam(p.name)) return ContractError.StatelessIntentWitnessUnsupported;
-            }
-        }
+        // N-412: pre-resolve the intent-witness pushes (WitnessValueMissing if
+        // a `_prevOutScript_<i>` / `_serialisedOutputs` value was not set);
+        // they go after the args, before the selector, and ride on the
+        // PreparedCall so finalizeCall rebuilds the same unlock.
+        const witness_hex = try self.buildIntentWitnessHex(abi_method);
+        defer self.allocator.free(witness_hex);
         // N-149: same user-arg filter as call() (shared `isSdkSuppliedParam`,
         // is_stateful == false on this path): intent-witness params are
         // SDK-supplied; SigHashPreimage is a user arg on a stateless contract.
@@ -2092,7 +2079,7 @@ pub const RunarContract = struct {
         }
 
         // ---- Build placeholder unlock (sized into funding fee below) -----
-        const placeholder_unlock = try self.buildUnlockingScript(method_name, resolved_args);
+        const placeholder_unlock = try self.buildUnlockingScriptWithWitness(method_name, resolved_args, witness_hex);
         defer self.allocator.free(placeholder_unlock);
 
         // Issue #133: coin-select funding instead of sweeping the wallet. A
@@ -2192,6 +2179,7 @@ pub const RunarContract = struct {
         const sig_indices_owned = try self.allocator.dupe(usize, sig_idx_list.items);
         const method_name_owned = try self.allocator.dupe(u8, method_name);
         const utxo_owned = try contract_utxo.clone(self.allocator);
+        const intent_witness_owned = try self.allocator.dupe(u8, witness_hex);
 
         return types.PreparedCall{
             .tx_hex = signed_tx,
@@ -2203,6 +2191,7 @@ pub const RunarContract = struct {
             .is_stateful = false,
             .new_locking_script = &.{},
             .new_satoshis = 0,
+            .intent_witness_hex = intent_witness_owned,
         };
     }
 
@@ -2855,7 +2844,7 @@ pub const RunarContract = struct {
                 method_selector_opt,
                 prepared.intent_witness_hex,
             );
-        } else try self.buildUnlockingScript(prepared.method_name, prepared.resolved_args);
+        } else try self.buildUnlockingScriptWithWitness(prepared.method_name, prepared.resolved_args, prepared.intent_witness_hex);
         defer self.allocator.free(final_unlock);
 
         const final_tx = try insertUnlockingScript(self.allocator, prepared.tx_hex, 0, final_unlock);
@@ -3146,6 +3135,21 @@ pub const RunarContract = struct {
         method_name: []const u8,
         args: []const types.StateValue,
     ) ![]u8 {
+        return self.buildUnlockingScriptWithWitness(method_name, args, "");
+    }
+
+    /// `buildUnlockingScript` with the method's pre-encoded intent-witness
+    /// pushes (`buildIntentWitnessHex`) placed after the args and before the
+    /// selector. N-412: the auto-injected `_prevOutScript_<i>` /
+    /// `_serialisedOutputs` params are the LAST ABI params, so the script
+    /// reads them directly beneath the selector — the slot the stateful
+    /// unlock gives them too (after the preimage).
+    fn buildUnlockingScriptWithWitness(
+        self: *const RunarContract,
+        method_name: []const u8,
+        args: []const types.StateValue,
+        witness_hex: []const u8,
+    ) ![]u8 {
         var script: std.ArrayListUnmanaged(u8) = .empty;
         errdefer script.deinit(self.allocator);
 
@@ -3155,6 +3159,7 @@ pub const RunarContract = struct {
             defer self.allocator.free(encoded);
             try script.appendSlice(self.allocator, encoded);
         }
+        try script.appendSlice(self.allocator, witness_hex);
 
         // Method selector if multiple public methods
         const public_methods = try self.getPublicMethods();
@@ -5139,17 +5144,18 @@ test "prepareCall and call agree on user-arg arity for a stateless SigHashPreima
     try std.testing.expectError(ContractError.ArgCountMismatch, contract.prepareCall("m", &one, prov.provider(), signer.signer(), null));
 }
 
-// N-149: the stateless unlock builders never push intent-witness values (the
-// TS SDK's stateless final unlock does not either: it appends witnessHex only
-// to the size-estimation placeholder). A stateless method that declares a
-// witness param must therefore be refused by BOTH call() and prepareCall(),
-// not built into a tx whose unlock lacks the witness pushes.
+// N-149 refused a stateless method that declares intent-witness params, because
+// the stateless unlock builders never pushed them. N-412 (user decision R154)
+// replaced that refusal with support in all seven SDKs: the witness pushes go
+// after the declared args and before the selector.
 //
-// Proves: both entry points return StatelessIntentWitnessUnsupported for a
-// stateless ABI with a `_serialisedOutputs` param, even with the witness value
-// set and the correct (user) arg count. Does NOT prove the witness could be
-// supported on a stateless contract (the stack position is unspecified).
-test "stateless call and prepareCall refuse intent-witness params (N-149)" {
+// Proves: prepareCall on a stateless ABI with a `_serialisedOutputs` param no
+// longer refuses; the prepared tx's input 0 carries `<x> <push(witness)>`
+// (single public method, so no selector) and the PreparedCall carries the
+// witness for finalizeCall. Does NOT prove script acceptance (the artifact's
+// script is a stub) — the shared-vector test sdk_n412_stateless_intent_witness_test.zig
+// pins the bytes against the Spend-validated TS reference.
+test "stateless prepareCall pushes intent-witness params (N-149 -> N-412)" {
     const allocator = std.testing.allocator;
     const json =
         \\{"contractName":"Plain","version":"1","compilerVersion":"1.0","script":"5151","asm":"OP_1 OP_1",
@@ -5175,8 +5181,11 @@ test "stateless call and prepareCall refuse intent-witness params (N-149)" {
     });
 
     const one = [_]types.StateValue{.{ .int = 7 }};
-    try std.testing.expectError(ContractError.StatelessIntentWitnessUnsupported, contract.call("m", &one, prov.provider(), signer.signer(), null));
-    try std.testing.expectError(ContractError.StatelessIntentWitnessUnsupported, contract.prepareCall("m", &one, prov.provider(), signer.signer(), null));
+    var prepared = try contract.prepareCall("m", &one, prov.provider(), signer.signer(), null);
+    defer prepared.deinit(allocator);
+    try std.testing.expectEqualStrings("02aabb", prepared.intent_witness_hex);
+    // scriptSig length 0x04, then OP_7, then push(aabb).
+    try std.testing.expect(std.mem.indexOf(u8, prepared.tx_hex, "045702aabb") != null);
 }
 
 test "prepareCall → finalizeCall round-trip broadcasts a tx" {

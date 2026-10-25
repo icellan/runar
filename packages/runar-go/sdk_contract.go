@@ -1334,17 +1334,17 @@ func (c *RunarContract) PrepareCall(
 	}
 
 	// Initial unlocking script (with placeholders). Intent-witness hex is
-	// suffixed so size estimation accounts for the witness pushes; the real
-	// ABI-correct unlock is rebuilt by buildStatefulUnlock below for stateful
+	// included (before the selector, N-412) so size estimation accounts for
+	// the witness pushes; the real unlock is rebuilt by buildStatefulUnlock below for stateful
 	// methods. Built BEFORE funding coin-selection (below) so its byte size — and
 	// the extra contract inputs' — can feed the funding fee estimate (finding C2:
 	// the deploy estimator is otherwise blind to the contract input being spent).
 	var unlockingScript string
 	if needsOpPushTx || isStateful {
 		unlockingScript = c.buildStatefulPrefix(strings.Repeat("00", 72), methodUsesCodePart) +
-			c.BuildUnlockingScript(methodName, resolvedArgs) + witnessHex
+			c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 	} else {
-		unlockingScript = c.BuildUnlockingScript(methodName, resolvedArgs) + witnessHex
+		unlockingScript = c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 	}
 
 	// Resolve per-input args for additional contract inputs
@@ -1755,9 +1755,9 @@ func (c *RunarContract) PrepareCall(
 			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
 		}
 		// Don't sign Sig params — keep placeholders
-		realUnlockingScript := groth16WAWitnessHex + c.BuildUnlockingScript(methodName, resolvedArgs)
+		realUnlockingScript := groth16WAWitnessHex + c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 		if needsOpPushTx && finalOpPushTxSig != "" {
-			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) + c.BuildUnlockingScript(methodName, resolvedArgs)
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) + c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 			tmpTx := InsertUnlockingScript(signedTx, 0, realUnlockingScript)
 			finalSig, finalPre, ptxErr := ComputeOpPushTxWithSigHash(tmpTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, codeSepIdx, sigHashType)
@@ -1768,7 +1768,7 @@ func (c *RunarContract) PrepareCall(
 			finalOpPushTxSig = hex.EncodeToString(finalSig)
 			finalPreimage = hex.EncodeToString(finalPre)
 			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
-				c.BuildUnlockingScript(methodName, resolvedArgs)
+				c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 
 			// N-258: a zero-mutable-field StatefulSmartContract merge. Each
 			// extra contract input gets a REAL unlock of the same layout as
@@ -1801,7 +1801,7 @@ func (c *RunarContract) PrepareCall(
 				}
 				inputArgs[preimageIndex] = hex.EncodeToString(extraPre)
 				return groth16WAWitnessHex + c.buildStatefulPrefix(hex.EncodeToString(extraOpSig), false) +
-					c.BuildUnlockingScript(methodName, inputArgs), nil
+					c.buildUnlockingScriptWithWitness(methodName, inputArgs, witnessHex), nil
 			}
 			extraRealUnlocks := make([]string, len(extraContractUtxos))
 			for i := range extraContractUtxos {
@@ -1902,7 +1902,7 @@ func (c *RunarContract) PrepareCall(
 			finalOpPushTxSig = hex.EncodeToString(rebuiltSig)
 			finalPreimage = hex.EncodeToString(rebuiltPre)
 			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
-				c.BuildUnlockingScript(methodName, resolvedArgs)
+				c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 
 			// N-258: re-derive every extra input's preimage and Sig against
 			// the rebuilt tx (its change output is final now).
@@ -1924,7 +1924,7 @@ func (c *RunarContract) PrepareCall(
 		// Pure stateless contract with witness preamble: no OP_PUSH_TX, no
 		// Sig params, no special handling — just splice the witness pushes
 		// in front of the standard unlock script and reinsert.
-		realUnlockingScript := groth16WAWitnessHex + c.BuildUnlockingScript(methodName, resolvedArgs)
+		realUnlockingScript := groth16WAWitnessHex + c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 		signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
 	}
 
@@ -2044,10 +2044,10 @@ func (c *RunarContract) FinalizeCall(
 		}
 		primaryUnlock = prepared.groth16WAWitnessHex +
 			c.buildStatefulPrefix("", false) +
-			c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
+			c.buildUnlockingScriptWithWitness(prepared.methodName, resolvedArgs, prepared.intentWitnessHex)
 	} else {
 		primaryUnlock = prepared.groth16WAWitnessHex +
-			c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
+			c.buildUnlockingScriptWithWitness(prepared.methodName, resolvedArgs, prepared.intentWitnessHex)
 	}
 
 	finalTxHex := InsertUnlockingScript(prepared.TxHex, 0, primaryUnlock)
@@ -2377,12 +2377,23 @@ func (c *RunarContract) methodSigHashType(methodName string) int {
 // followed by a method selector (the method index as a Script number) if
 // the contract has multiple public methods.
 func (c *RunarContract) BuildUnlockingScript(methodName string, args []interface{}) string {
+	return c.buildUnlockingScriptWithWitness(methodName, args, "")
+}
+
+// buildUnlockingScriptWithWitness is BuildUnlockingScript with the method's
+// pre-encoded intent-witness pushes (buildIntentWitnessHex) placed after the
+// args and before the selector. N-412: the auto-injected `_prevOutScript_<i>`
+// / `_serialisedOutputs` params are the LAST ABI params, so the script reads
+// them directly beneath the selector — the slot the stateful unlock gives
+// them too (after the preimage, before the selector).
+func (c *RunarContract) buildUnlockingScriptWithWitness(methodName string, args []interface{}, witnessHex string) string {
 	script := ""
 
 	// Push each argument
 	for _, arg := range args {
 		script += encodeArg(arg)
 	}
+	script += witnessHex
 
 	// If there are multiple public methods, push the method selector
 	publicMethods := c.getPublicMethods()
@@ -2921,16 +2932,16 @@ func (c *RunarContract) prepareCallTerminal(
 		fundingSigner = options.FundingSigner
 	}
 
-	// Build placeholder unlocking script (witnessHex suffixed for sizing;
-	// the real ABI-correct unlock is built by buildUnlock below for stateful).
+	// Build placeholder unlocking script (witnessHex in its ABI slot, before
+	// the selector — N-412; the real unlock is built by buildUnlock below for
+	// stateful).
 	var termUnlockScript string
 	if needsOpPushTx {
 		termUnlockScript = c.buildStatefulPrefix(strings.Repeat("00", 72), false) +
-			c.BuildUnlockingScript(methodName, resolvedArgs)
+			c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 	} else {
-		termUnlockScript = c.BuildUnlockingScript(methodName, resolvedArgs)
+		termUnlockScript = c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 	}
-	termUnlockScript += witnessHex
 
 	// Terminal calls (auction close/claim/withdraw) typically assert
 	// extractLocktime(preimage) >= deadline. Default 0 preserves legacy
@@ -3039,7 +3050,7 @@ func (c *RunarContract) prepareCallTerminal(
 			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
 		}
 		// Don't sign Sig params — keep 72-byte placeholders
-		realUnlock := c.BuildUnlockingScript(methodName, resolvedArgs)
+		realUnlock := c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 		if needsOpPushTx && finalOpPushTxSig != "" {
 			realUnlock = c.buildStatefulPrefix(finalOpPushTxSig, false) + realUnlock
 			tmpTx := InsertUnlockingScript(termTx, 0, realUnlock)
@@ -3052,7 +3063,7 @@ func (c *RunarContract) prepareCallTerminal(
 			finalOpPushTxSig = hex.EncodeToString(finalSig)
 			finalPreimage = hex.EncodeToString(finalPre)
 			realUnlock = c.buildStatefulPrefix(finalOpPushTxSig, false) +
-				c.BuildUnlockingScript(methodName, resolvedArgs)
+				c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 		}
 		termTx = InsertUnlockingScript(termTx, 0, realUnlock)
 		if finalPreimage == "" && needsOpPushTx {
