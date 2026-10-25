@@ -1000,6 +1000,7 @@ class RbParser {
     let isReadonly = false;
     let embedAlways = false;
     let initializer: Expression | undefined;
+    let optionError = false;
     while (this.peek().type === ',') {
       this.advance(); // ','
       if (this.checkIdent('embed_always')) {
@@ -1014,6 +1015,7 @@ class RbParser {
           embedAlways = false;
         } else {
           this.badBooleanPropOption('embed_always');
+          optionError = true;
           break;
         }
       } else if (this.checkIdent('readonly')) {
@@ -1027,6 +1029,7 @@ class RbParser {
           isReadonly = false;
         } else {
           this.badBooleanPropOption('readonly');
+          optionError = true;
           break;
         }
       } else if (this.checkIdent('default')) {
@@ -1041,8 +1044,23 @@ class RbParser {
           'error',
           this.loc(),
         ));
+        optionError = true;
         break;
       }
+    }
+
+    // N-413: nothing may follow the type or an option value except `,` (the
+    // next option) or end of line. `default:` takes one literal, so
+    // `default: 1 + 2` or `default: '00' * 33` is refused here rather than
+    // silently truncated to its first operand; `readonly: true false` and a
+    // missing comma (`default: 3 readonly: true`) likewise. Same text in all
+    // seven tiers, at the leftover token's line:col.
+    if (!optionError && this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+      this.errors.push(makeDiagnostic(
+        `unexpected '${this.peek().value || this.peek().type}' in prop declaration (expected ',' or end of line)`,
+        'error',
+        this.loc(),
+      ));
     }
 
     // In stateless contracts (SmartContract and UnsafeSmartContract),

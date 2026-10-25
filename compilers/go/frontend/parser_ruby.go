@@ -1114,6 +1114,7 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 	isReadonly := false
 	embedAlways := false
 	var initializer Expression
+	optionError := false
 	for p.check(rbTokComma) {
 		p.advance() // ','
 		if p.checkIdent("embed_always") {
@@ -1128,6 +1129,7 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 				embedAlways = false
 			} else {
 				p.badBooleanPropOption("embed_always")
+				optionError = true
 				break
 			}
 		} else if p.checkIdent("readonly") {
@@ -1141,6 +1143,7 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 				isReadonly = false
 			} else {
 				p.badBooleanPropOption("readonly")
+				optionError = true
 				break
 			}
 		} else if p.checkIdent("default") {
@@ -1151,8 +1154,16 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 			// N-301: an unknown option (e.g. a typo of `embed_always`) is
 			// refused, never silently dropped. Same text in all seven tiers.
 			p.addError(fmt.Sprintf("line %d: unknown prop option '%s' (expected readonly, embed_always or default)", p.peek().line, p.peek().value))
+			optionError = true
 			break
 		}
+	}
+
+	// N-413: nothing may follow the type or an option value except `,` (the
+	// next option) or end of line, so `default: 1 + 2` is refused rather than
+	// silently truncated to its first operand. Same text in all seven tiers.
+	if !optionError && !p.check(rbTokNewline) && !p.check(rbTokEOF) {
+		p.addError(fmt.Sprintf("line %d: unexpected '%s' in prop declaration (expected ',' or end of line)", p.peek().line, p.peek().value))
 	}
 
 	// In stateless contracts (SmartContract and UnsafeSmartContract), all

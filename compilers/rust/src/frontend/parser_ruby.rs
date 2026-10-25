@@ -379,6 +379,8 @@ fn rb_token_text(tok: &Token) -> String {
         Token::Symbol(name) => name.clone(),
         Token::Ident(name) => name.clone(),
         Token::NumberLit(n) => n.to_string(),
+        Token::TrueLit => "true".into(),
+        Token::FalseLit => "false".into(),
         Token::Plus => "+".into(),
         Token::Star => "*".into(),
         Token::Slash => "/".into(),
@@ -1335,6 +1337,7 @@ impl<'a> RbParser<'a> {
         let mut is_readonly = false;
         let mut embed_always = false;
         let mut initializer: Option<Expression> = None;
+        let mut option_error = false;
         while *self.peek() == Token::Comma {
             self.advance(); // ','
             if self.check_ident("embed_always") {
@@ -1349,6 +1352,7 @@ impl<'a> RbParser<'a> {
                     embed_always = false;
                 } else {
                     self.bad_boolean_prop_option("embed_always");
+                    option_error = true;
                     break;
                 }
             } else if self.check_ident("readonly") {
@@ -1362,6 +1366,7 @@ impl<'a> RbParser<'a> {
                     is_readonly = false;
                 } else {
                     self.bad_boolean_prop_option("readonly");
+                    option_error = true;
                     break;
                 }
             } else if self.check_ident("default") {
@@ -1376,8 +1381,20 @@ impl<'a> RbParser<'a> {
                     "unknown prop option '{}' (expected readonly, embed_always or default)",
                     tok_text
                 ));
+                option_error = true;
                 break;
             }
+        }
+
+        // N-413: nothing may follow the type or an option value except `,`
+        // (the next option) or end of line, so `default: 1 + 2` is refused
+        // rather than silently truncated to its first operand. Same text in
+        // all seven tiers.
+        if !option_error && *self.peek() != Token::Newline && *self.peek() != Token::Eof {
+            self.errors.push(format!(
+                "unexpected '{}' in prop declaration (expected ',' or end of line)",
+                rb_token_text(self.peek())
+            ));
         }
 
         // In stateless contracts (SmartContract and UnsafeSmartContract), all

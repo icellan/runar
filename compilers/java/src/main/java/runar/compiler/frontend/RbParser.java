@@ -991,6 +991,7 @@ public final class RbParser {
             boolean isReadonly = false;
             boolean embedAlways = false;
             Expression initializer = null;
+            boolean optionError = false;
 
             while (peek().kind == TK.COMMA) {
                 advance();
@@ -1006,6 +1007,7 @@ public final class RbParser {
                         embedAlways = false;
                     } else {
                         badBooleanPropOption("embed_always");
+                        optionError = true;
                         break;
                     }
                 } else if (checkIdent("readonly")) {
@@ -1019,6 +1021,7 @@ public final class RbParser {
                         isReadonly = false;
                     } else {
                         badBooleanPropOption("readonly");
+                        optionError = true;
                         break;
                     }
                 } else if (checkIdent("default")) {
@@ -1031,8 +1034,19 @@ public final class RbParser {
                     errors.add(file + ":" + peek().line + ":" + peek().col
                         + ": unknown prop option '" + peek().value
                         + "' (expected readonly, embed_always or default)");
+                    optionError = true;
                     break;
                 }
+            }
+
+            // N-413: nothing may follow the type or an option value except `,`
+            // (the next option) or end of line, so `default: 1 + 2` is refused
+            // rather than silently truncated to its first operand. Same text in
+            // all seven tiers.
+            if (!optionError && peek().kind != TK.NEWLINE && peek().kind != TK.EOF) {
+                errors.add(file + ":" + peek().line + ":" + peek().col
+                    + ": unexpected '" + peek().value
+                    + "' in prop declaration (expected ',' or end of line)");
             }
 
             // Stateless contracts (SmartContract and UnsafeSmartContract):

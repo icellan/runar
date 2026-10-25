@@ -23,7 +23,7 @@ class TicTacToe < Runar::StatefulSmartContract
   prop :p2pkh_prefix,  ByteString, readonly: true, default: '1976a914'
   prop :p2pkh_suffix,  ByteString, readonly: true, default: '88ac'
 
-  prop :player_o, PubKey,  default: '00' * 33
+  prop :player_o, PubKey,  default: '000000000000000000000000000000000000000000000000000000000000000000'
   prop :c0,       Bigint,  default: 0
   prop :c1,       Bigint,  default: 0
   prop :c2,       Bigint,  default: 0

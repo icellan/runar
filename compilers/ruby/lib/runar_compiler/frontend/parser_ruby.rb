@@ -1080,6 +1080,7 @@ module RunarCompiler
 
         # Check for optional trailing +readonly: true+, +embed_always: true+
         # or +default: value+
+        option_error = false
         while peek.kind == TOK_COMMA
           advance # ','
 
@@ -1095,6 +1096,7 @@ module RunarCompiler
               embed_always = false
             else
               bad_boolean_prop_option("embed_always")
+              option_error = true
               break
             end
           elsif check_ident("readonly")
@@ -1108,6 +1110,7 @@ module RunarCompiler
               is_readonly = false
             else
               bad_boolean_prop_option("readonly")
+              option_error = true
               break
             end
           elsif check_ident("default")
@@ -1118,8 +1121,17 @@ module RunarCompiler
             # N-301: an unknown option (e.g. a typo of +embed_always+) is
             # refused, never silently dropped. Same text in all seven tiers.
             @errors << "#{@file}:#{peek.line}:#{peek.col}: unknown prop option '#{peek.value}' (expected readonly, embed_always or default)"
+            option_error = true
             break
           end
+        end
+
+        # N-413: nothing may follow the type or an option value except +,+
+        # (the next option) or end of line, so +default: 1 + 2+ is refused
+        # rather than silently truncated to its first operand. Same text in
+        # all seven tiers.
+        if !option_error && peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF
+          @errors << "#{@file}:#{peek.line}:#{peek.col}: unexpected '#{peek.value}' in prop declaration (expected ',' or end of line)"
         end
 
         # In stateless contracts (SmartContract and UnsafeSmartContract), all

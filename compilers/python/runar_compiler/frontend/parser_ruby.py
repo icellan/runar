@@ -1050,6 +1050,7 @@ class _RbParser:
         initializer: Expression | None = None
 
         # Check for optional trailing ``readonly: true`` or ``default: value``
+        option_error = False
         while self._peek().kind == TOK_COMMA:
             self._advance()  # ','
 
@@ -1065,6 +1066,7 @@ class _RbParser:
                     embed_always = False
                 else:
                     self._bad_boolean_prop_option("embed_always")
+                    option_error = True
                     break
 
             elif self._check_ident("readonly"):
@@ -1078,6 +1080,7 @@ class _RbParser:
                     is_readonly = False
                 else:
                     self._bad_boolean_prop_option("readonly")
+                    option_error = True
                     break
 
             elif self._check_ident("default"):
@@ -1092,7 +1095,18 @@ class _RbParser:
                     f"unknown prop option '{self._peek().value}' "
                     "(expected readonly, embed_always or default)"
                 )
+                option_error = True
                 break
+
+        # N-413: nothing may follow the type or an option value except ``,``
+        # (the next option) or end of line, so ``default: 1 + 2`` is refused
+        # rather than silently truncated to its first operand. Same text in
+        # all seven tiers.
+        if not option_error and self._peek().kind not in (TOK_NEWLINE, TOK_EOF):
+            self._errors.append(
+                f"unexpected '{self._peek().value}' in prop declaration "
+                "(expected ',' or end of line)"
+            )
 
         # In stateless contracts (SmartContract and UnsafeSmartContract),
         # all properties are always readonly.

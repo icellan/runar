@@ -1296,13 +1296,17 @@ const Parser = struct {
         var is_readonly = false;
         var embed_always = false;
         var initializer: ?Expression = null;
+        var option_error = false;
 
         while (self.check(.comma)) {
             _ = self.bump(); // ','
             if (self.checkIdent("embed_always")) {
                 // N-093: the native spelling of the `@embedAlways` directive.
                 _ = self.bump(); // 'embed_always'
-                if (self.expect(.colon) == null) break;
+                if (self.expect(.colon) == null) {
+                    option_error = true;
+                    break;
+                }
                 if (self.check(.kw_true)) {
                     _ = self.bump();
                     embed_always = true;
@@ -1311,11 +1315,15 @@ const Parser = struct {
                     embed_always = false;
                 } else {
                     self.badBooleanPropOption("embed_always");
+                    option_error = true;
                     break;
                 }
             } else if (self.checkIdent("readonly")) {
                 _ = self.bump(); // 'readonly'
-                if (self.expect(.colon) == null) break;
+                if (self.expect(.colon) == null) {
+                    option_error = true;
+                    break;
+                }
                 if (self.check(.kw_true)) {
                     _ = self.bump();
                     is_readonly = true;
@@ -1324,18 +1332,31 @@ const Parser = struct {
                     is_readonly = false;
                 } else {
                     self.badBooleanPropOption("readonly");
+                    option_error = true;
                     break;
                 }
             } else if (self.checkIdent("default")) {
                 _ = self.bump(); // 'default'
-                if (self.expect(.colon) == null) break;
+                if (self.expect(.colon) == null) {
+                    option_error = true;
+                    break;
+                }
                 initializer = self.parseUnary();
             } else {
                 // N-301: an unknown option (e.g. a typo of `embed_always`) is
                 // refused, never silently dropped. Same text in all seven tiers.
                 self.addErrorFmt("unknown prop option '{s}' (expected readonly, embed_always or default)", .{self.peek().text});
+                option_error = true;
                 break;
             }
+        }
+
+        // N-413: nothing may follow the type or an option value except `,`
+        // (the next option) or end of line, so `default: 1 + 2` is refused
+        // rather than silently truncated to its first operand. Same text in
+        // all seven tiers.
+        if (!option_error and !self.check(.newline) and !self.check(.eof)) {
+            self.addErrorFmt("unexpected '{s}' in prop declaration (expected ',' or end of line)", .{self.peek().text});
         }
 
         // In stateless contracts (SmartContract and UnsafeSmartContract),
