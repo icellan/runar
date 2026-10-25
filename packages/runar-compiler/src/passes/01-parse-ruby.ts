@@ -2010,8 +2010,13 @@ class RbParser {
       return { kind: 'bytestring_literal', value: tok.value };
     }
 
-    // nil -> 0
+    // N-416: `nil` is not a Rúnar value; refused, never read as 0.
     if (tok.type === 'nil') {
+      this.errors.push(makeDiagnostic(
+        "'nil' is not a Rúnar value (use a number, true, false or a hex string)",
+        'error',
+        this.loc(),
+      ));
       this.advance();
       return { kind: 'bigint_literal', value: 0n };
     }

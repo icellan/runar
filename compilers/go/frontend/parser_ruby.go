@@ -2060,8 +2060,9 @@ func (p *rbParser) parsePrimary() Expression {
 		return ByteStringLiteral{Value: tok.value}
 	}
 
-	// nil -> 0
+	// N-416: `nil` is not a Rúnar value; refused, never read as 0.
 	if tok.kind == rbTokNil {
+		p.addError(fmt.Sprintf("line %d: 'nil' is not a Rúnar value (use a number, true, false or a hex string)", tok.line))
 		p.advance()
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}

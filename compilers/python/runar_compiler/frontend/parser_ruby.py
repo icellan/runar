@@ -1926,8 +1926,11 @@ class _RbParser:
             self._advance()
             return ByteStringLiteral(value=tok.value)
 
-        # ``nil`` → 0
+        # N-416: ``nil`` is not a Rúnar value; refused, never read as 0.
         if kind == TOK_NIL:
+            self._errors.append(
+                "'nil' is not a Rúnar value (use a number, true, false or a hex string)"
+            )
             self._advance()
             return BigIntLiteral(value=0)
 

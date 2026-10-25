@@ -2462,8 +2462,9 @@ const Parser = struct {
             return Expression{ .literal_bytes = tok.text };
         }
 
-        // nil -> 0
+        // N-416: `nil` is not a Rúnar value; refused, never read as 0.
         if (tok.kind == .kw_nil) {
+            self.addErrorFmt("'nil' is not a Rúnar value (use a number, true, false or a hex string)", .{});
             _ = self.bump();
             return Expression{ .literal_int = 0 };
         }

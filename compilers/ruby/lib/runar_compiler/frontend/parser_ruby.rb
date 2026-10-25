@@ -2021,8 +2021,9 @@ module RunarCompiler
           return ByteStringLiteral.new(value: tok.value)
         end
 
-        # +nil+ -> 0
+        # N-416: +nil+ is not a Rúnar value; refused, never read as 0.
         if kind == TOK_NIL
+          @errors << "#{@file}:#{tok.line}:#{tok.col}: 'nil' is not a Rúnar value (use a number, true, false or a hex string)"
           advance
           return BigIntLiteral.new(value: 0)
         end

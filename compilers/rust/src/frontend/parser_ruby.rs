@@ -2552,7 +2552,11 @@ impl<'a> RbParser<'a> {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
-            Token::NilLit => Expression::BigIntLiteral { value: BigInt::from(0) },
+            Token::NilLit => {
+                // N-416: `nil` is not a Rúnar value; refused, never read as 0.
+                self.errors.push("'nil' is not a Rúnar value (use a number, true, false or a hex string)".to_string());
+                Expression::BigIntLiteral { value: BigInt::from(0) }
+            }
             Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
             Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
             Token::Ivar(name) => {
