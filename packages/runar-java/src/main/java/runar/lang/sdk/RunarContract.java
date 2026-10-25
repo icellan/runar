@@ -907,6 +907,41 @@ public final class RunarContract {
     }
 
     /**
+     * N-417: lays out a stateless (non-OP_PUSH_TX) call exactly as the other six
+     * SDKs do: input 0 is the contract UTXO, followed by the largest-first P2PKH
+     * funding inputs from the signer's address (never the contract outpoint
+     * itself), one P2PKH change output to the signer, and the fee paid from the
+     * funding inputs rather than out of the contract input. The funding inputs
+     * are signed here; their BIP-143 digests commit to no scriptSig, so they
+     * stay valid when input 0's unlock is rebuilt with its real signatures.
+     */
+    private RawTx layoutStateless(String unlockHex, Provider provider, Signer signer) {
+        String funderAddress = signer.address();
+        List<UTXO> candidates = new ArrayList<>();
+        for (UTXO u : provider.listUtxos(funderAddress)) {
+            if (!(u.txid().equals(currentUtxo.txid()) && u.outputIndex() == currentUtxo.outputIndex())) {
+                candidates.add(u);
+            }
+        }
+        TransactionBuilder.CallTxResult laid = TransactionBuilder.buildCallTransactionFull(
+            currentUtxo, unlockHex, null, 0, List.of(), candidates, funderAddress,
+            provider.getFeeRate()
+        );
+        RawTx tx = laid.tx();
+        List<UTXO> funding = laid.fundingUtxos();
+        for (int i = 0; i < funding.size(); i++) {
+            UTXO u = funding.get(i);
+            byte[] fundSighash = tx.sighashBIP143(
+                1 + i, u.scriptHex(), u.satoshis(), RawTx.SIGHASH_ALL_FORKID);
+            tx.setUnlockingScript(1 + i,
+                ScriptUtils.encodePushData(ScriptUtils.bytesToHex(signer.sign(fundSighash, null))
+                    + String.format("%02x", RawTx.SIGHASH_ALL_FORKID))
+                + ScriptUtils.encodePushData(ScriptUtils.bytesToHex(signer.pubKey())));
+        }
+        return tx;
+    }
+
+    /**
      * Stateless single-method legacy path. Builds a tx that fully
      * consumes the contract UTXO, signs every Sig placeholder against
      * the contract's BIP-143 sighash, and broadcasts. Matches the
@@ -924,15 +959,13 @@ public final class RunarContract {
         String intentWitnessHex = buildIntentWitnessHex(m);
         String unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
 
-        TransactionBuilder.CallResult result = TransactionBuilder.buildCallTransaction(
-            artifact, currentUtxo, unlockHex, null, 0, provider, signer, null
-        );
-        String txHex = result.txHex();
+        // N-417: P2PKH funding input + change, as every other tier (see layoutStateless).
+        RawTx tx = layoutStateless(unlockHex, provider, signer);
 
         if (!sigIndices.isEmpty()) {
             // Issue #123: sign under the method's declared @sighash mode (default 0x41).
             int methodSigHash = m.sigHashType() != null ? m.sigHashType() : RawTx.SIGHASH_ALL_FORKID;
-            byte[] sighash = computeContractSighash(txHex, 0, methodSigHash);
+            byte[] sighash = computeContractSighash(tx.toHex(), 0, methodSigHash);
             for (int idx : sigIndices) {
                 byte[] der = signer.sign(sighash, null);
                 String sigHex = ScriptUtils.bytesToHex(der)
@@ -940,11 +973,10 @@ public final class RunarContract {
                 resolved.set(idx, sigHex);
             }
             unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
-            result = TransactionBuilder.buildCallTransaction(
-                artifact, currentUtxo, unlockHex, null, 0, provider, signer, null
-            );
-            txHex = result.txHex();
+            // BIP-143 commits to no scriptSig, so the funding signatures stay valid.
+            tx.setUnlockingScript(0, unlockHex);
         }
+        String txHex = tx.toHex();
 
         String txid = provider.broadcastRaw(txHex);
         this.currentUtxo = null;
@@ -2392,17 +2424,14 @@ public final class RunarContract {
         Map<String, Object> continuation = artifact.isStateful() ? new java.util.LinkedHashMap<>(state) : null;
         long newSats = artifact.isStateful() ? currentUtxo.satoshis() : 0;
 
-        TransactionBuilder.CallResult result = TransactionBuilder.buildCallTransaction(
-            artifact, currentUtxo, unlockHex, continuation, newSats, provider, signer, null
-        );
-        // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
-        if (result.newLockingScriptHex() != null) {
-            ScriptSizeExceededError.assertScriptHexUnderLimit(
-                result.newLockingScriptHex(), InputLimits.MAX_SCRIPT_BYTES,
-                artifact.contractName() + ".prepareCall(" + methodName + ").continuation"
+        if (signer == null) {
+            throw new IllegalArgumentException(
+                "RunarContract.prepareCall('" + methodName + "'): a signer is required — it funds "
+                    + "the transaction, receives the change and signs the funding inputs, as in call() "
+                    + "(N-417). Only the method's own Sig slots are left for external signers."
             );
         }
-        String txHex = result.txHex();
+        String txHex = layoutStateless(unlockHex, provider, signer).toHex();
 
         // BIP-143 is invariant under scriptSig contents (it hashes the
         // subscript — i.e. the locking script — not the unlocking
@@ -2429,7 +2458,7 @@ public final class RunarContract {
             currentUtxo,
             artifact.isStateful(),
             continuation,
-            result.newLockingScriptHex(),
+            null,
             newSats,
             intentWitnessHex
         );

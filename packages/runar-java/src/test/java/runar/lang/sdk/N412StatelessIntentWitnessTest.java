@@ -25,11 +25,13 @@ import org.junit.jupiter.api.Test;
  * TS reference (for {@code call(spend)}, everything after the signature push).
  * Before N-412 Java pushed the witness AFTER the selector.
  *
- * <p>Does not prove: whole-tx equality. Java's stateless call pays the fee out
- * of the contract input instead of adding a P2PKH funding input as TS does
- * (tier fee policy, outside N-412), so its tx — and therefore the signature
- * {@code call(spend)} derives — differs. Nor a live node, nor
- * {@code _serialisedOutputs} on a stateless method (the compiler refuses
+ * <p>N-417: also proves WHOLE-tx equality with the TS reference for all three
+ * paths (peek, spend, prepare+finalize): the P2PKH funding input, the change
+ * output and the fee paid from the funding input, not out of the contract input.
+ *
+ * <p>Does not prove: a live node, a stateful call's funding (covered elsewhere),
+ * the {@code fundingSigner}/{@code changeAddress} options on a stateless call,
+ * nor {@code _serialisedOutputs} on a stateless method (the compiler refuses
  * requireOutputP2PKH outside StatefulSmartContract).
  */
 class N412StatelessIntentWitnessTest {
@@ -124,6 +126,8 @@ class N412StatelessIntentWitnessTest {
             f.provider(), f.signer());
         assertEquals(obj(obj(f.v().get("expected")).get("peek")).get("input0UnlockingHex"), input0(out.rawTxHex()),
             "input-0 unlocking script must be <x> <witness> <selector>");
+        assertEquals(obj(obj(f.v().get("expected")).get("peek")).get("referenceTxHex"), out.rawTxHex(),
+            "N-417: the whole broadcast tx (P2PKH funding input, change output, fee) must equal the TS reference");
     }
 
     @Test
@@ -136,6 +140,8 @@ class N412StatelessIntentWitnessTest {
         String want = (String) obj(obj(f.v().get("expected")).get("spend")).get("input0UnlockingHex");
         assertEquals(afterFirstPush(want), afterFirstPush(input0(out.rawTxHex())),
             "after the Sig push, input 0 must be <pubKey> <witness> <selector>");
+        assertEquals(obj(obj(f.v().get("expected")).get("spend")).get("referenceTxHex"), out.rawTxHex(),
+            "N-417: the whole broadcast tx (incl. the contract-input signature) must equal the TS reference");
     }
 
     @Test
@@ -153,5 +159,7 @@ class N412StatelessIntentWitnessTest {
         RunarContract.CallOutcome out = f.contract().finalizeCall(prepared, List.of(der), f.provider());
         assertEquals(spend.get("input0UnlockingHex"), input0(out.rawTxHex()),
             "input-0 unlocking script must be <sig> <pubKey> <witness> <selector>");
+        assertEquals(spend.get("referenceTxHex"), out.rawTxHex(),
+            "N-417: prepareCall + finalizeCall must produce the same whole tx as the TS reference");
     }
 }
