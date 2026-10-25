@@ -28,7 +28,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message, unexpected_class_body_token_message, unsupported_statement_message
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message, unexpected_class_body_token_message, unexpected_token_after_class_message, unsupported_statement_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
@@ -901,6 +901,13 @@ class _PyParser:
             self._refuse_class_body_token()
 
         self.match(TOK_DEDENT)
+
+        # N-410: nothing but blank lines may follow the class (N-004 did this
+        # for .runar.rb); a method or class after it used to be dropped unread.
+        self.skip_newlines()
+        if not self.check(TOK_EOF):
+            trailing = self.peek()
+            self.errors.append(lex_error(unexpected_token_after_class_message(_py_token_text(trailing)), self.file_name, trailing.line, trailing.col))
 
         if constructor is None:
             # N-032: auto-generate from the uninitialized properties (declaration

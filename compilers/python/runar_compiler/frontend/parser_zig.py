@@ -37,10 +37,12 @@ from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nes
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     ZIG_LIST_COMMA,
+    ZIG_STRUCT_INIT_DOT,
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     static_method_message,
+    unexpected_struct_body_token_message,
     unknown_return_type_message,
     with_lex_errors,
 )
@@ -683,7 +685,9 @@ class _ZigParser:
                 self._properties.append(self._parse_field())
                 continue
 
-            self._advance()
+            # N-410: any other token is refused, never skipped.
+            stray = self._advance()
+            self._errors.append(f"{self._file}:{stray.line}:{stray.col}: {unexpected_struct_body_token_message(stray.value)}")
 
         self._expect(TOK_RBRACE, "}")
         self._match(TOK_SEMICOLON)
@@ -1041,8 +1045,12 @@ class _ZigParser:
         self._expect(TOK_LBRACE, "{")
 
         while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
+            # N-410: Zig requires the leading `.` of a struct-init field.
             if self._current().kind == TOK_DOT:
                 self._advance()
+            else:
+                t = self._current()
+                self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_STRUCT_INIT_DOT}")
             field = self._expect(TOK_IDENT, "field name").value
             self._expect(TOK_ASSIGN, "=")
             value = self._parse_expression()

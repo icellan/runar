@@ -556,11 +556,16 @@ const Parser = struct {
                 continue;
             }
 
-            if (self.parseField(&fields_with_defaults, &explicit_readonly_fields)) |f| {
-                properties.append(self.allocator, f) catch {};
-            } else {
-                _ = self.bump();
+            if (self.current.kind == .ident) {
+                if (self.parseField(&fields_with_defaults, &explicit_readonly_fields)) |f| {
+                    properties.append(self.allocator, f) catch {};
+                }
+                continue;
             }
+
+            // N-410: any other token is refused, never skipped.
+            self.addErrorFmt(lex_diag.UNEXPECTED_STRUCT_BODY_TOKEN_FMT, .{self.current.text});
+            _ = self.bump();
         }
 
         _ = self.expect(.rbrace); _ = self.expect(.semicolon);
@@ -637,8 +642,8 @@ const Parser = struct {
         if (self.current.kind == .kw_pub) _ = self.bump();
         if (self.current.kind != .ident) return null;
         const name_tok = self.bump();
-        if (self.current.kind != .colon) return null;
-        _ = self.bump();
+        // N-410: an identifier that is no field (no `:`) is refused, as TS does.
+        if (self.expect(.colon) == null) return null;
         const parsed_type = self.parseFieldTypeNode();
         var has_default = false;
         var initializer: ?*const Expression = null;
@@ -876,7 +881,12 @@ const Parser = struct {
     fn parseStructReturnAssignments(self: *Parser, assignments: *std.ArrayListUnmanaged(AssignmentNode)) void {
         _ = self.expect(.lbrace);
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
-            if (self.current.kind == .dot) _ = self.bump();
+            // N-410: Zig requires the leading `.` of a struct-init field.
+            if (self.current.kind == .dot) {
+                _ = self.bump();
+            } else {
+                self.addError(lex_diag.ZIG_STRUCT_INIT_DOT);
+            }
             const field = self.expect(.ident) orelse return;
             if (self.expect(.assign) == null) return;
             const value = self.parseExpression() orelse return;

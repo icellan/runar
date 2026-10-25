@@ -70,6 +70,16 @@ const PyBytesNonASCIIMsg = "bytes can only contain ASCII literal characters"
 // ZIG_LIST_COMMA).
 const ZigListCommaMsg = "expected ',' between list elements"
 
+// UnexpectedStructBodyTokenMsg and ZigStructInitDotMsg are N-410's refusals of
+// a .runar.zig struct-body token that is not a `pub const Contract` marker, a
+// method or a `name:` field, and of a struct-init field without its leading
+// `.` (the TS reference's unexpectedStructBodyTokenMessage / ZIG_STRUCT_INIT_DOT).
+func UnexpectedStructBodyTokenMsg(token string) string {
+	return fmt.Sprintf("Unexpected token in struct body: '%s'", token)
+}
+
+const ZigStructInitDotMsg = "expected '.' before struct-init field name"
+
 // PyStatementLineBreakMsg is F-026's refusal of a second .runar.py statement
 // on the same line (the TS reference's PY_STATEMENT_LINE_BREAK).
 const PyStatementLineBreakMsg = "expected a line break between statements"

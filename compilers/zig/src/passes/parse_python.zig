@@ -1165,6 +1165,20 @@ const Parser = struct {
 
         _ = self.match(.dedent);
 
+        // N-410: nothing but blank lines may follow the class (N-004 did this
+        // for .runar.rb); a method or class after it used to be dropped unread.
+        self.skipNewlines();
+        if (self.current.kind != .eof) {
+            const trailing: []const u8 = switch (self.current.kind) {
+                .indent => "INDENT",
+                .dedent => "DEDENT",
+                .amp_amp => "and",
+                .pipe_pipe => "or",
+                else => self.current.text,
+            };
+            self.addErrorFmt(lex_diag.UNEXPECTED_TOKEN_AFTER_CLASS_FMT, .{trailing});
+        }
+
         // Auto-generate constructor if not provided
         if (constructor == null) {
             constructor = self.autoGenerateConstructor(properties.items);

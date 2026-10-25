@@ -94,6 +94,17 @@ pub const PY_BYTES_NON_ASCII: &str = "bytes can only contain ASCII literal chara
 /// not separated by commas (the TS reference's `ZIG_LIST_COMMA`).
 pub const ZIG_LIST_COMMA: &str = "expected ',' between list elements";
 
+/// N-410: a .runar.zig struct-body token that is not a `pub const Contract`
+/// marker, a method or a `name:` field (the TS reference's
+/// `unexpectedStructBodyTokenMessage`). It used to be skipped.
+pub fn unexpected_struct_body_token_message(token: &str) -> String {
+    format!("Unexpected token in struct body: '{}'", token)
+}
+
+/// N-410: a .runar.zig struct-init field without its leading `.` (the TS
+/// reference's `ZIG_STRUCT_INIT_DOT`).
+pub const ZIG_STRUCT_INIT_DOT: &str = "expected '.' before struct-init field name";
+
 /// F-026: a second .runar.py statement on the same line (the TS reference's
 /// `PY_STATEMENT_LINE_BREAK`).
 pub const PY_STATEMENT_LINE_BREAK: &str = "expected a line break between statements";

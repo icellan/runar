@@ -878,6 +878,15 @@ module RunarCompiler
 
         match_tok(TOK_DEDENT)
 
+        # N-410: nothing but blank lines may follow the class (N-004 did this
+        # for .runar.rb); a method or class after it used to be dropped unread.
+        skip_newlines
+        unless check(TOK_EOF)
+          trailing = peek
+          text = PY_TOKEN_NAMES.fetch(trailing.kind, trailing.value)
+          @errors << Frontend.lex_error(Frontend.unexpected_token_after_class_message(text), @file_name, trailing.line, trailing.col)
+        end
+
         # Auto-generate constructor if not provided
         constructor ||= auto_generate_constructor(properties)
 

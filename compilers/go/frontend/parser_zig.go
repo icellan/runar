@@ -750,7 +750,9 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 			continue
 		}
 
-		p.advance()
+		// N-410: any other token is refused, never skipped.
+		stray := p.advance()
+		p.errors = append(p.errors, lexDiag(UnexpectedStructBodyTokenMsg(stray.value), p.fileName, stray.line, stray.col))
 	}
 
 	p.expect(zigTokRBrace)
@@ -1083,7 +1085,11 @@ func (p *zigParser) parseStructReturnAssignments() []Statement {
 	p.expect(zigTokLBrace)
 
 	for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
-		p.match(zigTokDot)
+		// N-410: Zig requires the leading `.` of a struct-init field.
+		if !p.match(zigTokDot) {
+			t := p.peek()
+			p.errors = append(p.errors, lexDiag(ZigStructInitDotMsg, p.fileName, t.line, t.col))
+		}
 		field := p.expect(zigTokIdent).value
 		p.expect(zigTokAssign)
 		value := p.parseExpression()

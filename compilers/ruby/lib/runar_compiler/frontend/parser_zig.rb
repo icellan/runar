@@ -650,7 +650,9 @@ module RunarCompiler
             next
           end
 
-          advance
+          # N-410: any other token is refused, never skipped.
+          stray = advance
+          @errors << Frontend.lex_error(Frontend.unexpected_struct_body_token_message(stray.value), @file_name, stray.line, stray.col)
         end
 
         expect(TOK_RBRACE)
@@ -1066,7 +1068,11 @@ module RunarCompiler
         expect(TOK_LBRACE)
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
-          match_tok(TOK_DOT)
+          # N-410: Zig requires the leading `.` of a struct-init field.
+          unless match_tok(TOK_DOT)
+            t = peek
+            @errors << Frontend.lex_error(ZIG_STRUCT_INIT_DOT, @file_name, t.line, t.col)
+          end
           field_tok = expect(TOK_IDENT)
           expect(TOK_ASSIGN)
           value = parse_expression

@@ -49,7 +49,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_message, unknown_return_type_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
+use super::diagnostic::{char_index_positions, lex_error_at_index, static_method_message, unexpected_struct_body_token_message, unknown_return_type_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
@@ -227,6 +227,67 @@ enum Token {
 
     // Special
     Eof,
+}
+
+/// N-410: a token's source text for a diagnostic.
+fn zig_token_text(tok: &Token) -> String {
+    match tok {
+        Token::Pub => "pub".into(),
+        Token::Const => "const".into(),
+        Token::Var => "var".into(),
+        Token::Fn => "fn".into(),
+        Token::Struct => "struct".into(),
+        Token::If => "if".into(),
+        Token::Else => "else".into(),
+        Token::For => "for".into(),
+        Token::While => "while".into(),
+        Token::Return => "return".into(),
+        Token::TrueLit => "true".into(),
+        Token::FalseLit => "false".into(),
+        Token::Void => "void".into(),
+        Token::Unknown(c) => c.to_string(),
+        Token::Ident(name) => name.clone(),
+        Token::NumberLit(n) => n.to_string(),
+        Token::StringLit(s) => s.clone(),
+        Token::Plus => "+".into(),
+        Token::Minus => "-".into(),
+        Token::Star => "*".into(),
+        Token::Slash => "/".into(),
+        Token::Percent => "%".into(),
+        Token::EqEq => "==".into(),
+        Token::NotEq => "!=".into(),
+        Token::Lt => "<".into(),
+        Token::Le => "<=".into(),
+        Token::Gt => ">".into(),
+        Token::Ge => ">=".into(),
+        Token::LShift => "<<".into(),
+        Token::RShift => ">>".into(),
+        Token::AndAnd => "&&".into(),
+        Token::OrOr => "||".into(),
+        Token::BitAnd => "&".into(),
+        Token::BitOr => "|".into(),
+        Token::BitXor => "^".into(),
+        Token::Tilde => "~".into(),
+        Token::Bang => "!".into(),
+        Token::Eq => "=".into(),
+        Token::PlusEq => "+=".into(),
+        Token::MinusEq => "-=".into(),
+        Token::StarEq => "*=".into(),
+        Token::SlashEq => "/=".into(),
+        Token::PercentEq => "%=".into(),
+        Token::At => "@".into(),
+        Token::LParen => "(".into(),
+        Token::RParen => ")".into(),
+        Token::LBrace => "{".into(),
+        Token::RBrace => "}".into(),
+        Token::LBracket => "[".into(),
+        Token::RBracket => "]".into(),
+        Token::Semicolon => ";".into(),
+        Token::Comma => ",".into(),
+        Token::Dot => ".".into(),
+        Token::Colon => ":".into(),
+        Token::Eof => "eof".into(),
+    }
 }
 
 /// Returns the tokens and, index for index, the (1-based line, 1-based
@@ -700,6 +761,9 @@ impl<'a> ZigParser<'a> {
                 continue;
             }
 
+            // N-410: any other token is refused, never skipped.
+            let text = zig_token_text(self.peek());
+            self.push_error_at_current(&unexpected_struct_body_token_message(&text));
             self.advance();
         }
 
@@ -1160,8 +1224,11 @@ impl<'a> ZigParser<'a> {
 
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
             // .field = value
+            // N-410: Zig requires the leading `.` of a struct-init field.
             if *self.peek() == Token::Dot {
                 self.advance(); // .
+            } else {
+                self.push_error_at_current(ZIG_STRUCT_INIT_DOT);
             }
             let field = self.expect_ident();
             self.expect(&Token::Eq);
@@ -2169,6 +2236,19 @@ impl<'a> ZigParser<'a> {
             ZIG_LIST_COMMA
         ));
         false
+    }
+
+    /// Report `msg` at the current token, in the `file:line:col: msg` shape
+    /// `expect_list_separator` uses (column 0-based).
+    fn push_error_at_current(&mut self, msg: &str) {
+        let loc = self.loc();
+        self.errors.push(format!(
+            "{}:{}:{}: {}",
+            loc.file,
+            loc.line,
+            loc.column.saturating_sub(1),
+            msg
+        ));
     }
 
     /// Parse postfix operations: `.prop`, `(args)`, `[index]`.

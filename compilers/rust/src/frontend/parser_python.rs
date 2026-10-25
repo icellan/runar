@@ -42,7 +42,7 @@ use super::ast::{
 };
 use super::diagnostic::{
     invalid_escape_sequence_message, lex_error, static_method_message,
-    unexpected_class_body_token_message, unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
+    unexpected_class_body_token_message, unexpected_token_after_class_message, unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
     UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
@@ -1257,6 +1257,15 @@ impl<'a> PyParser<'a> {
         }
 
         self.match_tok(&Token::Dedent);
+
+        // N-410: nothing but blank lines may follow the class (N-004 did this
+        // for .runar.rb); a method or class after it used to be dropped unread.
+        self.skip_newlines();
+        if *self.peek() != Token::Eof {
+            let loc = self.loc();
+            let trailing = py_token_text(self.peek());
+            self.errors.push(Diagnostic::error(unexpected_token_after_class_message(&trailing), Some(loc)));
+        }
 
         // Auto-generate constructor if not provided
         let constructor = constructor

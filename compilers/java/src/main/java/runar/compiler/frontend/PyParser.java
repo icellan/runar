@@ -1083,6 +1083,16 @@ public final class PyParser {
 
             match(TokKind.DEDENT);
 
+            // N-410: nothing but blank lines may follow the class (N-004 did
+            // this for .runar.rb); a method or class after it used to be
+            // dropped unread.
+            skipNewlines();
+            if (!check(TokKind.EOF)) {
+                Token t = peek();
+                String text = t.kind == TokKind.INDENT ? "INDENT" : t.kind == TokKind.DEDENT ? "DEDENT" : t.value;
+                errors.add(LexDiag.at(fileName, t.line, t.col, LexDiag.unexpectedTokenAfterClass(text)));
+            }
+
             if (constructor == null) {
                 // N-032: auto-generate from the uninitialized properties
                 // (declaration order): super(...) first, then self.p = p.

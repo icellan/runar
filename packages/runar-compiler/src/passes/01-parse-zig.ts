@@ -30,7 +30,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { checkReturnType, makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
+import { checkReturnType, makeDiagnostic, staticMethodMessage, unexpectedStructBodyTokenMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT } from '../errors.js';
 import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
@@ -435,7 +435,14 @@ class ZigParser extends ParserCore<ZigToken> {
         continue;
       }
 
-      this.advance();
+      // N-410: any other token is refused, never skipped (a skipped stray
+      // token is how a line of the struct body vanished without a word).
+      const stray = this.advance();
+      this.errors.push(makeDiagnostic(
+        unexpectedStructBodyTokenMessage(stray.value || stray.type),
+        'error',
+        { file: this.file, line: stray.line, column: stray.column },
+      ));
     }
 
     this.expect('}');
@@ -792,7 +799,13 @@ class ZigParser extends ParserCore<ZigToken> {
     this.expect('{');
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
-      if (this.current().type === '.') this.advance();
+      // N-410: Zig requires the leading `.` of a struct-init field.
+      if (this.current().type === '.') {
+        this.advance();
+      } else {
+        const t = this.current();
+        this.errors.push(makeDiagnostic(ZIG_STRUCT_INIT_DOT, 'error', { file: this.file, line: t.line, column: t.column }));
+      }
       const field = this.expect('ident').value;
       this.expect('=');
       const value = this.parseExpression();

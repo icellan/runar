@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unexpectedClassBodyTokenMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unexpectedClassBodyTokenMessage, unexpectedTokenAfterClassMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
@@ -869,6 +869,18 @@ class PyParser {
     }
 
     this.match('DEDENT');
+
+    // N-410: nothing but blank lines may follow the class (N-004 did this
+    // for .runar.rb); a method or class after it used to be dropped unread.
+    this.skipNewlines();
+    const trailing = this.peek();
+    if (trailing.type !== 'eof') {
+      this.errors.push(makeDiagnostic(
+        unexpectedTokenAfterClassMessage(trailing.type === 'INDENT' ? 'INDENT' : trailing.value || trailing.type),
+        'error',
+        { file: this.file, line: trailing.line, column: trailing.column },
+      ));
+    }
 
     // Auto-generate constructor if not provided
     if (!constructor) {

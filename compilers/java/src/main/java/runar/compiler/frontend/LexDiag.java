@@ -44,6 +44,21 @@ final class LexDiag {
     static final String ZIG_LIST_COMMA = "expected ',' between list elements";
 
     /**
+     * N-410: a .runar.zig struct-body token that is not a {@code pub const
+     * Contract} marker, a method or a {@code name:} field (the TS reference's
+     * unexpectedStructBodyTokenMessage). It used to be skipped.
+     */
+    static String unexpectedStructBodyToken(String token) {
+        return "Unexpected token in struct body: '" + token + "'";
+    }
+
+    /**
+     * N-410: a .runar.zig struct-init field without its leading {@code .}
+     * (the TS reference's ZIG_STRUCT_INIT_DOT).
+     */
+    static final String ZIG_STRUCT_INIT_DOT = "expected '.' before struct-init field name";
+
+    /**
      * F-026: a second .runar.py statement on the same line (the TS reference's
      * PY_STATEMENT_LINE_BREAK).
      */

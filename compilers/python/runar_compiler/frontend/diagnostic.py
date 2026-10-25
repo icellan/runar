@@ -92,6 +92,18 @@ def unexpected_token_after_class_message(token: str) -> str:
     return f"Unexpected token after class end: '{token}'"
 
 
+def unexpected_struct_body_token_message(token: str) -> str:
+    """N-410's refusal of a .runar.zig struct-body token that is not a
+    ``pub const Contract`` marker, a method or a ``name:`` field (the TS
+    reference's unexpectedStructBodyTokenMessage). It used to be skipped."""
+    return f"Unexpected token in struct body: '{token}'"
+
+
+# N-410: a .runar.zig struct-init field without its leading ``.`` (the TS
+# reference's ZIG_STRUCT_INIT_DOT).
+ZIG_STRUCT_INIT_DOT = "expected '.' before struct-init field name"
+
+
 def public_return_type_message(method: str) -> str:
     """N-332's refusal of a PUBLIC method that declares a non-void return type
     (the TS reference's ``publicReturnTypeMessage``)."""

@@ -625,7 +625,9 @@ public final class ZigParser {
                     properties.add(parseField());
                     continue;
                 }
-                advance();
+                // N-410: any other token is refused, never skipped.
+                Token stray = advance();
+                errors.add(LexDiag.at(file, stray.line, stray.col, LexDiag.unexpectedStructBodyToken(stray.value)));
             }
             expect(Kind.RBRACE, "}");
             match(Kind.SEMICOLON);
@@ -1013,7 +1015,13 @@ public final class ZigParser {
             expect(Kind.DOT, ".");
             expect(Kind.LBRACE, "{");
             while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
-                if (current().kind == Kind.DOT) advance();
+                // N-410: Zig requires the leading `.` of a struct-init field.
+                if (current().kind == Kind.DOT) {
+                    advance();
+                } else {
+                    Token t = current();
+                    errors.add(LexDiag.at(file, t.line, t.col, LexDiag.ZIG_STRUCT_INIT_DOT));
+                }
                 String field = expect(Kind.IDENT, "field name").value;
                 expect(Kind.ASSIGN, "=");
                 Expression value = parseExpression();

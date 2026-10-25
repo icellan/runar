@@ -85,6 +85,19 @@ export const OPTIONAL_CHAINING = "optional chaining '?.' is not supported";
 export const ZIG_LIST_COMMA = "expected ',' between list elements";
 
 /**
+ * N-410: a .runar.zig struct-body token that is not a `pub const Contract`
+ * marker, a method or a `name:` field, and a struct-init field without its
+ * leading `.` (Zig's `FieldInit <- DOT IDENTIFIER EQUAL Expr`). The parser
+ * used to skip the first and take the dot as optional. Every tier refuses
+ * with these texts; `token` is the token's source text.
+ */
+export function unexpectedStructBodyTokenMessage(token: string): string {
+  return `Unexpected token in struct body: '${token}'`;
+}
+
+export const ZIG_STRUCT_INIT_DOT = "expected '.' before struct-init field name";
+
+/**
  * F-026: a .runar.py statement (or class-level field) followed by more code on
  * the same line. Rúnar's Python surface has no `;`, so a statement must end at
  * the line break.

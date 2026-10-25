@@ -1145,6 +1145,13 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 
 	p.match(pyTokDedent)
 
+	// N-410: nothing but blank lines may follow the class (N-004 did this for
+	// .runar.rb); a method or class after it used to be dropped unread.
+	p.skipNewlines()
+	if trailing := p.peek(); trailing.kind != pyTokEOF {
+		p.errors = append(p.errors, lexDiag(UnexpectedTokenAfterClassMsg(pyTokenText(trailing)), p.fileName, trailing.line, trailing.col))
+	}
+
 	if constructor == nil {
 		// Only non-initialized properties become constructor params
 		var uninitProps []PropertyNode

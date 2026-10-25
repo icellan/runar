@@ -73,6 +73,17 @@ module RunarCompiler
     # are not separated by commas (the TS reference's ZIG_LIST_COMMA).
     ZIG_LIST_COMMA = "expected ',' between list elements"
 
+    # N-410's refusal of a .runar.zig struct-body token that is not a
+    # `pub const Contract` marker, a method or a `name:` field (the TS
+    # reference's unexpectedStructBodyTokenMessage). It used to be skipped.
+    def self.unexpected_struct_body_token_message(token)
+      "Unexpected token in struct body: '#{token}'"
+    end
+
+    # N-410's refusal of a .runar.zig struct-init field without its leading
+    # `.` (the TS reference's ZIG_STRUCT_INIT_DOT).
+    ZIG_STRUCT_INIT_DOT = "expected '.' before struct-init field name"
+
     # F-026: a second .runar.py statement on the same line (the TS reference's
     # PY_STATEMENT_LINE_BREAK).
     PY_STATEMENT_LINE_BREAK = "expected a line break between statements"
