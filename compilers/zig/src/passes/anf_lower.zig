@@ -561,8 +561,6 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
         var method_ctx = LowerCtx.init(allocator, contract);
         method_ctx.diagnostic = diag;
         defer method_ctx.deinit();
-        // Use the method's source location as default for all bindings in the method.
-        method_ctx.current_source_loc = method.source_loc;
         for (method.params) |param| {
             try method_ctx.addParam(param.name);
             if (isByteType(param.type_info)) try method_ctx.markByteTyped(param.name);

@@ -517,18 +517,6 @@ fn emitMethodBodyWithLoc(ctx: *EmitContext, method: types.StackMethod, loc: ?typ
 // Multi-Method Dispatch Table
 // ============================================================================
 
-/// Find the first non-null source_loc from a method's ANF bindings.
-fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []const u8) ?types.SourceLocation {
-    for (anf_methods) |m| {
-        if (std.mem.eql(u8, m.name, method_name)) {
-            for (m.body) |binding| {
-                if (binding.source_loc) |loc| return loc;
-            }
-        }
-    }
-    return null;
-}
-
 /// R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness gets
 /// ONE OP_CODESEPARATOR, and it goes at offset 1 of the locking script, behind a
 /// single OP_NOP.
@@ -585,12 +573,16 @@ fn emitCodeSeparatorPrologue(ctx: *EmitContext, methods: []const types.StackMeth
 ///     OP_ENDIF
 ///   OP_ENDIF (×(N-1) total ENDIFs)
 fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.StackMethod, anf_methods: []const types.ANFMethod) !void {
+    // N-368: the method-entry opcodes are compiler-synthesized glue; like the
+    // TS reference (06-emit.ts maps only ops that carry their own sourceLoc),
+    // they stay unmapped. Per-instruction locs from stack lowering are the only
+    // source of mappings, so the ANF methods are not consulted here.
+    _ = anf_methods;
     if (methods.len == 0) return;
 
     try emitCodeSeparatorPrologue(ctx, methods);
 
     if (methods.len == 1) {
-        ctx.pending_source_loc = findMethodSourceLoc(anf_methods, methods[0].name);
         try emitMethodBody(ctx, methods[0]);
         return;
     }
@@ -607,7 +599,6 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
             try ctx.emitScriptNumber(@intCast(i));
             try ctx.emitOpcode(.op_numequalverify);
         }
-        ctx.pending_source_loc = findMethodSourceLoc(anf_methods, method.name);
         try emitMethodBody(ctx, method);
         if (!is_last) {
             try ctx.emitOpcode(.op_else);

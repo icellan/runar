@@ -49,28 +49,5 @@
     "  default to 0 when omitted and are matched EXACTLY, so a generator fix",
     "  that lands without removing its entry fails, as does a regression."
   ],
-  "knownIssues": [
-    {
-      "fixture": "if-else",
-      "tier": "zig",
-      "violationCount": 0,
-      "trackedCount": 16,
-      "totalCount": 16,
-      "mergedAnchors": 0,
-      "extraMappings": 3,
-      "reason": "Zig maps 3 opcodes (0, 17, 23) that the TS reference leaves unmapped: the if-branch bookkeeping ops are anchored to the `if` line. Not an anchor-validity defect; pinned so it cannot grow.",
-      "tracking": "NEW (reported to dispatcher by F-293; no finding id yet)"
-    },
-    {
-      "fixture": "stateful-counter",
-      "tier": "zig",
-      "violationCount": 0,
-      "trackedCount": 432,
-      "totalCount": 432,
-      "mergedAnchors": 0,
-      "extraMappings": 422,
-      "reason": "Zig maps 432 opcodes against the TS reference's 10: ~420 compiler-injected stateful preamble opcodes (from opcode 7) are all anchored to a single user position (12:20), a 43x mapping-count explosion that the per-mapping rules certify as clean. The reference leaves these synthesized opcodes unmapped.",
-      "tracking": "NEW (reported to dispatcher by F-293; no finding id yet)"
-    }
-  ]
+  "knownIssues": []
 }

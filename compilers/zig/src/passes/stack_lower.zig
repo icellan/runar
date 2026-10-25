@@ -6123,6 +6123,12 @@ const LowerCtx = struct {
         const if_chunk = self.sealed.tail.?;
         self.sealed.appendList(then_arm.chunks);
         then_arm.chunks = .{};
+        // N-368: only OP_IF carries the `if`'s location. OP_ELSE / OP_ENDIF are
+        // structural glue the TS reference leaves unmapped (06-emit.ts clears
+        // the location after the last arm op), so they must not be anchored to
+        // the `if` line. The ops reconciling the stack after OP_ENDIF keep it.
+        const if_loc = self.current_source_loc;
+        self.current_source_loc = null;
         if (else_arm.chunks.head != null) {
             try self.emitOp(.op_else);
             try self.sealTail();
@@ -6131,6 +6137,7 @@ const LowerCtx = struct {
         }
         try self.emitOp(.op_endif);
         try self.sealTail();
+        self.current_source_loc = if_loc;
         if (then_arm.converged and else_arm.converged) if_chunk.frozen_end = self.sealed.tail.?;
 
         // Transfer ownership of push_data buffers allocated by the branch
