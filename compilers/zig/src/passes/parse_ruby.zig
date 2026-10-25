@@ -1341,7 +1341,13 @@ const Parser = struct {
                     option_error = true;
                     break;
                 }
-                initializer = self.parseUnary();
+                if (self.check(.kw_nil)) {
+                    // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+                    self.addErrorFmt("prop default 'nil' is not a literal (expected a number, true, false or a hex string)", .{});
+                    _ = self.bump(); // 'nil'
+                } else {
+                    initializer = self.parseUnary();
+                }
             } else {
                 // N-301: an unknown option (e.g. a typo of `embed_always`) is
                 // refused, never silently dropped. Same text in all seven tiers.

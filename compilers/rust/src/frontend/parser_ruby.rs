@@ -1372,7 +1372,13 @@ impl<'a> RbParser<'a> {
             } else if self.check_ident("default") {
                 self.advance(); // 'default'
                 self.expect(&Token::Colon);
-                initializer = Some(self.parse_unary());
+                if *self.peek() == Token::NilLit {
+                    // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+                    self.errors.push("prop default 'nil' is not a literal (expected a number, true, false or a hex string)".to_string());
+                    self.advance(); // 'nil'
+                } else {
+                    initializer = Some(self.parse_unary());
+                }
             } else {
                 // N-301: an unknown option (e.g. a typo of `embed_always`) is
                 // refused, never silently dropped. Same text in all seven tiers.

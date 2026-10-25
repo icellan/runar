@@ -147,6 +147,12 @@ module RunarCompiler
               loc: prop.source_location
             )
           end
+
+          # N-414 (peer of TS F-265): the shape checks above never validate a
+          # ByteStringLiteral's HEX FORMAT; that lives in validate_expression,
+          # which a property initializer never reached. An odd-length literal
+          # used to surface two passes later as an opaque stack-lowering error.
+          validate_expression(prop.initializer)
         end
 
         # SmartContract (and the asm-escape-hatch UnsafeSmartContract) require

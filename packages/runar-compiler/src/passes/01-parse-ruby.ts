@@ -1035,7 +1035,17 @@ class RbParser {
       } else if (this.checkIdent('default')) {
         this.advance(); // 'default'
         this.expect(':');
-        initializer = this.parseUnary();
+        if (this.peek().type === 'nil') {
+          // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+          this.errors.push(makeDiagnostic(
+            "prop default 'nil' is not a literal (expected a number, true, false or a hex string)",
+            'error',
+            this.loc(),
+          ));
+          this.advance(); // 'nil'
+        } else {
+          initializer = this.parseUnary();
+        }
       } else {
         // N-301: an unknown option (e.g. a typo of `embed_always`) is refused,
         // never silently dropped. Same text in all seven tiers.

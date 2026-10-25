@@ -1086,7 +1086,14 @@ class _RbParser:
             elif self._check_ident("default"):
                 self._advance()  # 'default'
                 self._expect(TOK_COLON, ":")
-                initializer = self._parse_unary()
+                if self._peek().kind == TOK_NIL:
+                    # N-414: ``nil`` is not a Rúnar literal; refused, never read as 0.
+                    self._errors.append(
+                        "prop default 'nil' is not a literal (expected a number, true, false or a hex string)"
+                    )
+                    self._advance()  # 'nil'
+                else:
+                    initializer = self._parse_unary()
 
             else:
                 # N-301: an unknown option (e.g. a typo of ``embed_always``) is

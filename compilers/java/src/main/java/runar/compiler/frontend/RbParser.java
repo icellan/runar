@@ -1027,7 +1027,14 @@ public final class RbParser {
                 } else if (checkIdent("default")) {
                     advance();
                     expect(TK.COLON, ":");
-                    initializer = parseUnary();
+                    if (peek().kind == TK.NIL) {
+                        // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+                        errors.add(file + ":" + peek().line + ":" + peek().col
+                            + ": prop default 'nil' is not a literal (expected a number, true, false or a hex string)");
+                        advance(); // 'nil'
+                    } else {
+                        initializer = parseUnary();
+                    }
                 } else {
                     // N-301: an unknown option (e.g. a typo of `embed_always`) is
                     // refused, never silently dropped. Same text in all seven tiers.

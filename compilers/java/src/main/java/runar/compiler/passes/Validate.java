@@ -688,6 +688,11 @@ public final class Validate {
                     prop.sourceLocation()
                 );
             }
+            // N-414 (peer of TS F-265): the shape checks above never validate a
+            // ByteStringLiteral's HEX FORMAT; that lives in validateExpression,
+            // which a property initializer never reached. An odd-length literal
+            // used to surface two passes later as an opaque emit error.
+            validateExpression(init);
         }
 
         // --------------------------------------------------------------

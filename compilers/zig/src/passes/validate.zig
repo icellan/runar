@@ -287,6 +287,11 @@ fn validateProperties(
             }
         }
 
+        // N-414 (peer of TS F-265): the shape checks above never validate a
+        // ByteString literal's HEX FORMAT. An odd-length initializer used to
+        // surface two passes later as an opaque StackLowerFailed.
+        if (prop.initializer) |init_expr| try validateInitializerHex(allocator, errors, init_expr);
+
         // V27: txPreimage is implicit in StatefulSmartContract
         if (contract.parent_class == .stateful_smart_contract and
             std.mem.eql(u8, prop.name, "txPreimage"))
@@ -332,6 +337,50 @@ fn validateProperties(
 // ============================================================================
 // Constructor validation
 // ============================================================================
+
+/// N-414: hex-format check for the ByteString literals of a property
+/// initializer (the literal itself, the argument of `toByteString(...)`, and
+/// array-literal elements). Same two messages as the TS validator.
+fn validateInitializerHex(
+    allocator: Allocator,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+    expr: Expression,
+) !void {
+    switch (expr) {
+        .literal_bytes => |val| {
+            if (val.len == 0) return;
+            if (val.len % 2 != 0) {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "ByteString literal '{s}' has odd length ({d}) \u{2014} hex strings must have an even number of characters",
+                        .{ val, val.len },
+                    ),
+                    .severity = .@"error",
+                    .owned_message = true,
+                });
+                return;
+            }
+            for (val) |c| {
+                if (!std.ascii.isHex(c)) {
+                    try errors.append(allocator, .{
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "ByteString literal '{s}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
+                            .{val},
+                        ),
+                        .severity = .@"error",
+                        .owned_message = true,
+                    });
+                    return;
+                }
+            }
+        },
+        .call => |c| for (c.args) |a| try validateInitializerHex(allocator, errors, a),
+        .array_literal => |els| for (els) |el| try validateInitializerHex(allocator, errors, el),
+        else => {},
+    }
+}
 
 /// Whether an expression is a literal allowed as a property initializer
 /// (bigint, bool, bytestring, or a negated bigint literal). Mirrors the TS/Go

@@ -1116,7 +1116,13 @@ module RunarCompiler
           elsif check_ident("default")
             advance # 'default'
             expect(TOK_COLON, ":")
-            initializer = parse_unary
+            if peek.kind == TOK_NIL
+              # N-414: +nil+ is not a Rúnar literal; refused, never read as 0.
+              @errors << "#{@file}:#{peek.line}:#{peek.col}: prop default 'nil' is not a literal (expected a number, true, false or a hex string)"
+              advance # 'nil'
+            else
+              initializer = parse_unary
+            end
           else
             # N-301: an unknown option (e.g. a typo of +embed_always+) is
             # refused, never silently dropped. Same text in all seven tiers.

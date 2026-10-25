@@ -1149,7 +1149,13 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 		} else if p.checkIdent("default") {
 			p.advance() // 'default'
 			p.expect(rbTokColon)
-			initializer = p.parseUnary()
+			if p.check(rbTokNil) {
+				// N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+				p.addError(fmt.Sprintf("line %d: prop default 'nil' is not a literal (expected a number, true, false or a hex string)", p.peek().line))
+				p.advance() // 'nil'
+			} else {
+				initializer = p.parseUnary()
+			}
 		} else {
 			// N-301: an unknown option (e.g. a typo of `embed_always`) is
 			// refused, never silently dropped. Same text in all seven tiers.

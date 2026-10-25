@@ -260,6 +260,13 @@ class _ValidationContext:
                         loc=prop.source_location,
                     )
 
+                # N-414 (peer of TS F-265): the shape checks above never validate
+                # a ByteStringLiteral's HEX FORMAT; that lives in
+                # _validate_expression, which a property initializer never
+                # reached. An odd-length literal used to surface two passes later
+                # as an opaque stack-lowering error.
+                self._validate_expression(prop.initializer)
+
         # SmartContract (and the asm-escape-hatch UnsafeSmartContract) require
         # all properties to be readonly.
         if self.contract.parent_class in ("SmartContract", "UnsafeSmartContract"):
