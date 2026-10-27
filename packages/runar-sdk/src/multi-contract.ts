@@ -202,13 +202,11 @@ export async function assembleMultiContractCall(
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
     const methodUsesCodePart = method.usesCodePart ?? methodNeedsChange;
-    // Shared SDK-supplied-param predicate (N-149). parentClass is the
-    // authoritative stateful signal (a zero-mutable StatefulSmartContract has
-    // empty stateFields yet still injects SigHashPreimage); older artifacts
-    // without it fall back to non-empty stateFields.
-    const isStateful = artifact.parentClass !== undefined
-      ? artifact.parentClass === 'StatefulSmartContract'
-      : (artifact.stateFields?.length ?? 0) > 0;
+    // Shared SDK-supplied-param predicate (N-149), the SAME one
+    // RunarContract.prepareCall uses (N-411): non-empty stateFields. A
+    // StatefulSmartContract with ZERO mutable fields has empty stateFields, so
+    // its txPreimage is a user arg (pass null), as on the single-contract path.
+    const isStateful = (artifact.stateFields?.length ?? 0) > 0;
     const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
     if (userParams.length !== inp.args.length) {
       throw new Error(
@@ -230,6 +228,7 @@ export async function assembleMultiContractCall(
 
     // Resolve user args; sign null Sig params over the trimmed subscript.
     let argsHex = '';
+    let preimageInArgs = false;
     for (let a = 0; a < userParams.length; a++) {
       let value = inp.args[a];
       if (userParams[a]!.type === 'Sig' && value === null) {
@@ -241,7 +240,14 @@ export async function assembleMultiContractCall(
         const trimmed = inp.contract.getSubscriptForSigning(utxo.script, methodIndex);
         value = await inp.signer.sign(skeletonHex, i, trimmed, utxo.satoshis);
       }
-      // This low-level surface only auto-resolves null `Sig` params. A null of
+      // N-411: a zero-mutable StatefulSmartContract's txPreimage is a user
+      // arg (null); it resolves to the preimage computed above.
+      if (userParams[a]!.type === 'SigHashPreimage' && value === null) {
+        value = preimageHex;
+        preimageInArgs = true;
+      }
+      // This low-level surface only auto-resolves null `Sig` and
+      // SigHashPreimage params. A null of
       // any other type would otherwise be encoded as the ASCII bytes of "null";
       // reject it with an actionable message instead (pass a concrete value).
       if (value === null || value === undefined) {
@@ -270,7 +276,7 @@ export async function assembleMultiContractCall(
     const unlock =
       inp.contract.buildStatefulPrefix('', methodUsesCodePart) +
       argsHex + changeHex + newAmountHex +
-      encodePushData(preimageHex) +
+      (preimageInArgs ? '' : encodePushData(preimageHex)) +
       selectorHex;
 
     unlocks.push(unlock);
