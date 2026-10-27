@@ -142,12 +142,22 @@ public final class CallOptions {
     /**
      * Address that receives the P2PKH change output of a non-terminal call
      * (TS parity: {@code options?.changeAddress}, default the connected
-     * signer's address). {@code null} → the signer's address. Honoured on the
-     * stateless (non-OP_PUSH_TX) call path; the stateful / OP_PUSH_TX path
-     * still sends change to the signer, because its covenant binds the change
-     * output to the signer's PKH.
+     * signer's address). {@code null} → the signer's address. Honoured on both
+     * the stateless (non-OP_PUSH_TX) and the stateful / OP_PUSH_TX call paths.
+     * On the stateful path the covenant rebuilds the change output from
+     * {@code _changePKH}, so a spend is valid only when this address and
+     * {@link #changePubKey} name the same key (TS builds the same tx).
      */
     public final String changeAddress;
+
+    /**
+     * Hex public key whose HASH160 is pushed as the covenant's {@code _changePKH}
+     * argument on the stateful / OP_PUSH_TX path (TS parity:
+     * {@code options?.changePubKey}, default the signer's public key).
+     * {@code null} → the signer's key. Pair it with {@link #changeAddress}.
+     * Ignored on the stateless path, which has no {@code _changePKH}.
+     */
+    public final String changePubKey;
 
     public CallOptions(
         Map<String, Object> newState,
@@ -218,7 +228,7 @@ public final class CallOptions {
             additionalContractInputArgs, satoshis, null);
     }
 
-    /** Canonical all-fields constructor. */
+    /** Pre-changePubKey all-fields constructor; kept for source compatibility. */
     public CallOptions(
         Map<String, Object> newState,
         List<TerminalOutput> terminalOutputs,
@@ -233,6 +243,27 @@ public final class CallOptions {
         Long satoshis,
         String changeAddress
     ) {
+        this(newState, terminalOutputs, fundingUtxos, locktime, sequence,
+            maxFundingInputs, fundingSigner, feeUtxo, additionalContractInputs,
+            additionalContractInputArgs, satoshis, changeAddress, null);
+    }
+
+    /** Canonical all-fields constructor. */
+    public CallOptions(
+        Map<String, Object> newState,
+        List<TerminalOutput> terminalOutputs,
+        List<UTXO> fundingUtxos,
+        Integer locktime,
+        Integer sequence,
+        Integer maxFundingInputs,
+        Signer fundingSigner,
+        UTXO feeUtxo,
+        List<UTXO> additionalContractInputs,
+        List<List<Object>> additionalContractInputArgs,
+        Long satoshis,
+        String changeAddress,
+        String changePubKey
+    ) {
         this.newState = newState;
         this.terminalOutputs = terminalOutputs;
         this.fundingUtxos = fundingUtxos;
@@ -245,6 +276,7 @@ public final class CallOptions {
         this.additionalContractInputArgs = additionalContractInputArgs;
         this.satoshis = satoshis;
         this.changeAddress = changeAddress;
+        this.changePubKey = changePubKey;
     }
 
     /** Convenience factory for the common terminal-call case. */
@@ -260,63 +292,70 @@ public final class CallOptions {
     public CallOptions withLocktime(Integer locktime) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #sequence} set (issue #131). */
     public CallOptions withSequence(Integer sequence) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #maxFundingInputs} set (issue #133). */
     public CallOptions withMaxFundingInputs(Integer maxFundingInputs) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #fundingSigner} set (issue #134). */
     public CallOptions withFundingSigner(Signer fundingSigner) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #feeUtxo} set (issue #118). */
     public CallOptions withFeeUtxo(UTXO feeUtxo) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #additionalContractInputs} set (merge / multi-input calls). */
     public CallOptions withAdditionalContractInputs(List<UTXO> additionalContractInputs) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #additionalContractInputArgs} set (merge / multi-input calls). */
     public CallOptions withAdditionalContractInputArgs(List<List<Object>> additionalContractInputArgs) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #satoshis} set (continuation-amount override). */
     public CallOptions withSatoshis(Long satoshis) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
+    }
+
+    /** Copy with {@link #changePubKey} set. */
+    public CallOptions withChangePubKey(String changePubKey) {
+        return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
+            sequence, maxFundingInputs, fundingSigner, feeUtxo,
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /** Copy with {@link #changeAddress} set. */
     public CallOptions withChangeAddress(String changeAddress) {
         return new CallOptions(newState, terminalOutputs, fundingUtxos, locktime,
             sequence, maxFundingInputs, fundingSigner, feeUtxo,
-            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress);
+            additionalContractInputs, additionalContractInputArgs, satoshis, changeAddress, changePubKey);
     }
 
     /**

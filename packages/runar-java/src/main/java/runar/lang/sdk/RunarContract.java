@@ -1261,9 +1261,18 @@ public final class RunarContract {
         }
 
         long feeRate = provider.getFeeRate();
+        // N-425 (TS parity): the change OUTPUT pays options.changeAddress (default the
+        // signer), and the covenant's _changePKH is hash160(options.changePubKey, default
+        // the signer's key). They are independent options, exactly as in TS; the covenant
+        // rebuilds the change output from _changePKH, so the spend is valid only when both
+        // name the same key.
+        String changeAddress = (options != null && options.changeAddress != null)
+            ? options.changeAddress : funderAddress;
         String changePkhHex = null;
         if (methodNeedsChange) {
-            byte[] pkhBytes = Hash160.hash160(signer.pubKey());
+            byte[] changePubKey = (options != null && options.changePubKey != null)
+                ? ScriptUtils.hexToBytes(options.changePubKey) : signer.pubKey();
+            byte[] pkhBytes = Hash160.hash160(changePubKey);
             changePkhHex = ScriptUtils.bytesToHex(pkhBytes);
         }
 
@@ -1385,10 +1394,10 @@ public final class RunarContract {
                 TransactionBuilder.CallTxResult probe = orderedContractOutputs != null
                     ? TransactionBuilder.buildCallTransactionFullOrdered(
                         currentUtxo, probeUnlock, orderedContractOutputs,
-                        dataOutputs, additional, funderAddress, feeRate, locktime, probeExtras)
+                        dataOutputs, additional, changeAddress, feeRate, locktime, probeExtras)
                     : TransactionBuilder.buildCallTransactionFull(
                         currentUtxo, probeUnlock, newLockingScript, newSats,
-                        dataOutputs, additional, funderAddress, feeRate, locktime, probeExtras);
+                        dataOutputs, additional, changeAddress, feeRate, locktime, probeExtras);
                 int actualInputs = 1 + extraContractUtxos.size() + probe.fundingUtxos().size();
                 if (actualInputs == assumedInputs) converged = true;
                 else assumedInputs = actualInputs;
@@ -1429,11 +1438,11 @@ public final class RunarContract {
         TransactionBuilder.CallTxResult firstPass = orderedContractOutputs != null
             ? TransactionBuilder.buildCallTransactionFullOrdered(
                 currentUtxo, placeholderUnlock, orderedContractOutputs,
-                dataOutputs, additional, funderAddress, feeRate, locktime, extraInputs
+                dataOutputs, additional, changeAddress, feeRate, locktime, extraInputs
             )
             : TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, placeholderUnlock, newLockingScript, newSats,
-                dataOutputs, additional, funderAddress, feeRate, locktime, extraInputs
+                dataOutputs, additional, changeAddress, feeRate, locktime, extraInputs
             );
         long changeAmount = firstPass.changeAmount();
 
@@ -1452,11 +1461,11 @@ public final class RunarContract {
         TransactionBuilder.CallTxResult secondPass = orderedContractOutputs != null
             ? TransactionBuilder.buildCallTransactionFullOrdered(
                 currentUtxo, secondPassUnlock, orderedContractOutputs,
-                dataOutputs, additional, funderAddress, feeRate, locktime, extraInputs
+                dataOutputs, additional, changeAddress, feeRate, locktime, extraInputs
             )
             : TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, secondPassUnlock, newLockingScript, newSats,
-                dataOutputs, additional, funderAddress, feeRate, locktime, extraInputs
+                dataOutputs, additional, changeAddress, feeRate, locktime, extraInputs
             );
         long finalChangeAmount = secondPass.changeAmount();
         RawTx tx = secondPass.tx();
