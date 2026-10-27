@@ -278,6 +278,12 @@ public final class Peephole {
     static List<StackOp> matchWindow3(StackOp a, StackOp b, StackOp c) {
         if (isRawBytes(a) || isRawBytes(b) || isRawBytes(c)) return null;
 
+        // ROT, ROT, ROT → remove all three (N-376). OP_ROT is a 3-cycle on the
+        // top three items, so three in a row are the identity; the fixed-point
+        // loop leaves a run of n as n mod 3. Matches the opcode-string form too
+        // (F-392 convention), as every tier does.
+        if (isRot(a) && isRot(b) && isRot(c)) return List.of();
+
         // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
         //
         // C17: `OP_NOT OP_NOT` is boolean NORMALISATION, not numeric identity.
@@ -326,6 +332,11 @@ public final class Peephole {
     }
 
     // ---------- predicates ----------
+
+    /** A typed {@link RotOp} or the opcode-string {@code OP_ROT} (N-376). */
+    private static boolean isRot(StackOp op) {
+        return op instanceof RotOp || isOpcode(op, "OP_ROT");
+    }
 
     private static boolean isOpcode(StackOp op, String code) {
         return op instanceof OpcodeOp o && code.equals(o.code());

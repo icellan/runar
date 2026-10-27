@@ -48,8 +48,8 @@
  *   conformance/sdk-envelope/fixtures.json tops out at 6.
  * - MAX_STRING_BYTES = 4 MiB — the binding case is a compiled script carried
  *   as a hex string, not a verification key. The largest checked-in script is
- *   `conformance/tests/p384-wallet/expected-script.hex`: 1,963,362 script
- *   bytes = 3,926,724 hex characters, which is 93.6% of this bound. Real
+ *   `conformance/tests/p384-wallet/expected-script.hex`: 1,958,727 script
+ *   bytes = 3,917,454 hex characters, which is 93.4% of this bound. Real
  *   headroom is 1.07×. An earlier note claimed "~3× headroom" against "the
  *   largest checked-in hex pushdata (witness-assisted Groth16 VK)" — that
  *   artifact, `examples/go/SP1Verifier.groth16.vk.json`, is 3,287 bytes in

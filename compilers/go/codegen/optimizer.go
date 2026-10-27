@@ -298,6 +298,14 @@ func matchWindow3(a, b, c StackOp) ([]StackOp, bool) {
 		return nil, false
 	}
 
+	// ROT, ROT, ROT -> remove all three (N-376). OP_ROT is a 3-cycle on the
+	// top three items, so three in a row are the identity; the fixed-point
+	// loop leaves a run of n as n mod 3. Matches the opcode-string form too
+	// (F-392 convention), as every tier does.
+	if isRotOp(a) && isRotOp(b) && isRotOp(c) {
+		return nil, true
+	}
+
 	// <canonical-bool producer>, OP_NOT, OP_NOT -> <canonical-bool producer>
 	//
 	// `OP_NOT OP_NOT` is boolean NORMALISATION, not numeric identity: for any
@@ -379,6 +387,11 @@ func isPushBigInt(op StackOp, n int64) bool {
 		return false
 	}
 	return op.Value.BigInt.Cmp(big.NewInt(n)) == 0
+}
+
+// isRotOp reports whether op is a typed rot or the opcode-string OP_ROT (N-376).
+func isRotOp(op StackOp) bool {
+	return op.Op == "rot" || isOpcodeOp(op, "OP_ROT")
 }
 
 func isOpcodeOp(op StackOp, code string) bool {

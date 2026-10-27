@@ -36,21 +36,25 @@ import { isCiEnv } from '../env.js';
  *     load-bearing, and all six tiers agreeing on a wrong script still fails;
  *   - the merkle-proof fixture compiles (fold OFF, every Merkle tier) to the
  *     checked-in golden, which is the pre-fix golden with exactly its eight
- *     per-level ROT ROT ROT runs removed and nothing else changed: 219 -> 195
- *     bytes (2 calls x depth 4 x 3 bytes).
+ *     per-level ROT ROT ROT runs removed (219 -> 195 bytes, 2 calls x depth 4
+ *     x 3 bytes) and, since N-376, its two prologue ROT x6 runs too (-> 183),
+ *     nothing else changed.
  * What it does NOT prove: anything about the OTHER identity-rot run in these
  * scripts — the six (merkle-proof) / three (state-covenant) OP_ROTs emitted
  * by generic stack lowering BEFORE the Merkle prologue, when load_param and
  * lowerMerkleRoot's bringToTop each roll leaf/proof/index from depth 2. That
- * is stack-lowering argument marshalling, a separate finding, and is
- * deliberately left as is (the assertions are scoped to the Merkle walk).
- * Nor Poseidon2 Merkle (a different codegen family).
+ * is stack-lowering argument marshalling, a separate finding (N-376, removed
+ * by the ROT ROT ROT -> [] peephole rule and proved in
+ * n376-rot3-peephole-parity.test.ts); here it only enters the expected
+ * golden. Nor Poseidon2 Merkle (a different codegen family).
  */
 
 /** The merkle-proof fixture golden BEFORE F-249 (fold OFF, 219 bytes). */
 const PRE_FIX_MERKLE_PROOF_GOLDEN =
   '76009c63757b7b7b7b7b7b760060a5697c01207f6b7c7652977c6b7b7b7b637c687ea86c6c01207f6b7c768e52977c6b7b7b7b637c687ea86c6c01207f6b7c7652b752977c6b7b7b7b637c687ea86c6c01207f6b7c7653b752977c6b7b7b7b637c687ea86c6c7c7582009d75008767519d7b7b7b7b7b7b760060a5697c01207f6b7c7652977c6b7b7b7b637c687eaa6c6c01207f6b7c768e52977c6b7b7b7b637c687eaa6c6c01207f6b7c7652b752977c6b7b7b7b637c687eaa6c6c01207f6b7c7653b752977c6b7b7b7b637c687eaa6c6c7c7582009d75008768';
 const PRE_FIX_MERKLE_PROOF_BYTES = 219;
+/** N-376: ROT x6 before each of the two Merkle prologues, removed by the ROT^3 rule. */
+const N376_PROLOGUE_ROTS = 2 * 6;
 /** Two Merkle calls (verifySha256 + verifyHash256), each depth 4. */
 const MERKLE_PROOF_LEVELS = 2 * 4;
 
@@ -240,7 +244,7 @@ describe('F-249 Merkle levels carry no identity ROT ROT ROT — six tiers, execu
       expect(countWindow(walk(PRE_FIX_MERKLE_PROOF_GOLDEN), OLD_LEVEL)).toBe(MERKLE_PROOF_LEVELS);
     });
 
-    it('the golden is the pre-fix golden with exactly the per-level ROT ROT ROT runs removed', () => {
+    it('the golden is the pre-fix golden with exactly the per-level ROT ROT ROT runs (and, N-376, the prologue ROT x6 runs) removed', () => {
       const expected: string[] = [];
       const old = walk(PRE_FIX_MERKLE_PROOF_GOLDEN);
       for (let k = 0; k < old.length; k++) {
@@ -251,8 +255,26 @@ describe('F-249 Merkle levels carry no identity ROT ROT ROT — six tiers, execu
         }
         expected.push(old[k]!);
       }
-      expect(walk(golden())).toEqual(expected);
-      expect(golden().length / 2).toBe(PRE_FIX_MERKLE_PROOF_BYTES - 3 * MERKLE_PROOF_LEVELS);
+      // N-376: the remaining ROT runs (the two prologue ROT x6) go to length mod 3.
+      const afterN376: string[] = [];
+      let run = 0;
+      const flush = () => {
+        for (let r = 0; r < run % 3; r++) afterN376.push(ROT);
+        run = 0;
+      };
+      for (const op of expected) {
+        if (op === ROT) {
+          run++;
+          continue;
+        }
+        flush();
+        afterN376.push(op);
+      }
+      flush();
+      expect(walk(golden())).toEqual(afterN376);
+      expect(golden().length / 2).toBe(
+        PRE_FIX_MERKLE_PROOF_BYTES - 3 * MERKLE_PROOF_LEVELS - N376_PROLOGUE_ROTS,
+      );
     });
 
     for (const tier of TIERS) {

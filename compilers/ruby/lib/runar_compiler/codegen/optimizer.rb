@@ -208,6 +208,12 @@ module RunarCompiler
     def self._match_window3(a, b, c)
       return nil if _raw_bytes?(a) || _raw_bytes?(b) || _raw_bytes?(c)
 
+      # ROT + ROT + ROT -> remove all three (N-376). OP_ROT is a 3-cycle on the
+      # top three items, so three in a row are the identity; the fixed-point
+      # loop leaves a run of n as n mod 3. Matches the opcode-string form too
+      # (F-392 convention), as every tier does.
+      return [] if _rot?(a) && _rot?(b) && _rot?(c)
+
       # <canonical-bool producer> + OP_NOT + OP_NOT -> <canonical-bool producer>
       #
       # C17: `OP_NOT OP_NOT` is boolean NORMALISATION, not numeric identity. For
@@ -289,6 +295,12 @@ module RunarCompiler
       _push_bigint_value(op) == n
     end
     private_class_method :_is_push_bigint
+
+    # A typed rot or the opcode-string OP_ROT (N-376).
+    def self._rot?(op)
+      op[:op] == "rot" || _is_opcode(op, "OP_ROT")
+    end
+    private_class_method :_rot?
 
     def self._is_opcode(op, code)
       op[:op] == "opcode" && op[:code] == code

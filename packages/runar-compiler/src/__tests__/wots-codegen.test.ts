@@ -19,11 +19,15 @@ import { optimizeStackIR } from '../optimizer/peephole.js';
 // R-135 re-stamp: the WOTS+ verifier gained a 5-byte exact-signature-length
 // gate (OP_SIZE <2144> OP_EQUALVERIFY), so these three pins moved together:
 // 39164 -> 39174 hex chars (+10 = +5 script bytes) and a new digest/head.
+// N-376 re-stamp: the ROT ROT ROT -> [] peephole rule deletes the identity
+// `7b7b7b` after the leading OP_0 (the only ROT^3 run in this script):
+// 39174 -> 39168 hex chars (-3 script bytes); the head is the old head with
+// those three bytes removed.
 const PREFIX_FROZEN_SCRIPT_SHA256 =
-  '92c400e316bd7a53a79e5e4dc2335f24f1dc46e089caf222012a323a510351ee';
-const PREFIX_FROZEN_SCRIPT_LEN = 39174;
+  '2006a4d5dd223c9ca7722bf445bd6fb2520e96cb87db557f30305970b7be4cbd';
+const PREFIX_FROZEN_SCRIPT_LEN = 39168;
 const PREFIX_FROZEN_SCRIPT_HEAD =
-  '007b7b7b01207f6b7b7b7ca87c82026008880000537a517f7c0051807e817660967c60976b7c6b765f7c946b7c6b7c6b7c01207f6b7c7692638c677c';
+  '0001207f6b7b7b7ca87c82026008880000537a517f7c0051807e817660967c60976b7c6b765f7c946b7c6b7c6b7c01207f6b7c7692638c677c';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WOTS_FIXTURE = join(

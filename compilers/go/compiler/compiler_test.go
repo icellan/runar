@@ -244,7 +244,9 @@ func TestCompile_BooleanLogic(t *testing.T) {
 	// previously nothing here checked the Script bytes at all, so a codegen
 	// bug that moves a byte value without changing an opcode's ASM name
 	// (e.g. a wrong entry in the opcode table) passed through undetected.
-	const wantHex = "767600877c51879b697b7b7b00537a78a0537a7ba06e9a7b7b9b7b919a9b"
+	// N-376: the ROT ROT ROT -> [] peephole rule deletes the identity `7b7b7b`
+	// after the first OP_VERIFY; nothing else moves.
+	const wantHex = "767600877c51879b6900537a78a0537a7ba06e9a7b7b9b7b919a9b"
 	if artifact.Script != wantHex {
 		t.Errorf("script hex mismatch: got %s, want %s", artifact.Script, wantHex)
 	}

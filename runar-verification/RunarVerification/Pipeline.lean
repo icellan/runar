@@ -7317,7 +7317,8 @@ private def rollPickFoldOpNoopB : StackOp → Bool
   | _ => true
 
 private theorem rollPickFoldOpNoop_of_b (op : StackOp)
-    (h : rollPickFoldOpNoopB op = true) : Peephole.rollPickFoldOpNoop op := by
+    (h : rollPickFoldOpNoopB op = true) :
+    Peephole.rollPickFoldOpNoop op ∨ op = .rot := by
   cases op with
   | roll n =>
       cases n with
@@ -7336,6 +7337,7 @@ private theorem rollPickFoldOpNoop_of_b (op : StackOp)
         cases n1 with
         | zero => simp [rollPickFoldOpNoopB] at h
         | succ _ => simp [Peephole.rollPickFoldOpNoop]
+  | rot => exact Or.inr rfl
   | _ => simp [Peephole.rollPickFoldOpNoop]
 
 set_option maxRecDepth 8192 in
@@ -7359,13 +7361,18 @@ theorem peepholeMethodOps_statefulFull :
     with_unfolding_all rfl
   have hRollB : AgreesStateful.statefulFullOps.all rollPickFoldOpNoopB = true := by
     native_decide
-  have hRoll : Peephole.rollPickFoldFlatNoop AgreesStateful.statefulFullOps := by
+  have hRoll : ∀ op, op ∈ AgreesStateful.statefulFullOps →
+      Peephole.rollPickFoldOpNoop op ∨ op = .rot := by
     intro op hop
     exact rollPickFoldOpNoop_of_b op ((List.all_eq_true.mp hRollB) op hop)
+  -- N-376: the ops carry `.rot`s but no `[rot, rot, rot]` run.
+  have hRot3 : Peephole.applyRot3Elim AgreesStateful.statefulFullOps
+      = AgreesStateful.statefulFullOps := by
+    with_unfolding_all rfl
   rw [hPost,
     Peephole.peepholeChainFold_eq_self_of_noIfOp_stepId _ hNoIf (by
       with_unfolding_all rfl),
-    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop _ hNoIf hRoll]
+    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_rotOK _ hNoIf hRoll hRot3]
 
 /-- **Widened stateful consume theorem (prologue + state-output epilogue,
 acceptance bit).**

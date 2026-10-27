@@ -18,6 +18,12 @@
     "bytes_saved": 2
   },
   {
+    "name": "rot-rot-rot",
+    "before": [{ "op": "rot" }, { "op": "rot" }, { "op": "rot" }],
+    "after": [],
+    "bytes_saved": 3
+  },
+  {
     "name": "1-add-to-1add",
     "before": [{ "op": "push", "value": 1 }, { "op": "opcode", "code": "OP_ADD" }],
     "after": [{ "op": "opcode", "code": "OP_1ADD" }],

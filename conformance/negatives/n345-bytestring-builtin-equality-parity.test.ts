@@ -74,7 +74,9 @@ const CASES: Case[] = [
   },
   {
     name: 'Sha256FinalizeEq', body: 'assert(sha256Finalize(a, b, x) === sha256Finalize(b, a, x));',
-    sha: 'b0eced81d5cb1cc9808c973271e50c576569b79e753879fe07cc2df8ec07dd15', tail: '757c75688777',
+    // N-376 re-stamp: the ROT ROT ROT -> [] peephole rule deletes 6 identity
+    // OP_ROTs (opcode-walk checked); was b0eced81d5cb1cc9….
+    sha: '593f2b477176d0755ef9f0d64c459dd3366741339848bf4aaaf54f085194f45e', tail: '757c75688777',
   },
   // Fold-ON already folds this to false in every tier; fold-OFF TS and Rust
   // compiled OP_NUMEQUAL, which is TRUE on-chain for 0100 vs 01.

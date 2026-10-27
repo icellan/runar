@@ -551,6 +551,16 @@ fn tryWindow3(allocator: Allocator, w: *const [3]Inst) !?Replacement3 {
     // raw_bytes is a hard peephole barrier — never rewrite across it.
     if (isRawBytes(w[0]) or isRawBytes(w[1]) or isRawBytes(w[2])) return null;
 
+    // N-376: ROT + ROT + ROT -> (removed). OP_ROT is a 3-cycle on the top three
+    // items, so three in a row are the identity; the fixed-point loop leaves a
+    // run of n as n mod 3. Every Zig rot is the typed `op_rot` (string-form
+    // "OP_ROT" emits resolve to it too), matching the other tiers, which accept
+    // both their typed and string forms. Must sit before the constant-fold
+    // early return below.
+    if (isOp(w[0], .op_rot) and isOp(w[1], .op_rot) and isOp(w[2], .op_rot)) {
+        return .{ null, null, null };
+    }
+
     // Rule 8: <canonical-bool producer> + OP_NOT + OP_NOT -> <producer>
     //
     // `OP_NOT OP_NOT` is boolean NORMALISATION, not numeric identity: for any

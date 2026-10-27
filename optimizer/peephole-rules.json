@@ -2,6 +2,7 @@
   {"name": "push-drop",       "match": [{"op":"push","any":true}, {"op":"drop"}],           "replace": []},
   {"name": "dup-drop",        "match": [{"op":"dup"}, {"op":"drop"}],                       "replace": []},
   {"name": "swap-swap",       "match": [{"op":"swap"}, {"op":"swap"}],                      "replace": []},
+  {"name": "rot-rot-rot",     "match": [{"op":"rot"}, {"op":"rot"}, {"op":"rot"}],          "replace": []},
   {"name": "1-add-to-1add",   "match": [{"op":"push","int":1}, {"op":"opcode","code":"OP_ADD"}], "replace": [{"op":"opcode","code":"OP_1ADD"}]},
   {"name": "1-sub-to-1sub",   "match": [{"op":"push","int":1}, {"op":"opcode","code":"OP_SUB"}], "replace": [{"op":"opcode","code":"OP_1SUB"}]},
   {"name": "not-not-elim",    "match": [{"op":"opcode","code":"OP_NUMEQUAL"}, {"op":"opcode","code":"OP_NOT"}, {"op":"opcode","code":"OP_NOT"}], "replace": [{"op":"opcode","code":"OP_NUMEQUAL"}],

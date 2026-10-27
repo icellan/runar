@@ -228,11 +228,13 @@ test "N-034 A: fused small-scalar hex matches the six-tier reference" {
     // 9206c8cb… for this source at the default fold setting. The value is
     // therefore another tier's opinion of these bytes, not this tier grading
     // itself.
+    // N-376 re-stamp: the ROT ROT ROT -> [] peephole rule deletes 4644 identity
+    // OP_ROTs (TS and Go agree). Was 2554314 / 7214cad88783e09e….
     try expectHexDigest(
         SRC_SMALL,
         "ECLinear.runar.ts",
-        2554314,
-        "7214cad88783e09e484fe15f57c3d45fdf4443960c7f7a45731e052065b1bcad",
+        2545026,
+        "87a45fc5c08da42fa2422a778d43119296752a4b7363dcc313b44a565fcc7fbf",
     );
 }
 
@@ -267,8 +269,10 @@ test "N-034 B: fused oversize-scalar hex matches the six-tier reference" {
     try expectHexDigest(
         SRC_BIG,
         "ECBig.runar.ts",
-        2554512,
-        "77534176f810b6bce7193ae80b45fc851fd0c3f5e5de495181467926e23f7d8f",
+        // N-376 re-stamp: ROT ROT ROT -> [] deletes 4644 identity OP_ROTs
+        // (TS and Go agree). Was 2554512 / 77534176f810b6bc….
+        2545224,
+        "592ef3167c0ac555819d1375ddde5fb2c80459b709b1c4d26e8611f874ff7ee4",
     );
 }
 
@@ -292,8 +296,10 @@ test "N-034 control: EC contract with no fusible pair is byte-unchanged" {
     try expectHexDigest(
         SRC_EC_NO_FUSION,
         "ECCtl.runar.ts",
-        852514,
-        "24c7cd49511fbfa8c35abbca607219af7e5ef28b17b37e880bbb68a28a5c4805",
+        // N-376 re-stamp: ROT ROT ROT -> [] deletes 1548 identity OP_ROTs
+        // (TS and Go agree). Was 852514 / 24c7cd49511fbfa8….
+        849418,
+        "42504bd9e7795cb82b3c33284a958a085327a3679f26ee038640b4e0ced72778",
     );
 }
 

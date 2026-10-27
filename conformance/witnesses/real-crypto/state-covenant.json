@@ -4,7 +4,7 @@
   "signerKey": "alice",
   "note": "N-044. The fixture carries a compilers:[\"go\"] allowlist for its bbFieldMul + merkleRootSha256 builtins, but the TS tier compiles this exact source to bytes identical to expected-script.hex (checked fold-OFF), so the real-crypto harness executes the golden's own covenant. Vectors are hand-derived, independent of the compiler: the verifying-key hash is the root of a 16-leaf SHA-256 tree whose leaf i is sha256(byte i) and whose nodes are sha256(left||right); the proof is the 4 bottom-up siblings of leaf 3; proofFieldC = 1000000 * 2000000 mod 2013265921 (Baby Bear); batchDataHash = hash256(preStateRoot || newStateRoot).",
   "goldenHashes": {
-    "expected-script.hex": "8aea06daccd7564bd98fc74d1d360c328fdba4e09a3de8342e7827107fd64009"
+    "expected-script.hex": "037d288b9ab2e9bab5388ce412e8ad51a2b0739a475986dd34a2a64dc7e789e1"
   },
   "constructorArgs": [
     "0000000000000000000000000000000000000000000000000000000000000000",

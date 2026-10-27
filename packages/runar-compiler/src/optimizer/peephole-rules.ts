@@ -92,6 +92,14 @@ export const PEEPHOLE_RULES: PeepholeRuleSpec[] = [
     stackInputs: 2,
     sweep: { kind: 'stack', inputs: 2, domain: 'num' },
   },
+  // ROT, ROT, ROT → []  (3-cycle cubed is the identity, N-376)
+  {
+    name: 'rot-rot-rot-elim',
+    pattern: [{ op: 'rot' }, { op: 'rot' }, { op: 'rot' }],
+    replacement: [],
+    stackInputs: 3,
+    sweep: { kind: 'stack', inputs: 3, domain: 'num' },
+  },
   // PUSH 1, OP_ADD → OP_1ADD
   {
     name: 'push1-add-to-1add',

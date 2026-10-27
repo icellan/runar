@@ -9242,14 +9242,154 @@ private def applyRollPickFold.tr.go : List StackOp → List StackOp → List Sta
 
 attribute [implemented_by applyRollPickFold.tr] applyRollPickFold
 
+/-! ### N-376: `[rot, rot, rot] → []`
+
+`OP_ROT` permutes the top three items `[a b c] ↦ [b c a]`, a 3-cycle, so
+three of them in a row are the identity whenever the stack holds at least
+three items (with fewer, the first `rot` errors). Stack lowering emits such
+runs when a three-argument consumer's arguments are already the top three
+slots in order (each `bringToTop` rolls from depth 2), and the seven
+reference tiers delete them with the rule `ROT ROT ROT → []`.
+
+The rule runs over the output of `applyRollPickFold`, so a `.roll 2` that
+folds to `.rot` takes part exactly as the TS `PUSH 2 ROLL → ROT` fold feeds
+the TS rule. Left-to-right greedy matching leaves a run of `n` rots as
+`n mod 3`, which is what the tiers' fixed-point loop produces. -/
+def applyRot3Elim : List StackOp → List StackOp
+  | [] => []
+  | .rot :: .rot :: .rot :: rest => applyRot3Elim rest
+  | op :: rest => op :: applyRot3Elim rest
+
+/-- Tail-recursive runtime twin of `applyRot3Elim` (same rationale as the
+`apply*.tr` block above: one method body of the wallet fixtures is far
+longer than the native stack allows for structural recursion). -/
+private def applyRot3Elim.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .rot :: .rot :: .rot :: rest, acc => applyRot3Elim.tr.go rest acc
+  | op :: rest, acc => applyRot3Elim.tr.go rest (op :: acc)
+
+@[inline] private def applyRot3Elim.tr (ops : List StackOp) : List StackOp :=
+  applyRot3Elim.tr.go ops []
+
+attribute [implemented_by applyRot3Elim.tr] applyRot3Elim
+
+theorem applyRot3Elim_empty : applyRot3Elim [] = [] := rfl
+
+/-- Per-position depth invariant for `applyRot3Elim`: every `.rot` executes
+on a stack at least three deep. Threaded through `stepNonIf` exactly like
+`rollPickDepthOK`. -/
+def rotDepthOK : List StackOp → StackState → Prop
+  | [], _ => True
+  | op :: rest, s =>
+      (op = .rot → s.stack.length ≥ 3) ∧
+      (∀ s', stepNonIf op s = .ok s' → rotDepthOK rest s')
+
+/-- Three `rot` steps on a stack at least three deep return the state. -/
+theorem rot3_steps (s : StackState) (h : s.stack.length ≥ 3) :
+    ∃ s1 s2, stepNonIf .rot s = .ok s1 ∧ stepNonIf .rot s1 = .ok s2
+      ∧ stepNonIf .rot s2 = .ok s := by
+  obtain ⟨stack, alt, outs, props, pre⟩ := s
+  match stack, h with
+  | _ :: _ :: _ :: _, _ => exact ⟨_, _, rfl, rfl, rfl⟩
+
+private theorem runOps_cons_nonIf_cong (op : StackOp)
+    (hop : ∀ thn els, op = .ifOp thn els → False)
+    (a b : List StackOp) (s : StackState)
+    (h : ∀ s', stepNonIf op s = .ok s' → runOps a s' = runOps b s') :
+    runOps (op :: a) s = runOps (op :: b) s := by
+  rw [runOps.eq_3 s op a hop, runOps.eq_3 s op b hop]
+  cases hs : stepNonIf op s with
+  | error e => rfl
+  | ok s' => exact h s' hs
+
+/-- `[rot, rot, rot]` is the identity on a stack at least three deep. -/
+theorem runOps_rot3 (rest : List StackOp) (s : StackState)
+    (h : s.stack.length ≥ 3) :
+    runOps (.rot :: .rot :: .rot :: rest) s = runOps rest s := by
+  obtain ⟨s1, s2, h1, h2, h3⟩ := rot3_steps s h
+  have hr : ∀ thn els, StackOp.rot = .ifOp thn els → False :=
+    fun _ _ he => StackOp.noConfusion he
+  rw [runOps.eq_3 s .rot _ hr, h1]
+  show runOps (.rot :: .rot :: rest) s1 = _
+  rw [runOps.eq_3 s1 .rot _ hr, h2]
+  show runOps (.rot :: rest) s2 = _
+  rw [runOps.eq_3 s2 .rot _ hr, h3]
+
+/-- Operational soundness of `applyRot3Elim` on `noIfOp` lists under the
+`rotDepthOK` invariant. -/
+theorem rot3Elim_pass_sound :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), rotDepthOK ops s →
+        runOps (applyRot3Elim ops) s = runOps ops s := by
+  intro ops
+  induction ops using applyRot3Elim.induct with
+  | case1 => intros; rfl
+  | case2 rest ih =>
+    intro hNoIf s hD
+    have hRestNoIf : noIfOp rest := hNoIf
+    have h3 : s.stack.length ≥ 3 := hD.1 rfl
+    obtain ⟨s1, s2, h1, h2, h3'⟩ := rot3_steps s h3
+    have hDr : rotDepthOK rest s := ((hD.2 s1 h1).2 s2 h2).2 s h3'
+    show runOps (applyRot3Elim rest) s = _
+    rw [ih hRestNoIf s hDr, runOps_rot3 rest s h3]
+  | case3 op rest hnm ih =>
+    intro hNoIf s hD
+    have hop : ∀ thn els, op = .ifOp thn els → False := by
+      intro thn els he; subst he; exact absurd hNoIf (by simp [noIfOp])
+    have hRestNoIf : noIfOp rest := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    rw [applyRot3Elim.eq_3 op rest hnm]
+    exact runOps_cons_nonIf_cong op hop _ _ s
+      (fun s' hs => ih hRestNoIf s' (hD.2 s' hs))
+
+/-- `applyRot3Elim` is the identity on a list with no `.rot`. -/
+theorem applyRot3Elim_eq_self_of_noRot :
+    ∀ (ops : List StackOp), (∀ op, op ∈ ops → op ≠ .rot) →
+      applyRot3Elim ops = ops := by
+  intro ops
+  induction ops using applyRot3Elim.induct with
+  | case1 => intros; rfl
+  | case2 rest _ => intro h; exact absurd rfl (h .rot (by simp))
+  | case3 op rest hnm ih =>
+    intro h
+    rw [applyRot3Elim.eq_3 op rest hnm, ih (fun o ho => h o (by simp [ho]))]
+
+/-- `applyRot3Elim` is the identity on a list shorter than its window. -/
+theorem applyRot3Elim_short (l : List StackOp) (h : l.length ≤ 2) :
+    applyRot3Elim l = l := by
+  match l, h with
+  | [], _ => rfl
+  | [a], _ =>
+    rw [applyRot3Elim.eq_3 a [] (fun _ _ he => by simp at he)]; rfl
+  | [a, b], _ =>
+    rw [applyRot3Elim.eq_3 a [b] (fun _ _ he => by simp at he),
+        applyRot3Elim.eq_3 b [] (fun _ _ he => by simp at he)]; rfl
+
+theorem applyRot3Elim_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyRot3Elim ops) := by
+  intro ops
+  induction ops using applyRot3Elim.induct with
+  | case1 => intros; exact True.intro
+  | case2 rest ih => intro h; exact ih h
+  | case3 op rest hnm ih =>
+    intro h
+    rw [applyRot3Elim.eq_3 op rest hnm]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ih (by simpa [noIfOp] using h)
+
 /-- Outer driver for `applyRollPickFold`. Since `applyRollPickFold` is
 idempotent (its outputs `[]`, `[.swap]`, `[.rot]`, `[.dup]`, `[.over]`
 are not themselves roll/pick ops, so re-applying changes nothing), a
-single pass suffices. The `fuel` argument is unused and retained for
-API stability. -/
+single pass suffices; N-376's `applyRot3Elim` then runs once over the
+folded list (it only removes ops, never creates a roll/pick head, and one
+left-to-right pass already leaves every rot run at its length mod 3).
+The `fuel` argument is unused and retained for API stability. -/
 private def rollPickFixpointFlat (_fuel : Nat) (ops : List StackOp) :
     List StackOp :=
-  applyRollPickFold ops
+  applyRot3Elim (applyRollPickFold ops)
 
 mutual
 
@@ -9290,8 +9430,13 @@ def peepholeRollPickFold (ops : List StackOp) : List StackOp :=
 exactly `rollPickRewriteOne` applied to that op. -/
 private theorem peepholeRollPickFold_singleton_eq (op : StackOp) :
     peepholeRollPickFold [op] = rollPickRewriteOne (rollPickOp op) := by
-  simp [peepholeRollPickFold, rollPickFixpointFlat, rollPickListTRgo,
-    applyRollPickFold]
+  simp only [peepholeRollPickFold, rollPickFixpointFlat, rollPickListTRgo,
+    applyRollPickFold, List.reverse_cons, List.reverse_nil, List.nil_append,
+    List.append_nil]
+  apply applyRot3Elim_short
+  have hLen : ∀ o, (rollPickRewriteOne o).length ≤ 1 := by
+    intro o; unfold rollPickRewriteOne; split <;> simp
+  exact Nat.le_succ_of_le (hLen _)
 
 /-- Fired `.roll 0` fold: under no-pop `.roll` semantics, the bundled
 `.roll 0` op folds to `[]` with identical `runOps` behaviour. -/
@@ -9364,9 +9509,13 @@ def rollPickFoldOpNoop : StackOp → Prop
   | .roll 2 => False
   | .pick 0 => False
   | .pick 1 => False
+  -- N-376: a `.rot` may take part in a `[rot, rot, rot]` deletion, so a
+  -- list that is a fixpoint of the whole roll/pick pass carries none.
+  | .rot    => False
   | _       => True
 
-/-- True when `applyRollPickFold` has no flat rewrite to perform. -/
+/-- True when the roll/pick pass (`applyRollPickFold` then
+`applyRot3Elim`) has no rewrite to perform. -/
 def rollPickFoldFlatNoop (ops : List StackOp) : Prop :=
   ∀ op, op ∈ ops → rollPickFoldOpNoop op
 
@@ -9536,7 +9685,37 @@ theorem peepholeRollPickFold_eq_self_of_noIfOp_flatNoop
   rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
   show rollPickFixpointFlat 64 ops = ops
   unfold rollPickFixpointFlat
-  exact applyRollPickFold_eq_self_of_flatNoop ops hNoop
+  rw [applyRollPickFold_eq_self_of_flatNoop ops hNoop]
+  exact applyRot3Elim_eq_self_of_noRot ops (fun op hMem hRot => by
+    have h := hNoop op hMem
+    rw [hRot] at h
+    exact h)
+
+/-- N-376 companion of `peepholeRollPickFold_eq_self_of_noIfOp_flatNoop` for
+lists that DO carry `.rot`s: if no op is a roll/pick fold head (rots
+allowed) and no `[rot, rot, rot]` run is deleted, the pass is the identity. -/
+theorem peepholeRollPickFold_eq_self_of_noIfOp_rotOK
+    (ops : List StackOp) (hNoIf : noIfOp ops)
+    (hNoop : ∀ op, op ∈ ops → rollPickFoldOpNoop op ∨ op = .rot)
+    (hRot3 : applyRot3Elim ops = ops) :
+    peepholeRollPickFold ops = ops := by
+  unfold peepholeRollPickFold
+  rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  show rollPickFixpointFlat 64 ops = ops
+  unfold rollPickFixpointFlat
+  have hFold : applyRollPickFold ops = ops := by
+    clear hNoIf hRot3
+    induction ops with
+    | nil => rfl
+    | cons op rest ih =>
+        have hOp : rollPickRewriteOne op = [op] := by
+          rcases hNoop op (by simp) with h | h
+          · exact rollPickRewriteOne_eq_singleton_of_opNoop op h
+          · subst h; rfl
+        unfold applyRollPickFold
+        rw [hOp, ih (fun o ho => hNoop o (by simp [ho]))]
+        simp
+  rw [hFold, hRot3]
 
 theorem peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop
     (ops : List StackOp) (s : StackState) (hNoIf : noIfOp ops)
@@ -9550,7 +9729,7 @@ theorem peepholeRollPickFold_preserves_noIfOp
   unfold peepholeRollPickFold
   rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
   unfold rollPickFixpointFlat
-  exact applyRollPickFold_preserves_noIfOp ops hNoIf
+  exact applyRot3Elim_preserves_noIfOp _ (applyRollPickFold_preserves_noIfOp ops hNoIf)
 
 /-! ### Phase 7.9.d — GENERAL roll/pick fold operational soundness (M3)
 
@@ -9585,6 +9764,7 @@ def rollPickDepthOK : List StackOp → StackState → Prop
   | [], _ => True
   | op :: rest, s =>
       (∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) ∧
+      (op = .rot → s.stack.length ≥ 3) ∧
       (∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s')
 
 theorem rollPickDepthOK_nil (s : StackState) : rollPickDepthOK [] s := True.intro
@@ -9592,6 +9772,7 @@ theorem rollPickDepthOK_nil (s : StackState) : rollPickDepthOK [] s := True.intr
 theorem rollPickDepthOK_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
     rollPickDepthOK (op :: rest) s ↔
       (∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) ∧
+      (op = .rot → s.stack.length ≥ 3) ∧
       (∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s') :=
   Iff.rfl
 
@@ -9610,27 +9791,36 @@ def rollPickHeadOK (op : StackOp) (s : StackState) : Bool :=
   match op with
   | .roll d => decide (s.stack.length ≥ d + 1)
   | .pick d => decide (s.stack.length ≥ d + 1)
+  | .rot    => decide (s.stack.length ≥ 3)
   | _ => true
 
 theorem rollPickHeadOK_iff (op : StackOp) (s : StackState) :
     rollPickHeadOK op s = true ↔
-      (∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) := by
+      ((∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) ∧
+       (op = .rot → s.stack.length ≥ 3)) := by
   unfold rollPickHeadOK
   constructor
-  · intro h d hOr
-    cases hOr with
-    | inl hEq =>
-        subst hEq
-        simp at h
-        exact h
-    | inr hEq =>
-        subst hEq
-        simp at h
-        exact h
   · intro h
+    refine ⟨?_, ?_⟩
+    · intro d hOr
+      cases hOr with
+      | inl hEq =>
+          subst hEq
+          simp at h
+          exact h
+      | inr hEq =>
+          subst hEq
+          simp at h
+          exact h
+    · intro hEq
+      subst hEq
+      simp at h
+      exact h
+  · intro ⟨h, hR⟩
     cases op <;> simp
     case roll d => exact h d (Or.inl rfl)
     case pick d => exact h d (Or.inr rfl)
+    case rot => exact hR rfl
 
 def rollPickDepthOKBool : List StackOp → StackState → Bool
   | [], _ => true
@@ -9650,14 +9840,15 @@ theorem rollPickDepthOKBool_iff_rollPickDepthOK :
     · intro h
       rw [Bool.and_eq_true] at h
       obtain ⟨hHead, hRest⟩ := h
-      refine ⟨(rollPickHeadOK_iff op s).mp hHead, ?_⟩
+      obtain ⟨hA, hR⟩ := (rollPickHeadOK_iff op s).mp hHead
+      refine ⟨hA, hR, ?_⟩
       intro s' hStep
       have : rollPickDepthOKBool rest s' = true := by
         rw [hStep] at hRest; exact hRest
       exact (rollPickDepthOKBool_iff_rollPickDepthOK rest s').mp this
-    · intro ⟨hHead, hStep⟩
+    · intro ⟨hHead, hHeadRot, hStep⟩
       rw [Bool.and_eq_true]
-      refine ⟨(rollPickHeadOK_iff op s).mpr hHead, ?_⟩
+      refine ⟨(rollPickHeadOK_iff op s).mpr ⟨hHead, hHeadRot⟩, ?_⟩
       cases hRes : stepNonIf op s with
       | error _ => rfl
       | ok s' =>
@@ -9693,7 +9884,7 @@ theorem applyRollPickFold_runOps_eq :
       (rollPickDepthOK_cons op rest s |>.mp hDepth).1
     have hTailDepth :
         ∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s' :=
-      (rollPickDepthOK_cons op rest s |>.mp hDepth).2
+      (rollPickDepthOK_cons op rest s |>.mp hDepth).2.2
     -- Step 1: `applyRollPickFold (op :: rest) = rollPickRewriteOne op ++ applyRollPickFold rest`.
     show runOps (rollPickRewriteOne op ++ applyRollPickFold rest) s
        = runOps (op :: rest) s
@@ -9749,6 +9940,115 @@ theorem applyRollPickFold_runOps_eq :
           (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
     | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
+/-- N-376: what one roll/pick rewrite does to the step, at a position where
+the depth invariant holds. Either the op vanishes and its step is the
+identity (`.roll 0`), or it becomes a single op whose step equals the
+original's — and a `.rot` it becomes still has three items to work on. -/
+private theorem rollPickRewriteOne_step (op : StackOp) (s : StackState)
+    (hLen : ∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1)
+    (hRot : op = .rot → s.stack.length ≥ 3) :
+    (rollPickRewriteOne op = [] ∧ stepNonIf op s = .ok s) ∨
+    ∃ op', rollPickRewriteOne op = [op'] ∧ stepNonIf op' s = stepNonIf op s
+      ∧ (op' = .rot → s.stack.length ≥ 3) := by
+  cases op with
+  | roll d =>
+    match d, hLen with
+    | 0, hLen =>
+      have h1 : s.stack.length ≥ 1 := hLen 0 (Or.inl rfl)
+      refine Or.inl ⟨rfl, ?_⟩
+      show applyRoll s 0 = .ok s
+      cases s with
+      | mk stack altstack outputs props preimage =>
+        cases stack with
+        | nil => simp at h1
+        | cons a tl => simp [applyRoll]
+    | 1, hLen =>
+      have h2 : s.stack.length ≥ 2 := hLen 1 (Or.inl rfl)
+      refine Or.inr ⟨.swap, rfl, ?_, fun h => StackOp.noConfusion h⟩
+      show applySwap s = applyRoll s 1
+      cases s with
+      | mk stack altstack outputs props preimage =>
+        match stack with
+        | [] => simp at h2
+        | [_] => simp at h2
+        | a :: b :: tl => simp [applySwap, applyRoll]
+    | 2, hLen =>
+      have h3 : s.stack.length ≥ 3 := hLen 2 (Or.inl rfl)
+      refine Or.inr ⟨.rot, rfl, ?_, fun _ => h3⟩
+      show applyRot s = applyRoll s 2
+      cases s with
+      | mk stack altstack outputs props preimage =>
+        match stack with
+        | [] => simp at h3
+        | [_] => simp at h3
+        | [_, _] => simp at h3
+        | a :: b :: c :: tl => simp [applyRot, applyRoll]
+    | (d + 3), _ =>
+      exact Or.inr ⟨.roll (d + 3), rfl, rfl, fun h => StackOp.noConfusion h⟩
+  | pick d =>
+    match d, hLen with
+    | 0, hLen =>
+      have h1 : s.stack.length ≥ 1 := hLen 0 (Or.inr rfl)
+      refine Or.inr ⟨.dup, rfl, ?_, fun h => StackOp.noConfusion h⟩
+      show applyDup s = applyPick s 0
+      cases s with
+      | mk stack altstack outputs props preimage =>
+        cases stack with
+        | nil => simp at h1
+        | cons a tl => simp [applyDup, applyPick, StackState.push]
+    | 1, hLen =>
+      have h2 : s.stack.length ≥ 2 := hLen 1 (Or.inr rfl)
+      refine Or.inr ⟨.over, rfl, ?_, fun h => StackOp.noConfusion h⟩
+      show applyOver s = applyPick s 1
+      cases s with
+      | mk stack altstack outputs props preimage =>
+        match stack with
+        | [] => simp at h2
+        | [_] => simp at h2
+        | a :: b :: tl => simp [applyOver, applyPick, StackState.push]
+    | (d + 2), _ =>
+      exact Or.inr ⟨.pick (d + 2), rfl, rfl, fun h => StackOp.noConfusion h⟩
+  | push v => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | dup => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | swap => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | drop => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | nip => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | over => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | rot => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | tuck => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | pickStruct d => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | opcode code => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | placeholder i n => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | pushCodesepIndex => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | rawBytes b => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+  | ifOp thn els => exact Or.inr ⟨_, rfl, rfl, hRot⟩
+
+/-- N-376: the roll/pick fold carries the depth invariant over to the rot
+invariant `applyRot3Elim` needs. Every `.rot` in the folded list is either
+an input `.rot` (three deep by `rollPickDepthOK`) or a folded `.roll 2`
+(three deep by its own bound), and the fold leaves every intermediate
+state unchanged. -/
+theorem applyRollPickFold_rotDepthOK :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), rollPickDepthOK ops s →
+        rotDepthOK (applyRollPickFold ops) s := by
+  intro ops
+  induction ops with
+  | nil => intro _ s _; exact True.intro
+  | cons op rest ih =>
+    intro hNoIf s hDepth
+    have hRestNoIf : noIfOp rest := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    obtain ⟨hLen, hRot, hTail⟩ := (rollPickDepthOK_cons op rest s).mp hDepth
+    show rotDepthOK (rollPickRewriteOne op ++ applyRollPickFold rest) s
+    rcases rollPickRewriteOne_step op s hLen hRot with ⟨hEq, hStep⟩ | ⟨op', hEq, hStep, hR'⟩
+    · rw [hEq, List.nil_append]
+      exact ih hRestNoIf s (hTail s hStep)
+    · rw [hEq]
+      exact ⟨hR', fun s' hs => ih hRestNoIf s' (hTail s' (hStep ▸ hs))⟩
+
 /-- General `runOps` soundness of `peepholeRollPickFold` for `noIfOp`
 inputs, under the `rollPickDepthOK` depth invariant. On `noIfOp` lists
 `rollPickListTRgo` is the identity and `rollPickFixpointFlat` is
@@ -9770,6 +10070,8 @@ theorem peepholeRollPickFold_runOps_eq
   rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
   show runOps (rollPickFixpointFlat 64 ops) s = runOps ops s
   unfold rollPickFixpointFlat
+  rw [rot3Elim_pass_sound _ (applyRollPickFold_preserves_noIfOp ops hNoIf) s
+        (applyRollPickFold_rotDepthOK ops hNoIf s hDepth)]
   exact applyRollPickFold_runOps_eq ops hNoIf s hDepth
 
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
@@ -11968,7 +12270,8 @@ private theorem rollPickFixpointFlat_singleton_ifOp
     (a : List StackOp) (b : Option (List StackOp)) :
     rollPickFixpointFlat 64 [.ifOp a b] = [.ifOp a b] := by
   unfold rollPickFixpointFlat
-  apply applyRollPickFold_eq_self_of_flatNoop
+  rw [applyRollPickFold_eq_self_of_flatNoop]
+  · rfl
   intro op hOp
   rw [List.mem_singleton] at hOp
   subst hOp
@@ -12277,6 +12580,7 @@ theorem rollPickFoldFlatNoop_of_mathByteEmit (ops : List StackOp)
         cases op with
         | roll d => exact absurd hHd (by simp only [isMathByteEmitOp]; decide)
         | pick d => exact absurd hHd (by simp only [isMathByteEmitOp]; decide)
+        | rot => exact absurd hHd (by simp only [isMathByteEmitOp]; decide)
         | _ => exact True.intro
       · exact ih hRest hTail
 

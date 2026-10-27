@@ -68,10 +68,13 @@ class ECLinear extends SmartContract {
 # efcff80d2f183358... / 2548856. Sourced from the TYPESCRIPT tier, not from
 # Python's own output — this pin exists precisely to be another tier's opinion
 # of these bytes. Independently equal to what the Ruby and Zig tiers measured.
+# Re-stamped for N-376, the ROT ROT ROT -> [] peephole rule: -9288 hex chars
+# (4644 identity OP_ROTs deleted, nothing else moved per the opcode-walk
+# oracle). Was 7214cad88783e09e... / 2554314. TS and Go agree on the new bytes.
 EC_LINEAR_REFERENCE_SHA256 = (
-    "7214cad88783e09e484fe15f57c3d45fdf4443960c7f7a45731e052065b1bcad"
+    "87a45fc5c08da42fa2422a778d43119296752a4b7363dcc313b44a565fcc7fbf"
 )
-EC_LINEAR_REFERENCE_HEX_LEN = 2554314
+EC_LINEAR_REFERENCE_HEX_LEN = 2545026
 
 # Control: no EC calls at all, so `optimize_ec` returns early. Pinned so the
 # fix above cannot be "achieved" by disabling the optimizer.

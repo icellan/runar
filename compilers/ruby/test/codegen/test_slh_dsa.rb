@@ -101,12 +101,14 @@ class TestSlhDsaCodegen < Minitest::Test
   # parameter sets here have a >32-byte Hmsg digest (34/39/42/47/49 bytes
   # respectively), so all five exercise the multi-block CAT path the
   # mutation corrupts.
+  # N-376: re-pinned to the goldens after the ROT ROT ROT -> [] peephole rule
+  # (each golden lost the identity `7b7b7b` after its leading OP_0).
   SLH_GOLDEN_SHA256 = {
-    'SHA2_128f' => '85967033e86155bcb7c172eb22773e0411ada44e4e7a358e220be2a2a782f070',
-    'SHA2_192s' => 'e33a62fd0e330909bb843fc42d95bbe784a102bf26f7874880eb74b5094ed35a',
-    'SHA2_192f' => '0193e75bc98aac84b87562a9e7402aba6dc2360cfad64c16ef669e8e14e1d9b8',
-    'SHA2_256s' => 'b02a5315446fdce88caab5b7868b072dd2bbcedd8882b676c94e92202603c5a1',
-    'SHA2_256f' => 'b46ea6196be67da1915f3e20e1eb19a4379319305974a70950c1a86eb1668828'
+    'SHA2_128f' => 'ae41cb3717e8d49f03c5806969265e56f92a59a7eba31f502c605b1379e189f2',
+    'SHA2_192s' => '33f4d82c70a12c4bf99a2b815e54cd75259f0d1b0d3d09feb843355b59a55205',
+    'SHA2_192f' => 'a72813eb2470c9ce281f44d26611625de239f2fd4c6a737696cf45a44fb753b7',
+    'SHA2_256s' => '5687acb14eb24f326196ef049af1f46c6894d20a3d81c461abdb99d81df06a4e',
+    'SHA2_256f' => '790ca285adc859741b79231754b2e69380f656a2675be0ced677ce8173847f85'
   }.freeze
 
   SLH_GOLDEN_SHA256.each do |param_key, expected_sha256|

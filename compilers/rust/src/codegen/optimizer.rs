@@ -373,6 +373,14 @@ fn match_window_3(a: &StackOp, b: &StackOp, c: &StackOp) -> Option<Vec<StackOp>>
         return None;
     }
 
+    // ROT, ROT, ROT → remove all three (N-376). OP_ROT is a 3-cycle on the
+    // top three items, so three in a row are the identity; the fixed-point
+    // loop leaves a run of n as n mod 3. Matches the opcode-string form too
+    // (F-392 convention), as every tier does.
+    if is_rot(a) && is_rot(b) && is_rot(c) {
+        return Some(vec![]);
+    }
+
     // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
     //
     // `OP_NOT OP_NOT` is boolean NORMALISATION, not numeric identity: for any
@@ -581,6 +589,11 @@ fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
 fn is_push_int(op: &StackOp, n: i128) -> bool {
     use num_traits::ToPrimitive;
     matches!(op, StackOp::Push(PushValue::Int(v)) if v.to_i128() == Some(n))
+}
+
+/// A typed `Rot` or the opcode-string `OP_ROT` (N-376).
+fn is_rot(op: &StackOp) -> bool {
+    matches!(op, StackOp::Rot) || is_opcode(op, "OP_ROT")
 }
 
 fn is_opcode(op: &StackOp, code: &str) -> bool {

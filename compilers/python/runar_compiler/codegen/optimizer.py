@@ -278,6 +278,13 @@ def _match_window3(a: StackOp, b: StackOp, c: StackOp) -> Optional[list[StackOp]
     if _is_raw_bytes(a) or _is_raw_bytes(b) or _is_raw_bytes(c):
         return None
 
+    # ROT, ROT, ROT -> remove all three (N-376).  OP_ROT is a 3-cycle on the
+    # top three items, so three in a row are the identity; the fixed-point
+    # loop leaves a run of n as n mod 3.  Matches the opcode-string form too
+    # (F-392 convention), as every tier does.
+    if _is_rot(a) and _is_rot(b) and _is_rot(c):
+        return []
+
     # <canonical-bool producer>, OP_NOT, OP_NOT -> <canonical-bool producer>
     #
     # ``OP_NOT OP_NOT`` is boolean NORMALISATION, not numeric identity: for any
@@ -350,6 +357,11 @@ def _is_push_bigint(op: StackOp, n: int) -> bool:
     if op.value.kind != "bigint" or op.value.big_int is None:
         return False
     return op.value.big_int == n
+
+
+def _is_rot(op: StackOp) -> bool:
+    """A typed ``rot`` or the opcode-string ``OP_ROT`` (N-376)."""
+    return op.op == "rot" or _is_opcode_op(op, "OP_ROT")
 
 
 def _is_opcode_op(op: StackOp, code: str) -> bool:

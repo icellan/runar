@@ -34,6 +34,11 @@ function isPushOne(op: StackOp): boolean {
   return isPushBigInt(op, 1n);
 }
 
+/** A typed `rot` op or its opcode-string form `OP_ROT` (N-376). */
+function isRot(op: StackOp): boolean {
+  return op.op === 'rot' || isOpcode(op, 'OP_ROT');
+}
+
 /**
  * Opcodes whose result is guaranteed to be a CANONICAL boolean — the minimal
  * script-number encoding of 0 (the empty element) or 1 (`{0x01}`), and nothing
@@ -119,6 +124,28 @@ const rules: PeepholeRule[] = [
     windowSize: 2,
     match(ops) {
       if (ops[0]!.op === 'swap' && ops[1]!.op === 'swap') {
+        return [];
+      }
+      return null;
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // ROT, ROT, ROT → remove all three (identity, N-376)
+  //
+  // OP_ROT is a 3-cycle on the top three items, so three in a row leave the
+  // stack as it was (given three items — with fewer the first ROT fails, and
+  // the input program fails the same way on the ops that consume them).
+  // Stack lowering emits the run when a three-argument consumer's arguments
+  // already sit on top in order. With the fixed-point loop a run of n ROTs
+  // ends as n mod 3; ROT ROT and a lone ROT are kept. Like the F-392 roll/pick
+  // rules it also matches the opcode-string form (`OP_ROT`) some codegen
+  // paths emit, so every tier deletes the same runs whichever form it uses.
+  // -------------------------------------------------------------------------
+  {
+    windowSize: 3,
+    match(ops) {
+      if (isRot(ops[0]!) && isRot(ops[1]!) && isRot(ops[2]!)) {
         return [];
       }
       return null;
