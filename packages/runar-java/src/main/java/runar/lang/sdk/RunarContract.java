@@ -593,7 +593,7 @@ public final class RunarContract {
         // Stateless single-method contract: thin path (legacy P2PKH).
         // ------------------------------------------------------------
         if (!plan.isStateful() && !plan.needsOpPushTx()) {
-            return callStateless(plan.m(), plan.resolved(), plan.sigIndices(), provider, signer);
+            return callStateless(plan.m(), plan.resolved(), plan.sigIndices(), provider, signer, options);
         }
 
         // ------------------------------------------------------------
@@ -915,8 +915,23 @@ public final class RunarContract {
      * are signed here; their BIP-143 digests commit to no scriptSig, so they
      * stay valid when input 0's unlock is rebuilt with its real signatures.
      */
-    private RawTx layoutStateless(String unlockHex, Provider provider, Signer signer) {
+    private RawTx layoutStateless(
+        String unlockHex, Provider provider, Signer signer, CallOptions options
+    ) {
+        // N-418: the stateless path honours the same CallOptions as TS's shared
+        // non-terminal build: change goes to options.changeAddress (default the
+        // signer), funding inputs are signed by options.fundingSigner (default the
+        // signer; the coins are still listed at the signer's address), locktime /
+        // sequence set nLockTime and every nSequence, maxFundingInputs caps the
+        // funding input count.
         String funderAddress = signer.address();
+        String changeAddress = (options != null && options.changeAddress != null)
+            ? options.changeAddress : funderAddress;
+        Signer fundingSigner = (options != null && options.fundingSigner != null)
+            ? options.fundingSigner : signer;
+        Integer optLocktime = options != null ? options.locktime : null;
+        Integer optSequence = options != null ? options.sequence : null;
+        Integer maxFundingInputs = options != null ? options.maxFundingInputs : null;
         List<UTXO> candidates = new ArrayList<>();
         for (UTXO u : provider.listUtxos(funderAddress)) {
             if (!(u.txid().equals(currentUtxo.txid()) && u.outputIndex() == currentUtxo.outputIndex())) {
@@ -924,19 +939,28 @@ public final class RunarContract {
             }
         }
         TransactionBuilder.CallTxResult laid = TransactionBuilder.buildCallTransactionFull(
-            currentUtxo, unlockHex, null, 0, List.of(), candidates, funderAddress,
-            provider.getFeeRate()
+            currentUtxo, unlockHex, null, 0, List.of(), candidates, changeAddress,
+            provider.getFeeRate(), optLocktime != null ? optLocktime : 0, null
         );
         RawTx tx = laid.tx();
         List<UTXO> funding = laid.fundingUtxos();
+        if (maxFundingInputs != null && funding.size() > maxFundingInputs) {
+            throw new IllegalStateException(
+                "RunarContract.call: funding requires " + funding.size()
+                    + " input(s) but maxFundingInputs=" + maxFundingInputs
+                    + ". Increase maxFundingInputs, use larger UTXOs, or consolidate.");
+        }
+        // Before any BIP-143 digest: hashSequence and the signed input's own
+        // nSequence both feed it (issue #131).
+        tx.setAllSequences(resolveInputSequence(optLocktime, optSequence));
         for (int i = 0; i < funding.size(); i++) {
             UTXO u = funding.get(i);
             byte[] fundSighash = tx.sighashBIP143(
                 1 + i, u.scriptHex(), u.satoshis(), RawTx.SIGHASH_ALL_FORKID);
             tx.setUnlockingScript(1 + i,
-                ScriptUtils.encodePushData(ScriptUtils.bytesToHex(signer.sign(fundSighash, null))
+                ScriptUtils.encodePushData(ScriptUtils.bytesToHex(fundingSigner.sign(fundSighash, null))
                     + String.format("%02x", RawTx.SIGHASH_ALL_FORKID))
-                + ScriptUtils.encodePushData(ScriptUtils.bytesToHex(signer.pubKey())));
+                + ScriptUtils.encodePushData(ScriptUtils.bytesToHex(fundingSigner.pubKey())));
         }
         return tx;
     }
@@ -952,7 +976,8 @@ public final class RunarContract {
         List<Object> resolved,
         List<Integer> sigIndices,
         Provider provider,
-        Signer signer
+        Signer signer,
+        CallOptions options
     ) {
         // Pre-resolve intent-intrinsic witness hex (throws
         // WitnessValueMissingError if any auto-injected param wasn't set).
@@ -960,7 +985,7 @@ public final class RunarContract {
         String unlockHex = buildUnlockingScript(m, resolved, intentWitnessHex);
 
         // N-417: P2PKH funding input + change, as every other tier (see layoutStateless).
-        RawTx tx = layoutStateless(unlockHex, provider, signer);
+        RawTx tx = layoutStateless(unlockHex, provider, signer, options);
 
         if (!sigIndices.isEmpty()) {
             // Issue #123: sign under the method's declared @sighash mode (default 0x41).
@@ -2431,7 +2456,7 @@ public final class RunarContract {
                     + "(N-417). Only the method's own Sig slots are left for external signers."
             );
         }
-        String txHex = layoutStateless(unlockHex, provider, signer).toHex();
+        String txHex = layoutStateless(unlockHex, provider, signer, options).toHex();
 
         // BIP-143 is invariant under scriptSig contents (it hashes the
         // subscript — i.e. the locking script — not the unlocking
