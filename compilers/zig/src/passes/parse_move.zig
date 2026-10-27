@@ -1407,7 +1407,14 @@ const Parser = struct {
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             self.skipSemicolons();
             if (self.current.kind == .rbrace or self.current.kind == .eof) break;
+            const starts_while = self.checkIdent("while");
             if (self.parseStatement()) |s| {
+                // N-421: a Move `while` must follow the declaration of its
+                // loop variable immediately; the fold below is the only place
+                // the start value is learned, so a `while` that does not fold
+                // would silently start from the default 0. Refuse it with the
+                // same sentence the other six tiers emit.
+                var folded = false;
                 // Fold `let i: Int = K; while (i < N) { ...; i = i + 1; }`
                 // into a single for_stmt by patching init_value from a
                 // preceding let/const decl whose name matches the loop variable.
@@ -1438,10 +1445,12 @@ const Parser = struct {
                             merged.init_value = init_val;
                             merged.init_is_const = init_const;
                             stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
-                            continue;
+                            folded = true;
                         }
                     }
                 }
+                if (folded) continue;
+                if (starts_while and s == .for_stmt) self.addError(move_while_shape_diagnostic);
                 stmts.append(self.allocator, s) catch {};
             }
         }
