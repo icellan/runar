@@ -83,7 +83,8 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	// N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
 	// N-045 took it 7849 -> 7857: the mutable PubKey playerO is width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY, +4) before each of its two continuation commits.
 	// N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
-	const expectedBytes = 7855 // W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2
+	// N-376 took it 7855 -> 7801: 18 identity ROT ROT ROT runs dropped by the peephole.
+	const expectedBytes = 7801 // W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2; N-376: -54
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}
