@@ -217,11 +217,13 @@ def _make_type_node(name: str) -> TypeNode:
 # ---------------------------------------------------------------------------
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isascii() and (ch.isalnum() or ch == "_")
 
 
 def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:

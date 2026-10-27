@@ -38,6 +38,12 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 	if diags := checkGoNumericLiterals(source, fileName); len(diags) > 0 {
 		return &ParseResult{Errors: diags}
 	}
+	// N-407: go/parser takes Unicode letters into identifiers; the TS
+	// reference (01-parse-go.ts) refuses any non-ASCII character outside a
+	// comment or a string with its "Unexpected character" diagnostic.
+	if diags := checkGoNonASCIITokens(source, fileName); len(diags) > 0 {
+		return &ParseResult{Errors: diags}
+	}
 	return withNestingLimit(func() *ParseResult { return parseGoContractSurface(source, fileName) })
 }
 
@@ -153,6 +159,36 @@ func checkGoNumericLiterals(source []byte, fileName string) []Diagnostic {
 		if parseIntLiteral("go", text) == nil {
 			p := f.Position(pos)
 			diags = append(diags, lexDiag(invalidIntegerLiteralMsg("go", text), fileName, p.Line, p.Column-1))
+		}
+	}
+	return diags
+}
+
+// checkGoNonASCIITokens (N-407) scans source with go/scanner, so comments,
+// strings and runes are skipped exactly, and refuses the first non-ASCII
+// character of every identifier (go/scanner admits Unicode letters) and every
+// illegal non-ASCII character (U+00A0, U+2003, ...) with the TS reference's
+// "Unexpected character '<c>'" at that character.
+func checkGoNonASCIITokens(source []byte, fileName string) []Diagnostic {
+	fset := token.NewFileSet()
+	f := fset.AddFile(fileName, -1, len(source))
+	var s scanner.Scanner
+	s.Init(f, source, func(token.Position, string) {}, 0)
+	var diags []Diagnostic
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok != token.IDENT && tok != token.ILLEGAL {
+			continue
+		}
+		for i, r := range lit {
+			if r >= 0x80 {
+				p := f.Position(pos + token.Pos(i))
+				diags = append(diags, lexDiag(fmt.Sprintf("Unexpected character '%c'", r), fileName, p.Line, p.Column-1))
+				break
+			}
 		}
 	}
 	return diags

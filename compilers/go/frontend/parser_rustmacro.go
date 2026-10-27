@@ -146,7 +146,9 @@ func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 			pos++
 			continue
 		}
-		if unicode.IsSpace(ch) {
+		// N-407: whitespace is exactly the TS reference's ' ', '\t', '\r'
+		// ('\n' above); a non-ASCII space such as U+00A0 is refused below.
+		if ch == ' ' || ch == '\t' || ch == '\r' {
 			col++
 			pos++
 			continue
@@ -325,9 +327,11 @@ func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 		}
 
 		// Identifier / keyword
-		if ch == '_' || unicode.IsLetter(ch) {
+		// N-407: ASCII only, as the TS reference ([A-Za-z_][A-Za-z0-9_]*);
+		// a non-ASCII letter is refused below.
+		if ch == '_' || isASCIILetter(ch) {
 			var val strings.Builder
-			for pos < len(chars) && (chars[pos] == '_' || unicode.IsLetter(chars[pos]) || unicode.IsDigit(chars[pos])) {
+			for pos < len(chars) && (chars[pos] == '_' || isASCIILetter(chars[pos]) || (chars[pos] >= '0' && chars[pos] <= '9')) {
 				val.WriteRune(chars[pos])
 				pos++
 				col++

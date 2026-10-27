@@ -580,11 +580,13 @@ public final class GoParser {
     }
 
     private static boolean isIdentStart(char c) {
-        return Character.isLetter(c) || c == '_';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(c) || c == '_';
     }
 
     private static boolean isIdentPart(char c) {
-        return Character.isLetterOrDigit(c) || c == '_';
+        return LexDiag.isAsciiLetter(c) || (c >= '0' && c <= '9') || c == '_';
     }
 
     private static boolean isHexDigit(char c) {

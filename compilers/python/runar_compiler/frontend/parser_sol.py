@@ -125,11 +125,13 @@ def _is_hex_digit(ch: str) -> bool:
 
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_" or ch == "$"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_" or ch == "$")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_" or ch == "$"
+    return ch.isascii() and (ch.isalnum() or ch == "_" or ch == "$")
 
 
 # ---------------------------------------------------------------------------

@@ -210,6 +210,13 @@ public final class JavaParser {
                 "javac reported errors parsing " + filename + ":\n  " + String.join("\n  ", errors)
             );
         }
+        // N-407: javac takes Unicode letters into identifiers; the TS
+        // reference (01-parse-java.ts) refuses every non-ASCII character
+        // outside a comment or a literal as an unexpected character.
+        List<String> nonAscii = nonAsciiOutsideLiterals(source, filename);
+        if (!nonAscii.isEmpty()) {
+            throw new ParseException(String.join("\n  ", nonAscii));
+        }
         var iter = units.iterator();
         if (!iter.hasNext()) {
             throw new ParseException("no compilation unit parsed from " + filename);
@@ -1306,7 +1313,67 @@ public final class JavaParser {
         return filename + ":" + d.getLineNumber() + ":" + (pos - lineStart) + ": ";
     }
 
-    private static SourceLocation locationOf(Tree t, Unit cu, String filename) {
+    /**
+     * N-407: {@code file:line:col: Unexpected character '<c>'} (0-based raw
+     * character column, as {@link #javacDiagnosticLocation}) for every
+     * non-ASCII character outside a comment, a string or text block, or a
+     * char literal. Only reached once javac accepted the source, so those
+     * constructs are well formed. Java's backslash-u Unicode escapes are not
+     * decoded here.
+     */
+    private static List<String> nonAsciiOutsideLiterals(String source, String filename) {
+        List<String> out = new ArrayList<>();
+        int n = source.length();
+        int line = 1;
+        int lineStart = 0;
+        int i = 0;
+        while (i < n) {
+            char c = source.charAt(i);
+            if (c == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
+                while (i < n && source.charAt(i) != '\n') i++;
+                continue;
+            }
+            int skipTo = -1;
+            if (c == '/' && i + 1 < n && source.charAt(i + 1) == '*') {
+                int end = source.indexOf("*/", i + 2);
+                skipTo = end < 0 ? n : end + 2;
+            } else if (c == '"' && source.startsWith("\"\"\"", i)) {
+                int j = i + 3;
+                while (j < n && !source.startsWith("\"\"\"", j)) j += source.charAt(j) == '\\' ? 2 : 1;
+                skipTo = Math.min(n, j + 3);
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && source.charAt(j) != c && source.charAt(j) != '\n') {
+                    j += source.charAt(j) == '\\' ? 2 : 1;
+                }
+                skipTo = Math.min(n, j + 1);
+            }
+            if (skipTo >= 0) {
+                for (int k = i; k < skipTo; k++) {
+                    if (source.charAt(k) == '\n') {
+                        line++;
+                        lineStart = k + 1;
+                    }
+                }
+                i = skipTo;
+                continue;
+            }
+            if (c == '\n') {
+                line++;
+                lineStart = i + 1;
+            } else if (c >= 0x80) {
+                int cp = source.codePointAt(i);
+                out.add(filename + ":" + line + ":" + (i - lineStart) + ": Unexpected character '"
+                    + new String(Character.toChars(cp)) + "'");
+                i += Character.charCount(cp);
+                continue;
+            }
+            i++;
+        }
+        return out;
+    }
+
+        private static SourceLocation locationOf(Tree t, Unit cu, String filename) {
         if (t == null || cu == null) return new SourceLocation(filename, 0, 0);
         long start = cu.positions().getStartPosition(cu.cu(), t);
         if (start == Diagnostic.NOPOS || start < 0) return new SourceLocation(filename, 0, 0);

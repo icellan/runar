@@ -378,7 +378,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
         let c = col;
 
         // Whitespace (skip semicolons that Go inserts — we handle real `;` and newlines)
-        if ch.is_whitespace() {
+        // N-407: exactly the TS reference's whitespace (' ', '\t', '\r', '\n'); a
+        // non-ASCII space such as U+00A0 is refused as an unexpected character.
+        if matches!(ch, ' ' | '\t' | '\r' | '\n') {
             if ch == '\n' {
                 line += 1;
                 col = 1;
@@ -613,9 +615,11 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
         }
 
         // Identifier / keyword
-        if ch.is_alphabetic() || ch == '_' {
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+        // as an unexpected character.
+        if ch.is_ascii_alphabetic() || ch == '_' {
             let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_') {
+            while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
                 val.push(chars[pos]);
                 pos += 1;
                 col += 1;

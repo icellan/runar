@@ -248,11 +248,13 @@ public final class ZigParser {
     // ===================================================================
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_';
     }
 
     static List<Token> tokenize(String source, String filename, List<String> lex) {

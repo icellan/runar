@@ -9,6 +9,15 @@ final class LexDiag {
     private LexDiag() {}
 
     /**
+     * N-407: the letter class of the TS reference tokenizers' identifier rule
+     * ([A-Za-z]). {@code Character.isLetter} also takes {@code é}, which the
+     * reference refuses as an unexpected character.
+     */
+    static boolean isAsciiLetter(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    /**
      * A quoted literal that reaches a line break or end of file before its
      * closing quote (only end of file on .runar.rs, for Python triple-quoted
      * strings, .runar.go backtick raw strings and .runar.ts template literals).

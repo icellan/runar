@@ -449,9 +449,11 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             continue
 
         # Identifier / keyword
-        if ch.isalpha() or ch == "_" or ch == "$":
+        # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+        # as an unexpected character.
+        if ch.isascii() and (ch.isalpha() or ch == "_" or ch == "$"):
             start = pos
-            while pos < n and (source[pos].isalnum() or source[pos] in ("_", "$")):
+            while pos < n and source[pos].isascii() and (source[pos].isalnum() or source[pos] in ("_", "$")):
                 pos += 1
                 col += 1
             word = source[start:pos]

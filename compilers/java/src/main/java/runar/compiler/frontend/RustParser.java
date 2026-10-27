@@ -513,11 +513,13 @@ public final class RustParser {
             }
 
             // Identifier / keyword
-            if (Character.isLetter(ch) || ch == '_') {
+            // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+            // refused as an unexpected character.
+            if (LexDiag.isAsciiLetter(ch) || ch == '_') {
                 int start = pos;
                 while (pos < n) {
                     char d = source.charAt(pos);
-                    if (Character.isLetterOrDigit(d) || d == '_') {
+                    if (LexDiag.isAsciiLetter(d) || (d >= '0' && d <= '9') || d == '_') {
                         pos++;
                         col++;
                     } else {

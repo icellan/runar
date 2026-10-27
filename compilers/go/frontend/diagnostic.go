@@ -177,3 +177,9 @@ func unexpectedCharDiag(src string, i int, file string, line, col int) (Diagnost
 	r, size := utf8.DecodeRuneInString(src[i:])
 	return lexDiag(fmt.Sprintf("Unexpected character '%c'", r), file, line, col), size
 }
+
+// isASCIILetter is the letter class of the TS reference tokenizers' identifier
+// rule ([A-Za-z]); N-407 keeps a non-ASCII letter out of identifiers.
+func isASCIILetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
