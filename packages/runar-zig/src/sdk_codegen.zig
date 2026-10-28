@@ -186,26 +186,18 @@ pub fn generateZig(allocator: std.mem.Allocator, artifact: *const types.RunarArt
         try appendFmt(&out, allocator, "        artifact: *sdk.RunarArtifact,\n", .{});
         try appendFmt(&out, allocator, "        args: {s}ConstructorArgs,\n", .{name});
         try appendFmt(&out, allocator, "    ) !{s}Contract {{\n", .{name});
-        try appendFmt(&out, allocator, "        var ctor_args = [_]sdk.StateValue{{\n", .{});
+        try appendFmt(&out, allocator, "        const ctor_args = [_]sdk.StateValue{{\n", .{});
         for (ctor_params) |p| {
-            const expr = try toStateValueExpr(allocator, p.name, p.type_name);
+            const field_ref = try std.fmt.allocPrint(allocator, "args.{s}", .{p.name});
+            defer allocator.free(field_ref);
+            const expr = try toStateValueExpr(allocator, field_ref, p.type_name);
             defer allocator.free(expr);
             try appendFmt(&out, allocator, "            {s},\n", .{expr});
-            try appendFmt(&out, allocator, "            // arg.{s}\n", .{p.name});
         }
         try appendFmt(&out, allocator, "        }};\n", .{});
-        try appendFmt(&out, allocator, "        // ^ scratch buffer; sliced below into the SDK call.\n", .{});
-        try appendFmt(&out, allocator, "        const ctor_count = ctor_args.len / 2;\n", .{});
-        try appendFmt(&out, allocator, "        var packed_args = try allocator.alloc(sdk.StateValue, ctor_count);\n", .{});
-        try appendFmt(&out, allocator, "        var i: usize = 0;\n", .{});
-        try appendFmt(&out, allocator, "        var j: usize = 0;\n", .{});
-        try appendFmt(&out, allocator, "        while (i < ctor_args.len) : (i += 2) {{\n", .{});
-        try appendFmt(&out, allocator, "            packed_args[j] = ctor_args[i];\n", .{});
-        try appendFmt(&out, allocator, "            j += 1;\n", .{});
-        try appendFmt(&out, allocator, "        }}\n", .{});
         try appendFmt(&out, allocator, "        const inner = try allocator.create(sdk.RunarContract);\n", .{});
-        try appendFmt(&out, allocator, "        inner.* = try sdk.RunarContract.init(allocator, artifact, packed_args);\n", .{});
-        try appendFmt(&out, allocator, "        allocator.free(packed_args);\n", .{});
+        try appendFmt(&out, allocator, "        errdefer allocator.destroy(inner);\n", .{});
+        try appendFmt(&out, allocator, "        inner.* = try sdk.RunarContract.init(allocator, artifact, &ctor_args);\n", .{});
         try appendFmt(&out, allocator, "        return .{{ .allocator = allocator, .inner = inner }};\n", .{});
         try appendFmt(&out, allocator, "    }}\n\n", .{});
     } else {

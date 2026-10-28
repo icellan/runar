@@ -40,6 +40,12 @@
 // output per entry (a dropped one keeps the single contract-UTXO amount).
 // Does NOT prove: script validity of the resulting tx, the prepare/finalize
 // wrapper methods, or any tier other than Zig.
+//
+// N-431 stops clearing the stateful artifact's constructor params before
+// generating, so the wrapper's `init(allocator, artifact, args)` is compiled
+// too, and a test asserts `init(.{count, owner})` yields the same locking
+// script as `RunarContract.init` with the same args in ABI order (and that a
+// different count changes it). Does NOT prove: init for other param types.
 const std = @import("std");
 const sdk = @import("runar-zig");
 
@@ -232,6 +238,39 @@ const TEST_BLOCK_STATEFUL =
     \\    try testing.expectEqual(@as(usize, 1), countOf(multi, sats_7000));
     \\}
     \\
+    \\test "N-431: generated init(args) yields the same locking script as the direct SDK" {
+    \\    const allocator = testing.allocator;
+    \\    const raw = try std.Io.Dir.cwd().readFileAlloc(testing.io, VECTOR, allocator, .limited(8 * 1024 * 1024));
+    \\    defer allocator.free(raw);
+    \\    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    \\    defer parsed.deinit();
+    \\    const v = parsed.value.object;
+    \\    const artifact_json = try std.json.Stringify.valueAlloc(allocator, v.get("artifact").?, .{});
+    \\    defer allocator.free(artifact_json);
+    \\    var artifact = try sdk.RunarArtifact.fromJson(allocator, artifact_json);
+    \\    defer artifact.deinit();
+    \\    const owner = v.get("constructorArgs").?.object.get("owner").?.string;
+    \\
+    \\    var wrapper = try MergeCounterContract.init(allocator, &artifact, .{ .count = 7, .owner = owner });
+    \\    defer wrapper.deinit();
+    \\    const direct_args = [_]sdk.StateValue{ .{ .int = 7 }, .{ .bytes = owner } };
+    \\    var direct = try sdk.RunarContract.init(allocator, &artifact, &direct_args);
+    \\    defer direct.deinit();
+    \\
+    \\    const a = try wrapper.getLockingScript();
+    \\    defer allocator.free(a);
+    \\    const b = try direct.getLockingScript();
+    \\    defer allocator.free(b);
+    \\    try testing.expectEqualStrings(b, a);
+    \\    // A different count must change the script (state is part of it), so the
+    \\    // equality above is not vacuous.
+    \\    var other = try MergeCounterContract.init(allocator, &artifact, .{ .count = 8, .owner = owner });
+    \\    defer other.deinit();
+    \\    const c = try other.getLockingScript();
+    \\    defer allocator.free(c);
+    \\    try testing.expect(!std.mem.eql(u8, a, c));
+    \\}
+    \\
 ;
 
 pub fn main(init: std.process.Init) !void {
@@ -257,11 +296,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(artifact_json);
     var stateful_artifact = try sdk.RunarArtifact.fromJson(allocator, artifact_json);
     defer stateful_artifact.deinit();
-    // Generate from a shallow copy with no constructor params: the wrapper's
-    // `init(args)` is not what this check exercises (the test uses `fromUtxo`).
-    var gen_artifact = stateful_artifact;
-    gen_artifact.abi.constructor.params = &.{};
-    const stateful_src = try sdk.generateZig(allocator, &gen_artifact);
+    const stateful_src = try sdk.generateZig(allocator, &stateful_artifact);
     defer allocator.free(stateful_src);
     // Both wrappers share one file: drop the second one's duplicate imports.
     const import_end_marker = "const sdk = @import(\"runar-zig\");\n\n";
