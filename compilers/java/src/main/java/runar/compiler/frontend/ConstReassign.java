@@ -21,17 +21,18 @@ import runar.compiler.ir.ast.VariableDeclStatement;
 
 /**
  * N-342 — a {@code const} local on the {@code .runar.ts} surface cannot be
- * reassigned.
+ * reassigned; since N-344 the same holds for {@code .runar.rs} ({@code let}
+ * without {@code mut}) and {@code .runar.zig} ({@code const}).
  *
  * <p>spec/grammar.md section 9: "{@code const} variables cannot be
  * reassigned." The Java AST's {@link VariableDeclStatement} carries no
- * mutability, so {@link TsParser} hands this pass the set of declarations (by
- * identity) it read as {@code const}. Refused, with one sentence in all seven
+ * mutability, so {@link TsParser}, {@link RustParser} and {@link ZigParser} hand
+ * this pass the set of declarations (by identity) they read as immutable. Refused, with one sentence in all seven
  * tiers: {@code x = e} (and the compound forms the parser desugars to it),
  * {@code x++} / {@code ++x} / {@code x--} / {@code --x}, and a {@code const}
  * for-initializer, which the loop's own {@code i++} then advances. Element
  * writes ({@code x[0] = e}) are not touched. Scoping follows blocks. Runs on
- * the {@code .runar.ts} parse result only.
+ * the {@code .runar.ts}, {@code .runar.rs} and {@code .runar.zig} parse results.
  */
 final class ConstReassign {
     /** The one sentence every tier emits for reassigning const {@code name}. */

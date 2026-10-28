@@ -1,4 +1,6 @@
-//! N-342 -- a `const` local on the `.runar.ts` surface cannot be reassigned.
+//! N-342 -- a `const` local on the `.runar.ts` surface cannot be reassigned;
+//! since N-344 the same holds for `.runar.rs` (`let` without `mut`) and
+//! `.runar.zig` (`const`).
 //!
 //! spec/grammar.md section 9: "`const` variables cannot be reassigned." The
 //! parser recorded the declaration kind and nothing ever read it, so
@@ -7,8 +9,8 @@
 //! `++x` / `x--` / `--x`, and a `const` for-initializer, which the loop's own
 //! `i++` then advances (that last one is checked by `parse_ts.zig`'s
 //! `parseForStmt`, which still sees the keyword). Element writes (`x[0] = e`)
-//! are not touched. Scoping follows blocks. Runs on the `.runar.ts` parse
-//! result only.
+//! are not touched. Scoping follows blocks. Runs on the `.runar.ts`, `.runar.rs` and
+//! `.runar.zig` parse results.
 
 const std = @import("std");
 const types = @import("../ir/types.zig");

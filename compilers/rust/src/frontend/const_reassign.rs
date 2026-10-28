@@ -1,4 +1,6 @@
-//! N-342 — a `const` local on the `.runar.ts` surface cannot be reassigned.
+//! N-342 — a `const` local on the `.runar.ts` surface cannot be reassigned;
+//! since N-344 the same holds for `.runar.rs` (`let` without `mut`) and
+//! `.runar.zig` (`const`).
 //!
 //! spec/grammar.md §9: "`const` variables cannot be reassigned." The parser
 //! recorded `mutable: false` for `const` and nothing ever read it, so
@@ -6,9 +8,10 @@
 //! seven tiers: `x = e` (and the compound forms the parser desugars to it),
 //! `x++` / `++x` / `x--` / `--x`, and a `const` for-initializer, which the
 //! loop's own `i++` then advances. Element writes (`x[0] = e`) are not
-//! touched. Scoping follows blocks. Runs on the `.runar.ts` parse result only:
-//! other surfaces spell immutability differently and several parsers record
-//! `mutable` as a constant.
+//! touched. Scoping follows blocks. Runs on the `.runar.ts`, `.runar.rs` and
+//! `.runar.zig` parse results, whose parsers record the declaration kind
+//! faithfully: other surfaces spell immutability differently and several
+//! parsers record `mutable` as a constant.
 
 use std::collections::HashMap;
 
