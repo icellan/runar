@@ -528,3 +528,68 @@ fn test_ruby_empty_source() {
         "expected a diagnostic for empty source"
     );
 }
+
+// ---------------------------------------------------------------------------
+// N-127: every one of the nine source formats is covered by the per-format
+// golden test and the N-way identity test.
+//
+// Proves: ALL_FORMATS names exactly the nine formats of the frontend-parity
+// invariant (CLAUDE.md), and basic-p2pkh compiled from each of them through
+// compile_from_source_str reaches the shared golden expected-script.hex and
+// therefore the same bytes as every other format.
+// Does not prove: fixtures beyond basic-p2pkh, constructs beyond
+// hash160+checkSig, or constant-folding-OFF output.
+// ---------------------------------------------------------------------------
+
+const ALL_FORMATS: [&str; 9] = [
+    ".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs",
+    ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
+];
+
+fn basic_p2pkh_script(ext: &str) -> String {
+    let source = read_conformance_format("basic-p2pkh", ext);
+    compile_from_source_str(&source, Some(&format!("basic-p2pkh{}", ext)))
+        .unwrap_or_else(|e| panic!("basic-p2pkh{}: compilation failed: {}", ext, e))
+        .script
+}
+
+#[test]
+fn test_format_list_covers_all_nine() {
+    let required = [
+        ".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs",
+        ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
+    ];
+    for ext in &required {
+        assert!(ALL_FORMATS.contains(ext), "ALL_FORMATS is missing {}", ext);
+    }
+    assert_eq!(ALL_FORMATS.len(), required.len(), "ALL_FORMATS has extra or duplicate entries");
+}
+
+#[test]
+fn test_basic_p2pkh_matches_golden_all_formats() {
+    let golden_path = conformance_dir().join("basic-p2pkh").join("expected-script.hex");
+    let golden = std::fs::read_to_string(&golden_path)
+        .unwrap_or_else(|e| panic!("golden {:?} unreadable: {}", golden_path, e));
+    for ext in &ALL_FORMATS {
+        assert_eq!(
+            basic_p2pkh_script(ext),
+            golden.trim(),
+            "basic-p2pkh{} does not match the golden",
+            ext
+        );
+    }
+}
+
+#[test]
+fn test_basic_p2pkh_all_formats_identical() {
+    let reference = basic_p2pkh_script(".runar.ts");
+    for ext in &ALL_FORMATS {
+        assert_eq!(
+            basic_p2pkh_script(ext),
+            reference,
+            "basic-p2pkh{} differs from .runar.ts",
+            ext
+        );
+    }
+}
+

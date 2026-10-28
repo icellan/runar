@@ -26,7 +26,7 @@ import (
 
 var multiFormats = []string{
 	".runar.ts", ".runar.sol", ".runar.move", ".runar.go",
-	".runar.rs", ".runar.py", ".runar.zig", ".runar.rb",
+	".runar.rs", ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
 }
 
 // resolveConformanceFormat is the pure resolution logic behind
@@ -702,5 +702,90 @@ func TestResolveConformanceFormat_MissingManifestEntryIsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "every fixture must carry all nine formats") {
 		t.Fatalf("resolveConformanceFormat failed, but not for the expected reason: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N-127: every one of the nine source formats is covered by the per-format
+// golden test and the N-way identity test below.
+//
+// Proves: multiFormats names exactly the nine formats of the frontend-parity
+// invariant (CLAUDE.md), and basic-p2pkh compiled from each of them through
+// CompileFromSource reaches the shared golden expected-script.hex and
+// therefore the same bytes as every other format.
+// Does not prove: fixtures beyond basic-p2pkh, constructs beyond
+// hash160+checkSig, or the constant-folding-OFF output (CompileFromSource uses
+// default options; TestConformanceGoldens covers fold-OFF for .runar.go).
+// ---------------------------------------------------------------------------
+
+func TestMultiFormat_FormatListCoversAllNine(t *testing.T) {
+	want := map[string]bool{
+		".runar.ts": true, ".runar.sol": true, ".runar.move": true,
+		".runar.go": true, ".runar.rs": true, ".runar.py": true,
+		".runar.zig": true, ".runar.rb": true, ".runar.java": true,
+	}
+	got := map[string]bool{}
+	for _, ext := range multiFormats {
+		if got[ext] {
+			t.Errorf("multiFormats lists %s twice", ext)
+		}
+		got[ext] = true
+	}
+	for ext := range want {
+		if !got[ext] {
+			t.Errorf("multiFormats is missing %s", ext)
+		}
+	}
+	for ext := range got {
+		if !want[ext] {
+			t.Errorf("multiFormats lists unexpected format %s", ext)
+		}
+	}
+}
+
+func compileBasicP2PKHScripts(t *testing.T) map[string]string {
+	t.Helper()
+	scripts := map[string]string{}
+	for _, ext := range multiFormats {
+		source := conformanceSourcePathExt(t, "basic-p2pkh", ext)
+		artifact, err := CompileFromSource(source)
+		if err != nil {
+			t.Errorf("basic-p2pkh%s: compilation failed: %v", ext, err)
+			continue
+		}
+		scripts[ext] = artifact.Script
+	}
+	return scripts
+}
+
+func TestMultiFormat_BasicP2PKHMatchesGolden_AllFormats(t *testing.T) {
+	goldenPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-script.hex")
+	goldenHex, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("golden %s is unreadable: %v", goldenPath, err)
+	}
+	expected := strings.TrimSpace(string(goldenHex))
+	scripts := compileBasicP2PKHScripts(t)
+	for _, ext := range multiFormats {
+		if got, ok := scripts[ext]; ok && got != expected {
+			t.Errorf("basic-p2pkh%s: script %q does not match golden %q", ext, got, expected)
+		}
+	}
+}
+
+func TestMultiFormat_BasicP2PKHAllFormatsIdentical(t *testing.T) {
+	scripts := compileBasicP2PKHScripts(t)
+	ref, ok := scripts[".runar.ts"]
+	if !ok {
+		t.Fatal("no .runar.ts reference script")
+	}
+	for _, ext := range multiFormats {
+		got, ok := scripts[ext]
+		if !ok {
+			continue // compile failure already reported by compileBasicP2PKHScripts
+		}
+		if got != ref {
+			t.Errorf("basic-p2pkh%s: script %q differs from .runar.ts %q", ext, got, ref)
+		}
 	}
 }
