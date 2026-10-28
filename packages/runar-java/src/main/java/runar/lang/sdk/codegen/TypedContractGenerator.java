@@ -424,9 +424,17 @@ public final class TypedContractGenerator {
                 .append(optionsArgName).append(" != null && ")
                 .append(optionsArgName).append(".satoshis() != null ? ")
                 .append(optionsArgName).append(".satoshis().longValueExact() : null;\n");
-            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null)\n");
+            b.append("        String changeAddr = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changeAddress() : null;\n");
+            b.append("        String changePubKey = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changePubKey() : null;\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null\n");
+            b.append("                && changeAddr == null && changePubKey == null)\n");
             b.append("            ? null\n");
-            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride);\n");
+            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride)\n");
+            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey);\n");
             b.append("        return inner.callWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
@@ -474,9 +482,17 @@ public final class TypedContractGenerator {
                 .append(optionsArgName).append(" != null && ")
                 .append(optionsArgName).append(".satoshis() != null ? ")
                 .append(optionsArgName).append(".satoshis().longValueExact() : null;\n");
-            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null)\n");
+            b.append("        String changeAddr = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changeAddress() : null;\n");
+            b.append("        String changePubKey = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changePubKey() : null;\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null\n");
+            b.append("                && changeAddr == null && changePubKey == null)\n");
             b.append("            ? null\n");
-            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride);\n");
+            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride)\n");
+            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey);\n");
             b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
