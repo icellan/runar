@@ -388,9 +388,12 @@ public final class RustParser {
                 pos += 2;
                 col += 2;
                 while (pos + 1 < n) {
+                    // N-406: a newline resets the column; it is not counted again.
                     if (source.charAt(pos) == '\n') {
                         line++;
                         col = 0;
+                        pos++;
+                        continue;
                     }
                     if (source.charAt(pos) == '*' && source.charAt(pos + 1) == '/') {
                         pos += 2;

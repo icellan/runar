@@ -93,7 +93,8 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
         if ch == '/' && pos + 1 < chars.len() && chars[pos + 1] == '*' {
             pos += 2; col += 2;
             while pos + 1 < chars.len() {
-                if chars[pos] == '\n' { line += 1; col = 1; }
+                // N-406: a newline resets the column; it is not counted again.
+                if chars[pos] == '\n' { line += 1; col = 1; pos += 1; continue; }
                 if chars[pos] == '*' && chars[pos + 1] == '/' { pos += 2; col += 2; break; }
                 pos += 1; col += 1;
             }
@@ -247,7 +248,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                     pos += 1; col += 1;
                 }
                 val.push(chars[pos]);
-                pos += 1; col += 1;
+                // N-406: a newline inside the literal advances the line, as TS.
+                if chars[pos] == '\n' { line += 1; col = 1; } else { col += 1; }
+                pos += 1;
             }
             // F-011: Rust strings may span lines, so only end of file leaves
             // one unterminated.

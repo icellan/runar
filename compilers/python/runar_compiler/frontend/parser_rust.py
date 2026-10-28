@@ -312,9 +312,12 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             pos += 2
             col += 2
             while pos + 1 < n:
+                # N-406: a newline resets the column; it is not counted again.
                 if chars[pos] == "\n":
                     line += 1
                     col = 0
+                    pos += 1
+                    continue
                 if chars[pos] == "*" and chars[pos + 1] == "/":
                     pos += 2
                     col += 2

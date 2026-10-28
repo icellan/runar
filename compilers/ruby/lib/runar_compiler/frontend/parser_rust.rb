@@ -319,9 +319,12 @@ module RunarCompiler
           pos += 2
           col += 2
           while pos + 1 < n
+            # N-406: a newline resets the column; it is not counted again.
             if source[pos] == "\n"
               line += 1
               col = 0
+              pos += 1
+              next
             end
             if source[pos] == "*" && source[pos + 1] == "/"
               pos += 2
@@ -417,8 +420,14 @@ module RunarCompiler
             else
               val << source[pos]
             end
+            # N-406: a newline inside the literal advances the line, as TS.
+            if source[pos] == "\n"
+              line += 1
+              col = 0
+            else
+              col += 1
+            end
             pos += 1
-            col += 1
           end
           # F-011: Rust strings may span lines, so only end of file leaves
           # one unterminated.

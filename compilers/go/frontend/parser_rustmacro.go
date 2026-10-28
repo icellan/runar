@@ -367,8 +367,14 @@ func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 					col++
 				}
 				val.WriteRune(chars[pos])
+				// N-406: a newline inside the literal advances the line, as TS.
+				if chars[pos] == '\n' {
+					line++
+					col = 0
+				} else {
+					col++
+				}
 				pos++
-				col++
 			}
 			// F-011: Rust strings may span lines, so only end of file leaves
 			// one unterminated.
