@@ -430,10 +430,21 @@ fn emitMethodBody(
         try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });
     } else if (is_stateful) {
+        // The wrapper's `OutputSpec` is a distinct (layout-identical) type from
+        // `sdk.OutputSpec`, so convert element-wise (N-428).
+        try appendFmt(out, allocator, "        var sdk_outputs: ?[]sdk.OutputSpec = null;\n", .{});
+        try appendFmt(out, allocator, "        defer if (sdk_outputs) |so| self.allocator.free(so);\n", .{});
+        try appendFmt(out, allocator, "        if (options) |o| if (o.outputs) |specs| {{\n", .{});
+        try appendFmt(out, allocator, "            const converted = try self.allocator.alloc(sdk.OutputSpec, specs.len);\n", .{});
+        try appendFmt(out, allocator, "            for (specs, 0..) |spec, i| converted[i] = .{{ .satoshis = spec.satoshis, .state = spec.state }};\n", .{});
+        try appendFmt(out, allocator, "            sdk_outputs = converted;\n", .{});
+        try appendFmt(out, allocator, "        }};\n", .{});
         try appendFmt(out, allocator, "        const sdk_opts: ?sdk.CallOptions = if (options) |o| .{{\n", .{});
         try appendFmt(out, allocator, "            .satoshis = o.satoshis orelse 0,\n", .{});
         try appendFmt(out, allocator, "            .change_address = o.change_address,\n", .{});
+        try appendFmt(out, allocator, "            .change_pub_key = o.change_pub_key,\n", .{});
         try appendFmt(out, allocator, "            .new_state = o.new_state,\n", .{});
+        try appendFmt(out, allocator, "            .outputs = sdk_outputs,\n", .{});
         try appendFmt(out, allocator, "        }} else null;\n", .{});
         try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });

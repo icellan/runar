@@ -30,8 +30,20 @@
 // `Simple` fixture has no constructor params and no state fields precisely
 // so this check can stay focused on the Provider call shape), or anything
 // about the other 6 tiers' `fromTxId` — this is a Zig-only codegen bug.
+//
+// N-428 extends the same generate-and-compile pipeline to a STATEFUL wrapper
+// (`MergeCounter`, built from `conformance/sdk-call/stateful-merge-prepared.json`)
+// and runs the generated `increment` against a MockProvider: the options the
+// wrapper declares (`change_pub_key`, `outputs`) must reach the tx it builds.
+// Proves: a matching `change_pub_key` is not dropped (a dropped one makes the
+// N-426 guard refuse `change_address`), and `outputs` yields one continuation
+// output per entry (a dropped one keeps the single contract-UTXO amount).
+// Does NOT prove: script validity of the resulting tx, the prepare/finalize
+// wrapper methods, or any tier other than Zig.
 const std = @import("std");
 const sdk = @import("runar-zig");
+
+const VECTOR_PATH = "../../conformance/sdk-call/stateful-merge-prepared.json";
 
 const TEST_BLOCK =
     \\
@@ -123,6 +135,105 @@ const TEST_BLOCK =
     \\
 ;
 
+const TEST_BLOCK_STATEFUL =
+    \\
+    \\const VECTOR = "../../conformance/sdk-call/stateful-merge-prepared.json";
+    \\const GUARD = "../../conformance/sdk-call/n426-change-address-guard.json";
+    \\
+    \\/// Runs the generated `MergeCounterContract.increment(options)` against the
+    \\/// vector's contract + funding UTXOs and returns an owned copy of the tx the
+    \\/// MockProvider saw broadcast.
+    \\fn incrementViaWrapper(options: MergeCounterStatefulCallOptions) ![]u8 {
+    \\    const allocator = testing.allocator;
+    \\    const raw = try std.Io.Dir.cwd().readFileAlloc(testing.io, VECTOR, allocator, .limited(8 * 1024 * 1024));
+    \\    defer allocator.free(raw);
+    \\    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    \\    defer parsed.deinit();
+    \\    const v = parsed.value.object;
+    \\    const artifact_json = try std.json.Stringify.valueAlloc(allocator, v.get("artifact").?, .{});
+    \\    defer allocator.free(artifact_json);
+    \\    var artifact = try sdk.RunarArtifact.fromJson(allocator, artifact_json);
+    \\    defer artifact.deinit();
+    \\
+    \\    const cu = v.get("contractUtxo").?.object;
+    \\    const fu = v.get("fundingUtxo").?.object;
+    \\    const contract_utxo = sdk.UTXO{
+    \\        .txid = cu.get("txid").?.string,
+    \\        .output_index = @intCast(cu.get("outputIndex").?.integer),
+    \\        .satoshis = cu.get("satoshis").?.integer,
+    \\        .script = cu.get("script").?.string,
+    \\    };
+    \\    const funding_utxo = sdk.UTXO{
+    \\        .txid = fu.get("txid").?.string,
+    \\        .output_index = @intCast(fu.get("outputIndex").?.integer),
+    \\        .satoshis = fu.get("satoshis").?.integer,
+    \\        .script = fu.get("script").?.string,
+    \\    };
+    \\
+    \\    var prov = sdk.MockProvider.init(allocator, "testnet");
+    \\    defer prov.deinit();
+    \\    var signer = try sdk.LocalSigner.fromHex(v.get("privKeyHex").?.string);
+    \\    {
+    \\        const addr = try signer.signer().getAddress(allocator);
+    \\        defer allocator.free(addr);
+    \\        try prov.addUtxo(addr, funding_utxo);
+    \\    }
+    \\    try prov.addKnownOutpoint(contract_utxo.txid, contract_utxo.output_index, contract_utxo.script, contract_utxo.satoshis);
+    \\
+    \\    var wrapper = try MergeCounterContract.fromUtxo(allocator, &artifact, contract_utxo);
+    \\    defer wrapper.deinit();
+    \\    wrapper.connect(prov.provider(), signer.signer());
+    \\
+    \\    const txid = try wrapper.increment(options);
+    \\    allocator.free(txid);
+    \\    const sent = prov.getBroadcastedTxs();
+    \\    try testing.expectEqual(@as(usize, 1), sent.len);
+    \\    return allocator.dupe(u8, sent[0]);
+    \\}
+    \\
+    \\fn countOf(hay: []const u8, needle: []const u8) usize {
+    \\    return std.mem.count(u8, hay, needle);
+    \\}
+    \\
+    \\test "N-428: generated wrapper forwards change_pub_key to the SDK call" {
+    \\    const allocator = testing.allocator;
+    \\    const raw = try std.Io.Dir.cwd().readFileAlloc(testing.io, GUARD, allocator, .limited(1024 * 1024));
+    \\    defer allocator.free(raw);
+    \\    const g = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    \\    defer g.deinit();
+    \\    const state = [_]sdk.StateValue{.{ .int = 1 }};
+    \\    // Another key's address WITHOUT its pubkey: the N-426 guard refuses.
+    \\    try testing.expectError(error.ChangeAddressMismatch, incrementViaWrapper(.{
+    \\        .change_address = g.value.object.get("otherAddress").?.string,
+    \\        .new_state = &state,
+    \\    }));
+    \\    // The same address WITH the matching change_pub_key must reach the SDK
+    \\    // and be accepted (dropped by the wrapper -> ChangeAddressMismatch).
+    \\    const tx = try incrementViaWrapper(.{
+    \\        .change_address = g.value.object.get("otherAddress").?.string,
+    \\        .change_pub_key = g.value.object.get("otherPubKeyHex").?.string,
+    \\        .new_state = &state,
+    \\    });
+    \\    defer allocator.free(tx);
+    \\}
+    \\
+    \\test "N-428: generated wrapper forwards outputs to the SDK call" {
+    \\    const allocator = testing.allocator;
+    \\    const state = [_]sdk.StateValue{.{ .int = 1 }};
+    \\    // 7000 sat as 8-byte LE. The vector's continuation keeps the contract
+    \\    // UTXO's 10000 sat unless `outputs` overrides it.
+    \\    const sats_7000 = "581b000000000000";
+    \\    const plain = try incrementViaWrapper(.{ .new_state = &state });
+    \\    defer allocator.free(plain);
+    \\    try testing.expectEqual(@as(usize, 0), countOf(plain, sats_7000));
+    \\    const specs = [_]OutputSpec{.{ .satoshis = 7000, .state = &state }};
+    \\    const multi = try incrementViaWrapper(.{ .outputs = &specs });
+    \\    defer allocator.free(multi);
+    \\    try testing.expectEqual(@as(usize, 1), countOf(multi, sats_7000));
+    \\}
+    \\
+;
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -137,9 +248,30 @@ pub fn main(init: std.process.Init) !void {
     const wrapper_src = try sdk.generateZig(allocator, &artifact);
     defer allocator.free(wrapper_src);
 
+    // N-428: a stateful wrapper generated from the shared vector's real artifact.
+    const raw = try std.Io.Dir.cwd().readFileAlloc(io, VECTOR_PATH, allocator, .limited(8 * 1024 * 1024));
+    defer allocator.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const artifact_json = try std.json.Stringify.valueAlloc(allocator, parsed.value.object.get("artifact").?, .{});
+    defer allocator.free(artifact_json);
+    var stateful_artifact = try sdk.RunarArtifact.fromJson(allocator, artifact_json);
+    defer stateful_artifact.deinit();
+    // Generate from a shallow copy with no constructor params: the wrapper's
+    // `init(args)` is not what this check exercises (the test uses `fromUtxo`).
+    var gen_artifact = stateful_artifact;
+    gen_artifact.abi.constructor.params = &.{};
+    const stateful_src = try sdk.generateZig(allocator, &gen_artifact);
+    defer allocator.free(stateful_src);
+    // Both wrappers share one file: drop the second one's duplicate imports.
+    const import_end_marker = "const sdk = @import(\"runar-zig\");\n\n";
+    const import_end = std.mem.indexOf(u8, stateful_src, import_end_marker).? + import_end_marker.len;
+
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll(wrapper_src);
+    try w.interface.writeAll(stateful_src[import_end..]);
     try w.interface.writeAll(TEST_BLOCK);
+    try w.interface.writeAll(TEST_BLOCK_STATEFUL);
     try w.interface.flush();
 }
