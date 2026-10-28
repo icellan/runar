@@ -47,6 +47,63 @@ export function computeOpPushTx(
   codeSeparatorIndex?: number,
   sigHashType: number = SIGHASH_ALL_FORKID,
 ): { sigHex: string; preimageHex: string } {
+  const preimage = buildOpPushTxPreimage(
+    txOrHex, inputIndex, subscript, satoshis, codeSeparatorIndex, sigHashType,
+  );
+
+  // Double-SHA256 for BIP-143 sighash
+  const sighash = Hash.sha256(preimage);
+
+  // Sign with k=1 private key
+  const signature = opPushTxPrivKey.sign(sighash);
+
+  // Enforce low-S
+  const halfN = CURVE_ORDER.div(new BigNumber(2));
+  if (signature.s.gt(halfN)) {
+    signature.s = CURVE_ORDER.sub(signature.s);
+  }
+
+  const derHex = signature.toDER('hex') as string;
+  const sigHex = derHex + (sigHashType & 0xff).toString(16).padStart(2, '0');
+
+  return { sigHex, preimageHex: bytesToHex(preimage) };
+}
+
+/**
+ * N-253: the BIP-143 preimage `computeOpPushTx` returns, WITHOUT the k=1
+ * ECDSA signature. Post-BUG-100 the on-chain script derives the OP_PUSH_TX
+ * signature from the preimage and the unlocking script has no slot for one,
+ * so callers that only need the preimage (the stateful prepareCall path)
+ * should not pay for a signature they discard. Same parameters, same
+ * validation and same preimage bytes as `computeOpPushTx`.
+ */
+export function computeOpPushTxPreimage(
+  txOrHex: Transaction | string,
+  inputIndex: number,
+  subscript: string,
+  satoshis: number,
+  codeSeparatorIndex?: number,
+  sigHashType: number = SIGHASH_ALL_FORKID,
+): { preimageHex: string } {
+  return {
+    preimageHex: bytesToHex(
+      buildOpPushTxPreimage(txOrHex, inputIndex, subscript, satoshis, codeSeparatorIndex, sigHashType),
+    ),
+  };
+}
+
+function bytesToHex(bytes: ArrayLike<number>): string {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function buildOpPushTxPreimage(
+  txOrHex: Transaction | string,
+  inputIndex: number,
+  subscript: string,
+  satoshis: number,
+  codeSeparatorIndex: number | undefined,
+  sigHashType: number,
+): number[] {
   const tx = typeof txOrHex === 'string' ? Transaction.fromHex(txOrHex) : txOrHex;
   const input = tx.inputs[inputIndex]!;
 
@@ -117,23 +174,5 @@ export function computeOpPushTx(
     scope: sigHashType,
   });
 
-  // Double-SHA256 for BIP-143 sighash
-  const sighash = Hash.sha256(preimage);
-
-  // Sign with k=1 private key
-  const signature = opPushTxPrivKey.sign(sighash);
-
-  // Enforce low-S
-  const halfN = CURVE_ORDER.div(new BigNumber(2));
-  if (signature.s.gt(halfN)) {
-    signature.s = CURVE_ORDER.sub(signature.s);
-  }
-
-  const derHex = signature.toDER('hex') as string;
-  const sigHex = derHex + (sigHashType & 0xff).toString(16).padStart(2, '0');
-
-  // Convert preimage to hex
-  const preimageHex = Array.from(preimage).map((b) => b.toString(16).padStart(2, '0')).join('');
-
-  return { sigHex, preimageHex };
+  return preimage;
 }

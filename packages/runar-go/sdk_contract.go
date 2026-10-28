@@ -1588,10 +1588,11 @@ func (c *RunarContract) PrepareCall(
 	if isStateful {
 		// Helper: build a stateful unlock. For inputIdx==0 (primary), keeps
 		// placeholder Sig params. For inputIdx>0 (extra), signs with signer.
-		buildStatefulUnlock := func(tx string, inputIdx int, subscript string, sats int64, baseArgs []interface{}, txChangeAmount int64) (unlock string, opSigHex string, preimageHex string, retErr error) {
-			opSig, preimage, ptxErr := ComputeOpPushTxWithSigHash(tx, inputIdx, subscript, sats, codeSepIdx, sigHashType)
+		buildStatefulUnlock := func(tx string, inputIdx int, subscript string, sats int64, baseArgs []interface{}, txChangeAmount int64) (unlock string, preimageHex string, retErr error) {
+			// N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+			preimage, ptxErr := ComputeOpPushTxPreimageWithSigHash(tx, inputIdx, subscript, sats, codeSepIdx, sigHashType)
 			if ptxErr != nil {
-				return "", "", "", fmt.Errorf("OP_PUSH_TX for input %d: %w", inputIdx, ptxErr)
+				return "", "", fmt.Errorf("OP_PUSH_TX for input %d: %w", inputIdx, ptxErr)
 			}
 			inputArgs := make([]interface{}, len(baseArgs))
 			copy(inputArgs, baseArgs)
@@ -1605,7 +1606,7 @@ func (c *RunarContract) PrepareCall(
 				for _, idx := range sigIndices {
 					realSig, sigErr := signer.Sign(tx, inputIdx, sigSubscript, sats, nil)
 					if sigErr != nil {
-						return "", "", "", fmt.Errorf("auto-signing Sig param %d for input %d: %w", idx, inputIdx, sigErr)
+						return "", "", fmt.Errorf("auto-signing Sig param %d for input %d: %w", idx, inputIdx, sigErr)
 					}
 					inputArgs[idx] = realSig
 				}
@@ -1628,7 +1629,6 @@ func (c *RunarContract) PrepareCall(
 			if methodNeedsNewAmount {
 				newAmountHex = encodeArg(newSatoshis)
 			}
-			opSigHexStr := hex.EncodeToString(opSig)
 			preimageHexStr := hex.EncodeToString(preimage)
 			// Mode 3: the witness pushes go BEFORE the stateful prefix
 			// so the witness items end up at the deepest stack positions
@@ -1638,24 +1638,24 @@ func (c *RunarContract) PrepareCall(
 			// the verifier consumes its witness inputs. See
 			// emitGroth16WAPreamble in compilers/go/codegen/stack.go.
 			unlockStr := groth16WAWitnessHex +
-				c.buildStatefulPrefix(opSigHexStr, methodUsesCodePart) +
+				c.buildStatefulPrefix("", methodUsesCodePart) +
 				argsHex +
 				changeHex +
 				newAmountHex +
 				EncodePushData(preimageHexStr) +
 				witnessHex +
 				methodSelectorHex
-			return unlockStr, opSigHexStr, preimageHexStr, nil
+			return unlockStr, preimageHexStr, nil
 		}
 
 		// First pass: build unlocking scripts with current tx layout
-		input0Unlock, _, _, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
+		input0Unlock, _, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall: %w", err)
 		}
 		extraUnlocks := make([]string, len(extraContractUtxos))
 		for i, mu := range extraContractUtxos {
-			extraUnlocks[i], _, _, err = buildStatefulUnlock(signedTx, i+1, mu.Script, mu.Satoshis, extraResolvedArgs[i], changeAmount)
+			extraUnlocks[i], _, err = buildStatefulUnlock(signedTx, i+1, mu.Script, mu.Satoshis, extraResolvedArgs[i], changeAmount)
 			if err != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall: %w", err)
 			}
@@ -1705,11 +1705,10 @@ func (c *RunarContract) PrepareCall(
 		signedTx = rebuildTx.Hex()
 
 		// Second pass: recompute with final tx (preimage changes with unlock size)
-		// N-213: the signature buildStatefulUnlock returns here has no
-		// consumer post-BUG-100 (PreparedCall has no OpPushTxSig field to
-		// carry it to) — discard it rather than storing it into a variable
-		// with no reader.
-		finalInput0Unlock, _, preim, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
+		// N-213/N-253: buildStatefulUnlock computes no OP_PUSH_TX signature --
+		// there is no consumer post-BUG-100 (PreparedCall has no OpPushTxSig
+		// field to carry it to).
+		finalInput0Unlock, preim, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall: %w", err)
 		}
@@ -1717,7 +1716,7 @@ func (c *RunarContract) PrepareCall(
 		signedTx = InsertUnlockingScript(signedTx, 0, finalInput0Unlock)
 
 		for i, mu := range extraContractUtxos {
-			finalMergeUnlock, _, _, mergeErr := buildStatefulUnlock(signedTx, i+1, mu.Script, mu.Satoshis, extraResolvedArgs[i], changeAmount)
+			finalMergeUnlock, _, mergeErr := buildStatefulUnlock(signedTx, i+1, mu.Script, mu.Satoshis, extraResolvedArgs[i], changeAmount)
 			if mergeErr != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall: %w", mergeErr)
 			}
@@ -3006,10 +3005,11 @@ func (c *RunarContract) prepareCallTerminal(
 	termSigHashType := c.methodSigHashType(methodName)
 	if isStateful {
 		// Build stateful terminal unlock with PLACEHOLDER user sigs
-		buildUnlock := func(tx string) (unlock string, opSigHex string, preimageHex string, retErr error) {
-			opSig, preimage, ptxErr := ComputeOpPushTxWithSigHash(tx, 0, contractUtxo.Script, contractUtxo.Satoshis, termCodeSepIdx, termSigHashType)
+		buildUnlock := func(tx string) (unlock string, preimageHex string, retErr error) {
+			// N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+			preimage, ptxErr := ComputeOpPushTxPreimageWithSigHash(tx, 0, contractUtxo.Script, contractUtxo.Satoshis, termCodeSepIdx, termSigHashType)
 			if ptxErr != nil {
-				return "", "", "", fmt.Errorf("OP_PUSH_TX for terminal: %w", ptxErr)
+				return "", "", fmt.Errorf("OP_PUSH_TX for terminal: %w", ptxErr)
 			}
 			argsHex := ""
 			for _, arg := range resolvedArgs {
@@ -3019,27 +3019,26 @@ func (c *RunarContract) prepareCallTerminal(
 			if methodNeedsChange && changePKHHex != "" {
 				changeHex = EncodePushData(changePKHHex) + encodeArg(int64(0))
 			}
-			opSigHexStr := hex.EncodeToString(opSig)
 			preimageHexStr := hex.EncodeToString(preimage)
-			unlockStr := c.buildStatefulPrefix(opSigHexStr, false) +
+			unlockStr := c.buildStatefulPrefix("", false) +
 				argsHex +
 				changeHex +
 				EncodePushData(preimageHexStr) +
 				witnessHex +
 				methodSelectorHex
-			return unlockStr, opSigHexStr, preimageHexStr, nil
+			return unlockStr, preimageHexStr, nil
 		}
 
 		// First pass
-		firstUnlock, _, _, err := buildUnlock(termTx)
+		firstUnlock, _, err := buildUnlock(termTx)
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall terminal: %w", err)
 		}
 		termTx = buildTerminalTx(firstUnlock).Hex()
 
 		// Second pass
-		// N-213: discard the returned signature — no consumer post-BUG-100.
-		secondUnlock, _, preim, err := buildUnlock(termTx)
+		// N-213/N-253: no OP_PUSH_TX signature is computed — no consumer post-BUG-100.
+		secondUnlock, preim, err := buildUnlock(termTx)
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall terminal: %w", err)
 		}

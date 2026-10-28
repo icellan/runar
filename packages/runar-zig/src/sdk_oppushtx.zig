@@ -105,6 +105,42 @@ pub fn computeOpPushTxWithSigHash(
     code_separator_index: i32,
     sig_hash_type: u32,
 ) OpPushTxError!OpPushTxResult {
+    return computeOpPushTxImpl(allocator, tx_hex, input_index, subscript_hex, satoshis, code_separator_index, sig_hash_type, true);
+}
+
+/// Number of k=1 OP_PUSH_TX ECDSA signatures computed by this process (N-253).
+/// A test observability hook: it lets a test assert that a code path which
+/// only needs the preimage does not sign. Tests run single-threaded.
+pub var sign_count: usize = 0;
+
+/// N-253: `computeOpPushTxWithSigHash` without the k=1 ECDSA signature -- same
+/// arguments, same validation, same preimage bytes. Post-BUG-100 the OP_PUSH_TX
+/// signature is derived on-chain from the preimage and the unlocking script has
+/// no slot for one, so the stateful prepareCall/call paths use this instead of
+/// signing and discarding a signature. The returned `sig_hex` is empty (and
+/// still safe to `deinit`).
+pub fn computeOpPushTxPreimageWithSigHash(
+    allocator: std.mem.Allocator,
+    tx_hex: []const u8,
+    input_index: usize,
+    subscript_hex: []const u8,
+    satoshis: i64,
+    code_separator_index: i32,
+    sig_hash_type: u32,
+) OpPushTxError!OpPushTxResult {
+    return computeOpPushTxImpl(allocator, tx_hex, input_index, subscript_hex, satoshis, code_separator_index, sig_hash_type, false);
+}
+
+fn computeOpPushTxImpl(
+    allocator: std.mem.Allocator,
+    tx_hex: []const u8,
+    input_index: usize,
+    subscript_hex: []const u8,
+    satoshis: i64,
+    code_separator_index: i32,
+    sig_hash_type: u32,
+    comptime want_sig: bool,
+) OpPushTxError!OpPushTxResult {
     const priv_key = getOpPushTxPrivateKey() catch return OpPushTxError.InvalidKey;
     const scope: u32 = if (sig_hash_type == 0)
         (bsvz.transaction.sighash.SigHashType.forkid | bsvz.transaction.sighash.SigHashType.all)
@@ -152,34 +188,40 @@ pub fn computeOpPushTxWithSigHash(
     const preimage_bytes = bsvz.transaction.sighash.formatPreimage(allocator, &tx, input_index, subscript, satoshis, scope) catch return OpPushTxError.SigningFailed;
     defer allocator.free(preimage_bytes);
 
-    // Compute sighash digest
-    const digest_result = bsvz.transaction.sighash.digest(allocator, &tx, input_index, subscript, satoshis, scope) catch return OpPushTxError.SigningFailed;
+    const sig_hex: []u8 = if (want_sig) blk: {
+        // Compute sighash digest
+        const digest_result = bsvz.transaction.sighash.digest(allocator, &tx, input_index, subscript, satoshis, scope) catch return OpPushTxError.SigningFailed;
 
-    // N-185: bsvz's PrivateKey.signDigest256 derives its ECDSA nonce via Zig
-    // stdlib's "Deterministic ECDSA with Additional Randomness" draft, not
-    // canonical RFC 6979 (see sdk_envelope_sign.zig's GAP-064 doc comment,
-    // and sdk_signer.zig's N-170 fix of the same bug in LocalSigner) -- it
-    // folds a 32-byte zero "noise" block into the HMAC-DRBG seed. The result
-    // is a VALID but non-reproducible signature: it verifies, but never
-    // matches the RFC-6979 signature every other tier (and
-    // conformance/sdk-bip143's fixture) produces for the same (key, digest).
-    // Sign with the same canonical RFC-6979 + low-S implementation the
-    // signed-envelope wire protocol and LocalSigner already use.
-    var der_buf: [72]u8 = undefined;
-    const der = envelope_sign.signDigestLowSDer(priv_key.bytes, digest_result.bytes, &der_buf) catch return OpPushTxError.SigningFailed;
+        // N-185: bsvz's PrivateKey.signDigest256 derives its ECDSA nonce via Zig
+        // stdlib's "Deterministic ECDSA with Additional Randomness" draft, not
+        // canonical RFC 6979 (see sdk_envelope_sign.zig's GAP-064 doc comment,
+        // and sdk_signer.zig's N-170 fix of the same bug in LocalSigner) -- it
+        // folds a 32-byte zero "noise" block into the HMAC-DRBG seed. The result
+        // is a VALID but non-reproducible signature: it verifies, but never
+        // matches the RFC-6979 signature every other tier (and
+        // conformance/sdk-bip143's fixture) produces for the same (key, digest).
+        // Sign with the same canonical RFC-6979 + low-S implementation the
+        // signed-envelope wire protocol and LocalSigner already use.
+        var der_buf: [72]u8 = undefined;
+        const der = envelope_sign.signDigestLowSDer(priv_key.bytes, digest_result.bytes, &der_buf) catch return OpPushTxError.SigningFailed;
 
-    // Build sig hex: DER bytes + sighash type byte
-    const sig_total_len = der.len + 1;
-    var sig_raw: [73]u8 = undefined;
-    @memcpy(sig_raw[0..der.len], der);
-    sig_raw[der.len] = @truncate(scope);
+        // Build sig hex: DER bytes + sighash type byte
+        const sig_total_len = der.len + 1;
+        var sig_raw: [73]u8 = undefined;
+        @memcpy(sig_raw[0..der.len], der);
+        sig_raw[der.len] = @truncate(scope);
 
-    const sig_hex = allocator.alloc(u8, sig_total_len * 2) catch return OpPushTxError.OutOfMemory;
+        sign_count += 1;
+
+        const signed_hex = allocator.alloc(u8, sig_total_len * 2) catch return OpPushTxError.OutOfMemory;
+        _ = bsvz.primitives.hex.encodeLower(sig_raw[0..sig_total_len], signed_hex) catch {
+            allocator.free(signed_hex);
+            return OpPushTxError.InvalidEncoding;
+        };
+
+        break :blk signed_hex;
+    } else allocator.alloc(u8, 0) catch return OpPushTxError.OutOfMemory;
     errdefer allocator.free(sig_hex);
-    _ = bsvz.primitives.hex.encodeLower(sig_raw[0..sig_total_len], sig_hex) catch {
-        allocator.free(sig_hex);
-        return OpPushTxError.InvalidEncoding;
-    };
 
     // Encode preimage as hex
     const preimage_hex = allocator.alloc(u8, preimage_bytes.len * 2) catch {

@@ -89,6 +89,22 @@ module Runar
     # @return [Array(String, String)] [sig_hex, preimage_hex]
     def compute_op_push_tx(tx_hex, input_index, subscript_hex, satoshis, code_separator_index = -1,
                            sighash_type = SIGHASH_ALL_FORKID)
+      preimage_hex = compute_op_push_tx_preimage(
+        tx_hex, input_index, subscript_hex, satoshis, code_separator_index, sighash_type
+      )
+      sig_hex = sign_preimage_k1(preimage_hex, sighash_type)
+      [sig_hex, preimage_hex]
+    end
+
+    # N-253: the BIP-143 preimage hex +compute_op_push_tx+ returns, WITHOUT the
+    # k=1 ECDSA signature -- same arguments, same validation, same bytes.
+    # Post-BUG-100 the OP_PUSH_TX signature is derived on-chain from the
+    # preimage and the unlocking script has no slot for one, so the stateful
+    # prepare_call path uses this instead of signing and discarding a signature.
+    #
+    # @return [String] BIP-143 preimage as hex
+    def compute_op_push_tx_preimage(tx_hex, input_index, subscript_hex, satoshis, code_separator_index = -1,
+                                    sighash_type = SIGHASH_ALL_FORKID)
       # N-041: the subscript is the locking script of the UTXO being spent
       # (e.g. a provider's contract UTXO). An empty one can never match the
       # script the node executes, so refuse it.
@@ -112,9 +128,7 @@ module Runar
               "compute_op_push_tx: refusing to build a preimage for input #{input_index} " \
               'with an empty subscript (scriptCode)'
       end
-      preimage_hex = compute_preimage(tx_hex, input_index, effective_subscript, satoshis, sighash_type)
-      sig_hex = sign_preimage_k1(preimage_hex, sighash_type)
-      [sig_hex, preimage_hex]
+      compute_preimage(tx_hex, input_index, effective_subscript, satoshis, sighash_type)
     end
 
     # Extract the subscript for BIP-143 sighash computation.

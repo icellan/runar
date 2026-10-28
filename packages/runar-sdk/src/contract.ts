@@ -13,7 +13,7 @@ import type { Inscription } from './ordinals/types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction, resolveInputSequence } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn, assertFixedWidthValue } from './state.js';
-import { computeOpPushTx } from './oppushtx.js';
+import { computeOpPushTx, computeOpPushTxPreimage } from './oppushtx.js';
 import { assertChangeAddressMatchesCovenantKey, buildP2PKHScript, extractConstructorArgs, isHexBytes } from './script-utils.js';
 import { computeNewStateAndDataOutputs } from './anf-interpreter.js';
 import type { OrderedOutputEntry } from './anf-interpreter.js';
@@ -1293,8 +1293,9 @@ export class RunarContract {
 
       if (isStateful) {
         // Build stateful terminal unlock with PLACEHOLDER user sigs
-        const buildUnlock = (tx: BsvTransaction): { unlock: string; opSig: string; preimage: string } => {
-          const { sigHex: opSig, preimageHex: preimage } = this.computeOpPushTxWithCodeSep(
+        const buildUnlock = (tx: BsvTransaction): { unlock: string; preimage: string } => {
+          // N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+          const { preimageHex: preimage } = this.computeOpPushTxPreimageWithCodeSep(
             tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
           let argsHex = '';
@@ -1307,8 +1308,8 @@ export class RunarContract {
           if (methodNeedsNewAmount) {
             newAmountHex = encodeArg(BigInt(contractUtxo.satoshis));
           }
-          const unlock = this.buildStatefulPrefix(opSig, methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
-          return { unlock, opSig, preimage };
+          const unlock = this.buildStatefulPrefix('', methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
+          return { unlock, preimage };
         };
 
         // First pass
@@ -1319,7 +1320,6 @@ export class RunarContract {
         const second = buildUnlock(termTx);
         termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(second.unlock);
         invalidateTxCache(termTx);
-        finalOpPushTxSig = second.opSig;
         finalPreimage = second.preimage;
       } else if (needsOpPushTx || sigIndices.length > 0) {
         // Stateless terminal — keep placeholder sigs
@@ -1823,8 +1823,9 @@ export class RunarContract {
       const buildStatefulUnlock = async (
         currentTx: BsvTransaction, inputIdx: number, subscript: string, sats: number,
         argsOverride?: unknown[], txChangeAmount?: number,
-      ): Promise<{ unlock: string; opSig: string; preimage: string }> => {
-        const { sigHex: opSig, preimageHex: preimage } = this.computeOpPushTxWithCodeSep(
+      ): Promise<{ unlock: string; preimage: string }> => {
+        // N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+        const { preimageHex: preimage } = this.computeOpPushTxPreimageWithCodeSep(
           currentTx, inputIdx, subscript, sats, methodIndex,
         );
         const baseArgs = argsOverride ?? resolvedArgs;
@@ -1860,8 +1861,8 @@ export class RunarContract {
         if (methodNeedsNewAmount) {
           newAmountHex = encodeArg(BigInt(newSatoshis ?? this.currentUtxo!.satoshis));
         }
-        const unlock = this.buildStatefulPrefix(opSig, methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
-        return { unlock, opSig, preimage };
+        const unlock = this.buildStatefulPrefix('', methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
+        return { unlock, preimage };
       };
 
       // First pass
@@ -1920,11 +1921,10 @@ export class RunarContract {
       ));
 
       // Second pass: recompute with final tx
-      const { unlock: finalInput0Unlock, opSig, preimage } = await buildStatefulUnlock(
+      const { unlock: finalInput0Unlock, preimage } = await buildStatefulUnlock(
         tx, 0, contractUtxo.script, contractUtxo.satoshis,
         undefined, changeAmount,
       );
-      finalOpPushTxSig = opSig;
       finalPreimage = preimage;
       tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(finalInput0Unlock);
       invalidateTxCache(tx);
@@ -2712,6 +2712,36 @@ export class RunarContract {
     satoshis: number,
     methodIndex?: number,
   ): { sigHex: string; preimageHex: string } {
+    const { codeSepIdx, sigHashType } = this.resolveOpPushTxParams(methodIndex);
+    return computeOpPushTx(
+      tx, inputIndex, subscript, satoshis,
+      codeSepIdx,
+      sigHashType,
+    );
+  }
+
+  /**
+   * N-253: `computeOpPushTxWithCodeSep` without the k=1 ECDSA signature -- the
+   * same code-separator offset, sighash mode and preimage bytes. Post-BUG-100
+   * the stateful unlock carries no OP_PUSH_TX signature, so the stateful
+   * prepareCall path uses this instead of signing and discarding one.
+   */
+  computeOpPushTxPreimageWithCodeSep(
+    tx: BsvTransaction,
+    inputIndex: number,
+    subscript: string,
+    satoshis: number,
+    methodIndex?: number,
+  ): { preimageHex: string } {
+    const { codeSepIdx, sigHashType } = this.resolveOpPushTxParams(methodIndex);
+    return computeOpPushTxPreimage(
+      tx, inputIndex, subscript, satoshis,
+      codeSepIdx,
+      sigHashType,
+    );
+  }
+
+  private resolveOpPushTxParams(methodIndex?: number): { codeSepIdx: number | undefined; sigHashType: number } {
     let codeSepIdx: number | undefined;
 
     if (this._codeScript !== null) {
@@ -2747,11 +2777,7 @@ export class RunarContract {
     const sigHashType =
       (methodIndex !== undefined ? publicMethods[methodIndex]?.sigHashType : undefined) ?? 0x41;
 
-    return computeOpPushTx(
-      tx, inputIndex, subscript, satoshis,
-      codeSepIdx,
-      sigHashType,
-    );
+    return { codeSepIdx, sigHashType };
   }
 
   /**

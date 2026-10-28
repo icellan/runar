@@ -7,7 +7,7 @@ use bsv::transaction::Transaction as BsvTransaction;
 use bsv::transaction::beef::Beef;
 use super::types::*;
 use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return, flatten_fixed_array_state, regroup_fixed_array_state};
-use super::oppushtx::compute_op_push_tx_with_code_sep_sighash;
+use super::oppushtx::{compute_op_push_tx_preimage_with_code_sep_sighash, compute_op_push_tx_with_code_sep_sighash};
 use super::deployment::{
     build_deploy_transaction, select_utxos,
     build_p2pkh_script_from_address, encode_varint,
@@ -1582,8 +1582,9 @@ impl RunarContract {
                                           prevouts_indices: &[usize],
                                           resolved_args: &mut Vec<SdkValue>,
                                           method_selector_hex: &str,
-                                          tx_change_amount: i64| -> Result<(String, String, String), String> {
-                let (op_sig, preimage) = compute_op_push_tx_with_code_sep_sighash(tx, input_idx, subscript, sats, code_sep_idx, sig_hash_type)?;
+                                          tx_change_amount: i64| -> Result<(String, String), String> {
+                // N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+                let preimage = compute_op_push_tx_preimage_with_code_sep_sighash(tx, input_idx, subscript, sats, code_sep_idx, sig_hash_type)?;
 
                 // Only sign Sig params for extra inputs, not the primary
                 if input_idx > 0 {
@@ -1644,11 +1645,11 @@ impl RunarContract {
                     method_selector_hex,
                 );
 
-                Ok((unlock, op_sig, preimage))
+                Ok((unlock, preimage))
             };
 
             // First pass: build unlocking scripts with current tx layout
-            let (input0_unlock, _, _) = build_stateful_unlock(
+            let (input0_unlock, _) = build_stateful_unlock(
                 &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
                 signer, &sig_indices, &prevouts_indices, &mut resolved_args, &method_selector_hex,
                 change_amount,
@@ -1660,7 +1661,7 @@ impl RunarContract {
                     .and_then(|v| v.get(i))
                     .cloned()
                     .unwrap_or_else(|| resolved_args.clone());
-                let (unlock, _, _) = build_stateful_unlock(
+                let (unlock, _) = build_stateful_unlock(
                     &signed_tx, i + 1, &mu.script, mu.satoshis,
                     signer, &sig_indices, &prevouts_indices, &mut args_for_input, &method_selector_hex,
                     change_amount,
@@ -1715,11 +1716,10 @@ impl RunarContract {
             change_amount = rebuilt_change;
 
             // Second pass: recompute with final tx (preimage changes with unlock size)
-            // N-213: the signature build_stateful_unlock returns here has no
-            // consumer post-BUG-100 (PreparedCall has no op_push_tx_sig field
-            // to carry it to) — discard it rather than storing it into a
-            // variable with no reader.
-            let (final_input0_unlock, _op_sig, preimage) = build_stateful_unlock(
+            // N-213/N-253: build_stateful_unlock computes no OP_PUSH_TX
+            // signature -- there is no consumer post-BUG-100 (PreparedCall has
+            // no op_push_tx_sig field to carry it to).
+            let (final_input0_unlock, preimage) = build_stateful_unlock(
                 &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
                 signer, &sig_indices, &prevouts_indices, &mut resolved_args, &method_selector_hex,
                 change_amount,
@@ -1732,7 +1732,7 @@ impl RunarContract {
                     .and_then(|v| v.get(i))
                     .cloned()
                     .unwrap_or_else(|| resolved_args.clone());
-                let (final_merge_unlock, _, _) = build_stateful_unlock(
+                let (final_merge_unlock, _) = build_stateful_unlock(
                     &signed_tx, i + 1, &mu.script, mu.satoshis,
                     signer, &sig_indices, &prevouts_indices, &mut args_for_input, &method_selector_hex,
                     change_amount,
@@ -2238,8 +2238,9 @@ impl RunarContract {
 
         if is_stateful {
             // Build stateful terminal unlock with PLACEHOLDER user sigs
-            let build_unlock = |tx: &str, args: &Vec<SdkValue>| -> Result<(String, String, String), String> {
-                let (op_sig, preimage) = compute_op_push_tx_with_code_sep_sighash(tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx, term_sig_hash_type)?;
+            let build_unlock = |tx: &str, args: &Vec<SdkValue>| -> Result<(String, String), String> {
+                // N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+                let preimage = compute_op_push_tx_preimage_with_code_sep_sighash(tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx, term_sig_hash_type)?;
                 let mut args_hex = String::new();
                 for arg in args.iter() {
                     args_hex.push_str(&encode_arg(arg));
@@ -2260,16 +2261,16 @@ impl RunarContract {
                     witness_hex,
                     method_selector_hex,
                 );
-                Ok((unlock, op_sig, preimage))
+                Ok((unlock, preimage))
             };
 
             // First pass
-            let (first_unlock, _, _) = build_unlock(&term_tx, resolved_args)?;
+            let (first_unlock, _) = build_unlock(&term_tx, resolved_args)?;
             term_tx = build_terminal_tx(&first_unlock);
 
             // Second pass: recompute with final tx
-            // N-213: discard the returned signature — no consumer post-BUG-100.
-            let (second_unlock, _op_sig, preimage) = build_unlock(&term_tx, resolved_args)?;
+            // N-213/N-253: no OP_PUSH_TX signature is computed — no consumer post-BUG-100.
+            let (second_unlock, preimage) = build_unlock(&term_tx, resolved_args)?;
             term_tx = insert_unlocking_script(&term_tx, 0, &second_unlock)?;
             final_preimage = preimage;
         } else if needs_op_push_tx || !sig_indices.is_empty() {

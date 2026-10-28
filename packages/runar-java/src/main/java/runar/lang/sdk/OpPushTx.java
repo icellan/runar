@@ -30,6 +30,14 @@ final class OpPushTx {
     /** Default BSV BIP-143 sighash flag: {@code SIGHASH_ALL | SIGHASH_FORKID}. */
     static final int SIGHASH_ALL_FORKID = 0x41;
 
+    /**
+     * Number of OP_PUSH_TX signatures computed by {@link #computePushTxSig} in
+     * this JVM (N-253). A test observability hook: it lets a test assert that a
+     * code path which only needs the preimage does not sign.
+     */
+    static final java.util.concurrent.atomic.AtomicInteger PUSH_TX_SIG_COUNT =
+        new java.util.concurrent.atomic.AtomicInteger();
+
     private OpPushTx() {}
 
     /**
@@ -230,6 +238,7 @@ final class OpPushTx {
      */
     static byte[] computePushTxSig(RawTx tx, int inputIndex, byte[] scriptCode, long satoshis,
                                    int sigHashFlag) {
+        PUSH_TX_SIG_COUNT.incrementAndGet();
         byte[] preimageBytes = preimage(tx, inputIndex, scriptCode, satoshis, sigHashFlag);
         byte[] sighash = Hash160.doubleSha256(preimageBytes);
         BigInteger z = new BigInteger(1, sighash);

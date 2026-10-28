@@ -1067,7 +1067,6 @@ public final class RunarContract {
         List<Object> resolved,
         byte[] userSighash,
         int methodSigHash,
-        String opPushTxSigHex,
         String preimageHex,
         String changePkhHex,
         long changeAmount,
@@ -1095,7 +1094,7 @@ public final class RunarContract {
     ) {
         tx.setUnlockingScript(0, buildPushTxUnlock(
             m, methodName, signedArgs,
-            lay.opPushTxSigHex(),
+            /*opPushTxSigHex*/ "",
             lay.changePkhHex(),
             lay.changeAmount(), lay.methodNeedsNewAmount(), lay.newSats(),
             lay.preimageHex(),
@@ -1563,9 +1562,8 @@ public final class RunarContract {
             tx, 0, ScriptUtils.hexToBytes(sighashSubscript),
             currentUtxo.satoshis(), methodSigHash
         );
-        byte[] opPushTxSig = OpPushTx.computePushTxSig(
-            tx, 0, sighashSubscript, currentUtxo.satoshis(), methodSigHash
-        );
+        // N-253: no OP_PUSH_TX signature is computed -- buildPushTxUnlock pushes
+        // none (BUG-100), so the preimage is all the covenant input needs.
 
         // The digest the primary input's Sig slots are signed over (by the
         // caller: call() signs it in-process, prepareCall publishes it).
@@ -1576,7 +1574,7 @@ public final class RunarContract {
         // Placeholder-Sig unlock; the final one is spliced in by finishPushTx.
         String finalUnlock = buildPushTxUnlock(
             m, methodName, resolved,
-            ScriptUtils.bytesToHex(opPushTxSig),
+            /*opPushTxSigHex*/ "",
             methodNeedsChange ? changePkhHex : null,
             finalChangeAmount, methodNeedsNewAmount, newSats,
             ScriptUtils.bytesToHex(preimage),
@@ -1595,8 +1593,6 @@ public final class RunarContract {
             String subscript = extraSubscripts.get(i);
             byte[] extraPreimage = OpPushTx.preimage(
                 tx, inputIdx, ScriptUtils.hexToBytes(subscript), u.satoshis(), methodSigHash);
-            byte[] extraPushTxSig = OpPushTx.computePushTxSig(
-                tx, inputIdx, subscript, u.satoshis(), methodSigHash);
             List<Object> r = extraResolved.get(i);
             List<Integer> sigs = extraSigIndices.get(i);
             if (!sigs.isEmpty()) {
@@ -1609,7 +1605,7 @@ public final class RunarContract {
                 }
             }
             tx.setUnlockingScript(inputIdx, buildPushTxUnlock(
-                m, methodName, r, ScriptUtils.bytesToHex(extraPushTxSig),
+                m, methodName, r, /*opPushTxSigHex*/ "",
                 methodNeedsChange ? changePkhHex : null,
                 finalChangeAmount, methodNeedsNewAmount, newSats,
                 ScriptUtils.bytesToHex(extraPreimage),
@@ -1642,7 +1638,6 @@ public final class RunarContract {
         int contIdx = orderedContractOutputs != null ? continuationIndex : 0;
         return new PushTxLayout(
             tx, resolved, userSighash, methodSigHash,
-            ScriptUtils.bytesToHex(opPushTxSig),
             ScriptUtils.bytesToHex(preimage),
             methodNeedsChange ? changePkhHex : null,
             finalChangeAmount, methodNeedsNewAmount, newSats,
@@ -1761,7 +1756,6 @@ public final class RunarContract {
         };
 
         String contractUnlock;
-        String opPushTxSigHex = null;
         String preimageHex = null;
 
         // Issue #123: the terminal method's declared @sighash mode (default 0x41).
@@ -1791,10 +1785,7 @@ public final class RunarContract {
                 tx, 0, ScriptUtils.hexToBytes(sighashSubscript),
                 contractSats, methodSigHash
             );
-            byte[] opPushTxSig = OpPushTx.computePushTxSig(
-                tx, 0, sighashSubscript, contractSats, methodSigHash
-            );
-            opPushTxSigHex = ScriptUtils.bytesToHex(opPushTxSig);
+            // N-253: no OP_PUSH_TX signature is computed (none is pushed, BUG-100).
             preimageHex = ScriptUtils.bytesToHex(preimage);
 
             // Sign Sig placeholders against the same code-separator-aware
@@ -1812,7 +1803,7 @@ public final class RunarContract {
             }
 
             contractUnlock = buildPushTxUnlock(
-                m, methodName, resolved, opPushTxSigHex,
+                m, methodName, resolved, /*opPushTxSigHex*/ "",
                 /*changePkhHex (terminal: no change)*/ null,
                 /*changeAmount*/ 0L, methodNeedsNewAmount, /*newSats*/ 0L,
                 preimageHex,
@@ -2756,10 +2747,7 @@ public final class RunarContract {
                 tx, 0, ScriptUtils.hexToBytes(sighashSubscript),
                 contractSats, methodSigHash
             );
-            byte[] opPushTxSig = OpPushTx.computePushTxSig(
-                tx, 0, sighashSubscript, contractSats, methodSigHash
-            );
-            String opPushTxSigHex = ScriptUtils.bytesToHex(opPushTxSig);
+            // N-253: no OP_PUSH_TX signature is computed (none is pushed, BUG-100).
             String preimageHex = ScriptUtils.bytesToHex(preimage);
 
             // Sighashes the external signer must produce (same digest for
@@ -2773,7 +2761,7 @@ public final class RunarContract {
             for (int i = 0; i < sigIndices.size(); i++) sighashes.add(userSighash.clone());
 
             contractUnlock = buildPushTxUnlock(
-                m, methodName, resolved, opPushTxSigHex,
+                m, methodName, resolved, /*opPushTxSigHex*/ "",
                 /*changePkhHex (terminal: no change)*/ null,
                 0L, methodNeedsNewAmount, 0L, preimageHex,
                 intentWitnessHex

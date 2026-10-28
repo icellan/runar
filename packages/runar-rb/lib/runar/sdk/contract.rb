@@ -1434,7 +1434,8 @@ module Runar
         if is_stateful
           # Two-pass stateful terminal: compute preimage with placeholder, then stabilize.
           build_stateful_terminal_unlock = lambda do |tx|
-            op_sig, preimage = SDK.compute_op_push_tx(
+            # N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+            preimage = SDK.compute_op_push_tx_preimage(
               tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
               resolve_sighash_type(method_name)
             )
@@ -1443,13 +1444,13 @@ module Runar
             if method_needs_change && !change_pkh_hex.empty?
               change_hex = State.encode_push_data(change_pkh_hex) + State.encode_script_int(0)
             end
-            unlock = build_stateful_prefix(op_sig, method_uses_code_part) +
+            unlock = build_stateful_prefix('', method_uses_code_part) +
                      args_hex +
                      change_hex +
                      State.encode_push_data(preimage) +
                      intent_witness_hex +
                      method_selector_hex
-            [unlock, op_sig, preimage]
+            [unlock, preimage]
           end
 
           # First pass — size the unlocking script.
@@ -1457,9 +1458,8 @@ module Runar
           term_tx = build_terminal_tx.call(first_unlock)
 
           # Second pass — stable preimage with final TX layout.
-          final_unlock, op_sig, preimage = build_stateful_terminal_unlock.call(term_tx)
+          final_unlock, preimage = build_stateful_terminal_unlock.call(term_tx)
           term_tx              = SDK.insert_unlocking_script(term_tx, 0, final_unlock)
-          final_op_push_tx_sig = op_sig
           final_preimage       = preimage
 
         elsif needs_op_push_tx || !sig_indices.empty?
@@ -1801,7 +1801,7 @@ module Runar
         final_preimage       = ''
 
         if is_stateful
-          signed_tx, change_amount, final_op_push_tx_sig, final_preimage =
+          signed_tx, change_amount, final_preimage =
             stateful_preimage_passes(
               signed_tx, contract_utxo, resolved_args,
               method_name, method_needs_change, method_needs_new_amount,
@@ -2006,7 +2006,7 @@ module Runar
         signed_tx = sign_funding_inputs(tx_hex, additional_utxos, fund_signer, p2pkh_start)
 
         # Second pass — stable preimage with finalised TX layout.
-        final_unlock, op_sig, preimage = build_stateful_unlock(
+        final_unlock, preimage = build_stateful_unlock(
           signed_tx, 0, contract_utxo, resolved_args,
           method_name, method_needs_change, method_needs_new_amount,
           change_pkh_hex, method_selector_hex, code_sep_idx,
@@ -2053,7 +2053,7 @@ module Runar
           signed_tx = SDK.insert_unlocking_script(signed_tx, p2pkh_start + i, unlock)
         end
 
-        [signed_tx, change_amount, op_sig, preimage]
+        [signed_tx, change_amount, preimage]
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
@@ -2663,7 +2663,7 @@ module Runar
       # Placeholder Sig params are kept as-is so the caller can inject real
       # signatures in finalize_call.
       #
-      # Returns [unlock_hex, op_sig_hex, preimage_hex].
+      # Returns [unlock_hex, preimage_hex].
       #
       # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists
       def build_stateful_unlock(tx_hex, input_idx, contract_utxo, resolved_args,
@@ -2673,7 +2673,8 @@ module Runar
                                 prevouts_indices: [], intent_witness_hex: '',
                                 method_uses_code_part: nil)
         # Issue #123: build the preimage under the method's declared @sighash mode.
-        op_sig, preimage = SDK.compute_op_push_tx(
+        # N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+        preimage = SDK.compute_op_push_tx_preimage(
           tx_hex, input_idx, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
           resolve_sighash_type(method_name)
         )
@@ -2702,13 +2703,13 @@ module Runar
         # (true for terminal var-length-state readers — issue #100).
         uses_code_part = method_uses_code_part.nil? ? method_needs_change : method_uses_code_part
 
-        unlock = build_stateful_prefix(op_sig, uses_code_part) +
+        unlock = build_stateful_prefix('', uses_code_part) +
                  args_hex + change_hex + new_amount_hex +
                  State.encode_push_data(preimage) +
                  intent_witness_hex +
                  method_selector_hex
 
-        [unlock, op_sig, preimage]
+        [unlock, preimage]
       end
 
       # Build the trailing intent-intrinsic witness hex for `method`, in ABI

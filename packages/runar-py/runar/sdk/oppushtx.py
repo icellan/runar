@@ -45,6 +45,55 @@ def compute_op_push_tx(
     byte. Defaults to 0x41 (ALL|FORKID); it must match the method's declared
     ``@sighash`` mode or the on-chain OP_PUSH_TX binding fails to verify.
     """
+    preimage = _op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    )
+    sighash = _sha256d(preimage)
+
+    # Sign with k=1 private key
+    sig_r, sig_s = _ecdsa_sign_k1(sighash)
+
+    # Enforce low-S
+    half_n = _N >> 1
+    if sig_s > half_n:
+        sig_s = _N - sig_s
+
+    # DER encode
+    der = _der_encode(sig_r, sig_s)
+    sig_hex = der.hex() + format(sig_hash_type & 0xFF, '02x')
+    preimage_hex = preimage.hex()
+
+    return sig_hex, preimage_hex
+
+
+def compute_op_push_tx_preimage(
+    tx_hex: str,
+    input_index: int,
+    subscript: str,
+    satoshis: int,
+    code_separator_index: int = -1,
+    sig_hash_type: int = SIGHASH_ALL_FORKID,
+) -> str:
+    """N-253: the BIP-143 preimage hex ``compute_op_push_tx`` returns, WITHOUT
+    the k=1 ECDSA signature -- same arguments, same validation, same bytes.
+
+    Post-BUG-100 the OP_PUSH_TX signature is derived on-chain from the preimage
+    and the unlocking script has no slot for one, so the stateful prepare_call
+    path uses this instead of signing and discarding a signature.
+    """
+    return _op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    ).hex()
+
+
+def _op_push_tx_preimage_bytes(
+    tx_hex: str,
+    input_index: int,
+    subscript: str,
+    satoshis: int,
+    code_separator_index: int,
+    sig_hash_type: int,
+) -> bytes:
     # N-041: the subscript is the locking script of the UTXO being spent (e.g.
     # a provider's contract UTXO). An empty one can never match the script the
     # node executes, so refuse it.
@@ -83,23 +132,7 @@ def compute_op_push_tx(
     tx = _parse_raw_tx(tx_bytes)
     subscript_bytes = bytes.fromhex(effective_subscript)
 
-    preimage = _bip143_preimage(tx, input_index, subscript_bytes, satoshis, sig_hash_type)
-    sighash = _sha256d(preimage)
-
-    # Sign with k=1 private key
-    sig_r, sig_s = _ecdsa_sign_k1(sighash)
-
-    # Enforce low-S
-    half_n = _N >> 1
-    if sig_s > half_n:
-        sig_s = _N - sig_s
-
-    # DER encode
-    der = _der_encode(sig_r, sig_s)
-    sig_hex = der.hex() + format(sig_hash_type & 0xFF, '02x')
-    preimage_hex = preimage.hex()
-
-    return sig_hex, preimage_hex
+    return _bip143_preimage(tx, input_index, subscript_bytes, satoshis, sig_hash_type)
 
 
 # ---------------------------------------------------------------------------

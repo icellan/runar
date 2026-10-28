@@ -28,7 +28,7 @@ from runar.sdk.state import (
     encode_push_data, check_fixed_width_value,
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
-from runar.sdk.oppushtx import compute_op_push_tx
+from runar.sdk.oppushtx import compute_op_push_tx, compute_op_push_tx_preimage
 from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs, _IntentCtx
 from runar.sdk.ordinals import (
     Inscription, build_inscription_envelope, parse_inscription_envelope,
@@ -1314,8 +1314,9 @@ class RunarContract:
             # Helper: build a stateful unlock.  For input_idx==0 (primary),
             # keeps placeholder Sig params.  For input_idx>0 (extra), signs
             # with signer.
-            def _build_stateful_unlock(tx: str, input_idx: int, subscript: str, sats: int, args_override: list | None = None, tx_change_amount: int = 0, pi: list[int] | None = None) -> tuple[str, str, str]:
-                op_sig, preimage = compute_op_push_tx(tx, input_idx, subscript, sats, code_sep_idx, method_sig_hash_type)
+            def _build_stateful_unlock(tx: str, input_idx: int, subscript: str, sats: int, args_override: list | None = None, tx_change_amount: int = 0, pi: list[int] | None = None) -> tuple[str, str]:
+                # N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+                preimage = compute_op_push_tx_preimage(tx, input_idx, subscript, sats, code_sep_idx, method_sig_hash_type)
                 base_args = args_override if args_override is not None else resolved_args
                 input_args = list(base_args)
                 # Only sign Sig params for extra inputs, not the primary
@@ -1343,7 +1344,7 @@ class RunarContract:
                 if method_needs_new_amount:
                     new_amount_hex = _encode_script_number(new_satoshis)
                 unlock = (
-                    self._build_stateful_prefix(op_sig, method_uses_code_part) +
+                    self._build_stateful_prefix('', method_uses_code_part) +
                     args_hex +
                     change_hex +
                     new_amount_hex +
@@ -1351,10 +1352,10 @@ class RunarContract:
                     witness_hex +
                     method_selector_hex
                 )
-                return unlock, op_sig, preimage
+                return unlock, preimage
 
             # First pass: build unlocking scripts with current tx layout
-            input0_unlock, _, _ = _build_stateful_unlock(
+            input0_unlock, _ = _build_stateful_unlock(
                 signed_tx, 0, contract_utxo.script, contract_utxo.satoshis,
                 tx_change_amount=change_amount,
                 pi=prevouts_indices,
@@ -1362,7 +1363,7 @@ class RunarContract:
             extra_unlocks: list[str] = []
             for i, mu in enumerate(extra_contract_utxos):
                 extra_args = resolved_per_input_args[i] if resolved_per_input_args and i < len(resolved_per_input_args) else None
-                eu, _, _ = _build_stateful_unlock(
+                eu, _ = _build_stateful_unlock(
                     signed_tx, i + 1, mu.script, mu.satoshis, extra_args,
                     tx_change_amount=change_amount,
                     pi=prevouts_indices,
@@ -1400,18 +1401,17 @@ class RunarContract:
                     signed_tx = insert_unlocking_script(signed_tx, i, unlock_script)
 
             # Second pass: recompute with final tx (preimage changes with unlock size)
-            final_input0_unlock, op_sig, preimage = _build_stateful_unlock(
+            final_input0_unlock, preimage = _build_stateful_unlock(
                 signed_tx, 0, contract_utxo.script, contract_utxo.satoshis,
                 tx_change_amount=change_amount,
                 pi=prevouts_indices,
             )
-            final_op_push_tx_sig = op_sig
             final_preimage = preimage
             signed_tx = insert_unlocking_script(signed_tx, 0, final_input0_unlock)
 
             for i, mu in enumerate(extra_contract_utxos):
                 extra_args = resolved_per_input_args[i] if resolved_per_input_args and i < len(resolved_per_input_args) else None
-                final_merge_unlock, _, _ = _build_stateful_unlock(
+                final_merge_unlock, _ = _build_stateful_unlock(
                     signed_tx, i + 1, mu.script, mu.satoshis, extra_args,
                     tx_change_amount=change_amount,
                     pi=prevouts_indices,
@@ -2050,8 +2050,9 @@ class RunarContract:
 
         if is_stateful:
             # Build stateful terminal unlock with PLACEHOLDER user sigs
-            def build_stateful_terminal_unlock(tx: str) -> tuple[str, str, str]:
-                op_sig, preimage = compute_op_push_tx(tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx, term_sig_hash_type)
+            def build_stateful_terminal_unlock(tx: str) -> tuple[str, str]:
+                # N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+                preimage = compute_op_push_tx_preimage(tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx, term_sig_hash_type)
                 # Keep placeholder Sig params (don't sign for primary)
                 args_hex = ''
                 for arg in resolved_args:
@@ -2061,23 +2062,22 @@ class RunarContract:
                 if method_needs_change and change_pkh_hex:
                     change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(0)
                 unlock = (
-                    self._build_stateful_prefix(op_sig, False) +
+                    self._build_stateful_prefix('', False) +
                     args_hex +
                     change_hex +
                     encode_push_data(preimage) +
                     witness_hex +
                     method_selector_hex
                 )
-                return unlock, op_sig, preimage
+                return unlock, preimage
 
             # First pass
-            first_unlock, _, _ = build_stateful_terminal_unlock(term_tx)
+            first_unlock, _ = build_stateful_terminal_unlock(term_tx)
             term_tx = build_terminal_tx(first_unlock)
 
             # Second pass
-            final_unlock, op_sig, preimage = build_stateful_terminal_unlock(term_tx)
+            final_unlock, preimage = build_stateful_terminal_unlock(term_tx)
             term_tx = insert_unlocking_script(term_tx, 0, final_unlock)
-            final_op_push_tx_sig = op_sig
             final_preimage = preimage
 
         elif needs_op_push_tx or sig_indices:

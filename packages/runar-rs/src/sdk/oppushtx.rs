@@ -9,6 +9,7 @@
 
 use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use sha2::{Sha256, Digest};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// SIGHASH_ALL | SIGHASH_FORKID — the default BSV sighash type.
 const SIGHASH_ALL_FORKID: u32 = 0x41;
@@ -63,6 +64,71 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
     code_separator_index: i64,
     sig_hash_type: u32,
 ) -> Result<(String, String), String> {
+    let preimage = op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    )?;
+
+    // Double-SHA256 for the sighash
+    let sighash = sha256d(&preimage);
+
+    // Sign with k=1 private key
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let signing_key = SigningKey::from_slice(&key_bytes)
+        .map_err(|e| format!("compute_op_push_tx: create k=1 key: {}", e))?;
+
+    let (sig, _) = signing_key
+        .sign_prehash(&sighash)
+        .map_err(|e| format!("compute_op_push_tx: sign: {}", e))?;
+    OP_PUSH_TX_SIGN_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Normalize to low-S
+    let normalized = sig.normalize_s().unwrap_or(sig);
+
+    // DER encode + append sighash byte
+    let der = normalized.to_der();
+    let mut result = der.as_bytes().to_vec();
+    result.push((sig_hash_type & 0xff) as u8);
+
+    let sig_hex = bytes_to_hex(&result);
+    let preimage_hex = bytes_to_hex(&preimage);
+
+    Ok((sig_hex, preimage_hex))
+}
+
+/// Number of k=1 OP_PUSH_TX ECDSA signatures computed by this process (N-253).
+/// A test observability hook: it lets a test assert that a code path which
+/// only needs the preimage does not sign.
+#[doc(hidden)]
+pub static OP_PUSH_TX_SIGN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// N-253: the BIP-143 preimage hex [`compute_op_push_tx_with_code_sep_sighash`]
+/// returns, WITHOUT the k=1 ECDSA signature -- same arguments, same validation,
+/// same bytes. Post-BUG-100 the OP_PUSH_TX signature is derived on-chain from
+/// the preimage and the unlocking script has no slot for one, so the stateful
+/// `prepare_call` path uses this instead of signing and discarding a signature.
+pub fn compute_op_push_tx_preimage_with_code_sep_sighash(
+    tx_hex: &str,
+    input_index: usize,
+    subscript: &str,
+    satoshis: i64,
+    code_separator_index: i64,
+    sig_hash_type: u32,
+) -> Result<String, String> {
+    let preimage = op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    )?;
+    Ok(bytes_to_hex(&preimage))
+}
+
+fn op_push_tx_preimage_bytes(
+    tx_hex: &str,
+    input_index: usize,
+    subscript: &str,
+    satoshis: i64,
+    code_separator_index: i64,
+    sig_hash_type: u32,
+) -> Result<Vec<u8>, String> {
     // R-178: an out-of-range code_separator_index used to leave the subscript
     // UNTRIMMED and sign it anyway — a wrong scriptCode, with no error, from a
     // fund-moving primitive. Reject it instead: there is no correct signature
@@ -118,32 +184,7 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
 
     // Compute BIP-143 preimage (raw bytes, not hashed)
     let preimage = bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, sig_hash_type);
-
-    // Double-SHA256 for the sighash
-    let sighash = sha256d(&preimage);
-
-    // Sign with k=1 private key
-    let mut key_bytes = [0u8; 32];
-    key_bytes[31] = 1;
-    let signing_key = SigningKey::from_slice(&key_bytes)
-        .map_err(|e| format!("compute_op_push_tx: create k=1 key: {}", e))?;
-
-    let (sig, _) = signing_key
-        .sign_prehash(&sighash)
-        .map_err(|e| format!("compute_op_push_tx: sign: {}", e))?;
-
-    // Normalize to low-S
-    let normalized = sig.normalize_s().unwrap_or(sig);
-
-    // DER encode + append sighash byte
-    let der = normalized.to_der();
-    let mut result = der.as_bytes().to_vec();
-    result.push((sig_hash_type & 0xff) as u8);
-
-    let sig_hex = bytes_to_hex(&result);
-    let preimage_hex = bytes_to_hex(&preimage);
-
-    Ok((sig_hex, preimage_hex))
+    Ok(preimage)
 }
 
 // ---------------------------------------------------------------------------

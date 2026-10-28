@@ -66,7 +66,7 @@ export {
 } from './state.js';
 
 // OP_PUSH_TX
-export { computeOpPushTx } from './oppushtx.js';
+export { computeOpPushTx, computeOpPushTxPreimage } from './oppushtx.js';
 
 // Script utilities
 export { buildP2PKHScript, extractConstructorArgs, matchesArtifact, pubkeyToPKH } from './script-utils.js';

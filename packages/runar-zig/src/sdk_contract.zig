@@ -1669,7 +1669,7 @@ pub const RunarContract = struct {
         const sig_hash_type = self.methodSigHashType(method_name);
 
         // First pass: compute OP_PUSH_TX
-        var ptx_result = oppushtx_mod.computeOpPushTxWithSigHash(
+        var ptx_result = oppushtx_mod.computeOpPushTxPreimageWithSigHash(
             self.allocator,
             signed_tx,
             0,
@@ -1778,7 +1778,7 @@ pub const RunarContract = struct {
 
         // Second pass: recompute with final tx (preimage depends on tx size)
         ptx_result.deinit(self.allocator);
-        ptx_result = oppushtx_mod.computeOpPushTxWithSigHash(
+        ptx_result = oppushtx_mod.computeOpPushTxPreimageWithSigHash(
             self.allocator,
             signed_tx,
             0,
@@ -2547,7 +2547,7 @@ pub const RunarContract = struct {
         // mode (default 0x41 for methods with no directive).
         const sig_hash_type = self.methodSigHashType(method_name);
 
-        var ptx_result = oppushtx_mod.computeOpPushTxWithSigHash(
+        var ptx_result = oppushtx_mod.computeOpPushTxPreimageWithSigHash(
             self.allocator, signed_tx, 0,
             contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
             sig_hash_type,
@@ -2614,7 +2614,7 @@ pub const RunarContract = struct {
 
         // Recompute preimage on the final tx (depends on tx size).
         ptx_result.deinit(self.allocator);
-        ptx_result = oppushtx_mod.computeOpPushTxWithSigHash(
+        ptx_result = oppushtx_mod.computeOpPushTxPreimageWithSigHash(
             self.allocator, signed_tx, 0,
             contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
             sig_hash_type,
@@ -2986,7 +2986,7 @@ pub const RunarContract = struct {
         }
 
         // Compute OP_PUSH_TX preimage for this input.
-        var xptx = oppushtx_mod.computeOpPushTxWithSigHash(
+        var xptx = oppushtx_mod.computeOpPushTxPreimageWithSigHash(
             self.allocator,
             signed_tx,
             inp_idx,
