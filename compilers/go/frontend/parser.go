@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
@@ -171,6 +173,74 @@ func Parse(source []byte, fileName string) *ParseResult {
 	return withNestingLimit(func() *ParseResult { return parseTsSurface(source, fileName) })
 }
 
+// firstNonASCIIOutsideTsLiterals is N-423's port of the TS reference's
+// firstNonAsciiOutsideLiterals (01-parse.ts): the byte offset of the first
+// non-ASCII character outside a comment or a string / template literal, or
+// -1. `//` comments end at '\n', '\r', U+2028 or U+2029; `/* */` at its
+// close or end of file; '..' / ".." at the matching quote or a '\n' / '\r';
+// templates at the matching backtick. A backslash in a string or template
+// skips the next character (or "\r\n").
+func firstNonASCIIOutsideTsLiterals(src []byte) int {
+	n := len(src)
+	for i := 0; i < n; {
+		c := src[i]
+		switch {
+		case c == '/' && i+1 < n && src[i+1] == '/':
+			i += 2
+			for i < n && src[i] != '\n' && src[i] != '\r' &&
+				!(bytes.HasPrefix(src[i:], []byte("\u2028")) || bytes.HasPrefix(src[i:], []byte("\u2029"))) {
+				i++
+			}
+		case c == '/' && i+1 < n && src[i+1] == '*':
+			end := bytes.Index(src[i+2:], []byte("*/"))
+			if end < 0 {
+				i = n
+			} else {
+				i += 2 + end + 2
+			}
+		case c == '\'' || c == '"' || c == '`':
+			i++
+			for i < n {
+				d := src[i]
+				if d == c {
+					i++
+					break
+				}
+				if c != '`' && (d == '\n' || d == '\r') {
+					break
+				}
+				if d == '\\' {
+					if bytes.HasPrefix(src[i+1:], []byte("\r\n")) {
+						i += 3
+					} else {
+						i += 2
+					}
+				} else {
+					i++
+				}
+			}
+		case c >= 0x80:
+			return i
+		default:
+			i++
+		}
+	}
+	return -1
+}
+
+// tsUTF16Position is the TS reference's locFromPos for byte offset i: line =
+// 1 + the number of '\n' before i; column (0-based) = UTF-16 units since the
+// last '\n' or '\r'.
+func tsUTF16Position(src []byte, i int) (int, int) {
+	line := 1 + bytes.Count(src[:i], []byte("\n"))
+	start := bytes.LastIndexAny(src[:i], "\n\r") + 1
+	col := 0
+	for _, r := range string(src[start:i]) {
+		col += utf16.RuneLen(r)
+	}
+	return line, col
+}
+
 // tsParseTimeLimit bounds the tree-sitter parse of a .runar.ts source (N-308).
 //
 // It is WALL-CLOCK, not an operation count: the go-tree-sitter binding exposes
@@ -189,6 +259,15 @@ const TsParseTooComplexMessage = "source too complex to parse: tree-sitter parse
 // parseTsSurface is the .runar.ts surface: tree-sitter parse, then conversion
 // to the Rúnar AST.
 func parseTsSurface(source []byte, fileName string) *ParseResult {
+	// N-423 (user decision R163): tree-sitter accepts ECMAScript's Unicode
+	// identifiers and whitespace; Rúnar takes only ASCII outside comments
+	// and string literals, as the TS reference's pre-scan does.
+	if i := firstNonASCIIOutsideTsLiterals(source); i >= 0 {
+		r, _ := utf8.DecodeRune(source[i:])
+		line, col := tsUTF16Position(source, i)
+		return &ParseResult{Errors: []Diagnostic{lexDiag(fmt.Sprintf("Unexpected character '%c'", r), fileName, line, col)}}
+	}
+
 	parser := sitter.NewParser()
 	parser.SetLanguage(typescript.GetLanguage())
 

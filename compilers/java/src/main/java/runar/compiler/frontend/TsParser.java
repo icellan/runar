@@ -244,11 +244,13 @@ public final class TsParser {
     // ---------------------------------------------------------------
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_' || ch == '$';
+        // N-423: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_' || ch == '$';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_' || ch == '$';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
     }
 
     private static boolean isHexDigit(char ch) {

@@ -226,6 +226,16 @@ function withConstReassignment(result: ParseResult): ParseResult {
 /** The `.runar.ts` surface: ts-morph parse, then conversion to the Rúnar AST. */
 function parseTsSurface(source: string, file: string, errors: CompilerDiagnostic[]): ParseResult {
 
+  // N-423 (user decision R163): ts-morph accepts ECMAScript's Unicode
+  // identifiers and whitespace; Rúnar takes only ASCII outside comments and
+  // string literals, as on every other surface.
+  const nonAscii = firstNonAsciiOutsideLiterals(source);
+  if (nonAscii >= 0) {
+    const ch = String.fromCodePoint(source.codePointAt(nonAscii)!);
+    errors.push(makeDiagnostic(`Unexpected character '${ch}'`, 'error', locFromPos(source, nonAscii, file)));
+    return { contract: null, errors };
+  }
+
   const project = new Project({
     useInMemoryFileSystem: true,
     compilerOptions: {
@@ -2093,6 +2103,48 @@ function reportUnterminatedLiterals(
     ts.forEachChild(node, visit);
   };
   visit(sf);
+}
+
+/**
+ * N-423: the offset of the first non-ASCII code unit of `src` outside a
+ * comment or a string / template literal, or -1. `//` comments end at a line
+ * break (`\n`, `\r`, U+2028, U+2029), `/* *\/` at its close or end of file;
+ * `'` / `"` strings at the matching quote or a `\n` / `\r`; templates at the
+ * matching backtick (they may span lines, and `${` is not tracked). A
+ * backslash in a string or template skips the next character (or `\r\n`).
+ * Go (parser.go) and Rust (parser.rs) port this scan exactly.
+ */
+function firstNonAsciiOutsideLiterals(src: string): number {
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    const c = src.charCodeAt(i);
+    if (c === 0x2f && src.charCodeAt(i + 1) === 0x2f) {
+      i += 2;
+      while (i < n) {
+        const d = src.charCodeAt(i);
+        if (d === 0x0a || d === 0x0d || d === 0x2028 || d === 0x2029) break;
+        i++;
+      }
+    } else if (c === 0x2f && src.charCodeAt(i + 1) === 0x2a) {
+      const end = src.indexOf('*/', i + 2);
+      i = end < 0 ? n : end + 2;
+    } else if (c === 0x27 || c === 0x22 || c === 0x60) {
+      i++;
+      while (i < n) {
+        const d = src.charCodeAt(i);
+        if (d === c) { i++; break; }
+        if (c !== 0x60 && (d === 0x0a || d === 0x0d)) break;
+        if (d === 0x5c) i += src.startsWith('\r\n', i + 1) ? 3 : 2;
+        else i++;
+      }
+    } else if (c >= 0x80) {
+      return i;
+    } else {
+      i++;
+    }
+  }
+  return -1;
 }
 
 function locFromNode(node: Node, file: string): SourceLocation {

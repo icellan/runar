@@ -581,7 +581,17 @@ IdentifierStart
 IdentifierPart
     = IdentifierStart | DecimalDigit
     ;
+
+Letter
+    = 'A' .. 'Z' | 'a' .. 'z'
+    ;
 ```
+
+`Letter` is ASCII only, and whitespace between tokens is space, tab, CR or LF.
+On every surface, `.runar.ts` included, a non-ASCII character is allowed only
+inside a comment or a string literal; anywhere else (a Unicode letter in an
+identifier, U+00A0 or U+2003 between tokens) it is refused with
+`Unexpected character '<c>'` (N-407, N-423).
 
 Reserved words follow TypeScript conventions. Additionally, the following are reserved in Rúnar:
 

@@ -11,6 +11,15 @@ import { isCiEnv } from '../env.js';
  * `.rs`, `.py`, `.zig`, `.rb` and `.java` with the TS reference's diagnostic
  * `:<line>:<col>: Unexpected character '<c>'` at that character.
  *
+ * N-423 (user decision R163) — the same holds on `.runar.ts`. ts-morph,
+ * tree-sitter and swc accept ECMAScript's Unicode identifiers and Zs
+ * whitespace, so the TS reference, Go and Rust refuse any non-ASCII character
+ * outside a comment or string literal in a pre-scan of the source text;
+ * Python and Java lex identifiers as ASCII only. Before the fix
+ * (remediation-logs/N-407/matrix.txt, the .ts cells): ts, go, rust, python
+ * and java accepted `diffé` / `édiff`; ts, go and rust accepted U+00A0 /
+ * U+2003 between tokens. Zig and Ruby already refused all four.
+ *
  * The TS reference tokenizers for those surfaces take identifiers as
  * [A-Za-z_$]-led ASCII runs and whitespace as exactly ' ', '\t', '\r', '\n'.
  * Before the fix (base matrix: remediation-logs/N-407/matrix.txt):
@@ -24,9 +33,6 @@ import { isCiEnv } from '../env.js';
  *     go refused them on .go but with go/scanner's `illegal character U+00A0`.
  *
  * NOT IN SCOPE:
- *   - `.runar.ts`: the TS reference (ts-morph) ACCEPTS Unicode identifiers and
- *     Unicode whitespace there, as ECMAScript does, so "converge on TS" and
- *     "refuse non-ASCII" disagree on that surface; it is left for a decision.
  *   - `.runar.move`: owned by N-341 (same defect measured in python/java for
  *     identifiers and rust for whitespace).
  *
@@ -43,6 +49,9 @@ import { isCiEnv } from '../env.js';
  *   - other non-ASCII characters (other scripts, combining marks, U+FEFF,
  *     U+2028), Java `\uXXXX` escapes, or non-ASCII inside string literals
  *     (the surfaces' string literals are hex ByteStrings or tags);
+ *   - on `.runar.ts`: `\uXXXX` escapes in identifiers (the source text is
+ *     ASCII), template literals with `${}` substitutions, or which of several
+ *     non-ASCII characters in one file a tier reports after the first;
  *   - ASCII control whitespace such as form feed or vertical tab;
  *   - columns after an earlier non-ASCII character on the same line (some
  *     tiers count bytes, TS counts UTF-16 units).
@@ -62,6 +71,7 @@ interface Surface {
 }
 
 const SURFACES: Surface[] = [
+  { ext: 'ts', path: 'examples/ts/arithmetic/Arithmetic.runar.ts', wsNeedle: 'a + b;', comment: '//', commentBefore: '    const diff' },
   { ext: 'sol', path: 'examples/sol/arithmetic/Arithmetic.runar.sol', wsNeedle: 'a + b;', comment: '//', commentBefore: '        int diff' },
   { ext: 'go', path: 'examples/go/arithmetic/Arithmetic.runar.go', wsNeedle: 'a + b\n', comment: '//', commentBefore: '\tdiff :=' },
   { ext: 'rs', path: 'examples/rust/arithmetic/Arithmetic.runar.rs', wsNeedle: 'a + b;', comment: '//', commentBefore: '        let diff' },

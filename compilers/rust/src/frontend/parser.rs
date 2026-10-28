@@ -153,10 +153,75 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     super::input_limits::enforce_ast_nesting(result)
 }
 
+/// N-423: port of the TS reference's `firstNonAsciiOutsideLiterals`
+/// (01-parse.ts) -- the byte offset of the first non-ASCII character outside a
+/// comment or a string / template literal. `//` comments end at '\n', '\r',
+/// U+2028 or U+2029; `/* */` at its close or end of file; '..' / ".." at the
+/// matching quote or a '\n' / '\r'; templates at the matching backtick. A
+/// backslash in a string or template skips the next character (or "\r\n").
+fn first_non_ascii_outside_ts_literals(src: &str) -> Option<usize> {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        if c == b'/' && i + 1 < n && b[i + 1] == b'/' {
+            i += 2;
+            while i < n
+                && b[i] != b'\n'
+                && b[i] != b'\r'
+                && !b[i..].starts_with("\u{2028}".as_bytes())
+                && !b[i..].starts_with("\u{2029}".as_bytes())
+            {
+                i += 1;
+            }
+        } else if c == b'/' && i + 1 < n && b[i + 1] == b'*' {
+            i = match src[i + 2..].find("*/") {
+                Some(end) => i + 2 + end + 2,
+                None => n,
+            };
+        } else if c == b'\'' || c == b'"' || c == b'`' {
+            i += 1;
+            while i < n {
+                let d = b[i];
+                if d == c {
+                    i += 1;
+                    break;
+                }
+                if c != b'`' && (d == b'\n' || d == b'\r') {
+                    break;
+                }
+                if d == b'\\' {
+                    i += if b[i + 1..].starts_with(b"\r\n") { 3 } else { 2 };
+                } else {
+                    i += 1;
+                }
+            }
+        } else if c >= 0x80 {
+            return Some(i);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// The `.runar.ts` surface: swc parse (behind the F-213 token guard), measure
 /// (A) over the swc AST, then conversion to the Rúnar AST.
 fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
     let mut errors: Vec<Diagnostic> = Vec::new();
+
+    // N-423 (user decision R163): swc accepts ECMAScript's Unicode
+    // identifiers and whitespace; Rúnar takes only ASCII outside comments and
+    // string literals, as the TS reference's pre-scan does.
+    if let Some(i) = first_non_ascii_outside_ts_literals(source) {
+        let ch = source[i..].chars().next().unwrap_or('\u{fffd}');
+        let line = 1 + source[..i].matches('\n').count();
+        let start = source[..i].rfind(|c| c == '\n' || c == '\r').map_or(0, |p| p + 1);
+        let col: usize = source[start..i].chars().map(char::len_utf16).sum();
+        errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, line, col));
+        return ParseResult { contract: None, errors, source_size_err: None };
+    }
 
     // Set up SWC parser. Collect comments so the author-facing directives
     // `/** @embedAlways */` (#109) and `/** @sighash <FLAGS> */` (#123) — which
