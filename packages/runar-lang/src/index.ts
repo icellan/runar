@@ -174,6 +174,12 @@ export {
   bn254Pairing,
   bn254MultiPairing3,
   bn254MultiPairing4,
+  // Go-tier STARK / Groth16
+  verifySP1FRI,
+  merkleRootPoseidon2KB,
+  assertGroth16WitnessAssisted,
+  assertGroth16WitnessAssistedWithMSM,
+  groth16PublicInput,
   // Merkle proof verification
   merkleRootSha256,
   merkleRootHash256,

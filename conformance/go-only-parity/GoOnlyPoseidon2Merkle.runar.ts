@@ -1,6 +1,4 @@
 // F-092 — merkleRootPoseidon2KB (Poseidon2 KoalaBear Merkle), depth 1. Go-only by project policy.
-// runar-lang (the TS tier) declares no merkleRootPoseidon2KB: Go-only, see header.
-// @ts-expect-error TS2305 — the import is the point of the probe.
 import { SmartContract, assert, merkleRootPoseidon2KB } from 'runar-lang';
 
 export class GoOnlyPoseidon2Merkle extends SmartContract {

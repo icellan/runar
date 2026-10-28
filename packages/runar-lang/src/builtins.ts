@@ -1063,6 +1063,40 @@ export function bn254MultiPairing4(
 }
 
 // ---------------------------------------------------------------------------
+// Go-tier STARK / Groth16 builtins (see CLAUDE.md on EVM/STARK scope)
+// ---------------------------------------------------------------------------
+
+/** SP1 FRI verifier (Go-tier codegen). Signature from Go's typecheck table. */
+export function verifySP1FRI(
+  _proof: ByteString, _publicValues: ByteString, _vkHash: ByteString,
+): boolean {
+  return compilerStub('verifySP1FRI') as unknown as boolean;
+}
+
+/**
+ * Poseidon2 (KoalaBear) Merkle root: 8 leaf limbs, the leaf index, the depth,
+ * then 8 sibling limbs per level (8*depth + 10 bigint arguments in total).
+ */
+export function merkleRootPoseidon2KB(..._args: bigint[]): bigint {
+  return compilerStub('merkleRootPoseidon2KB');
+}
+
+/** Mode-3 witness-assisted Groth16 verification entry; takes no arguments. */
+export function assertGroth16WitnessAssisted(): void {
+  compilerStub('assertGroth16WitnessAssisted');
+}
+
+/** Soundness-strict sibling of assertGroth16WitnessAssisted (with MSM). */
+export function assertGroth16WitnessAssistedWithMSM(): void {
+  compilerStub('assertGroth16WitnessAssistedWithMSM');
+}
+
+/** Reads one of the 5 SP1 public-input scalars left by the Groth16 entry. */
+export function groth16PublicInput(_index: bigint): bigint {
+  return compilerStub('groth16PublicInput');
+}
+
+// ---------------------------------------------------------------------------
 // Merkle proof verification
 // ---------------------------------------------------------------------------
 
