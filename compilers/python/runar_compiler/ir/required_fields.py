@@ -313,6 +313,7 @@ def _non_empty_binding_names(obj: dict, key: str, path: str) -> None:
         _non_empty(binding, bp, "name")
         value = binding["value"]
         vp = f"{bp}.value"
+        _non_empty(value, vp, "kind")
         if value["kind"] == "if":
             _non_empty_binding_names(value, "then", vp)
             _non_empty_binding_names(value, "else", vp)

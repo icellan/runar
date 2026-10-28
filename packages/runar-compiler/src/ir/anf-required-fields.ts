@@ -335,6 +335,7 @@ function nonEmptyBindingNames(obj: Obj, key: string, path: string): void {
     nonEmpty(b, 'name', bp);
     const value = b.value as Obj;
     const vp = `${bp}.value`;
+    nonEmpty(value, 'kind', vp);
     if (value.kind === 'if') {
       nonEmptyBindingNames(value, 'then', vp);
       nonEmptyBindingNames(value, 'else', vp);

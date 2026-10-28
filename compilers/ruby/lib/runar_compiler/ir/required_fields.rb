@@ -288,6 +288,7 @@ module RunarCompiler
           non_empty(binding, bp, "name")
           value = binding["value"]
           vp = "#{bp}.value"
+          non_empty(value, vp, "kind")
           case value["kind"]
           when "if"
             non_empty_binding_names(value, "then", vp)

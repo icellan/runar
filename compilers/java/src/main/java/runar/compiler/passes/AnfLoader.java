@@ -1069,6 +1069,9 @@ public final class AnfLoader {
 
     private static AnfValue toValue(Map<?, ?> obj, String path) {
         String kind = reqString(obj, "kind", path);
+        // N-419: an empty kind is refused with the shared non-empty-string
+        // message, not as an "unknown ANF kind ''" below.
+        nonEmpty(kind, path + ".kind");
         return switch (kind) {
             case "load_param" -> new LoadParam(reqString(obj, "name", path));
             case "load_prop" -> new LoadProp(reqString(obj, "name", path));

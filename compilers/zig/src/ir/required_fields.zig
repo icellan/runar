@@ -362,6 +362,7 @@ fn nonEmptyBindingNames(w: Walker, obj: Obj, key: []const u8, path: []const u8) 
         try nonEmpty(w, b.object, bp, &.{"name"});
         const value = b.object.get("value").?.object;
         const vp = try std.fmt.allocPrint(w.a, "{s}.value", .{bp});
+        try nonEmpty(w, value, vp, &.{"kind"});
         const kind = value.get("kind").?.string;
         if (std.mem.eql(u8, kind, "if")) {
             try nonEmptyBindingNames(w, value, "then", vp);

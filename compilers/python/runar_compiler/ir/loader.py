@@ -230,7 +230,7 @@ def validate_ir(program: ANFProgram) -> list[str]:
     errors: list[str] = []
 
     if not program.contract_name:
-        errors.append("contractName is required")
+        errors.append("contractName must be a non-empty string")
 
     # R-126 / CL-BUG-164: an add_output must name exactly one state value per
     # MUTABLE property. Counted once, up front.
@@ -261,27 +261,28 @@ def validate_ir(program: ANFProgram) -> list[str]:
 
     for i, method in enumerate(program.methods):
         if not method.name:
-            errors.append(f"method[{i}] has empty name")
+            errors.append(f"methods[{i}].name must be a non-empty string")
         for j, param in enumerate(method.params):
             if not param.name:
                 errors.append(
-                    f"method {method.name} param[{j}] has empty name"
+                    f"methods[{i}].params[{j}].name must be a non-empty string"
                 )
             if not param.type:
                 errors.append(
-                    f"method {method.name} param {param.name} has empty type"
+                    f"methods[{i}].params[{j}].type must be a non-empty string"
                 )
         errors.extend(
             _validate_bindings(
-                method.body, method.name, mutable_count, readonly_props, declared_props
+                method.body, method.name, mutable_count, readonly_props, declared_props,
+                path=f"methods[{i}].body",
             )
         )
 
     for i, prop in enumerate(program.properties):
         if not prop.name:
-            errors.append(f"property[{i}] has empty name")
+            errors.append(f"properties[{i}].name must be a non-empty string")
         if not prop.type:
-            errors.append(f"property {prop.name} has empty type")
+            errors.append(f"properties[{i}].type must be a non-empty string")
 
     # F-014 / CL-BUG-266: the source validator requires every public
     # method to end with assert() (frontend/validator.py
@@ -600,8 +601,12 @@ def _validate_bindings(
     readonly_props: frozenset[str] = frozenset(),
     declared_props: frozenset[str] | None = None,
     enclosing_loop_count: int = 1,
+    path: str = "",
 ) -> list[str]:
     """Validate a list of ANF bindings, including nested ones.
+
+    ``path`` names ``bindings`` in the shared IR-diagnostic path style
+    (``methods[0].body``, ``methods[0].body[1].value.then``); N-419.
 
     ``enclosing_loop_count`` is the product of every loop count already
     entered on the path from the method body down to ``bindings`` (1 at the
@@ -615,15 +620,11 @@ def _validate_bindings(
 
     for i, binding in enumerate(bindings):
         if not binding.name:
-            errors.append(
-                f"method {method_name} binding[{i}] has empty name"
-            )
+            errors.append(f"{path}[{i}].name must be a non-empty string")
 
         kind = binding.value.kind
         if not kind:
-            errors.append(
-                f"method {method_name} binding {binding.name} has empty kind"
-            )
+            errors.append(f"{path}[{i}].value.kind must be a non-empty string")
             continue
 
         if kind not in KNOWN_KINDS:
@@ -726,11 +727,11 @@ def _validate_bindings(
         if kind == "if":
             if binding.value.then:
                 errors.extend(
-                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props, declared_props, enclosing_loop_count)
+                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props, declared_props, enclosing_loop_count, f"{path}[{i}].value.then")
                 )
             if binding.value.else_:
                 errors.extend(
-                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props, declared_props, enclosing_loop_count)
+                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props, declared_props, enclosing_loop_count, f"{path}[{i}].value.else")
                 )
 
         if kind == "loop":
@@ -762,7 +763,7 @@ def _validate_bindings(
                 )
             if binding.value.body:
                 errors.extend(
-                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props, declared_props, total_loop_count)
+                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props, declared_props, total_loop_count, f"{path}[{i}].value.body")
                 )
 
         if kind == "raw_script":

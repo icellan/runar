@@ -86,7 +86,7 @@ const MaxLoopCount = 10000
 // ValidateIR performs basic structural validation of a parsed ANF program.
 func ValidateIR(program *ANFProgram) error {
 	if program.ContractName == "" {
-		return fmt.Errorf("IR validation: contractName is required")
+		return fmt.Errorf("IR validation: contractName must be a non-empty string")
 	}
 
 	// R-126 / CL-BUG-164: an add_output must name exactly one state value per
@@ -101,27 +101,27 @@ func ValidateIR(program *ANFProgram) error {
 
 	for i, method := range program.Methods {
 		if method.Name == "" {
-			return fmt.Errorf("IR validation: method[%d] has empty name", i)
+			return fmt.Errorf("IR validation: methods[%d].name must be a non-empty string", i)
 		}
 		for j, param := range method.Params {
 			if param.Name == "" {
-				return fmt.Errorf("IR validation: method %s param[%d] has empty name", method.Name, j)
+				return fmt.Errorf("IR validation: methods[%d].params[%d].name must be a non-empty string", i, j)
 			}
 			if param.Type == "" {
-				return fmt.Errorf("IR validation: method %s param %s has empty type", method.Name, param.Name)
+				return fmt.Errorf("IR validation: methods[%d].params[%d].type must be a non-empty string", i, j)
 			}
 		}
-		if err := validateBindings(method.Body, method.Name, mutableCount, 1); err != nil {
+		if err := validateBindings(method.Body, method.Name, fmt.Sprintf("methods[%d].body", i), mutableCount, 1); err != nil {
 			return err
 		}
 	}
 
 	for i, prop := range program.Properties {
 		if prop.Name == "" {
-			return fmt.Errorf("IR validation: property[%d] has empty name", i)
+			return fmt.Errorf("IR validation: properties[%d].name must be a non-empty string", i)
 		}
 		if prop.Type == "" {
-			return fmt.Errorf("IR validation: property %s has empty type", prop.Name)
+			return fmt.Errorf("IR validation: properties[%d].type must be a non-empty string", i)
 		}
 	}
 
@@ -201,14 +201,14 @@ var validSighashFlags = map[int]bool{
 // this function is called with a non-default enclosingLoopCount, every
 // level above it has already returned early if its own count failed the
 // per-binding check, so enclosingLoopCount is always <= MaxLoopCount here.
-func validateBindings(bindings []ANFBinding, methodName string, mutableCount int, enclosingLoopCount int) error {
+func validateBindings(bindings []ANFBinding, methodName string, path string, mutableCount int, enclosingLoopCount int) error {
 	for i, binding := range bindings {
 		if binding.Name == "" {
-			return fmt.Errorf("IR validation: method %s binding[%d] has empty name", methodName, i)
+			return fmt.Errorf("IR validation: %s[%d].name must be a non-empty string", path, i)
 		}
 		kind := binding.Value.Kind
 		if kind == "" {
-			return fmt.Errorf("IR validation: method %s binding %s has empty kind", methodName, binding.Name)
+			return fmt.Errorf("IR validation: %s[%d].value.kind must be a non-empty string", path, i)
 		}
 		if !knownKinds[kind] {
 			return fmt.Errorf("IR validation: method %s binding %s has unknown kind %q", methodName, binding.Name, kind)
@@ -308,10 +308,10 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 
 		// Validate nested bindings
 		if kind == "if" {
-			if err := validateBindings(binding.Value.Then, methodName, mutableCount, enclosingLoopCount); err != nil {
+			if err := validateBindings(binding.Value.Then, methodName, fmt.Sprintf("%s[%d].value.then", path, i), mutableCount, enclosingLoopCount); err != nil {
 				return err
 			}
-			if err := validateBindings(binding.Value.Else, methodName, mutableCount, enclosingLoopCount); err != nil {
+			if err := validateBindings(binding.Value.Else, methodName, fmt.Sprintf("%s[%d].value.else", path, i), mutableCount, enclosingLoopCount); err != nil {
 				return err
 			}
 		}
@@ -329,7 +329,7 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 			if totalLoopCount > MaxLoopCount {
 				return fmt.Errorf("IR validation: method %s binding %s has loop count %d nested inside an enclosing loop of total count %d, producing %d total iterations, exceeding maximum %d", methodName, binding.Name, binding.Value.Count, enclosingLoopCount, totalLoopCount, MaxLoopCount)
 			}
-			if err := validateBindings(binding.Value.Body, methodName, mutableCount, totalLoopCount); err != nil {
+			if err := validateBindings(binding.Value.Body, methodName, fmt.Sprintf("%s[%d].value.body", path, i), mutableCount, totalLoopCount); err != nil {
 				return err
 			}
 		}

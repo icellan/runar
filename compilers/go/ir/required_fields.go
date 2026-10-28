@@ -415,6 +415,9 @@ func irNonEmptyBindingNames(obj irObj, key, path string) error {
 		}
 		value := binding["value"].(irObj)
 		vp := bp + ".value"
+		if err := irNonEmpty(value, "kind", vp); err != nil {
+			return err
+		}
 		switch value["kind"] {
 		case "if":
 			for _, arm := range []string{"then", "else"} {

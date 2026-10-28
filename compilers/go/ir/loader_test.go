@@ -772,3 +772,69 @@ func TestValidateIR_NegativeLoopCount(t *testing.T) {
 		t.Fatal("expected error for negative loop count")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// N-419: the public ValidateIR carries the SAME empty-identifier wording as the
+// --ir loader's required-fields pass (N-207 / N-408):
+//
+//	IR validation: <path> must be a non-empty string
+//
+// Proves: each empty identifier / binding name / binding kind reached through
+// the direct API names its path in the shared wording, at the top level and
+// inside `if` arms and `loop` bodies. Does not prove: whitespace-only names,
+// or that the loader path (which refuses these earlier, in assertRequiredIRFields)
+// still does so -- conformance/negatives/ir-identifiers.test.ts and
+// n419-ir-empty-kind-parity.test.ts cover that for all seven CLIs.
+// ---------------------------------------------------------------------------
+
+func TestValidateIR_EmptyIdentifierSharedWording(t *testing.T) {
+	assertBody := func(name string, value ANFValue) []ANFBinding {
+		return []ANFBinding{{Name: name, Value: value}}
+	}
+	lc := ANFValue{Kind: "load_const"}
+	cases := []struct {
+		name    string
+		program *ANFProgram
+		want    string
+	}{
+		{"contractName", &ANFProgram{ContractName: ""},
+			"IR validation: contractName must be a non-empty string"},
+		{"method name", &ANFProgram{ContractName: "T", Methods: []ANFMethod{{Name: ""}}},
+			"IR validation: methods[0].name must be a non-empty string"},
+		{"param name", &ANFProgram{ContractName: "T", Methods: []ANFMethod{
+			{Name: "m", IsPublic: true, Params: []ANFParam{{Name: "a", Type: "bigint"}, {Name: "", Type: "bigint"}}}}},
+			"IR validation: methods[0].params[1].name must be a non-empty string"},
+		{"param type", &ANFProgram{ContractName: "T", Methods: []ANFMethod{
+			{Name: "m", IsPublic: true, Params: []ANFParam{{Name: "a", Type: ""}}}}},
+			"IR validation: methods[0].params[0].type must be a non-empty string"},
+		{"property name", &ANFProgram{ContractName: "T", Properties: []ANFProperty{{Name: "", Type: "bigint"}}},
+			"IR validation: properties[0].name must be a non-empty string"},
+		{"property type", &ANFProgram{ContractName: "T", Properties: []ANFProperty{{Name: "p", Type: ""}}},
+			"IR validation: properties[0].type must be a non-empty string"},
+		{"binding name", &ANFProgram{ContractName: "T", Methods: []ANFMethod{
+			{Name: "m", IsPublic: true, Body: []ANFBinding{{Name: "t0", Value: lc}, {Name: "", Value: lc}}}}},
+			"IR validation: methods[0].body[1].name must be a non-empty string"},
+		{"binding kind", &ANFProgram{ContractName: "T", Methods: []ANFMethod{
+			{Name: "m", IsPublic: true, Body: assertBody("t0", ANFValue{Kind: ""})}}},
+			"IR validation: methods[0].body[0].value.kind must be a non-empty string"},
+		{"binding name in then arm", &ANFProgram{ContractName: "T", Methods: []ANFMethod{
+			{Name: "m", IsPublic: true, Body: assertBody("t1", ANFValue{Kind: "if", Cond: "t0",
+				Then: assertBody("", lc), Else: assertBody("e0", lc)})}}},
+			"IR validation: methods[0].body[0].value.then[0].name must be a non-empty string"},
+		{"binding kind in loop body", &ANFProgram{ContractName: "T", Methods: []ANFMethod{
+			{Name: "m", IsPublic: true, Body: assertBody("t1", ANFValue{Kind: "loop", Count: 2,
+				Body: assertBody("l0", ANFValue{Kind: ""})})}}},
+			"IR validation: methods[0].body[0].value.body[0].value.kind must be a non-empty string"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateIR(c.program)
+			if err == nil {
+				t.Fatalf("expected %q, got nil", c.want)
+			}
+			if err.Error() != c.want {
+				t.Fatalf("got  %q\nwant %q", err.Error(), c.want)
+			}
+		})
+	}
+}

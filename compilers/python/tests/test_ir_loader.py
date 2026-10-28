@@ -487,8 +487,9 @@ class TestValidateIR_EmptyPropertyType:
         )
         errors = validate_ir(program)
         assert len(errors) > 0, "expected error for empty property type"
-        assert any("empty type" in e for e in errors), (
-            f"expected error mentioning 'empty type', got: {errors}"
+        # N-419: wording converged on the --ir loader's shared message.
+        assert any("properties[0].type must be a non-empty string" in e for e in errors), (
+            f"expected the shared non-empty-string error, got: {errors}"
         )
 
 
@@ -763,3 +764,69 @@ def test_structural_errors_keep_priority_over_the_entry_point_error() -> None:
     with pytest.raises(ValueError) as exc:
         load_ir(json.dumps(payload))
     assert "odd hex length" in str(exc.value), str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# N-419: the public validate_ir carries the SAME empty-identifier wording as
+# the --ir loader's required-fields pass (N-207 / N-408):
+#     IR validation: <path> must be a non-empty string
+# validate_ir returns bare messages and load_ir prepends "IR validation: ", so
+# the entries here are "<path> must be a non-empty string".
+#
+# Proves: each empty identifier / binding name / binding kind reached through
+# the direct API names its path in the shared wording, at the top level and
+# inside `if` arms and `loop` bodies. Does not prove: whitespace-only names,
+# or that load_ir still refuses these earlier (conformance/negatives/
+# ir-identifiers.test.ts and n419-ir-empty-kind-parity.test.ts cover that).
+# ---------------------------------------------------------------------------
+
+def _lc(name):
+    return ANFBinding(name=name, value=ANFValue(kind="load_const", raw_value=True, const_bool=True))
+
+
+def _program(**kw):
+    kw.setdefault("contract_name", "T")
+    kw.setdefault("properties", [])
+    kw.setdefault("methods", [])
+    return ANFProgram(**kw)
+
+
+def _method(body=None, params=None, name="m"):
+    return ANFMethod(name=name, params=params or [], body=body or [], is_public=True)
+
+
+_N419_CASES = [
+    ("contractName", _program(contract_name=""),
+     "contractName must be a non-empty string"),
+    ("method name", _program(methods=[_method(name="")]),
+     "methods[0].name must be a non-empty string"),
+    ("param name", _program(methods=[_method(params=[
+        ANFParam(name="a", type="bigint"), ANFParam(name="", type="bigint")])]),
+     "methods[0].params[1].name must be a non-empty string"),
+    ("param type", _program(methods=[_method(params=[ANFParam(name="a", type="")])]),
+     "methods[0].params[0].type must be a non-empty string"),
+    ("property name", _program(properties=[ANFProperty(name="", type="bigint", readonly=True)]),
+     "properties[0].name must be a non-empty string"),
+    ("property type", _program(properties=[ANFProperty(name="p", type="", readonly=True)]),
+     "properties[0].type must be a non-empty string"),
+    ("binding name", _program(methods=[_method(body=[_lc("t0"), _lc("")])]),
+     "methods[0].body[1].name must be a non-empty string"),
+    ("binding kind", _program(methods=[_method(body=[
+        ANFBinding(name="t0", value=ANFValue(kind=""))])]),
+     "methods[0].body[0].value.kind must be a non-empty string"),
+    ("binding name in then arm", _program(methods=[_method(body=[
+        ANFBinding(name="t1", value=ANFValue(kind="if", then=[_lc("")], else_=[_lc("e0")]))])]),
+     "methods[0].body[0].value.then[0].name must be a non-empty string"),
+    ("binding kind in loop body", _program(methods=[_method(body=[
+        ANFBinding(name="t1", value=ANFValue(kind="loop", count=2, body=[
+            ANFBinding(name="l0", value=ANFValue(kind=""))]))])]),
+     "methods[0].body[0].value.body[0].value.kind must be a non-empty string"),
+]
+
+
+class TestValidateIR_N419_SharedEmptyWording:
+    @pytest.mark.parametrize("label,program,want", _N419_CASES, ids=[c[0] for c in _N419_CASES])
+    def test_shared_wording(self, label, program, want):
+        errors = validate_ir(program)
+        assert errors, f"{label}: expected a validation error"
+        assert errors[0] == want, f"{label}: got {errors[0]!r}, want {want!r}"

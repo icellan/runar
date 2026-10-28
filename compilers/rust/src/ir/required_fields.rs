@@ -329,6 +329,7 @@ fn non_empty_binding_names(obj: &Obj, key: &str, path: &str) -> R<()> {
         non_empty(binding, &bp, &["name"])?;
         let Some(value) = binding.get("value").and_then(Value::as_object) else { continue };
         let vp = format!("{}.value", bp);
+        non_empty(value, &vp, &["kind"])?;
         match value.get("kind").and_then(Value::as_str).unwrap_or("") {
             "if" => {
                 non_empty_binding_names(value, "then", &vp)?;
