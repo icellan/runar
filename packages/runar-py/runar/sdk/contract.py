@@ -16,6 +16,7 @@ from .unsound_primitives import assert_unsound_primitives_acknowledged
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
     build_deploy_transaction, select_utxos, build_p2pkh_script,
+    change_address_mismatch_message,
     _to_le32, _to_le64, _encode_varint, _reverse_hex,
 )
 from runar.sdk.calling import (
@@ -813,6 +814,10 @@ class RunarContract:
             pub_key_bytes = bytes.fromhex(change_pub_key_hex)
             hash160_bytes = ripemd160_digest(hashlib.sha256(pub_key_bytes).digest())
             change_pkh_hex = hash160_bytes.hex()
+            # N-426: refuse before any signing/broadcast when the explicit change
+            # address is not the key the covenant's _changePKH enforces.
+            if opts.change_address and build_p2pkh_script(opts.change_address) != build_p2pkh_script(change_pkh_hex):
+                raise ValueError(change_address_mismatch_message(opts.change_address))
 
         # Pre-resolve intent-intrinsic witness hex (raises
         # WitnessValueMissingError if a `_prevOutScript_<i>` or

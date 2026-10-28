@@ -14,7 +14,7 @@ import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction, resolveInputSequence } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn, assertFixedWidthValue } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
-import { buildP2PKHScript, extractConstructorArgs, isHexBytes } from './script-utils.js';
+import { assertChangeAddressMatchesCovenantKey, buildP2PKHScript, extractConstructorArgs, isHexBytes } from './script-utils.js';
 import { computeNewStateAndDataOutputs } from './anf-interpreter.js';
 import type { OrderedOutputEntry } from './anf-interpreter.js';
 import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
@@ -1204,6 +1204,11 @@ export class RunarContract {
       const pubKeyBytes = Utils.toArray(changePubKeyHex, 'hex');
       const hash160Bytes = Hash.hash160(pubKeyBytes);
       changePKHHex = Utils.toHex(hash160Bytes);
+      // N-426: refuse before any signing/broadcast when the explicit change
+      // address is not the key the covenant's _changePKH enforces.
+      if (options?.changeAddress) {
+        assertChangeAddressMatchesCovenantKey(options.changeAddress, changePKHHex);
+      }
     }
 
     // Pre-resolve intent-intrinsic witness hex (throws WitnessValueMissingError

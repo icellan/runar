@@ -3335,6 +3335,15 @@
       "reviewer": "siggi",
       "review-status": "reviewed",
       "date": "2026-10-25"
+    },
+    {
+      "path": "conformance/sdk-call/n426-change-address-guard.json",
+      "sha256": "23fff20e9407384142614789f3e3acb5070ce172f298107e2565d8c5a14deec2",
+      "verified-against": "second-implementation",
+      "reason": "N-426 (R164/R165/R166, user decisions 2026-10-28). NEW hand-written golden, no compiled bytes: the stateful change-address guard vector (shared refusal message template with {changeAddress}, a second key's pubkey and P2PKH address, and three cases replayed on the contract, UTXOs and key of stateful-merge-prepared.json). Oracles actually run: conformance/sdk-call/n426-change-address-guard.test.ts checks the keys and addresses are self-consistent and the TS reference refuses case 1 before broadcast while @bsv/sdk Spend accepts the case 2 (changePubKey) and case 3 (own address) calls via MockProvider; the Go, Rust, Python, Java, Ruby and Zig SDKs each replay the vector in their own N-426 tests and produce the identical message with nothing broadcast.",
+      "reviewer": "siggi",
+      "date": "2026-10-28",
+      "review-status": "reviewed"
     }
   ]
 }

@@ -1274,6 +1274,14 @@ public final class RunarContract {
                 ? ScriptUtils.hexToBytes(options.changePubKey) : signer.pubKey();
             byte[] pkhBytes = Hash160.hash160(changePubKey);
             changePkhHex = ScriptUtils.bytesToHex(pkhBytes);
+            // N-426: refuse before any signing/broadcast when the explicit change address is
+            // not the key the covenant's _changePKH enforces.
+            if (options != null && options.changeAddress != null && !options.changeAddress.isEmpty()
+                && !ScriptUtils.buildP2PKHScript(options.changeAddress)
+                    .equals(ScriptUtils.buildP2PKHScript(changePkhHex))) {
+                throw new IllegalArgumentException(
+                    ScriptUtils.changeAddressMismatchMessage(options.changeAddress));
+            }
         }
 
         // Code-separator-aware sighash subscript for the contract input

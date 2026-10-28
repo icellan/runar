@@ -2,6 +2,7 @@ package runar.lang.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -21,14 +22,15 @@ import org.junit.jupiter.api.Test;
  * independent options; the covenant rebuilds the change output from {@code _changePKH}, so a
  * spend is valid only when they name the same key (measured on TS: changeAddress alone
  * builds a tx @bsv/sdk Spend rejects; changeAddress + matching changePubKey is accepted).
- * Go, Rust and Python carry the same two options.
+ * Go, Rust and Python carry the same two options. N-426 (R164): changeAddress alone for another
+ * key is now refused before signing/broadcast in every SDK, so that case asserts the refusal.
  *
  * <p>Proves: given the MergeCounter stateful vector's artifact/UTXOs/key
  * ({@code conformance/sdk-call/stateful-merge-prepared.json}), a call with
  * changeAddress + changePubKey of a second key reproduces the TS tx byte for byte
  * (reference below was Spend-validated by the TS MockProvider on both inputs), and a call
- * with changeAddress alone moves only the change output (the _changePKH stays the signer's,
- * as in TS). Does not prove: a live node, the terminal path, or Java-side script execution
+ * with changeAddress alone for another key is refused with the shared N-426 message and
+ * nothing is broadcast. Does not prove: a live node, the terminal path, or Java-side script execution
  * (Java has no ScriptVM; validity rests on the TS-validated reference).
  */
 class N425StatefulChangeAddressTest {
@@ -187,17 +189,17 @@ class N425StatefulChangeAddressTest {
     }
 
     @Test
-    void changeAddressAloneMovesOnlyTheChangeOutput() throws Exception {
+    void changeAddressAloneForAnotherKeyIsRefusedBeforeAnyBroadcast() throws Exception {
+        // N-426 (R164): changeAddress alone for a key other than the signer builds a spend the
+        // network rejects (the covenant's _changePKH stays the signer's), so it is refused.
         Fixture f = fresh();
-        String signerPkh = p2pkhHex(ScriptUtils.bytesToHex(f.signer().pubKey()));
-        String otherP2pkh = p2pkhHex(PUB_B);
-        PreparedCall prepared = prepare(f, new CallOptions(null, null, null).withChangeAddress(ADDR_B));
-        String tx = prepared.txHex();
-        assertTrue(tx.contains(otherP2pkh), "change output must pay changeAddress");
-        assertFalse(tx.contains(signerPkh + "00000000"),
-            "change must not still pay the signer (it is the last output)");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+            () -> prepare(f, new CallOptions(null, null, null).withChangeAddress(ADDR_B)));
+        assertEquals(ScriptUtils.changeAddressMismatchMessage(ADDR_B), e.getMessage());
+        assertEquals(0, f.provider().getBroadcastedTxs().size());
         PreparedCall defaults = prepare(fresh(), null);
+        String signerPkh = p2pkhHex(ScriptUtils.bytesToHex(f.signer().pubKey()));
         assertTrue(defaults.txHex().contains(signerPkh), "default change pays the signer");
-        assertFalse(defaults.txHex().contains(otherP2pkh));
+        assertFalse(defaults.txHex().contains(p2pkhHex(PUB_B)));
     }
 }

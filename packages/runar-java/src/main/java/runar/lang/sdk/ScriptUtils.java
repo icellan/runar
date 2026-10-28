@@ -494,6 +494,18 @@ public final class ScriptUtils {
         return "76a914" + pkh + "88ac";
     }
 
+    /**
+     * N-426: shared cross-SDK refusal text, byte-identical in all seven SDKs
+     * (conformance/sdk-call/n426-change-address-guard.json). A stateful covenant rebuilds its
+     * change output from {@code _changePKH} = hash160(changePubKey ?? signer pubkey), so a
+     * {@code changeAddress} naming a different key builds a spend the network rejects.
+     */
+    public static String changeAddressMismatchMessage(String changeAddress) {
+        return "changeAddress " + changeAddress + " does not match the change key the covenant enforces "
+            + "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); "
+            + "pass changePubKey for that address";
+    }
+
     public static boolean isHex(String s) {
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

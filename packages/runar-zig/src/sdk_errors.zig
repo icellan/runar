@@ -58,6 +58,40 @@ pub fn assertScriptHexUnderLimit(
     }
 }
 
+/// N-426: a stateful call whose `change_address` is not the key the
+/// covenant's `_changePKH` enforces (hash160 of `change_pub_key`, or of the
+/// signer's key when unset) builds a spend the network rejects. Refused before
+/// any signing or broadcast. Zig errors carry no payload, so the shared
+/// cross-SDK message (byte-identical in all seven SDKs,
+/// conformance/sdk-call/n426-change-address-guard.json) is stashed in
+/// `last_change_address_error`.
+pub const ChangeAddressError = error{ChangeAddressMismatch};
+
+pub var last_change_address_error: ?LastChangeAddressError = null;
+
+pub const LastChangeAddressError = struct {
+    message_buf: [512]u8,
+    message_len: usize,
+
+    pub fn messageSlice(self: *const LastChangeAddressError) []const u8 {
+        return self.message_buf[0..self.message_len];
+    }
+};
+
+pub fn raiseChangeAddressMismatch(change_address: []const u8) ChangeAddressError {
+    var rec = LastChangeAddressError{ .message_buf = undefined, .message_len = 0 };
+    const msg = @import("std").fmt.bufPrint(
+        &rec.message_buf,
+        "changeAddress {s} does not match the change key the covenant enforces " ++
+            "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " ++
+            "pass changePubKey for that address",
+        .{change_address},
+    ) catch rec.message_buf[0..0];
+    rec.message_len = msg.len;
+    last_change_address_error = rec;
+    return error.ChangeAddressMismatch;
+}
+
 /// Distinct typed error returned when a method call requires a caller-supplied
 /// intent-intrinsic witness value (auto-injected `_prevOutScript_<i>` or
 /// `_serialisedOutputs`) that has not been set on the `RunarContract`.

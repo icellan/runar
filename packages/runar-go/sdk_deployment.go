@@ -293,6 +293,17 @@ func BuildP2PKHScript(address string) string {
 	return "76a914" + pubKeyHash + "88ac"
 }
 
+// ChangeAddressMismatchMessage is the N-426 refusal text, byte-identical in all
+// seven SDKs (conformance/sdk-call/n426-change-address-guard.json). A stateful
+// covenant rebuilds its change output from _changePKH = hash160(changePubKey ??
+// signer pubkey), so a changeAddress naming a different key builds a spend the
+// network rejects.
+func ChangeAddressMismatchMessage(changeAddress string) string {
+	return "changeAddress " + changeAddress + " does not match the change key the covenant enforces " +
+		"(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " +
+		"pass changePubKey for that address"
+}
+
 // computeHash160Hex computes RIPEMD160(SHA256(data)) and returns the hex-encoded result.
 func computeHash160Hex(data []byte) string {
 	h256 := sha256.Sum256(data)

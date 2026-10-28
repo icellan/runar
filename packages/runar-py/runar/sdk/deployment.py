@@ -181,6 +181,19 @@ def _address_to_pubkey_hash(address: str) -> str:
     return payload[1:].hex()
 
 
+def change_address_mismatch_message(change_address: str) -> str:
+    """N-426: shared cross-SDK refusal text, byte-identical in all seven SDKs
+    (conformance/sdk-call/n426-change-address-guard.json). A stateful covenant
+    rebuilds its change output from ``_changePKH`` = hash160(changePubKey ??
+    signer pubkey), so a ``changeAddress`` naming a different key builds a spend
+    the network rejects."""
+    return (
+        f"changeAddress {change_address} does not match the change key the covenant enforces "
+        "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); "
+        "pass changePubKey for that address"
+    )
+
+
 def build_p2pkh_script(address_or_pub_key: str) -> str:
     """Build a standard P2PKH locking script.
 

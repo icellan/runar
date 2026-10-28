@@ -301,6 +301,7 @@ test {
     _ = @import("sdk_n293_stateful_merge_call_test.zig");
     _ = @import("sdk_n295_merge_funding_exclusion_test.zig");
     _ = @import("sdk_n286_stateful_merge_prepared_test.zig");
+    _ = @import("sdk_n426_change_address_guard_test.zig");
     _ = @import("sdk_n412_stateless_intent_witness_test.zig");
     _ = @import("sdk_mock_broadcast_validation_test.zig");
     _ = @import("sdk_always_ack_allowlist_test.zig");

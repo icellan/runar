@@ -253,6 +253,9 @@ pub const ContractError = error{
     /// resulting tx would be invalid (or, before this fix, silently drop
     /// the extra UTXOs while reporting success). Fail closed instead.
     AdditionalContractInputsUnsupported,
+    /// N-426: `options.change_address` is not the P2PKH address of the key the
+    /// covenant's `_changePKH` enforces (see `sdk_errors.ChangeAddressError`).
+    ChangeAddressMismatch,
 };
 
 /// N-045 (defence in depth): every fixed-width method arg must have its
@@ -681,6 +684,37 @@ pub const RunarContract = struct {
     ///     state continuation output, method selector
     ///
     /// Returns the broadcast txid (caller owns).
+    /// The covenant's `_changePKH` (hex, caller-owned): hash160 of
+    /// `options.change_pub_key`, else of the signer's public key (as TS).
+    /// N-426: an explicit `options.change_address` that is not the P2PKH
+    /// address of that key builds a spend the network rejects, so it is
+    /// refused here, before any signing or broadcast
+    /// (`error.ChangeAddressMismatch`, message in `sdk_errors`).
+    fn computeChangePkhHex(self: *RunarContract, sign: signer_mod.Signer, options: ?types.CallOptions) ![]u8 {
+        const explicit_pub: ?[]const u8 = if (options) |o| o.change_pub_key else null;
+        const pub_key_hex: []const u8 = if (explicit_pub) |e| try self.allocator.dupe(u8, e) else try sign.getPublicKey(self.allocator);
+        defer self.allocator.free(pub_key_hex);
+        const pub_key_bytes = try state_mod.hexToBytes(self.allocator, pub_key_hex);
+        defer self.allocator.free(pub_key_bytes);
+        // hash160 = RIPEMD160(SHA256(pubkey))
+        const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
+        const hex_buf = try self.allocator.alloc(u8, 40);
+        errdefer self.allocator.free(hex_buf);
+        _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, hex_buf) catch return ContractError.CallFailed;
+        if (options) |o| {
+            if (o.change_address) |ca| {
+                if (ca.len > 0) {
+                    const want = try deploy_mod.buildP2PKHScript(self.allocator, ca);
+                    defer self.allocator.free(want);
+                    const have = try deploy_mod.buildP2PKHScript(self.allocator, hex_buf);
+                    defer self.allocator.free(have);
+                    if (!std.ascii.eqlIgnoreCase(want, have)) return errors_mod.raiseChangeAddressMismatch(ca);
+                }
+            }
+        }
+        return hex_buf;
+    }
+
     pub fn call(
         self: *RunarContract,
         method_name: []const u8,
@@ -1163,18 +1197,7 @@ pub const RunarContract = struct {
         defer if (change_pkh_hex) |c| self.allocator.free(c);
 
         if (is_stateful and needs_change) {
-            const pub_key_hex = try sign.getPublicKey(self.allocator);
-            defer self.allocator.free(pub_key_hex);
-            const pub_key_bytes = try state_mod.hexToBytes(self.allocator, pub_key_hex);
-            defer self.allocator.free(pub_key_bytes);
-            // hash160 = RIPEMD160(SHA256(pubkey))
-            const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
-            const hex_buf = try self.allocator.alloc(u8, 40);
-            _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, hex_buf) catch {
-                self.allocator.free(hex_buf);
-                return ContractError.CallFailed;
-            };
-            change_pkh_hex = hex_buf;
+            change_pkh_hex = try self.computeChangePkhHex(sign, options);
         }
 
         // Build method selector hex
@@ -2407,16 +2430,7 @@ pub const RunarContract = struct {
         var change_pkh_buf: []u8 = &.{};
         errdefer if (change_pkh_buf.len > 0) self.allocator.free(change_pkh_buf);
         if (needs_change) {
-            const pub_key_hex = try sign.getPublicKey(self.allocator);
-            defer self.allocator.free(pub_key_hex);
-            const pub_key_bytes = try state_mod.hexToBytes(self.allocator, pub_key_hex);
-            defer self.allocator.free(pub_key_bytes);
-            const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
-            change_pkh_buf = try self.allocator.alloc(u8, 40);
-            _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, change_pkh_buf) catch {
-                self.allocator.free(change_pkh_buf);
-                return ContractError.CallFailed;
-            };
+            change_pkh_buf = try self.computeChangePkhHex(sign, options);
         }
 
         // ---- Method selector hex -----------------------------------------

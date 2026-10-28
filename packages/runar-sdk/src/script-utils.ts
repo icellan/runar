@@ -93,6 +93,33 @@ export function buildP2PKHScript(addressOrPubKey: string): string {
   return '76a914' + pubKeyHash + '88ac';
 }
 
+/**
+ * N-426: shared cross-SDK refusal text. A stateful covenant rebuilds its change
+ * output from `_changePKH` = hash160(changePubKey ?? signer pubkey), so a
+ * `changeAddress` naming a different key builds a spend the network rejects.
+ * Byte-identical in all seven SDKs (conformance/sdk-call/n426-change-address-guard.json).
+ */
+export function changeAddressMismatchMessage(changeAddress: string): string {
+  return (
+    `changeAddress ${changeAddress} does not match the change key the covenant enforces ` +
+    "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " +
+    'pass changePubKey for that address'
+  );
+}
+
+/**
+ * N-426: throw unless P2PKH(changeAddress) equals P2PKH(changePKHHex). Called
+ * before any signing or broadcast on a stateful method that takes `_changePKH`.
+ */
+export function assertChangeAddressMatchesCovenantKey(
+  changeAddress: string,
+  changePKHHex: string,
+): void {
+  if (buildP2PKHScript(changeAddress).toLowerCase() !== buildP2PKHScript(changePKHHex).toLowerCase()) {
+    throw new Error(changeAddressMismatchMessage(changeAddress));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constructor arg extraction
 // ---------------------------------------------------------------------------

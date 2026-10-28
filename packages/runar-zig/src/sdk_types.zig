@@ -84,6 +84,10 @@ pub const DeployOptions = struct {
 pub const CallOptions = struct {
     satoshis: i64 = 0,
     change_address: ?[]const u8 = null,
+    /// Override the public key (hex) whose hash160 is the covenant's `_changePKH`
+    /// (stateful methods). Defaults to the signer's public key. When
+    /// `change_address` is set it must be the P2PKH address of this key (N-426).
+    change_pub_key: ?[]const u8 = null,
     new_state: ?[]const StateValue = null,
     /// Multiple continuation outputs for multi-output methods (e.g.
     /// `transfer` on a fungible token where the contract emits one output

@@ -968,7 +968,20 @@ impl RunarContract {
                 .map(|i| u8::from_str_radix(&change_pub_key_hex[i..i + 2], 16).unwrap_or(0))
                 .collect();
             let hash = compute_hash160(&pub_key_bytes);
-            hash.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            let pkh_hex = hash.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+            // N-426: refuse before any signing/broadcast when the explicit change
+            // address is not the key the covenant's _changePKH enforces.
+            if let Some(explicit) = options.and_then(|o| o.change_address.as_deref()) {
+                if super::script_utils::build_p2pkh_script(explicit)
+                    != super::script_utils::build_p2pkh_script(&pkh_hex)
+                {
+                    return Err(format!(
+                        "RunarContract.prepareCall: {}",
+                        super::script_utils::change_address_mismatch_message(explicit)
+                    ));
+                }
+            }
+            pkh_hex
         } else {
             String::new()
         };

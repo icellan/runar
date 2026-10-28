@@ -473,7 +473,7 @@ module Runar
         method_selector_hex = compute_method_selector(method_name, is_stateful)
         code_sep_idx        = get_code_sep_index(find_method_index(method_name))
 
-        change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change)
+        change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change, opts)
 
         # Pre-resolve intent-intrinsic witness hex (raises
         # WitnessValueMissingError if a `_prevOutScript_<i>` or
@@ -1719,11 +1719,21 @@ module Runar
         )
       end
 
-      def compute_change_pkh(signer, is_stateful, method_needs_change)
+      # The covenant's _changePKH is hash160(opts.change_pub_key, default the
+      # signer's key), exactly as TS. N-426: an explicit change_address that is not
+      # that key builds a spend the network rejects, so refuse it before any
+      # signing or broadcast.
+      def compute_change_pkh(signer, is_stateful, method_needs_change, opts)
         return '' unless is_stateful && method_needs_change
 
-        pub_key_bytes = [signer.get_public_key].pack('H*')
-        Digest::RMD160.digest(Digest::SHA256.digest(pub_key_bytes)).unpack1('H*')
+        change_pub_key = opts.change_pub_key.to_s.empty? ? signer.get_public_key : opts.change_pub_key
+        pub_key_bytes = [change_pub_key].pack('H*')
+        pkh = Digest::RMD160.digest(Digest::SHA256.digest(pub_key_bytes)).unpack1('H*')
+        unless opts.change_address.to_s.empty? ||
+               SDK.build_p2pkh_script(opts.change_address) == SDK.build_p2pkh_script(pkh)
+          raise ArgumentError, SDK.change_address_mismatch_message(opts.change_address)
+        end
+        pkh
       end
 
       def build_continuation(is_stateful, opts, anf_ordered_outputs = [])

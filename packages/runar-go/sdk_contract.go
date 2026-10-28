@@ -1057,6 +1057,13 @@ func (c *RunarContract) PrepareCall(
 		r := ripemd160.New()
 		r.Write(h[:])
 		changePKHHex = hex.EncodeToString(r.Sum(nil))
+		// N-426: refuse before any signing/broadcast when the explicit change
+		// address is not the key the covenant's _changePKH enforces.
+		if options != nil && options.ChangeAddress != "" {
+			if BuildP2PKHScript(options.ChangeAddress) != BuildP2PKHScript(changePKHHex) {
+				return nil, fmt.Errorf("RunarContract.PrepareCall: %s", ChangeAddressMismatchMessage(options.ChangeAddress))
+			}
+		}
 	}
 
 	// Pre-resolve intent-intrinsic witness hex (returns WitnessValueMissingError

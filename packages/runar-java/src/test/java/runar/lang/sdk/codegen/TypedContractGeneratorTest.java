@@ -389,9 +389,11 @@ class TypedContractGeneratorTest {
     @Test
     void generatedWrapperStatefulCallOptionsChangeAddressAndPubKeyReachTheTx() throws Exception {
         String pkh = n427Pkh();
-        String addrOnly = n427Call("n427a", N427_ADDR_B, null);
-        assertEquals(1, countOccurrences(addrOnly, pkh),
-            "changeAddress must reach the change output through the wrapper");
+        // N-426 (R164): changeAddress alone for another key is refused through the wrapper too.
+        java.lang.reflect.InvocationTargetException refused = org.junit.jupiter.api.Assertions.assertThrows(
+            java.lang.reflect.InvocationTargetException.class, () -> n427Call("n427a", N427_ADDR_B, null));
+        assertEquals(runar.lang.sdk.ScriptUtils.changeAddressMismatchMessage(N427_ADDR_B),
+            refused.getCause().getMessage());
         String both = n427Call("n427b", N427_ADDR_B, N427_PUB_B);
         assertEquals(2, countOccurrences(both, pkh),
             "changePubKey must reach the covenant's _changePKH through the wrapper");

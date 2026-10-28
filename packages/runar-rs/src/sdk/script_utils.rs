@@ -11,6 +11,20 @@ use super::state::find_last_op_return;
 // P2PKH script building (enhanced)
 // ---------------------------------------------------------------------------
 
+/// N-426: shared cross-SDK refusal text, byte-identical in all seven SDKs
+/// (conformance/sdk-call/n426-change-address-guard.json). A stateful covenant
+/// rebuilds its change output from `_changePKH` = hash160(changePubKey ??
+/// signer pubkey), so a `changeAddress` naming a different key builds a spend
+/// the network rejects.
+pub fn change_address_mismatch_message(change_address: &str) -> String {
+    format!(
+        "changeAddress {} does not match the change key the covenant enforces \
+         (hash160 of changePubKey, or of the signer's key when changePubKey is unset); \
+         pass changePubKey for that address",
+        change_address
+    )
+}
+
 /// Build a standard P2PKH locking script hex from an address, pubkey hash,
 /// or public key.
 ///
