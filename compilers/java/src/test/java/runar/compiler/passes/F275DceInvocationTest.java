@@ -126,7 +126,9 @@ class F275DceInvocationTest {
     void ecGateStillPrecedesTheDceDelegationCall() throws IOException {
         String src = readSource("src/main/java/runar/compiler/passes/AnfOptimize.java");
         int gate = src.indexOf("if (!anyChanged) return program;");
-        int call = src.indexOf("eliminateDead(method.withBody(body))");
+        // N-097 moved the call from optimizeEcMethod into run(), after the
+        // gate; the literal follows it, the ordering it pins is unchanged.
+        int call = src.indexOf("method.withBody(eliminateDead(method))");
         assertTrue(gate > -1, "the anyChanged early-exit gate is gone from AnfOptimize.run");
         assertTrue(call > -1, "optimizeEcMethod no longer delegates to eliminateDead");
         assertTrue(
@@ -187,12 +189,41 @@ class F275DceInvocationTest {
     }
 
     /**
-     * Control: an EC-containing program DOES get the dead binding removed,
+     * Control: an EC-rewritten program DOES get the dead binding removed,
      * via AnfOptimize's EC-gated post-cleanup. This is the asymmetry the
      * corrected comments describe: DCE runs ONLY when the EC gate fires.
+     *
+     * <p>N-097 / N-195: the gate is "a rewrite rule fired" (the TS
+     * reference), so the input is now one a rule fires on — ec-mul-one
+     * rewrites {@code ecMul(p, 1)} to {@code p}, as Go's sibling
+     * TestF303_EcProgramRemovesDeadBindingViaEcGatedCleanup does. The former
+     * input (an EC call no rule fires on) is pinned the other way below.
      */
     @Test
     void ecProgramRemovesDeadBindingViaEcGatedCleanup() {
+        List<AnfBinding> in = new ArrayList<>();
+        in.add(bind("p", new LoadConst(new BytesConst("ab".repeat(64)))));
+        in.add(bind("one", new LoadConst(new BigIntConst(BigInteger.ONE))));
+        in.add(bind("deadConst", new LoadConst(new BigIntConst(BigInteger.valueOf(99))))); // unused, pure
+        in.add(bind("t0", new Call("ecMul", List.of("p", "one")))); // ec-mul-one fires
+        in.add(bind("t1", new Assert("t0")));
+
+        AnfProgram out = Cli.optimizeAnf(singleMethod("m", in), /* disableConstantFolding */ true);
+        List<AnfBinding> body = bodyOf(out);
+
+        assertFalse(hasBinding(body, "deadConst"),
+            "an EC-rewritten method's unused pure binding IS removed by the EC-gated cleanup");
+        assertTrue(hasBinding(body, "t0"), "the rewritten binding must survive (referenced by the assert)");
+    }
+
+    /**
+     * N-097 / N-195: an EC call that NO rule rewrites does not open the gate.
+     * The TS reference (anf-ec.ts optimizeEC) returns such a program
+     * untouched, dead bindings included; this tier used to DCE it because it
+     * gated on the presence of an EC call, which moved the script bytes.
+     */
+    @Test
+    void ecCallWithNoRewriteKeepsDeadBinding() {
         List<AnfBinding> in = new ArrayList<>();
         in.add(bind("p", new LoadConst(new BytesConst("ab".repeat(64)))));
         in.add(bind("q", new LoadConst(new BytesConst("cd".repeat(64)))));
@@ -204,8 +235,8 @@ class F275DceInvocationTest {
         AnfProgram out = Cli.optimizeAnf(singleMethod("m", in), /* disableConstantFolding */ true);
         List<AnfBinding> body = bodyOf(out);
 
-        assertFalse(hasBinding(body, "deadConst"),
-            "an EC-containing method's unused pure binding IS removed by the EC-gated cleanup");
-        assertTrue(hasBinding(body, "t0"), "the non-folding ecAdd call must survive");
+        assertTrue(hasBinding(body, "deadConst"),
+            "no rule fired, so no DCE: the dead pure binding survives, as in the TS reference");
+        assertEquals(in.size(), body.size(), "no bindings should be removed when no EC rule fires");
     }
 }

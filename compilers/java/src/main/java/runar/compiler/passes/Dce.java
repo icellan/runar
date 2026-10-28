@@ -54,10 +54,11 @@ import runar.compiler.ir.anf.UpdateProp;
  * <p>This module is the canonical DEFINITION of DCE for the Java compiler —
  * one extracted implementation, mirroring the Zig reference in
  * {@code compilers/zig/src/passes/dce.zig} — but it is NOT a standalone
- * pipeline pass (F-275). Its only caller is
- * {@code AnfOptimize.optimizeEcMethod}, reached only after the
- * {@code anyChanged}/{@code hasEcCalls} gate in {@code AnfOptimize.run()}, so
- * a program no method of which has an EC call is never DCE'd. The earlier
+ * pipeline pass (F-275). Its only caller is {@code AnfOptimize.run()},
+ * which runs it over every method once {@code AnfOptimize.optimizeEcMethod}
+ * has rewritten them, and only when a rewrite fired (N-097: the TS reference
+ * gate) behind the {@code anyChanged}/{@code hasEcCalls} fast path, so
+ * a program in which no EC rewrite fires is never DCE'd. The earlier
  * inline implementation in {@code AnfOptimize.java} has been surgically
  * extracted here.
  *

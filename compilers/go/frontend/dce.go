@@ -20,8 +20,9 @@ package frontend
 // This module is the canonical DEFINITION of DCE for the Go compiler — one
 // extracted implementation, mirroring the Zig reference in
 // `compilers/zig/src/passes/dce.zig` — but it is NOT a standalone pipeline
-// pass (F-303). Its only caller is anf_optimize.go's optimizeMethodEC,
-// reached only after the `anyChanged` gate in OptimizeEC, so a program no
+// pass (F-303). Its only caller is anf_optimize.go's OptimizeEC, which runs
+// it over every method once optimizeMethodEC has rewritten them, and only
+// behind the `anyChanged` gate (N-097: the TS reference gate), so a program no
 // method of which triggers an EC rewrite is never DCE'd through any public
 // compile entrypoint. The earlier inline implementation in `anf_optimize.go`
 // has been surgically extracted here.

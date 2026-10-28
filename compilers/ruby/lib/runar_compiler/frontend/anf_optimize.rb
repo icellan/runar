@@ -49,8 +49,18 @@ module RunarCompiler
         any_changed = program.methods.any? { |m| has_ec_calls?(m) }
         return program unless any_changed
 
+        # N-097: the has-EC-call check above is only a fast path (a rule can
+        # only fire on a top-level EC call). The gate is the TS reference's
+        # (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY
+        # method iff a rewrite fired in ANY method, else the program is
+        # returned untouched, dead bindings included.
         result = deep_copy_program(program)
-        result.methods.each { |m| optimize_method(m, result.properties) }
+        fired = false
+        result.methods.each { |m| fired = true if optimize_method(m, result.properties) }
+        return program unless fired
+
+        # Dead binding elimination
+        result.methods.each { |method| eliminate_dead_bindings(method) }
         result
       end
 
@@ -213,6 +223,7 @@ module RunarCompiler
       def self.optimize_method(method, properties)
         value_map = ValueMap.new(collect_rebound_names(method))
         used_names = collect_used_names(method, properties)
+        fired = false
         changed = true
         while changed
           changed = false
@@ -237,6 +248,7 @@ module RunarCompiler
                 source_loc: binding.source_loc
               )
               changed = true
+              fired = true
             end
             value_map[binding.name] = binding.value
             new_body << binding
@@ -244,8 +256,7 @@ module RunarCompiler
           method.body = new_body
         end
 
-        # Dead binding elimination
-        eliminate_dead_bindings(method)
+        fired
       end
       private_class_method :optimize_method
 

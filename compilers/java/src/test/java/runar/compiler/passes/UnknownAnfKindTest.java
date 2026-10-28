@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +15,7 @@ import runar.compiler.ir.anf.AnfBinding;
 import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfProgram;
 import runar.compiler.ir.anf.AnfValue;
+import runar.compiler.ir.anf.BigIntConst;
 import runar.compiler.ir.anf.BoolConst;
 import runar.compiler.ir.anf.Call;
 import runar.compiler.ir.anf.If;
@@ -78,14 +80,15 @@ class UnknownAnfKindTest {
 
     @Test
     void throwsFromAnfOptimizeDispatchers() {
-        // AnfOptimize.run is gated on the presence of an EC call (`ecAdd`,
-        // `ecMul`, ...) — bodies with no EC primitives return unchanged and
-        // never reach the dispatchers, by design. We seed the body with a
-        // benign ecAdd call so the gate trips, then place the synthetic kind
-        // in a sibling binding so renameInValue / collectRefs / hasSideEffect
-        // walk over it and throw.
+        // AnfOptimize.run is gated on an EC rewrite FIRING (N-097: the TS
+        // reference gate) — bodies on which no rule fires return unchanged
+        // and never reach the dispatchers, by design. We seed the body with
+        // ecMulGen(1), which ec-mul-gen-one rewrites to G, so the gate trips,
+        // then place the synthetic kind in a sibling binding so
+        // renameInValue / collectRefs / hasSideEffect walk over it and throw.
         AnfProgram program = makeProgram(List.of(
-            new AnfBinding("ec0", new Call("ecAdd", List.of("a", "b")), null),
+            new AnfBinding("k", new LoadConst(new BigIntConst(BigInteger.ONE)), null),
+            new AnfBinding("ec0", new Call("ecMulGen", List.of("k")), null),
             new AnfBinding("t0", syntheticValue(), null)
         ));
 

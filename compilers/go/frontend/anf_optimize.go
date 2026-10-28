@@ -31,14 +31,34 @@ var infinityHex = strings.Repeat("0", 128)
 // OptimizeEC walks the ANF program and rewrites EC calls using algebraic
 // identities (identity element, scalar simplifications, double-negate, etc.).
 // It mutates the program in-place and returns it.
+//
+// N-097: dead binding elimination then runs over EVERY method iff a rewrite
+// fired in ANY method, exactly the gate of the TS reference (anf-ec.ts
+// optimizeEC). It used to run only on the methods that were themselves
+// rewritten, so a dead pure binding in a method next to an EC-rewritten one
+// survived here alone and the script carried a push/drop no other tier emits.
 func OptimizeEC(program *ir.ANFProgram) *ir.ANFProgram {
+	anyChanged := false
 	for mi := range program.Methods {
-		optimizeMethodEC(&program.Methods[mi], program.Properties)
+		if optimizeMethodEC(&program.Methods[mi], program.Properties) {
+			anyChanged = true
+		}
+	}
+	// Only run dead binding elimination if we actually rewrote something,
+	// to avoid incorrectly pruning bindings in non-EC programs.
+	// Delegates to the standalone DCE module (frontend/dce.go).
+	if anyChanged {
+		for mi := range program.Methods {
+			method := &program.Methods[mi]
+			EliminateDeadBindings(method)
+		}
 	}
 	return program
 }
 
-func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
+// optimizeMethodEC applies the EC rewrite rules to one method's top-level
+// bindings until none fires, and reports whether any did.
+func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) bool {
 	// F-086: names a minted helper binding must avoid (params, properties,
 	// nested bindings — the lookup below only covers top-level bindings).
 	used := collectUsedNames(method, properties)
@@ -102,12 +122,7 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
 		}
 	}
 
-	// Only run dead binding elimination if we actually rewrote something,
-	// to avoid incorrectly pruning bindings in non-EC methods.
-	// Delegates to the standalone DCE module (frontend/dce.go).
-	if anyChanged {
-		EliminateDeadBindings(method)
-	}
+	return anyChanged
 }
 
 // optimizeBindingECWithInserts is like optimizeBindingEC but also returns

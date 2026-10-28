@@ -51,7 +51,7 @@ const ec_funcs = std.StaticStringMap(void).initComptime(.{
 // ============================================================================
 
 /// Optimize all EC operations in the program. Returns a new program with
-/// algebraically simplified bindings and dead code eliminated.
+/// algebraically simplified bindings, and dead code eliminated when a rule fired.
 /// When no EC calls are present, returns the input program unchanged (no allocation).
 pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgram {
     var any_ec = false;
@@ -63,9 +63,22 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
     }
     if (!any_ec) return program;
 
+    // N-097: the has-EC-call check above is only a fast path (a rule can only
+    // fire on a top-level EC call). The DCE gate is the TS reference's
+    // (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY method
+    // iff a rewrite fired in ANY method; otherwise the bodies are returned as
+    // copies, dead bindings included.
+    var fired = false;
     const new_methods = try allocator.alloc(types.ANFMethod, program.methods.len);
     for (program.methods, 0..) |method, i| {
-        new_methods[i] = try optimizeMethod(allocator, method, program.properties);
+        new_methods[i] = try optimizeMethod(allocator, method, program.properties, &fired);
+    }
+    if (fired) {
+        for (new_methods) |*method| {
+            const optimized_body = try dce.eliminateDeadBindingsInMethod(allocator, method.*);
+            allocator.free(method.body);
+            method.body = optimized_body;
+        }
     }
 
     return .{
@@ -209,7 +222,9 @@ const ValueMap = struct {
     }
 };
 
-fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []const types.ANFProperty) !types.ANFMethod {
+/// Rewrite one method's top-level EC calls to a fixed point. Sets `fired`
+/// when any rule fires; dead binding elimination is the caller's (N-097).
+fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []const types.ANFProperty, fired: *bool) !types.ANFMethod {
     var body = try allocator.alloc(types.ANFBinding, method.body.len);
     @memcpy(body, method.body);
 
@@ -251,6 +266,7 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
                 for (new_body.items[prelude_start..]) |*helper| helper.source_loc = binding.source_loc;
                 current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
                 changed = true;
+                fired.* = true;
             }
             try value_map.put(current.name, current.value);
             try new_body.append(allocator, current);
@@ -261,12 +277,6 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
             body = try new_body.toOwnedSlice(allocator);
         }
     }
-
-    var rooted = method;
-    rooted.body = body;
-    const optimized_body = try dce.eliminateDeadBindingsInMethod(allocator, rooted);
-    allocator.free(body);
-    body = optimized_body;
 
     return .{
         .name = method.name,

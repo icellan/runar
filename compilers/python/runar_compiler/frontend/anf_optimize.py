@@ -57,9 +57,22 @@ def optimize_ec(program: ANFProgram) -> ANFProgram:
     if not any_changed:
         return program
 
+    # N-097: the has-EC-call check above is only a fast path (a rule can only
+    # fire on a top-level EC call). The gate is the TS reference's
+    # (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY method
+    # iff a rewrite fired in ANY method, else the program is returned
+    # untouched, dead bindings included.
     result = deepcopy(program)
+    fired = False
     for method in result.methods:
-        _optimize_method(method, result.properties)
+        if _optimize_method(method, result.properties):
+            fired = True
+    if not fired:
+        return program
+
+    # Dead binding elimination
+    for method in result.methods:
+        _eliminate_dead_bindings(method)
     return result
 
 
@@ -143,9 +156,11 @@ def _collect_rebound_names(method: ANFMethod) -> set[str]:
     return rebound
 
 
-def _optimize_method(method: ANFMethod, properties) -> None:
+def _optimize_method(method: ANFMethod, properties) -> bool:
+    """Rewrite one method's top-level EC calls to a fixed point; True iff a rule fired."""
     value_map = _ValueMap(_collect_rebound_names(method))
     used_names = _collect_used_names(method, properties)
+    fired = False
     changed = True
     while changed:
         changed = False
@@ -167,12 +182,12 @@ def _optimize_method(method: ANFMethod, properties) -> None:
                     helper.source_loc = binding.source_loc
                 binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
                 changed = True
+                fired = True
             value_map[binding.name] = binding.value
             new_body.append(binding)
         method.body = new_body
 
-    # Dead binding elimination
-    _eliminate_dead_bindings(method)
+    return fired
 
 
 # ---------------------------------------------------------------------------

@@ -98,11 +98,25 @@ public final class AnfOptimize {
         }
         if (!anyChanged) return program;
 
+        // N-097 / N-195: the hasEcCalls check above is only a fast path (a
+        // rule can only fire on a top-level EC call). The DCE gate is the TS
+        // reference's (anf-ec.ts optimizeEC): dead-binding elimination runs
+        // over EVERY method iff a rewrite fired in ANY method; otherwise the
+        // program is returned untouched, dead bindings included.
+        boolean fired = false;
         List<AnfMethod> opts = new ArrayList<>(program.methods().size());
         for (AnfMethod m : program.methods()) {
-            opts.add(optimizeEcMethod(m, program.properties()));
+            AnfMethod o = optimizeEcMethod(m, program.properties());
+            if (o != m) fired = true;
+            opts.add(o);
         }
-        return program.withMethods(opts);
+        if (!fired) return program;
+
+        List<AnfMethod> cleaned = new ArrayList<>(opts.size());
+        for (AnfMethod method : opts) {
+            cleaned.add(method.withBody(eliminateDead(method)));
+        }
+        return program.withMethods(cleaned);
     }
 
     // ===================================================================
@@ -180,6 +194,7 @@ public final class AnfOptimize {
         // F-269: names bound more than once; alias resolution never passes one.
         Set<String> reboundNames = collectReboundNames(method);
         boolean converged = false;
+        boolean fired = false;
         for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
             // value_map maps binding name → its current ANFValue. We rebuild
             // the body in order, allowing each subsequent binding to see the
@@ -213,6 +228,7 @@ public final class AnfOptimize {
                 converged = true;
                 break;
             }
+            fired = true;
         }
         if (!converged) {
             throw new IllegalStateException(
@@ -223,9 +239,9 @@ public final class AnfOptimize {
                     + "rule set does not converge for this input, or the limit is too "
                     + "low.");
         }
-        // Dead-binding elimination after fixed-point.
-        body = eliminateDead(method.withBody(body));
-        return method.withBody(body);
+        // No rule fired: hand back the same method so run() can tell. Dead-
+        // binding elimination is run()'s, over every method (N-097).
+        return fired ? method.withBody(body) : method;
     }
 
     /**
