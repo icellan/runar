@@ -352,8 +352,8 @@ class TypedContractGeneratorTest {
     // output pays changeAddress (one occurrence of its HASH160) and, with
     // changePubKey, the covenant's _changePKH push carries the same HASH160
     // (a second occurrence) - on call() and on prepare(). Does not prove
-    // script validity (Java has no ScriptVM) nor the unused `outputs`
-    // option, which the SDK CallOptions has no field for.
+    // script validity (Java has no ScriptVM) nor the `outputs` option
+    // (covered by the N-430 test below).
     // ------------------------------------------------------------------
 
     private static final String N427_ADDR_B = "1KvP21twgz7RTnDbAztPGTjx3YCAk3Evpu";
@@ -447,6 +447,47 @@ class TypedContractGeneratorTest {
             wrapper, PubKey.fromHex(pubHex), BigInteger.valueOf(1_000), options);
         assertEquals(2, countOccurrences(prepared.txHex(), n427Pkh()),
             "prepare must forward changeAddress (output) and changePubKey (_changePKH)");
+    }
+
+    // ------------------------------------------------------------------
+    // N-430: the generated {Contract}StatefulCallOptions declared `outputs`
+    // (List<OutputSpec>) but the wrapper dropped it because the SDK
+    // CallOptions had no field for it. Proves: an OutputSpec of 7000 sat set
+    // on the generated record reaches the tx built through the wrapper (the
+    // continuation is built at 7000, not at the spent UTXO's 5000), and
+    // without it no 7000-sat output exists. Does not prove script validity
+    // (Java has no ScriptVM), several specs, or the prepare path.
+    // ------------------------------------------------------------------
+
+    private String n430Increment(String pkg, boolean withOutputs) throws Exception {
+        RunarArtifact artifact = loadRealCounterArtifact();
+        String src = TypedContractGenerator.generate(artifact, "runar.generated." + pkg);
+        Class<?> cls = compileInMemory("runar.generated." + pkg + ".CounterContract", src);
+        runar.lang.sdk.MockProvider provider = new runar.lang.sdk.MockProvider();
+        runar.lang.sdk.LocalSigner signer = new runar.lang.sdk.LocalSigner(
+            "18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+        Object wrapper = newWrapperInstance(cls, artifact, provider, signer, 5_000L);
+        Class<?> optsCls = cls.getDeclaredClasses()[indexOfNested(cls, "CounterStatefulCallOptions")];
+        Class<?> specCls = cls.getDeclaredClasses()[indexOfNested(cls, "OutputSpec")];
+        Object outputs = null;
+        if (withOutputs) {
+            Object spec = specCls.getDeclaredConstructor(BigInteger.class, Map.class)
+                .newInstance(BigInteger.valueOf(7_000), Map.of("count", BigInteger.ONE));
+            outputs = List.of(spec);
+        }
+        Object options = optsCls.getDeclaredConstructor(
+            BigInteger.class, String.class, String.class, Map.class, List.class
+        ).newInstance(null, null, null, null, outputs);
+        Method increment = cls.getDeclaredMethod("increment", optsCls);
+        return ((runar.lang.sdk.RunarContract.CallOutcome) increment.invoke(wrapper, options)).rawTxHex();
+    }
+
+    @Test
+    void generatedWrapperStatefulCallOptionsOutputsReachTheTx() throws Exception {
+        String sats7000 = "581b000000000000";
+        assertEquals(0, countOccurrences(n430Increment("n430a", false), sats7000));
+        assertEquals(1, countOccurrences(n430Increment("n430b", true), sats7000),
+            "StatefulCallOptions.outputs must reach the tx as a 7000-sat continuation output");
     }
 
     private static RunarArtifact loadRealCounterArtifact() throws Exception {

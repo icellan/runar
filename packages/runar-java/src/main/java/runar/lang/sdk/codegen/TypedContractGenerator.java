@@ -430,11 +430,22 @@ public final class TypedContractGenerator {
             b.append("        String changePubKey = ")
                 .append(optionsArgName).append(" != null ? ")
                 .append(optionsArgName).append(".changePubKey() : null;\n");
+            // N-430: StatefulCallOptions.outputs (List<OutputSpec>) is converted
+            // to the SDK's CallOptions.OutputSpec list, like the terminal path
+            // converts TerminalOutput.
+            b.append("        java.util.List<runar.lang.sdk.CallOptions.OutputSpec> sdkSpecs = null;\n");
+            b.append("        if (").append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".outputs() != null) {\n");
+            b.append("            sdkSpecs = new java.util.ArrayList<>();\n");
+            b.append("            for (OutputSpec o : ").append(optionsArgName).append(".outputs()) {\n");
+            b.append("                sdkSpecs.add(new runar.lang.sdk.CallOptions.OutputSpec(o.satoshis(), o.state()));\n");
+            b.append("            }\n");
+            b.append("        }\n");
             b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null\n");
-            b.append("                && changeAddr == null && changePubKey == null)\n");
+            b.append("                && changeAddr == null && changePubKey == null && sdkSpecs == null)\n");
             b.append("            ? null\n");
             b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride)\n");
-            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey);\n");
+            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey).withOutputs(sdkSpecs);\n");
             b.append("        return inner.callWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
@@ -488,11 +499,22 @@ public final class TypedContractGenerator {
             b.append("        String changePubKey = ")
                 .append(optionsArgName).append(" != null ? ")
                 .append(optionsArgName).append(".changePubKey() : null;\n");
+            // N-430: StatefulCallOptions.outputs (List<OutputSpec>) is converted
+            // to the SDK's CallOptions.OutputSpec list, like the terminal path
+            // converts TerminalOutput.
+            b.append("        java.util.List<runar.lang.sdk.CallOptions.OutputSpec> sdkSpecs = null;\n");
+            b.append("        if (").append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".outputs() != null) {\n");
+            b.append("            sdkSpecs = new java.util.ArrayList<>();\n");
+            b.append("            for (OutputSpec o : ").append(optionsArgName).append(".outputs()) {\n");
+            b.append("                sdkSpecs.add(new runar.lang.sdk.CallOptions.OutputSpec(o.satoshis(), o.state()));\n");
+            b.append("            }\n");
+            b.append("        }\n");
             b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null\n");
-            b.append("                && changeAddr == null && changePubKey == null)\n");
+            b.append("                && changeAddr == null && changePubKey == null && sdkSpecs == null)\n");
             b.append("            ? null\n");
             b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride)\n");
-            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey);\n");
+            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey).withOutputs(sdkSpecs);\n");
             b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {

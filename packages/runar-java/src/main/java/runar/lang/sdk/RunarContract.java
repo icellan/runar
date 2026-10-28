@@ -1075,6 +1075,7 @@ public final class RunarContract {
         long newSats,
         String newLockingScript,
         int continuationIndex,
+        long continuationSats,
         String intentWitnessHex,
         boolean isStateful
     ) {}
@@ -1105,7 +1106,7 @@ public final class RunarContract {
 
         UTXO nextUtxo = null;
         if (lay.isStateful() && lay.newLockingScript() != null) {
-            nextUtxo = new UTXO(txid, lay.continuationIndex(), lay.newSats(), lay.newLockingScript());
+            nextUtxo = new UTXO(txid, lay.continuationIndex(), lay.continuationSats(), lay.newLockingScript());
             this.currentUtxo = nextUtxo;
         } else {
             this.currentUtxo = null;
@@ -1192,6 +1193,7 @@ public final class RunarContract {
         // is byte-for-byte untouched.
         List<TransactionBuilder.ContractOutput> orderedContractOutputs = null;
         int continuationIndex = 0;
+        long continuationSats = newSats;
         boolean hasRawOutput = false;
         for (AnfInterpreter.OrderedOutput o : orderedOutputs) {
             if ("raw".equals(o.kind())) { hasRawOutput = true; break; }
@@ -1228,9 +1230,39 @@ public final class RunarContract {
                     // sats — this.addOutput(0L, ...) makes it 0, not the input
                     // value the single-continuation path defaulted to.
                     newSats = o.satoshis();
+                    continuationSats = newSats;
                 }
                 idx++;
             }
+        }
+
+        // N-430 (TS parity: options.outputs): caller-specified continuation outputs
+        // replace the single automatic continuation. Each is codePart + OP_RETURN +
+        // serialize(state) at its own sats; the preimage's _newAmount stays the
+        // spent UTXO's value (TS leaves newSatoshis unset on this path) and the
+        // first output is the next contract UTXO.
+        List<CallOptions.OutputSpec> outputSpecs = options == null ? null : options.outputs;
+        if (isStateful && outputSpecs != null && !outputSpecs.isEmpty()) {
+            if (hasRawOutput) {
+                // TS refuses the same combination (finding G1).
+                throw new IllegalStateException(
+                    "RunarContract.call('" + methodName + "'): cannot build a transaction that "
+                        + "interleaves raw outputs with " + orderedOutputs.stream()
+                            .filter(o -> "state".equals(o.kind())).count() + " state "
+                        + "continuations; the SDK currently supports raw outputs alongside "
+                        + "a single state continuation only (finding G1).");
+            }
+            String specCodePart = ContractScript.extractCodePart(currentUtxo.scriptHex());
+            orderedContractOutputs = new ArrayList<>(outputSpecs.size());
+            for (CallOptions.OutputSpec spec : outputSpecs) {
+                orderedContractOutputs.add(new TransactionBuilder.ContractOutput(
+                    spec.satoshis().longValueExact(),
+                    specCodePart + "6a" + StateSerializer.serialize(artifact.stateFields(), spec.state())));
+            }
+            newSats = currentUtxo.satoshis();
+            newLockingScript = orderedContractOutputs.get(0).scriptHex();
+            continuationIndex = 0;
+            continuationSats = orderedContractOutputs.get(0).satoshis();
         }
 
         // Extra contract inputs (merge / swap / any multi-input covenant),
@@ -1614,7 +1646,7 @@ public final class RunarContract {
             ScriptUtils.bytesToHex(preimage),
             methodNeedsChange ? changePkhHex : null,
             finalChangeAmount, methodNeedsNewAmount, newSats,
-            newLockingScript, contIdx, intentWitnessHex, isStateful
+            newLockingScript, contIdx, continuationSats, intentWitnessHex, isStateful
         );
     }
 
