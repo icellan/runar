@@ -285,6 +285,7 @@ def assert_required_ir_fields(root: Any) -> None:
             _SIGHASH_DEFAULT if declared is None else int(declared),
         )
     _assert_ir_identifiers(program)
+    _assert_no_output_helper_calls(program)
 
 
 # N-207: the declared identifiers are non-empty, and a method's parameter names
@@ -339,3 +340,54 @@ def _assert_ir_identifiers(program: dict) -> None:
                 )
             seen[name] = j
         _non_empty_binding_names(method, "body", mp)
+
+
+# N-094: a method_call to a PRIVATE method that emits outputs is refused at
+# load time. The frontends always inline an output-emitting private helper, so
+# such a call only arrives through hand-written --ir; stack lowering cannot
+# resolve the helper's add_output outside its caller's frame and used to fail
+# deep inside ("value '_codePart' not found on stack"). Shared verbatim with
+# the other six tiers, pinned by
+# conformance/negatives/n094-ir-output-helper-call-parity.test.ts:
+#
+#     IR validation: private method '<m>' emits outputs and must be inlined; --ir method_call to it is not supported
+_OUTPUT_KINDS = ("add_output", "add_raw_output", "add_data_output")
+
+
+def _emits_outputs(bindings: list) -> bool:
+    for b in bindings:
+        v = b["value"]
+        if v["kind"] in _OUTPUT_KINDS:
+            return True
+        if v["kind"] == "if" and (_emits_outputs(v["then"]) or _emits_outputs(v["else"])):
+            return True
+        if v["kind"] == "loop" and _emits_outputs(v["body"]):
+            return True
+    return False
+
+
+def _refuse_output_helper_calls(bindings: list, helpers: set) -> None:
+    for b in bindings:
+        v = b["value"]
+        if v["kind"] == "method_call" and v["method"] in helpers:
+            raise ValueError(
+                f"IR validation: private method '{v['method']}' emits outputs and must be inlined; "
+                "--ir method_call to it is not supported"
+            )
+        if v["kind"] == "if":
+            _refuse_output_helper_calls(v["then"], helpers)
+            _refuse_output_helper_calls(v["else"], helpers)
+        elif v["kind"] == "loop":
+            _refuse_output_helper_calls(v["body"], helpers)
+
+
+def _assert_no_output_helper_calls(program: dict) -> None:
+    helpers = {
+        m["name"]
+        for m in program["methods"]
+        if m["isPublic"] is False and _emits_outputs(m["body"])
+    }
+    if not helpers:
+        return
+    for m in program["methods"]:
+        _refuse_output_helper_calls(m["body"], helpers)

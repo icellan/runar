@@ -331,6 +331,7 @@ pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value
         try checkSighashFlags(w, method, "body", mp, method.get("name").?.string, method.get("isPublic").?.bool, declared);
     }
     try assertIrIdentifiers(w, program);
+    try assertNoOutputHelperCalls(program);
 }
 
 /// N-207: the declared identifiers are non-empty, and a method's parameter
@@ -395,5 +396,59 @@ fn assertIrIdentifiers(w: Walker, program: Obj) CheckError!void {
             }
         }
         try nonEmptyBindingNames(w, m.object, "body", mp);
+    }
+}
+
+/// N-094: a method_call to a PRIVATE method that emits outputs is refused at
+/// load time. The frontends always inline an output-emitting private helper,
+/// so such a call only arrives through hand-written --ir; stack lowering cannot
+/// resolve the helper's add_output outside its caller's frame and used to fail
+/// deep inside (VariableNotFound). Shared verbatim with the other six tiers,
+/// pinned by conformance/negatives/n094-ir-output-helper-call-parity.test.ts:
+///
+///   IR validation: private method '<m>' emits outputs and must be inlined; --ir method_call to it is not supported
+fn emitsOutputs(bindings: []const std.json.Value) bool {
+    for (bindings) |b| {
+        const v = b.object.get("value").?.object;
+        const kind = v.get("kind").?.string;
+        if (std.mem.eql(u8, kind, "add_output") or
+            std.mem.eql(u8, kind, "add_raw_output") or
+            std.mem.eql(u8, kind, "add_data_output")) return true;
+        if (std.mem.eql(u8, kind, "if")) {
+            if (emitsOutputs(v.get("then").?.array.items) or emitsOutputs(v.get("else").?.array.items)) return true;
+        } else if (std.mem.eql(u8, kind, "loop")) {
+            if (emitsOutputs(v.get("body").?.array.items)) return true;
+        }
+    }
+    return false;
+}
+
+fn refuseOutputHelperCalls(bindings: []const std.json.Value, methods: []const std.json.Value) CheckError!void {
+    for (bindings) |b| {
+        const v = b.object.get("value").?.object;
+        const kind = v.get("kind").?.string;
+        if (std.mem.eql(u8, kind, "method_call")) {
+            const target = v.get("method").?.string;
+            for (methods) |m| {
+                const mo = m.object;
+                if (mo.get("isPublic").?.bool) continue;
+                if (!std.mem.eql(u8, mo.get("name").?.string, target)) continue;
+                if (!emitsOutputs(mo.get("body").?.array.items)) continue;
+                setDiag("IR validation: private method '{s}' emits outputs and must be inlined; --ir method_call to it is not supported", .{target});
+                return Error.IRIdentifierInvalid;
+            }
+        } else if (std.mem.eql(u8, kind, "if")) {
+            try refuseOutputHelperCalls(v.get("then").?.array.items, methods);
+            try refuseOutputHelperCalls(v.get("else").?.array.items, methods);
+        } else if (std.mem.eql(u8, kind, "loop")) {
+            try refuseOutputHelperCalls(v.get("body").?.array.items, methods);
+        }
+    }
+}
+
+fn assertNoOutputHelperCalls(program: Obj) CheckError!void {
+    const methods = program.get("methods").?.array.items;
+    for (methods) |m| {
+        try refuseOutputHelperCalls(m.object.get("body").?.array.items, methods);
     }
 }

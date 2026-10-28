@@ -289,7 +289,8 @@ pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
         let is_public = method.get("isPublic").and_then(Value::as_bool).unwrap_or(false);
         check_sighash_flags(method, "body", &mp, name, is_public, declared)?;
     }
-    assert_ir_identifiers(program)
+    assert_ir_identifiers(program)?;
+    assert_no_output_helper_calls(program)
 }
 
 /// N-207: the declared identifiers are non-empty, and a method's parameter
@@ -370,6 +371,77 @@ fn assert_ir_identifiers(program: &Obj) -> R<()> {
             seen.insert(name, j);
         }
         non_empty_binding_names(method, "body", &mp)?;
+    }
+    Ok(())
+}
+
+/// N-094: a `method_call` to a PRIVATE method that emits outputs is refused at
+/// load time. The frontends always inline an output-emitting private helper,
+/// so such a call only arrives through hand-written `--ir`; stack lowering
+/// cannot resolve the helper's `add_output` outside its caller's frame and used
+/// to fail deep inside ("value '_codePart' not found on stack"). Shared
+/// verbatim with the other six tiers, pinned by
+/// `conformance/negatives/n094-ir-output-helper-call-parity.test.ts`:
+///
+/// ```text
+/// IR validation: private method '<m>' emits outputs and must be inlined; --ir method_call to it is not supported
+/// ```
+fn value_of(binding: &Value) -> Option<&Obj> {
+    binding.get("value").and_then(Value::as_object)
+}
+
+fn arm<'a>(v: &'a Obj, key: &str) -> &'a [Value] {
+    v.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn emits_outputs(bindings: &[Value]) -> bool {
+    bindings.iter().filter_map(value_of).any(|v| {
+        match v.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "add_output" | "add_raw_output" | "add_data_output" => true,
+            "if" => emits_outputs(arm(v, "then")) || emits_outputs(arm(v, "else")),
+            "loop" => emits_outputs(arm(v, "body")),
+            _ => false,
+        }
+    })
+}
+
+fn refuse_output_helper_calls(bindings: &[Value], helpers: &[String]) -> R<()> {
+    for v in bindings.iter().filter_map(value_of) {
+        match v.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "method_call" => {
+                let name = v.get("method").and_then(Value::as_str).unwrap_or("");
+                if helpers.iter().any(|h| h == name) {
+                    return Err(format!(
+                        "IR validation: private method '{}' emits outputs and must be inlined; --ir method_call to it is not supported",
+                        name
+                    ));
+                }
+            }
+            "if" => {
+                refuse_output_helper_calls(arm(v, "then"), helpers)?;
+                refuse_output_helper_calls(arm(v, "else"), helpers)?;
+            }
+            "loop" => refuse_output_helper_calls(arm(v, "body"), helpers)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn assert_no_output_helper_calls(program: &Obj) -> R<()> {
+    let methods = arm(program, "methods");
+    let helpers: Vec<String> = methods
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|m| m.get("isPublic").and_then(Value::as_bool) == Some(false))
+        .filter(|m| emits_outputs(arm(m, "body")))
+        .filter_map(|m| m.get("name").and_then(Value::as_str).map(String::from))
+        .collect();
+    if helpers.is_empty() {
+        return Ok(());
+    }
+    for m in methods.iter().filter_map(Value::as_object) {
+        refuse_output_helper_calls(arm(m, "body"), &helpers)?;
     }
     Ok(())
 }

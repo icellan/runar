@@ -109,6 +109,7 @@ public final class AnfLoader {
             methods.add(toMethod(asObject(ml.get(i), path), path));
         }
         checkIrIdentifiers(name, props, methods);
+        checkNoOutputHelperCalls(methods);
         // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
         checkReservedIrNames(props, methods);
 
@@ -761,6 +762,45 @@ public final class AnfLoader {
                 nonEmptyBindingNames(branch.elseBranch(), bp + ".value.else");
             } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
                 nonEmptyBindingNames(loop.body(), bp + ".value.body");
+            }
+        }
+    }
+
+    /**
+     * N-094: a {@code method_call} to a PRIVATE method that emits outputs is
+     * refused at load time. The frontends always inline an output-emitting
+     * private helper, so such a call only arrives through hand-written
+     * {@code --ir}; stack lowering cannot resolve the helper's
+     * {@code add_output} outside its caller's frame and used to fail deep
+     * inside ("value '_codePart' not found on stack"). Shared verbatim with
+     * the other six tiers, pinned by
+     * {@code conformance/negatives/n094-ir-output-helper-call-parity.test.ts}:
+     * <pre>
+     *   IR validation: private method '&lt;m&gt;' emits outputs and must be inlined; --ir method_call to it is not supported
+     * </pre>
+     */
+    private static void checkNoOutputHelperCalls(List<AnfMethod> methods) {
+        java.util.Set<String> helpers = new java.util.HashSet<>();
+        for (AnfMethod m : methods) {
+            if (m.isPublic()) continue;
+            List<AnfValue> vs = new ArrayList<>();
+            collectValues(m.body(), vs);
+            for (AnfValue v : vs) {
+                if (v instanceof AddOutput || v instanceof AddRawOutput || v instanceof AddDataOutput) {
+                    helpers.add(m.name());
+                    break;
+                }
+            }
+        }
+        if (helpers.isEmpty()) return;
+        for (AnfMethod m : methods) {
+            List<AnfValue> vs = new ArrayList<>();
+            collectValues(m.body(), vs);
+            for (AnfValue v : vs) {
+                if (v instanceof MethodCall mc && helpers.contains(mc.method())) {
+                    throw new RuntimeException("IR validation: private method '" + mc.method()
+                        + "' emits outputs and must be inlined; --ir method_call to it is not supported");
+                }
             }
         }
     }

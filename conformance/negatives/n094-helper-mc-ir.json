@@ -1,0 +1,391 @@
+{
+ "contractName": "Helper",
+ "properties": [
+  {
+   "name": "count",
+   "type": "bigint",
+   "readonly": false
+  }
+ ],
+ "methods": [
+  {
+   "name": "constructor",
+   "params": [
+    {
+     "name": "count",
+     "type": "bigint"
+    }
+   ],
+   "body": [
+    {
+     "name": "t0",
+     "value": {
+      "kind": "load_prop",
+      "name": "count"
+     }
+    },
+    {
+     "name": "t1",
+     "value": {
+      "kind": "call",
+      "func": "super",
+      "args": [
+       "t0"
+      ]
+     }
+    },
+    {
+     "name": "t2",
+     "value": {
+      "kind": "load_prop",
+      "name": "count"
+     }
+    },
+    {
+     "name": "t3",
+     "value": {
+      "kind": "update_prop",
+      "name": "count",
+      "value": "t2"
+     }
+    }
+   ],
+   "isPublic": false
+  },
+  {
+   "name": "emit",
+   "params": [
+    {
+     "name": "n",
+     "type": "bigint"
+    },
+    {
+     "name": "sats",
+     "type": "bigint"
+    }
+   ],
+   "body": [
+    {
+     "name": "t0",
+     "value": {
+      "kind": "load_param",
+      "name": "sats"
+     }
+    },
+    {
+     "name": "t1",
+     "value": {
+      "kind": "load_param",
+      "name": "n"
+     }
+    },
+    {
+     "name": "t2",
+     "value": {
+      "kind": "add_output",
+      "preimage": "",
+      "satoshis": "t0",
+      "stateValues": [
+       "t1"
+      ]
+     }
+    }
+   ],
+   "isPublic": false
+  },
+  {
+   "name": "bump",
+   "params": [
+    {
+     "name": "sats",
+     "type": "bigint"
+    },
+    {
+     "name": "_changePKH",
+     "type": "Ripemd160"
+    },
+    {
+     "name": "_changeAmount",
+     "type": "bigint"
+    },
+    {
+     "name": "txPreimage",
+     "type": "SigHashPreimage"
+    }
+   ],
+   "body": [
+    {
+     "name": "t0",
+     "value": {
+      "kind": "load_param",
+      "name": "txPreimage"
+     }
+    },
+    {
+     "name": "t1",
+     "value": {
+      "kind": "check_preimage",
+      "preimage": "t0"
+     }
+    },
+    {
+     "name": "t2",
+     "value": {
+      "kind": "assert",
+      "value": "t1"
+     }
+    },
+    {
+     "name": "t3",
+     "value": {
+      "kind": "load_param",
+      "name": "txPreimage"
+     }
+    },
+    {
+     "name": "t4",
+     "value": {
+      "kind": "call",
+      "func": "extractSigHashType",
+      "args": [
+       "t3"
+      ]
+     }
+    },
+    {
+     "name": "t5",
+     "value": {
+      "kind": "load_const",
+      "value": 65
+     }
+    },
+    {
+     "name": "t6",
+     "value": {
+      "kind": "bin_op",
+      "op": "===",
+      "left": "t4",
+      "right": "t5"
+     }
+    },
+    {
+     "name": "t7",
+     "value": {
+      "kind": "assert",
+      "value": "t6"
+     }
+    },
+    {
+     "name": "t8",
+     "value": {
+      "kind": "load_param",
+      "name": "txPreimage"
+     }
+    },
+    {
+     "name": "t9",
+     "value": {
+      "kind": "deserialize_state",
+      "preimage": "t8"
+     }
+    },
+    {
+     "name": "t10",
+     "value": {
+      "kind": "load_param",
+      "name": "sats"
+     }
+    },
+    {
+     "name": "t11",
+     "value": {
+      "kind": "load_const",
+      "value": 0
+     }
+    },
+    {
+     "name": "t12",
+     "value": {
+      "kind": "bin_op",
+      "op": ">",
+      "left": "t10",
+      "right": "t11"
+     }
+    },
+    {
+     "name": "t13",
+     "value": {
+      "kind": "assert",
+      "value": "t12"
+     }
+    },
+    {
+     "name": "t14",
+     "value": {
+      "kind": "load_prop",
+      "name": "count"
+     }
+    },
+    {
+     "name": "t15",
+     "value": {
+      "kind": "load_const",
+      "value": 1
+     }
+    },
+    {
+     "name": "t16",
+     "value": {
+      "kind": "bin_op",
+      "op": "+",
+      "left": "t14",
+      "right": "t15"
+     }
+    },
+    {
+     "name": "t17",
+     "value": {
+      "kind": "load_param",
+      "name": "sats"
+     }
+    },
+    {
+     "name": "t18self",
+     "value": {
+      "kind": "load_const",
+      "value": "@this"
+     }
+    },
+    {
+     "name": "t18",
+     "value": {
+      "kind": "method_call",
+      "object": "t18self",
+      "method": "emit",
+      "args": [
+       "t16",
+       "t17"
+      ]
+     }
+    },
+    {
+     "name": "t19",
+     "value": {
+      "kind": "load_param",
+      "name": "_changePKH"
+     }
+    },
+    {
+     "name": "t20",
+     "value": {
+      "kind": "load_param",
+      "name": "_changeAmount"
+     }
+    },
+    {
+     "name": "t21",
+     "value": {
+      "kind": "load_const",
+      "value": 0
+     }
+    },
+    {
+     "name": "t22",
+     "value": {
+      "kind": "bin_op",
+      "op": "!==",
+      "left": "t20",
+      "right": "t21"
+     }
+    },
+    {
+     "name": "t25",
+     "value": {
+      "kind": "if",
+      "cond": "t22",
+      "then": [
+       {
+        "name": "t23",
+        "value": {
+         "kind": "call",
+         "func": "buildChangeOutput",
+         "args": [
+          "t19",
+          "t20"
+         ]
+        }
+       }
+      ],
+      "else": [
+       {
+        "name": "t24",
+        "value": {
+         "kind": "load_const",
+         "value": ""
+        }
+       }
+      ]
+     }
+    },
+    {
+     "name": "t26",
+     "value": {
+      "kind": "call",
+      "func": "cat",
+      "args": [
+       "t18",
+       "t25"
+      ]
+     }
+    },
+    {
+     "name": "t27",
+     "value": {
+      "kind": "call",
+      "func": "hash256",
+      "args": [
+       "t26"
+      ]
+     }
+    },
+    {
+     "name": "t28",
+     "value": {
+      "kind": "load_param",
+      "name": "txPreimage"
+     }
+    },
+    {
+     "name": "t29",
+     "value": {
+      "kind": "call",
+      "func": "extractOutputHash",
+      "args": [
+       "t28"
+      ]
+     }
+    },
+    {
+     "name": "t30",
+     "value": {
+      "kind": "bin_op",
+      "op": "===",
+      "left": "t27",
+      "right": "t29",
+      "result_type": "bytes"
+     }
+    },
+    {
+     "name": "t31",
+     "value": {
+      "kind": "assert",
+      "value": "t30",
+      "isAutoInjectedStateCheck": true
+     }
+    }
+   ],
+   "isPublic": true
+  }
+ ],
+ "parentClass": "StatefulSmartContract"
+}
