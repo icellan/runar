@@ -347,38 +347,130 @@ fn validateInitializerHex(
     expr: Expression,
 ) !void {
     switch (expr) {
-        .literal_bytes => |val| {
-            if (val.len == 0) return;
-            if (val.len % 2 != 0) {
-                try errors.append(allocator, .{
-                    .message = try std.fmt.allocPrint(
-                        allocator,
-                        "ByteString literal '{s}' has odd length ({d}) \u{2014} hex strings must have an even number of characters",
-                        .{ val, val.len },
-                    ),
-                    .severity = .@"error",
-                    .owned_message = true,
-                });
-                return;
-            }
-            for (val) |c| {
-                if (!std.ascii.isHex(c)) {
-                    try errors.append(allocator, .{
-                        .message = try std.fmt.allocPrint(
-                            allocator,
-                            "ByteString literal '{s}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
-                            .{val},
-                        ),
-                        .severity = .@"error",
-                        .owned_message = true,
-                    });
-                    return;
-                }
-            }
-        },
+        .literal_bytes => |val| try checkByteStringHex(allocator, errors, val),
         .call => |c| for (c.args) |a| try validateInitializerHex(allocator, errors, a),
         .array_literal => |els| for (els) |el| try validateInitializerHex(allocator, errors, el),
         else => {},
+    }
+}
+
+/// The TS validator's `bytestring_literal` arm, shared by property
+/// initializers and method bodies (N-429). Odd length is checked BEFORE the
+/// hex alphabet, and the length is TS's `String.length` -- UTF-16 code units
+/// -- so a non-ASCII literal such as `"\u{e9}"` reports `odd length (1)` as TS
+/// does rather than `non-hex` (its UTF-8 form is 2 bytes). Input that is not
+/// valid UTF-8 falls back to its byte count.
+fn checkByteStringHex(
+    allocator: Allocator,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+    val: []const u8,
+) !void {
+    if (val.len == 0) return;
+    const units = utf16Len(val);
+    if (units % 2 != 0) {
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "ByteString literal '{s}' has odd length ({d}) \u{2014} hex strings must have an even number of characters",
+                .{ val, units },
+            ),
+            .severity = .@"error",
+            .owned_message = true,
+        });
+        return;
+    }
+    for (val) |c| {
+        if (!std.ascii.isHex(c)) {
+            try errors.append(allocator, .{
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "ByteString literal '{s}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
+                    .{val},
+                ),
+                .severity = .@"error",
+                .owned_message = true,
+            });
+            return;
+        }
+    }
+}
+
+/// Length of `s` in UTF-16 code units (JS `String.length`); `s.len` when `s`
+/// is not valid UTF-8.
+fn utf16Len(s: []const u8) usize {
+    var n: usize = 0;
+    var it = (std.unicode.Utf8View.init(s) catch return s.len).iterator();
+    while (it.nextCodepoint()) |cp| n += if (cp >= 0x10000) 2 else 1;
+    return n;
+}
+
+/// N-429: hex-format check for every ByteString literal in a method body,
+/// mirroring the TS `validateExpression` walk. `asm(...)` calls are skipped:
+/// their body literal is validated by `checkAsmCall` under its own messages.
+fn walkStatementForHex(
+    allocator: Allocator,
+    stmt: Statement,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    switch (stmt) {
+        .expr_stmt => |e| try walkExprForHex(allocator, e.expr, errors),
+        .const_decl => |cd| try walkExprForHex(allocator, cd.value, errors),
+        .let_decl => |ld| {
+            if (ld.value) |v| try walkExprForHex(allocator, v, errors);
+        },
+        .assign => |a| try walkExprForHex(allocator, a.value, errors),
+        .if_stmt => |if_s| {
+            try walkExprForHex(allocator, if_s.condition, errors);
+            for (if_s.then_body) |s| try walkStatementForHex(allocator, s, errors);
+            if (if_s.else_body) |eb| {
+                for (eb) |s| try walkStatementForHex(allocator, s, errors);
+            }
+        },
+        .for_stmt => |fs| {
+            if (fs.update) |u| try walkStatementForHex(allocator, u.*, errors);
+            for (fs.body) |s| try walkStatementForHex(allocator, s, errors);
+        },
+        .assert_stmt => |a| try walkExprForHex(allocator, a.condition, errors),
+        .return_stmt => |opt| {
+            if (opt) |e| try walkExprForHex(allocator, e, errors);
+        },
+    }
+}
+
+fn walkExprForHex(
+    allocator: Allocator,
+    expr: Expression,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    switch (expr) {
+        .literal_bytes => |val| try checkByteStringHex(allocator, errors, val),
+        .call => |c| {
+            if (std.mem.eql(u8, c.callee, "asm")) return;
+            for (c.args) |arg| try walkExprForHex(allocator, arg, errors);
+        },
+        .method_call => |mc| {
+            for (mc.args) |arg| try walkExprForHex(allocator, arg, errors);
+        },
+        .binary_op => |b| {
+            try walkExprForHex(allocator, b.left, errors);
+            try walkExprForHex(allocator, b.right, errors);
+        },
+        .unary_op => |u| try walkExprForHex(allocator, u.operand, errors),
+        .ternary => |t| {
+            try walkExprForHex(allocator, t.condition, errors);
+            try walkExprForHex(allocator, t.then_expr, errors);
+            try walkExprForHex(allocator, t.else_expr, errors);
+        },
+        .index_access => |ia| {
+            try walkExprForHex(allocator, ia.object, errors);
+            try walkExprForHex(allocator, ia.index, errors);
+        },
+        .increment => |inc| try walkExprForHex(allocator, inc.operand, errors),
+        .decrement => |dec| try walkExprForHex(allocator, dec.operand, errors),
+        .array_literal => |al| {
+            for (al) |e| try walkExprForHex(allocator, e, errors);
+        },
+        .literal_int, .literal_bigint, .literal_bool, .identifier, .property_access => {},
     }
 }
 
@@ -834,6 +926,9 @@ fn validateMethods(
 
         // Gate asm({...}) calls on UnsafeSmartContract + check structural args.
         try validateAsmUsage(allocator, contract, method, errors);
+
+        // N-429: ByteString literal hex format (TS `validateExpression`).
+        for (method.body) |stmt| try walkStatementForHex(allocator, stmt, errors);
 
         // readonly properties may only be assigned in the constructor.
         try checkReadonlyWrites(allocator, contract, method, errors);
