@@ -278,7 +278,9 @@ fn tokenize(
         at = i;
         let ch = chars[i];
 
-        if ch.is_whitespace() {
+        // N-424: exactly the TS reference's whitespace (' ', '\t', '\r', '\n'); a
+        // non-ASCII space such as U+00A0 is refused as an unexpected character.
+        if matches!(ch, ' ' | '\t' | '\r' | '\n') {
             i += 1;
             continue;
         }

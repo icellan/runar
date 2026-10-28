@@ -297,11 +297,13 @@ public final class MoveParser {
     }
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_';
+        // N-424: ASCII only, as the TS reference; a non-ASCII letter is refused
+        // as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_';
     }
 
     private static final Map<String, Kind> TWO_CHAR_OPS = Map.ofEntries(
