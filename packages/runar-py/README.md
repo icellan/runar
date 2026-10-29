@@ -428,7 +428,7 @@ txid, output_index = contract.deploy_with_wallet(satoshis=1, description="Deploy
 
 Sources: [runar/sdk/wallet.py](runar/sdk/wallet.py).
 
-`WalletProvider.ensure_funding(min_satoshis)` will create a fresh funding UTXO via `wallet.create_action(...)` if the basket balance is insufficient. `WalletProvider` broadcasts via GorillaPool ARC by default and looks up transactions through an optional overlay service plus a local cache.
+`WalletProvider.ensure_funding(min_satoshis)` will create a fresh funding UTXO via `wallet.create_action(...)` if the basket balance is insufficient. `WalletProvider` broadcasts via BSV Broadcaster by default (the endpoint for `network`; pass `arc_url` to use an ARC endpoint instead) and looks up transactions through an optional overlay service plus a local cache.
 
 ---
 
@@ -1618,7 +1618,7 @@ class WalletProvider(Provider):
         signer: Signer,
         basket: str,
         funding_tag: str = 'funding',
-        arc_url: str = 'https://arc.gorillapool.io',
+        arc_url: str | None = None,
         overlay_url: str | None = None,
         network: str = 'mainnet',
         fee_rate: int = 100,
@@ -1628,7 +1628,7 @@ class WalletProvider(Provider):
     def ensure_funding(self, min_satoshis: int) -> None: ...
 ```
 
-`Provider` backed by a BRC-100 wallet for UTXO management, ARC for broadcast, and an optional overlay service for transaction lookups. Source: [runar/sdk/wallet.py:106](runar/sdk/wallet.py).
+`Provider` backed by a BRC-100 wallet for UTXO management, BSV Broadcaster for broadcast (or ARC, when `arc_url` is given), and an optional overlay service for transaction lookups. Source: [runar/sdk/wallet.py](runar/sdk/wallet.py).
 
 #### `WalletSigner`
 

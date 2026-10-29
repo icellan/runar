@@ -73,7 +73,7 @@ type WalletProviderOptions struct {
 	Signer        Signer
 	Basket        string
 	FundingTag    string // default "funding"
-	ArcUrl        string // default "https://arc.gorillapool.io"
+	ArcUrl        string // optional ARC endpoint; default: BSV Broadcaster for Network
 	OverlayUrl    string // optional
 	OverlayTopics []string
 	Network       string  // "mainnet" or "testnet"
@@ -85,14 +85,15 @@ type WalletProviderOptions struct {
 }
 
 // WalletProvider implements the Provider interface using a BRC-100 WalletClient
-// for UTXO management and funding, ARC for broadcast, and an optional overlay
+// for UTXO management and funding, BSV Broadcaster (or ARC) for broadcast, and an optional overlay
 // service for transaction lookups.
 type WalletProvider struct {
 	wallet        WalletClient
 	signer        Signer
 	basket        string
 	fundingTag    string
-	arcUrl        string
+	arcUrl        string // the caller's ARC endpoint, if any
+	broadcastURL  string // where Broadcast posts: ARC /v1/tx or BSV Broadcaster /tx
 	overlayUrl    string
 	overlayTopics []string
 	network       string
@@ -102,9 +103,14 @@ type WalletProvider struct {
 	client        *http.Client
 }
 
-// mainnetArcURL is the default ARC broadcaster. It is a MAINNET endpoint —
-// see R-179 for why that matters when Network is not "mainnet".
-const mainnetArcURL = "https://arc.gorillapool.io"
+// bsvBroadcasterURLs are the default broadcasters: the BSV Association's
+// public BSV Broadcaster endpoints (called Arcade before 0.19.0, hence the
+// hostnames). One per network, so the default always matches Network — see
+// R-179. BSV Broadcaster submits at POST /tx, not ARC's POST /v1/tx.
+var bsvBroadcasterURLs = map[string]string{
+	"mainnet": "https://arcade-us-1.bsvblockchain.tech",
+	"testnet": "https://arcade-v2-testnet-us-1.bsvblockchain.tech",
+}
 
 // NewWalletProvider creates a new WalletProvider with the given options.
 func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
@@ -116,12 +122,17 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 	if network == "" {
 		network = "mainnet"
 	}
-	// R-179: only mainnet has a default ARC endpoint, because the default IS a
-	// mainnet endpoint. A non-mainnet provider that names none is left with an
-	// empty arcUrl and refuses in Broadcast.
+	// R-179: the default endpoint is derived from the network, so a provider
+	// the caller did not point anywhere broadcasts to the network it reports.
+	// An explicit ArcUrl is the caller's choice and is used as given. A network
+	// with no BSV Broadcaster endpoint is left with an empty broadcastURL and
+	// refuses in Broadcast.
 	arcUrl := opts.ArcUrl
-	if arcUrl == "" && network == "mainnet" {
-		arcUrl = mainnetArcURL
+	broadcastURL := ""
+	if arcUrl != "" {
+		broadcastURL = strings.TrimRight(arcUrl, "/") + "/v1/tx"
+	} else if base, ok := bsvBroadcasterURLs[network]; ok {
+		broadcastURL = base + "/tx"
 	}
 	feeRate := opts.FeeRate
 	if feeRate == 0 {
@@ -137,6 +148,7 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 		basket:        opts.Basket,
 		fundingTag:    fundingTag,
 		arcUrl:        arcUrl,
+		broadcastURL:  broadcastURL,
 		overlayUrl:    opts.OverlayUrl,
 		overlayTopics: opts.OverlayTopics,
 		network:       network,
@@ -203,18 +215,16 @@ func (p *WalletProvider) GetUtxos(address string) ([]UTXO, error) {
 	return utxos, nil
 }
 
-// Broadcast sends a raw transaction to the ARC service.
-// Posts the raw bytes to arcUrl/v1/tx with Content-Type application/octet-stream.
+// Broadcast sends a raw transaction to BSV Broadcaster, or to ARC when ArcUrl
+// is set. Posts the raw bytes to broadcastURL with Content-Type
+// application/octet-stream.
 func (p *WalletProvider) Broadcast(tx *transaction.Transaction) (string, error) {
-	// R-179: ArcUrl and Network used to be defaulted independently, so a
-	// provider configured for testnet reported GetNetwork() == "testnet" and
-	// broadcast to the MAINNET ARC. There is no canonical testnet ARC endpoint
-	// to default to, so a non-mainnet provider that named no endpoint is left
-	// with an empty one and refuses here, rather than reaching real money.
-	if p.arcUrl == "" {
+	// R-179: refuse rather than guess an endpoint for a network that has no
+	// default; see NewWalletProvider.
+	if p.broadcastURL == "" {
 		return "", fmt.Errorf(
-			"WalletProvider.Broadcast: no ARC endpoint for network %q — %q is a MAINNET "+
-				"broadcaster; set WalletProviderOptions.ArcUrl explicitly", p.network, mainnetArcURL)
+			"WalletProvider.Broadcast: no default broadcaster for network %q; "+
+				"set WalletProviderOptions.ArcUrl explicitly", p.network)
 	}
 	rawHex := tx.Hex()
 	rawBytes, err := hex.DecodeString(rawHex)
@@ -222,8 +232,7 @@ func (p *WalletProvider) Broadcast(tx *transaction.Transaction) (string, error) 
 		return "", fmt.Errorf("WalletProvider.Broadcast: decoding tx hex: %w", err)
 	}
 
-	url := strings.TrimRight(p.arcUrl, "/") + "/v1/tx"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(rawBytes))
+	req, err := http.NewRequest("POST", p.broadcastURL, bytes.NewReader(rawBytes))
 	if err != nil {
 		return "", fmt.Errorf("WalletProvider.Broadcast: creating request: %w", err)
 	}
@@ -237,7 +246,11 @@ func (p *WalletProvider) Broadcast(tx *transaction.Transaction) (string, error) 
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("WalletProvider.Broadcast: ARC returned %d: %s", resp.StatusCode, string(body))
+		service := "BSV Broadcaster"
+		if p.arcUrl != "" {
+			service = "ARC"
+		}
+		return "", fmt.Errorf("WalletProvider.Broadcast: %s returned %d: %s", service, resp.StatusCode, string(body))
 	}
 
 	txid, err := checkArcAccepted(body, tx.TxID().String())
