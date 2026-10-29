@@ -650,13 +650,19 @@ class ZigParser extends ParserCore<ZigToken> {
         receiverName = paramName;
       } else {
         if (parsedType.rawName === 'StatefulContext') {
+          // N-304: the context is a surface artifact the compiler re-injects,
+          // not a spending parameter. Dropping it here (as the six native
+          // tiers' Zig parsers do) keeps it out of the artifact ABI, which is
+          // built from the AST param list. `ctx.txPreimage` / `ctx.addOutput`
+          // are rewritten to `this.*` via statefulContextNames.
           statefulContextNames.add(paramName);
+        } else {
+          params.push({
+            kind: 'param',
+            name: paramName,
+            type: parsedType.type,
+          });
         }
-        params.push({
-          kind: 'param',
-          name: paramName,
-          type: parsedType.type,
-        });
       }
 
       index++;
