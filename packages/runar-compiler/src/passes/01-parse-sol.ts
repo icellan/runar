@@ -1139,14 +1139,24 @@ function resolvePropertyAccess(stmt: Statement, propNames: Set<string>, paramNam
         then: stmt.then.map(s => resolvePropertyAccess(s, propNames, new Set(paramNames))),
         else: stmt.else?.map(s => resolvePropertyAccess(s, propNames, new Set(paramNames))),
       };
-    case 'for_statement':
+    case 'for_statement': {
+      // The init variable is scoped to the loop: it shadows a same-named
+      // property inside the init/condition/update/body only, never after it.
+      const forParams = new Set(paramNames);
+      const init = resolvePropertyAccess(stmt.init, propNames, forParams) as typeof stmt.init;
+      const condition = (resolvePropertyAccess(
+        { kind: 'expression_statement', expression: stmt.condition, sourceLocation: stmt.sourceLocation },
+        propNames,
+        forParams,
+      ) as { expression: Expression }).expression;
       return {
         ...stmt,
-        init: resolvePropertyAccess(stmt.init, propNames, paramNames) as typeof stmt.init,
-        condition: resolveExpr(stmt.condition),
-        update: resolvePropertyAccess(stmt.update, propNames, paramNames),
-        body: stmt.body.map(s => resolvePropertyAccess(s, propNames, new Set(paramNames))),
+        init,
+        condition,
+        update: resolvePropertyAccess(stmt.update, propNames, forParams),
+        body: stmt.body.map(s => resolvePropertyAccess(s, propNames, new Set(forParams))),
       };
+    }
     case 'return_statement':
       return stmt.value ? { ...stmt, value: resolveExpr(stmt.value) } : stmt;
     default:
