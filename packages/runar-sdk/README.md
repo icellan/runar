@@ -961,7 +961,8 @@ interface WalletProviderOptions {
   signer: Signer;                   // typically a WalletSigner backed by the same wallet
   basket: string;                   // wallet basket holding funding outputs
   fundingTag?: string;              // default 'funding'
-  arcUrl?: string;                  // default 'https://arc.gorillapool.io'
+  arcUrl?: string;                  // ARC endpoint; default: BSV Broadcaster for `network`
+  broadcaster?: Broadcaster;        // injected @bsv/sdk Broadcaster; overrides arcUrl
   overlayUrl?: string;              // optional overlay service for tx submission
   overlayTopics?: string[];         // overlay topics, e.g. ['tm_myapp']
   network?: 'mainnet' | 'testnet'; // default 'mainnet'

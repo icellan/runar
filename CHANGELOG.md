@@ -83,6 +83,10 @@ and weak-coverage-kind policies.
 
 - **BREAKING: `PreparedCall.opPushTxSig` (and its per-language equivalent — `OpPushTxSig` in Go, `op_push_tx_sig` in Rust/Python/Ruby) removed from the Go, Rust, Python, Ruby, and Zig SDKs.** Since BUG-100, the stateful unlocking script's OP_PUSH_TX signature is derived ON-CHAIN from the pushed preimage — `buildStatefulPrefix`'s (or `build_stateful_prefix` / `buildStatefulUnlockScript`'s) signature parameter has been accepted for call-site compatibility but ignored in every tier, so this field was documented public surface backing nothing a caller could use. A caller who read the field and prepended it to the unlock, as its doc comment implied, would have produced an INVALID unlock (one extra stack item). The TypeScript SDK dropped the equivalent field earlier (F-369); this closes the remaining five tiers. Code that reads `prepared.opPushTxSig` / `prepared.OpPushTxSig` / `prepared.op_push_tx_sig` must delete that read — nothing replaces it.
 
+### Changed
+
+- **TypeScript `WalletProvider` broadcasts to BSV Broadcaster by default, on mainnet and testnet.** With no `arcUrl` and no injected `broadcaster`, EF is posted to the BSV Association's BSV Broadcaster (`POST /tx`): `https://arcade-us-1.bsvblockchain.tech` on mainnet, `https://arcade-v2-testnet-us-1.bsvblockchain.tech` on testnet. A testnet provider no longer throws for want of an `arcUrl` (R-179's invariant — the default endpoint matches `network` — still holds). Passing `arcUrl` keeps the previous ARC behaviour (`POST ${arcUrl}/v1/tx`); mainnet callers who relied on the GorillaPool ARC default can pass `arcUrl: 'https://arc.gorillapool.io'`. The protected `arcUrl` field is now `string | undefined`, and a new protected `broadcastUrl` holds the submit URL. The Go, Python, Rust, Zig, Ruby and Java wallet providers are unchanged.
+
 ## [1.0.0-rc.1] — 2026-06-22
 
 First release candidate for 1.0.0. All seven compiler and SDK tiers are unified

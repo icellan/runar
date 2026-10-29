@@ -9,7 +9,7 @@
  * These tests pin the delegation contract:
  *   - injected broadcaster is used INSTEAD of the hardcoded ARC fetch path;
  *   - a `BroadcastFailure` return flattens to a thrown Error;
- *   - with no injection, the default ARC fetch path is unchanged.
+ *   - with no injection, the default fetch path (BSV Broadcaster) is used.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -73,7 +73,7 @@ describe('WalletProvider broadcaster injection (#107)', () => {
     const child = makeChildWithParent();
     const injectedTxid = child.id('hex');
 
-    // If the hardcoded path ran, it would hit fetch(`${arcUrl}/v1/tx`).
+    // If the default path ran, it would hit fetch() on the default endpoint.
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
@@ -122,13 +122,13 @@ describe('WalletProvider broadcaster injection (#107)', () => {
     await expect(provider.broadcast(child)).rejects.toThrow(/461/);
   });
 
-  it('with no injected broadcaster, the default ARC fetch path is unchanged', async () => {
+  it('with no injected broadcaster, the default fetch path is used', async () => {
     const child = makeChildWithParent();
     const childTxid = child.id('hex');
 
     const fetchMock = vi.fn(async (url: string) => {
-      if (url.endsWith('/v1/tx')) {
-        return new Response(JSON.stringify({ txid: childTxid }), { status: 200 });
+      if (url.endsWith('/tx')) {
+        return new Response(JSON.stringify({ txid: childTxid }), { status: 202 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
