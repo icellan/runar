@@ -1812,6 +1812,7 @@ module Runar
               data_outputs: data_outputs,
               extra_contract_utxos: extra_contract_utxos,
               resolved_per_input_args: resolved_per_input_args,
+              sig_indices: sig_indices,
               prevouts_indices: prevouts_indices,
               intent_witness_hex: intent_witness_hex,
               locktime: locktime,
@@ -1939,6 +1940,7 @@ module Runar
         data_outputs: [],
         extra_contract_utxos: [],
         resolved_per_input_args: [],
+        sig_indices: [],
         prevouts_indices: [],
         intent_witness_hex: '',
         locktime: nil,
@@ -2030,8 +2032,10 @@ module Runar
             trim_pos = (code_sep_idx + 1) * 2
             sig_subscript = extra_utxo.script[trim_pos..] if trim_pos <= extra_utxo.script.length
           end
-          args_for.each_with_index do |arg, j|
-            args_for[j] = signer.sign(signed_tx, i + 1, sig_subscript, extra_utxo.satoshis) if arg == '00' * 72
+          # N-296: every auto-sign Sig slot is signed for THIS input, even when
+          # the per-input args carry an explicit value there (TS reference).
+          sig_indices.each do |idx|
+            args_for[idx] = signer.sign(signed_tx, i + 1, sig_subscript, extra_utxo.satoshis)
           end
 
           extra_unlock, = build_stateful_unlock(

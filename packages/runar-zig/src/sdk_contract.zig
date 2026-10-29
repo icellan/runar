@@ -2951,6 +2951,10 @@ pub const RunarContract = struct {
                     const overrides = aia[ei];
                     for (overrides, 0..) |ov, oi| {
                         if (oi >= per_input_args.len) break;
+                        // N-296: an auto-sign Sig slot (the primary's sig_indices)
+                        // was signed for THIS input above and stays signed; an
+                        // explicit caller value there is overwritten (TS reference).
+                        if (std.mem.indexOfScalar(usize, ctx.sig_indices, oi) != null) continue;
                         // `.int = 0` means "auto-resolve" for Sig/ByteString
                         // (same convention as the primary args). For other
                         // types, a literal 0 user value is taken at face.

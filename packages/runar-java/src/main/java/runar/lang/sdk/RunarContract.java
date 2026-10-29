@@ -1383,7 +1383,10 @@ public final class RunarContract {
             List<Integer> sigs = new ArrayList<>();
             for (int j = 0; j < userParamsForExtra.size(); j++) {
                 RunarArtifact.ABIParam p = userParamsForExtra.get(j);
-                if ("Sig".equals(p.type()) && r.get(j) == null) {
+                // N-296: an auto-sign slot (one of the primary's sigIndices) is
+                // signed for THIS input even when the per-input args carry an
+                // explicit value there (TS reference overwrites it).
+                if ("Sig".equals(p.type()) && (r.get(j) == null || sigIndices.contains(j))) {
                     sigs.add(j);
                     r.set(j, "00".repeat(72));
                 } else if ("PubKey".equals(p.type()) && r.get(j) == null) {
