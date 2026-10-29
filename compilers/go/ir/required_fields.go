@@ -382,10 +382,7 @@ func assertRequiredIRFields(data []byte) error {
 			return err
 		}
 	}
-	if err := assertIRIdentifiers(program); err != nil {
-		return err
-	}
-	return assertNoOutputHelperCalls(program)
+	return assertIRIdentifiers(program)
 }
 
 // N-207: the declared identifiers are non-empty, and a method's parameter
@@ -471,77 +468,6 @@ func assertIRIdentifiers(program irObj) error {
 			seen[name] = j
 		}
 		if err := irNonEmptyBindingNames(method, "body", mp); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// N-094: a method_call to a PRIVATE method that emits outputs is refused at
-// load time. The frontends always inline an output-emitting private helper, so
-// such a call only arrives through hand-written --ir; stack lowering cannot
-// resolve the helper's add_output outside its caller's frame and used to fail
-// deep inside ("value '_codePart' not found on stack"). Shared verbatim with
-// the other six tiers, pinned by
-// conformance/negatives/n094-ir-output-helper-call-parity.test.ts:
-//
-//	IR validation: private method '<m>' emits outputs and must be inlined; --ir method_call to it is not supported
-func irEmitsOutputs(bindings []any) bool {
-	for _, b := range bindings {
-		v := b.(irObj)["value"].(irObj)
-		switch v["kind"] {
-		case "add_output", "add_raw_output", "add_data_output":
-			return true
-		case "if":
-			if irEmitsOutputs(v["then"].([]any)) || irEmitsOutputs(v["else"].([]any)) {
-				return true
-			}
-		case "loop":
-			if irEmitsOutputs(v["body"].([]any)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func irRefuseOutputHelperCalls(bindings []any, helpers map[string]bool) error {
-	for _, b := range bindings {
-		v := b.(irObj)["value"].(irObj)
-		switch v["kind"] {
-		case "method_call":
-			if name := v["method"].(string); helpers[name] {
-				return fmt.Errorf("IR validation: private method '%s' emits outputs and must be inlined; --ir method_call to it is not supported", name)
-			}
-		case "if":
-			for _, arm := range []string{"then", "else"} {
-				if err := irRefuseOutputHelperCalls(v[arm].([]any), helpers); err != nil {
-					return err
-				}
-			}
-		case "loop":
-			if err := irRefuseOutputHelperCalls(v["body"].([]any), helpers); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func assertNoOutputHelperCalls(program irObj) error {
-	methods := program["methods"].([]any)
-	helpers := map[string]bool{}
-	for _, m := range methods {
-		method := m.(irObj)
-		if !method["isPublic"].(bool) && irEmitsOutputs(method["body"].([]any)) {
-			helpers[method["name"].(string)] = true
-		}
-	}
-	if len(helpers) == 0 {
-		return nil
-	}
-	for _, m := range methods {
-		if err := irRefuseOutputHelperCalls(m.(irObj)["body"].([]any), helpers); err != nil {
 			return err
 		}
 	}

@@ -303,59 +303,6 @@ export function assertRequiredIrFields(root: unknown): void {
     checkSighashFlags(method, 'body', mp, method.name as string, method.isPublic as boolean, declared);
   });
   assertIrIdentifiers(program);
-  assertNoOutputHelperCalls(program);
-}
-
-/**
- * N-094: a `method_call` to a PRIVATE method that emits outputs is refused at
- * load time. The frontends always inline an output-emitting private helper, so
- * such a call only arrives through hand-written `--ir`; stack lowering cannot
- * resolve the helper's `add_output` outside its caller's frame and used to
- * fail deep inside ("value '_codePart' not found on stack"). Runs after the
- * type walk, so every field read here has the right JSON type. Shared verbatim
- * with the other six tiers and pinned by
- * `conformance/negatives/n094-ir-output-helper-call-parity.test.ts`:
- *   IR validation: private method '<m>' emits outputs and must be inlined;
- *   --ir method_call to it is not supported
- */
-const OUTPUT_KINDS = ['add_output', 'add_raw_output', 'add_data_output'];
-
-function emitsOutputs(bindings: Obj[]): boolean {
-  return bindings.some((b) => {
-    const v = b.value as Obj;
-    if (OUTPUT_KINDS.includes(v.kind as string)) return true;
-    if (v.kind === 'if') return emitsOutputs(v.then as Obj[]) || emitsOutputs(v.else as Obj[]);
-    if (v.kind === 'loop') return emitsOutputs(v.body as Obj[]);
-    return false;
-  });
-}
-
-function refuseOutputHelperCalls(bindings: Obj[], helpers: Set<string>): void {
-  for (const b of bindings) {
-    const v = b.value as Obj;
-    if (v.kind === 'method_call' && helpers.has(v.method as string)) {
-      throw new Error(
-        `IR validation: private method '${v.method as string}' emits outputs and must be inlined; ` +
-          '--ir method_call to it is not supported',
-      );
-    }
-    if (v.kind === 'if') {
-      refuseOutputHelperCalls(v.then as Obj[], helpers);
-      refuseOutputHelperCalls(v.else as Obj[], helpers);
-    } else if (v.kind === 'loop') {
-      refuseOutputHelperCalls(v.body as Obj[], helpers);
-    }
-  }
-}
-
-function assertNoOutputHelperCalls(program: Obj): void {
-  const methods = program.methods as Obj[];
-  const helpers = new Set<string>();
-  for (const m of methods) {
-    if (m.isPublic === false && emitsOutputs(m.body as Obj[])) helpers.add(m.name as string);
-  }
-  if (helpers.size === 0) return;
-  for (const m of methods) refuseOutputHelperCalls(m.body as Obj[], helpers);
 }
 
 /**

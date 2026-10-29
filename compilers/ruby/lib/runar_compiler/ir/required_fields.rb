@@ -259,7 +259,6 @@ module RunarCompiler
           check_sighash_flags(method, "body", mp, method["name"], method["isPublic"], declared)
         end
         assert_identifiers!(program)
-        assert_no_output_helper_calls!(program)
       end
 
       # N-207: the declared identifiers are non-empty, and a method's parameter
@@ -320,53 +319,6 @@ module RunarCompiler
           end
           non_empty_binding_names(method, "body", mp)
         end
-      end
-
-      # N-094: a method_call to a PRIVATE method that emits outputs is refused
-      # at load time. The frontends always inline an output-emitting private
-      # helper, so such a call only arrives through hand-written --ir; stack
-      # lowering cannot resolve the helper's add_output outside its caller's
-      # frame and used to fail deep inside ("value '_codePart' not found on
-      # stack"). Shared verbatim with the other six tiers, pinned by
-      # conformance/negatives/n094-ir-output-helper-call-parity.test.ts:
-      #
-      #   IR validation: private method '<m>' emits outputs and must be inlined; --ir method_call to it is not supported
-      OUTPUT_KINDS = %w[add_output add_raw_output add_data_output].freeze
-
-      def emits_outputs?(bindings)
-        bindings.any? do |b|
-          v = b["value"]
-          OUTPUT_KINDS.include?(v["kind"]) ||
-            (v["kind"] == "if" && (emits_outputs?(v["then"]) || emits_outputs?(v["else"]))) ||
-            (v["kind"] == "loop" && emits_outputs?(v["body"]))
-        end
-      end
-
-      def refuse_output_helper_calls(bindings, helpers)
-        bindings.each do |b|
-          v = b["value"]
-          case v["kind"]
-          when "method_call"
-            if helpers.include?(v["method"])
-              raise ArgumentError,
-                    "IR validation: private method '#{v['method']}' emits outputs and must be inlined; " \
-                    "--ir method_call to it is not supported"
-            end
-          when "if"
-            refuse_output_helper_calls(v["then"], helpers)
-            refuse_output_helper_calls(v["else"], helpers)
-          when "loop"
-            refuse_output_helper_calls(v["body"], helpers)
-          end
-        end
-      end
-
-      def assert_no_output_helper_calls!(program)
-        helpers = program["methods"].select { |m| m["isPublic"] == false && emits_outputs?(m["body"]) }
-                                    .map { |m| m["name"] }
-        return if helpers.empty?
-
-        program["methods"].each { |m| refuse_output_helper_calls(m["body"], helpers) }
       end
     end
   end
