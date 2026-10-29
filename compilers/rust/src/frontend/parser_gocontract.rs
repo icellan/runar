@@ -326,6 +326,9 @@ struct Token {
     typ: TokenType,
     line: usize,
     col: usize,
+    /// N-435: double-quoted `StringLit` only -- the Go string's bytes (literal
+    /// text UTF-8 encoded, a `\xNN` escape the single byte NN).
+    raw: Option<Vec<u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -451,13 +454,14 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
             } else {
                 errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
-            tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
+            tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c, raw: None });
             continue;
         }
 
         // Double-quoted string
         if ch == '"' {
             let mut val = String::new();
+            let mut raw: Vec<u8> = Vec::new();
             pos += 1;
             col += 1;
             // F-011: a Go interpreted string cannot span lines; one that
@@ -471,12 +475,12 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                     pos += 1;
                     col += 1;
                     match chars[pos] {
-                        'n' => val.push('\n'),
-                        't' => val.push('\t'),
-                        'r' => val.push('\r'),
-                        '0' => val.push('\0'),
-                        '\\' => val.push('\\'),
-                        '"' => val.push('"'),
+                        'n' => { val.push('\n'); raw.push('\n' as u8); },
+                        't' => { val.push('\t'); raw.push('\t' as u8); },
+                        'r' => { val.push('\r'); raw.push('\r' as u8); },
+                        '0' => { val.push('\0'); raw.push('\0' as u8); },
+                        '\\' => { val.push('\\'); raw.push('\\' as u8); },
+                        '"' => { val.push('"'); raw.push('"' as u8); },
                         'x' if pos + 2 < chars.len() => {
                             let h1 = chars[pos + 1];
                             let h2 = chars[pos + 2];
@@ -484,21 +488,30 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                                 let hex_str: String = [h1, h2].iter().collect();
                                 if let Ok(b) = u8::from_str_radix(&hex_str, 16) {
                                     val.push(b as char);
+                                    raw.push(b);
                                     pos += 2;
                                     col += 2;
                                 } else {
                                     val.push('\\');
                                     val.push('x');
+                                    raw.extend_from_slice(b"\\x");
                                 }
                             } else {
                                 val.push('\\');
                                 val.push('x');
+                                raw.extend_from_slice(b"\\x");
                             }
                         }
-                        c => { val.push('\\'); val.push(c); }
+                        c => {
+                            val.push('\\');
+                            val.push(c);
+                            raw.push(b'\\');
+                            raw.extend_from_slice(c.to_string().as_bytes());
+                        }
                     }
                 } else {
                     val.push(chars[pos]);
+                    raw.extend_from_slice(chars[pos].to_string().as_bytes());
                 }
                 pos += 1;
                 col += 1;
@@ -509,7 +522,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
             } else {
                 errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
-            tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
+            tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c, raw: Some(raw) });
             continue;
         }
 
@@ -522,7 +535,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                 _ => None,
             };
             if let Some(t) = tok {
-                tokens.push(Token { typ: t, line: l, col: c });
+                tokens.push(Token { typ: t, line: l, col: c, raw: None });
                 pos += 3;
                 col += 3;
                 continue;
@@ -555,7 +568,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                 _ => None,
             };
             if let Some(t) = tok {
-                tokens.push(Token { typ: t, line: l, col: c });
+                tokens.push(Token { typ: t, line: l, col: c, raw: None });
                 pos += 2;
                 col += 2;
                 continue;
@@ -590,7 +603,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
             _ => None,
         };
         if let Some(t) = single {
-            tokens.push(Token { typ: t, line: l, col: c });
+            tokens.push(Token { typ: t, line: l, col: c, raw: None });
             pos += 1;
             col += 1;
             continue;
@@ -610,7 +623,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                     BigInt::from(0)
                 }
             };
-            tokens.push(Token { typ: TokenType::Number(n), line: l, col: c });
+            tokens.push(Token { typ: TokenType::Number(n), line: l, col: c, raw: None });
             continue;
         }
 
@@ -640,7 +653,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                 "false" => TokenType::False,
                 _ => TokenType::Ident(val),
             };
-            tokens.push(Token { typ: tok, line: l, col: c });
+            tokens.push(Token { typ: tok, line: l, col: c, raw: None });
             continue;
         }
 
@@ -651,7 +664,7 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
         col += 1;
     }
 
-    tokens.push(Token { typ: TokenType::Eof, line, col });
+    tokens.push(Token { typ: TokenType::Eof, line, col, raw: None });
     tokens
 }
 
@@ -2485,11 +2498,14 @@ impl<'a> GoParser<'a> {
                         let saved = self.pos;
                         self.advance(); // consume '('
                         if let TokenType::StringLit(s) = self.current().typ.clone() {
+                            let raw = self.current().raw.clone();
                             self.advance(); // consume string
                             if matches!(self.current().typ, TokenType::RParen) {
                                 self.advance(); // consume ')'
-                                // Hex-encode the raw bytes of the literal.
-                                let hex_str: String = s.bytes().map(|b| format!("{:02x}", b)).collect();
+                                // Hex-encode the Go string's bytes (N-435: UTF-8 for
+                                // literal text, the raw byte for a \xNN escape).
+                                let bytes = raw.unwrap_or_else(|| s.clone().into_bytes());
+                                let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                                 return Some(Expression::ByteStringLiteral { value: hex_str });
                             }
                         }

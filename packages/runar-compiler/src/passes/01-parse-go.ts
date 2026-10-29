@@ -61,6 +61,8 @@ type TokenType =
 interface GoToken extends Token {
   type: string; // TokenType (widened for ParserCore compatibility)
   value: string;
+  /** 'string' tokens only (N-435): the Go string's bytes, one per char. */
+  bytes?: string;
   line: number;
   column: number;
 }
@@ -192,6 +194,17 @@ function tokenize(
     // String literal
     if (ch === '"') {
       let val = '';
+      // N-435: `raw` is the Go string's BYTES, one byte per char (latin-1
+      // style): literal source text is UTF-8 encoded (`lit` buffers it until
+      // an escape byte interrupts), a `\xNN` escape is the single byte NN.
+      // `val` keeps its historical one-char-per-escape/UTF-16 shape for every
+      // other consumer.
+      let raw = '';
+      let lit = '';
+      const flushLit = () => {
+        for (const b of new TextEncoder().encode(lit)) raw += String.fromCharCode(b);
+        lit = '';
+      };
       advance(); // consume opening quote
       // F-011: a Go interpreted string cannot span lines; one that reaches a
       // line break (escaped or not) or end of file is unterminated.
@@ -200,12 +213,12 @@ function tokenize(
           advance(); // skip backslash
           const esc = peek();
           if (esc === '\n' || esc === '') break;
-          if (esc === 'n') { val += '\n'; advance(); }
-          else if (esc === 't') { val += '\t'; advance(); }
-          else if (esc === 'r') { val += '\r'; advance(); }
-          else if (esc === '0') { val += '\0'; advance(); }
-          else if (esc === '\\') { val += '\\'; advance(); }
-          else if (esc === '"') { val += '"'; advance(); }
+          if (esc === 'n') { val += '\n'; lit += '\n'; advance(); }
+          else if (esc === 't') { val += '\t'; lit += '\t'; advance(); }
+          else if (esc === 'r') { val += '\r'; lit += '\r'; advance(); }
+          else if (esc === '0') { val += '\0'; lit += '\0'; advance(); }
+          else if (esc === '\\') { val += '\\'; lit += '\\'; advance(); }
+          else if (esc === '"') { val += '"'; lit += '"'; advance(); }
           else if (esc === 'x') {
             advance(); // consume 'x'
             const h1 = peek();
@@ -213,18 +226,25 @@ function tokenize(
             if (/[0-9a-fA-F]/.test(h1) && /[0-9a-fA-F]/.test(h2)) {
               advance(); advance();
               val += String.fromCharCode(parseInt(h1 + h2, 16));
+              flushLit();
+              raw += String.fromCharCode(parseInt(h1 + h2, 16));
             } else {
               val += '\\x';
+              lit += '\\x';
             }
           }
-          else { val += advance(); }
+          else { const u = advance(); val += u; lit += u; }
         } else {
-          val += advance();
+          const u = advance();
+          val += u;
+          lit += u;
         }
       }
       if (peek() === '"') advance(); // consume closing quote
       else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
+      flushLit();
       add('string', val, l, c);
+      tokens[tokens.length - 1]!.bytes = raw;
       continue;
     }
 
@@ -1465,11 +1485,12 @@ class GoParser extends ParserCore<GoToken> {
           this.advance(); // '('
           const strTok = this.advance(); // consume string
           this.advance(); // ')'
-          // Hex-encode the raw bytes of the string literal (tokenizer has
-          // already decoded Go escape sequences like \x00 into real bytes).
+          // Hex-encode the Go string's bytes (N-435: UTF-8 for literal text,
+          // the raw byte for a \xNN escape — what `[]byte(s)` yields in Go).
+          const bytes = (strTok as GoToken).bytes ?? strTok.value;
           let hex = '';
-          for (let i = 0; i < strTok.value.length; i++) {
-            hex += strTok.value.charCodeAt(i).toString(16).padStart(2, '0');
+          for (let i = 0; i < bytes.length; i++) {
+            hex += bytes.charCodeAt(i).toString(16).padStart(2, '0');
           }
           return { kind: 'bytestring_literal', value: hex };
         }

@@ -172,6 +172,8 @@ public final class GoParser {
         final String value;
         final int line;
         final int col;
+        /** Tok.STRING only (N-435): the Go string's bytes, one per char (latin-1 style). */
+        String raw;
 
         Token(Tok kind, String value, int line, int col) {
             this.kind = kind;
@@ -516,7 +518,9 @@ public final class GoParser {
                 } else {
                     lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
-                tokens.add(new Token(Tok.STRING, processGoStringEscapes(val), line, startCol));
+                Token stringTok = new Token(Tok.STRING, processGoStringEscapes(val, false), line, startCol);
+                stringTok.raw = processGoStringEscapes(val, true);
+                tokens.add(stringTok);
                 continue;
             }
 
@@ -644,7 +648,13 @@ public final class GoParser {
         }
     }
 
-    private static String processGoStringEscapes(String s) {
+    /**
+     * N-435: with {@code asBytes} the result is the Go string's BYTES, one
+     * latin-1 char per byte: literal source text is UTF-8 encoded, a
+     * {@code \xNN} escape is the single byte NN (what {@code []byte(s)} yields
+     * in Go).
+     */
+    private static String processGoStringEscapes(String s, boolean asBytes) {
         StringBuilder out = new StringBuilder(s.length());
         int i = 0;
         while (i < s.length()) {
@@ -675,6 +685,12 @@ public final class GoParser {
                         out.append(c);
                         i++;
                 }
+            } else if (asBytes && c >= 0x80) {
+                int cp = s.codePointAt(i);
+                for (byte bt : new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+                    out.append((char) (bt & 0xff));
+                }
+                i += Character.charCount(cp);
             } else {
                 out.append(c);
                 i++;
@@ -1931,7 +1947,7 @@ public final class GoParser {
                             Token strTok = advance();
                             if (check(Tok.RPAREN)) {
                                 advance();
-                                String hex = bytesToHex(strTok.value);
+                                String hex = bytesToHex(strTok.raw != null ? strTok.raw : strTok.value);
                                 return new ByteStringLiteral(hex);
                             }
                         }

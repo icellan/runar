@@ -88,13 +88,15 @@ TOK_BACKTICK_STRING = 44
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "raw")
 
     def __init__(self, kind: int, value: str, line: int, col: int):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # N-435: TOK_STRING only -- the Go string's bytes, one per latin-1 char.
+        self.raw = None
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +474,9 @@ def _tokenize_go(
                 lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             # Process escape sequences to get the raw string value
             processed = _process_go_string_escapes(val)
-            tokens.append(Token(TOK_STRING, processed, line, start_col))
+            string_tok = Token(TOK_STRING, processed, line, start_col)
+            string_tok.raw = _process_go_string_escapes(val, as_bytes=True)
+            tokens.append(string_tok)
             continue
 
         # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
@@ -564,8 +568,16 @@ def _tokenize_go(
     return tokens
 
 
-def _process_go_string_escapes(s: str) -> str:
-    """Process Go string escape sequences and return the literal value."""
+def _process_go_string_escapes(s: str, as_bytes: bool = False) -> str:
+    """Process Go string escape sequences and return the literal value.
+
+    N-435: with ``as_bytes`` the result is the Go string's BYTES, one latin-1
+    char per byte -- literal source text is UTF-8 encoded, a ``\\xNN`` escape is
+    the single byte NN (what ``[]byte(s)`` yields in Go).
+    """
+    def lit(ch: str) -> str:
+        return ch.encode("utf-8").decode("latin-1") if as_bytes else ch
+
     result: list[str] = []
     i = 0
     while i < len(s):
@@ -594,10 +606,10 @@ def _process_go_string_escapes(s: str) -> str:
                     result.append(s[i:i + 4])
                 i += 4
             else:
-                result.append(s[i])
+                result.append(lit(s[i]))
                 i += 1
         else:
-            result.append(s[i])
+            result.append(lit(s[i]))
             i += 1
     return "".join(result)
 
@@ -1905,8 +1917,8 @@ class _GoParser:
                         str_tok = self.advance()
                         if self.check(TOK_RPAREN):
                             self.advance()  # consume ')'
-                            # Hex-encode raw bytes of the string literal.
-                            hex_str = str_tok.value.encode("latin-1", errors="replace").hex()
+                            # Hex-encode the Go string's bytes (N-435).
+                            hex_str = (str_tok.raw if str_tok.raw is not None else str_tok.value).encode("latin-1", errors="replace").hex()
                             return ByteStringLiteral(value=hex_str)
                     # Fall back: restore and parse as args for type-conversion unwrap.
                     self.pos = saved_pos
