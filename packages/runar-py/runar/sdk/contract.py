@@ -28,7 +28,7 @@ from runar.sdk.state import (
     encode_push_data, check_fixed_width_value,
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
-from runar.sdk.oppushtx import compute_op_push_tx, compute_op_push_tx_preimage
+from runar.sdk.oppushtx import compute_op_push_tx_preimage
 from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs, _IntentCtx
 from runar.sdk.ordinals import (
     Inscription, build_inscription_envelope, parse_inscription_envelope,
@@ -1307,7 +1307,6 @@ class RunarContract:
                 unlock_script = encode_push_data(sig) + encode_push_data(pub_key)
                 signed_tx = insert_unlocking_script(signed_tx, i, unlock_script)
 
-        final_op_push_tx_sig = ''
         final_preimage = ''
 
         if is_stateful:
@@ -1436,26 +1435,25 @@ class RunarContract:
 
         elif needs_op_push_tx or sig_indices:
             # Stateless: keep placeholder sigs, compute OP_PUSH_TX
+            # N-433: preimage only -- _build_stateful_prefix discards the signature.
             if needs_op_push_tx:
-                sig_hex, preimage_hex = compute_op_push_tx(
+                preimage_hex = compute_op_push_tx_preimage(
                     signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                     method_sig_hash_type,
                 )
-                final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
             # Don't sign Sig params -- keep placeholders
             real_unlocking_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
-            if needs_op_push_tx and final_op_push_tx_sig:
-                real_unlocking_script = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlocking_script
+            if needs_op_push_tx:
+                real_unlocking_script = self._build_stateful_prefix('', False) + real_unlocking_script
                 tmp_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
-                final_sig, final_pre = compute_op_push_tx(
+                final_pre = compute_op_push_tx_preimage(
                     tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                     method_sig_hash_type,
                 )
                 resolved_args[preimage_index] = final_pre
-                final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
-                real_unlocking_script = self._build_stateful_prefix(final_sig, False) + \
+                real_unlocking_script = self._build_stateful_prefix('', False) + \
                     self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
                 # N-258: a zero-mutable-field StatefulSmartContract merge. Each
@@ -1475,7 +1473,7 @@ class RunarContract:
                         else resolved_args
                     )
                     input_args = list(base)
-                    extra_op_sig, extra_pre = compute_op_push_tx(
+                    extra_pre = compute_op_push_tx_preimage(
                         tx, i + 1, mu.script, mu.satoshis, code_sep_idx, method_sig_hash_type,
                     )
                     sig_subscript = mu.script
@@ -1486,7 +1484,7 @@ class RunarContract:
                     for idx in sig_indices:
                         input_args[idx] = signer.sign(tx, i + 1, sig_subscript, mu.satoshis)
                     input_args[preimage_index] = extra_pre
-                    return self._build_stateful_prefix(extra_op_sig, False) + \
+                    return self._build_stateful_prefix('', False) + \
                         self.build_unlocking_script(method_name, input_args, witness_hex)
 
                 extra_real_unlocks = [
@@ -1541,14 +1539,13 @@ class RunarContract:
                 # commits to — recompute it against the REBUILT tx before
                 # embedding it in the final unlock.
                 signed_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
-                rebuilt_sig, rebuilt_pre = compute_op_push_tx(
+                rebuilt_pre = compute_op_push_tx_preimage(
                     signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                     method_sig_hash_type,
                 )
                 resolved_args[preimage_index] = rebuilt_pre
-                final_op_push_tx_sig = rebuilt_sig
                 final_preimage = rebuilt_pre
-                real_unlocking_script = self._build_stateful_prefix(rebuilt_sig, False) + \
+                real_unlocking_script = self._build_stateful_prefix('', False) + \
                     self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
                 # N-258: re-derive every extra input's preimage and Sig against
@@ -2041,7 +2038,6 @@ class RunarContract:
             return tx
 
         term_tx = build_terminal_tx(term_unlock_script)
-        final_op_push_tx_sig = ''
         final_preimage = ''
 
         term_code_sep_idx = self._get_code_sep_index(self._find_method_index(method_name))
@@ -2082,27 +2078,26 @@ class RunarContract:
 
         elif needs_op_push_tx or sig_indices:
             # Stateless terminal -- keep placeholder sigs
+            # N-433: preimage only -- _build_stateful_prefix discards the signature.
             if needs_op_push_tx:
-                sig_hex, preimage_hex = compute_op_push_tx(
+                preimage_hex = compute_op_push_tx_preimage(
                     term_tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx,
                     term_sig_hash_type,
                 )
-                final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
 
             # Don't sign Sig params -- keep 72-byte placeholders
             real_unlock = self.build_unlocking_script(method_name, resolved_args, witness_hex)
-            if needs_op_push_tx and final_op_push_tx_sig:
-                real_unlock = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlock
+            if needs_op_push_tx:
+                real_unlock = self._build_stateful_prefix('', False) + real_unlock
                 tmp_tx = insert_unlocking_script(term_tx, 0, real_unlock)
-                final_sig, final_pre = compute_op_push_tx(
+                final_pre = compute_op_push_tx_preimage(
                     tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx,
                     term_sig_hash_type,
                 )
                 resolved_args[preimage_index] = final_pre
-                final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
-                real_unlock = self._build_stateful_prefix(final_sig, False) + \
+                real_unlock = self._build_stateful_prefix('', False) + \
                     self.build_unlocking_script(method_name, resolved_args, witness_hex)
             term_tx = insert_unlocking_script(term_tx, 0, real_unlock)
             if not final_preimage and needs_op_push_tx:

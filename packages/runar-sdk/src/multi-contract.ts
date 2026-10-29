@@ -222,7 +222,7 @@ export async function assembleMultiContractCall(
     // OP_PUSH_TX preimage against THIS artifact's codesep layout. BUG-100: the
     // signature is derived on-chain from the preimage, so only the preimage is
     // pushed (buildStatefulPrefix pushes no signature).
-    const { preimageHex } = inp.contract.computeOpPushTxWithCodeSep(
+    const { preimageHex } = inp.contract.computeOpPushTxPreimageWithCodeSep(
       skeleton, i, utxo.script, utxo.satoshis, methodIndex,
     );
 

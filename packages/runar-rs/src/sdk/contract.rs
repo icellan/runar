@@ -7,7 +7,7 @@ use bsv::transaction::Transaction as BsvTransaction;
 use bsv::transaction::beef::Beef;
 use super::types::*;
 use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return, flatten_fixed_array_state, regroup_fixed_array_state};
-use super::oppushtx::{compute_op_push_tx_preimage_with_code_sep_sighash, compute_op_push_tx_with_code_sep_sighash};
+use super::oppushtx::compute_op_push_tx_preimage_with_code_sep_sighash;
 use super::deployment::{
     build_deploy_transaction, select_utxos,
     build_p2pkh_script_from_address, encode_varint,
@@ -1559,7 +1559,6 @@ impl RunarContract {
             }
         }
 
-        let mut final_op_push_tx_sig = String::new();
         let mut final_preimage = String::new();
 
         let method_index = self.find_method_index(method_name);
@@ -1752,32 +1751,31 @@ impl RunarContract {
             }
         } else if needs_op_push_tx || !sig_indices.is_empty() {
             // Stateless: keep placeholder sigs, compute OP_PUSH_TX
+            // N-433: preimage only -- build_stateful_prefix ignores the signature.
             if needs_op_push_tx {
-                let (sig_hex, preimage_hex) = compute_op_push_tx_with_code_sep_sighash(
+                let preimage_hex = compute_op_push_tx_preimage_with_code_sep_sighash(
                     &signed_tx, 0, &current_utxo.script, current_utxo.satoshis, code_sep_idx, sig_hash_type,
                 )?;
-                final_op_push_tx_sig = sig_hex;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(preimage_hex);
                 }
             }
             // Don't sign Sig params — keep placeholders
             let mut real_unlocking_script = self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?;
-            if needs_op_push_tx && !final_op_push_tx_sig.is_empty() {
-                real_unlocking_script = format!("{}{}", self.build_stateful_prefix(&final_op_push_tx_sig, false), real_unlocking_script);
+            if needs_op_push_tx {
+                real_unlocking_script = format!("{}{}", self.build_stateful_prefix("", false), real_unlocking_script);
 
                 let tmp_tx = insert_unlocking_script(&signed_tx, 0, &real_unlocking_script)?;
-                let (final_sig, final_pre) = compute_op_push_tx_with_code_sep_sighash(
+                let final_pre = compute_op_push_tx_preimage_with_code_sep_sighash(
                     &tmp_tx, 0, &current_utxo.script, current_utxo.satoshis, code_sep_idx, sig_hash_type,
                 )?;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(final_pre.clone());
                 }
-                final_op_push_tx_sig = final_sig;
                 final_preimage = final_pre;
                 real_unlocking_script = format!(
                     "{}{}",
-                    self.build_stateful_prefix(&final_op_push_tx_sig, false),
+                    self.build_stateful_prefix("", false),
                     self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?
                 );
 
@@ -1799,7 +1797,7 @@ impl RunarContract {
                 let build_extra_unlock = |tx: &str, i: usize| -> Result<String, String> {
                     let mu = &extra_contract_utxos[i];
                     let mut input_args = extra_base_args[i].clone();
-                    let (extra_op_sig, extra_pre) = compute_op_push_tx_with_code_sep_sighash(
+                    let extra_pre = compute_op_push_tx_preimage_with_code_sep_sighash(
                         tx, i + 1, &mu.script, mu.satoshis, code_sep_idx, sig_hash_type,
                     )?;
                     let mut sig_subscript = mu.script.clone();
@@ -1817,7 +1815,7 @@ impl RunarContract {
                     }
                     Ok(format!(
                         "{}{}",
-                        self.build_stateful_prefix(&extra_op_sig, false),
+                        self.build_stateful_prefix("", false),
                         self.build_unlocking_script_with_witness(method_name, &input_args, &witness_hex)?
                     ))
                 };
@@ -1897,17 +1895,16 @@ impl RunarContract {
                 // commits to — recompute it against the REBUILT tx before
                 // embedding it in the final unlock.
                 signed_tx = insert_unlocking_script(&signed_tx, 0, &real_unlocking_script)?;
-                let (rebuilt_sig, rebuilt_pre) = compute_op_push_tx_with_code_sep_sighash(
+                let rebuilt_pre = compute_op_push_tx_preimage_with_code_sep_sighash(
                     &signed_tx, 0, &current_utxo.script, current_utxo.satoshis, code_sep_idx, sig_hash_type,
                 )?;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(rebuilt_pre.clone());
                 }
-                final_op_push_tx_sig = rebuilt_sig;
                 final_preimage = rebuilt_pre;
                 real_unlocking_script = format!(
                     "{}{}",
-                    self.build_stateful_prefix(&final_op_push_tx_sig, false),
+                    self.build_stateful_prefix("", false),
                     self.build_unlocking_script_with_witness(method_name, &resolved_args, &witness_hex)?
                 );
 
@@ -2233,7 +2230,6 @@ impl RunarContract {
         };
 
         let mut term_tx = build_terminal_tx(&term_unlock_script);
-        let mut final_op_push_tx_sig = String::new();
         let mut final_preimage = String::new();
 
         if is_stateful {
@@ -2275,31 +2271,30 @@ impl RunarContract {
             final_preimage = preimage;
         } else if needs_op_push_tx || !sig_indices.is_empty() {
             // Stateless terminal — keep placeholder sigs
+            // N-433: preimage only -- build_stateful_prefix ignores the signature.
             if needs_op_push_tx {
-                let (sig_hex, preimage_hex) = compute_op_push_tx_with_code_sep_sighash(
+                let preimage_hex = compute_op_push_tx_preimage_with_code_sep_sighash(
                     &term_tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx, term_sig_hash_type,
                 )?;
-                final_op_push_tx_sig = sig_hex;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(preimage_hex);
                 }
             }
             // Don't sign Sig params — keep 72-byte placeholders
             let mut real_unlock = self.build_unlocking_script_with_witness(method_name, resolved_args, witness_hex)?;
-            if needs_op_push_tx && !final_op_push_tx_sig.is_empty() {
-                real_unlock = format!("{}{}", self.build_stateful_prefix(&final_op_push_tx_sig, false), real_unlock);
+            if needs_op_push_tx {
+                real_unlock = format!("{}{}", self.build_stateful_prefix("", false), real_unlock);
                 let tmp_tx = insert_unlocking_script(&term_tx, 0, &real_unlock)?;
-                let (final_sig, final_pre) = compute_op_push_tx_with_code_sep_sighash(
+                let final_pre = compute_op_push_tx_preimage_with_code_sep_sighash(
                     &tmp_tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx, term_sig_hash_type,
                 )?;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(final_pre.clone());
                 }
-                final_op_push_tx_sig = final_sig;
                 final_preimage = final_pre;
                 real_unlock = format!(
                     "{}{}",
-                    self.build_stateful_prefix(&final_op_push_tx_sig, false),
+                    self.build_stateful_prefix("", false),
                     self.build_unlocking_script_with_witness(method_name, resolved_args, witness_hex)?
                 );
             }

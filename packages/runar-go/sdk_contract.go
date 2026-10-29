@@ -1566,7 +1566,6 @@ func (c *RunarContract) PrepareCall(
 		}
 	}
 
-	finalOpPushTxSig := ""
 	finalPreimage := ""
 	codeSepIdx := c.getCodeSepIndex(methodIndex)
 	// Issue #123: build every preimage on this path under the method's declared
@@ -1752,28 +1751,27 @@ func (c *RunarContract) PrepareCall(
 	} else if needsOpPushTx || len(sigIndices) > 0 {
 		// Stateless: keep placeholder sigs, compute OP_PUSH_TX
 		if needsOpPushTx {
-			opPushTxSig, preimage, ptxErr := ComputeOpPushTxWithSigHash(signedTx, 0,
+			// N-433: preimage only -- buildStatefulPrefix ignores the signature.
+			preimage, ptxErr := ComputeOpPushTxPreimageWithSigHash(signedTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, codeSepIdx, sigHashType)
 			if ptxErr != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall: OP_PUSH_TX: %w", ptxErr)
 			}
-			finalOpPushTxSig = hex.EncodeToString(opPushTxSig)
 			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
 		}
 		// Don't sign Sig params — keep placeholders
 		realUnlockingScript := groth16WAWitnessHex + c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
-		if needsOpPushTx && finalOpPushTxSig != "" {
-			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) + c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
+		if needsOpPushTx {
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix("", false) + c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 			tmpTx := InsertUnlockingScript(signedTx, 0, realUnlockingScript)
-			finalSig, finalPre, ptxErr := ComputeOpPushTxWithSigHash(tmpTx, 0,
+			finalPre, ptxErr := ComputeOpPushTxPreimageWithSigHash(tmpTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, codeSepIdx, sigHashType)
 			if ptxErr != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall: OP_PUSH_TX for rebuild: %w", ptxErr)
 			}
 			resolvedArgs[preimageIndex] = hex.EncodeToString(finalPre)
-			finalOpPushTxSig = hex.EncodeToString(finalSig)
 			finalPreimage = hex.EncodeToString(finalPre)
-			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix("", false) +
 				c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 
 			// N-258: a zero-mutable-field StatefulSmartContract merge. Each
@@ -1789,7 +1787,7 @@ func (c *RunarContract) PrepareCall(
 				mu := extraContractUtxos[i]
 				inputArgs := make([]interface{}, len(extraResolvedArgs[i]))
 				copy(inputArgs, extraResolvedArgs[i])
-				extraOpSig, extraPre, ptxErr := ComputeOpPushTxWithSigHash(txHex, i+1,
+				extraPre, ptxErr := ComputeOpPushTxPreimageWithSigHash(txHex, i+1,
 					mu.Script, mu.Satoshis, codeSepIdx, sigHashType)
 				if ptxErr != nil {
 					return "", fmt.Errorf("OP_PUSH_TX for input %d: %w", i+1, ptxErr)
@@ -1806,7 +1804,7 @@ func (c *RunarContract) PrepareCall(
 					inputArgs[idx] = realSig
 				}
 				inputArgs[preimageIndex] = hex.EncodeToString(extraPre)
-				return groth16WAWitnessHex + c.buildStatefulPrefix(hex.EncodeToString(extraOpSig), false) +
+				return groth16WAWitnessHex + c.buildStatefulPrefix("", false) +
 					c.buildUnlockingScriptWithWitness(methodName, inputArgs, witnessHex), nil
 			}
 			extraRealUnlocks := make([]string, len(extraContractUtxos))
@@ -1899,15 +1897,14 @@ func (c *RunarContract) PrepareCall(
 			// preimage byte length, so this does not reopen the sizing
 			// question above).
 			signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
-			rebuiltSig, rebuiltPre, ptxErr2 := ComputeOpPushTxWithSigHash(signedTx, 0,
+			rebuiltPre, ptxErr2 := ComputeOpPushTxPreimageWithSigHash(signedTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, codeSepIdx, sigHashType)
 			if ptxErr2 != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall: OP_PUSH_TX for N-227 rebuild: %w", ptxErr2)
 			}
 			resolvedArgs[preimageIndex] = hex.EncodeToString(rebuiltPre)
-			finalOpPushTxSig = hex.EncodeToString(rebuiltSig)
 			finalPreimage = hex.EncodeToString(rebuiltPre)
-			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix("", false) +
 				c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 
 			// N-258: re-derive every extra input's preimage and Sig against
@@ -2996,7 +2993,6 @@ func (c *RunarContract) prepareCallTerminal(
 
 	termTxObj := buildTerminalTx(termUnlockScript)
 	termTx := termTxObj.Hex()
-	finalOpPushTxSig := ""
 	finalPreimage := ""
 
 	termCodeSepIdx := c.getCodeSepIndex(c.findMethodIndex(methodName))
@@ -3047,28 +3043,27 @@ func (c *RunarContract) prepareCallTerminal(
 	} else if needsOpPushTx || len(sigIndices) > 0 {
 		// Stateless terminal — keep placeholder sigs
 		if needsOpPushTx {
-			opPushTxSig, preimage, ptxErr := ComputeOpPushTxWithSigHash(termTx, 0,
+			// N-433: preimage only -- buildStatefulPrefix ignores the signature.
+			preimage, ptxErr := ComputeOpPushTxPreimageWithSigHash(termTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, termCodeSepIdx, termSigHashType)
 			if ptxErr != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall terminal: OP_PUSH_TX: %w", ptxErr)
 			}
-			finalOpPushTxSig = hex.EncodeToString(opPushTxSig)
 			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
 		}
 		// Don't sign Sig params — keep 72-byte placeholders
 		realUnlock := c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
-		if needsOpPushTx && finalOpPushTxSig != "" {
-			realUnlock = c.buildStatefulPrefix(finalOpPushTxSig, false) + realUnlock
+		if needsOpPushTx {
+			realUnlock = c.buildStatefulPrefix("", false) + realUnlock
 			tmpTx := InsertUnlockingScript(termTx, 0, realUnlock)
-			finalSig, finalPre, ptxErr := ComputeOpPushTxWithSigHash(tmpTx, 0,
+			finalPre, ptxErr := ComputeOpPushTxPreimageWithSigHash(tmpTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, termCodeSepIdx, termSigHashType)
 			if ptxErr != nil {
 				return nil, fmt.Errorf("RunarContract.PrepareCall terminal: OP_PUSH_TX rebuild: %w", ptxErr)
 			}
 			resolvedArgs[preimageIndex] = hex.EncodeToString(finalPre)
-			finalOpPushTxSig = hex.EncodeToString(finalSig)
 			finalPreimage = hex.EncodeToString(finalPre)
-			realUnlock = c.buildStatefulPrefix(finalOpPushTxSig, false) +
+			realUnlock = c.buildStatefulPrefix("", false) +
 				c.buildUnlockingScriptWithWitness(methodName, resolvedArgs, witnessHex)
 		}
 		termTx = InsertUnlockingScript(termTx, 0, realUnlock)

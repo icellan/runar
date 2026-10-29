@@ -842,7 +842,7 @@ module Runar
         p2pkh_start_idx = 1 + extra_contract_utxos.length
         signed_tx = sign_funding_inputs(tx_hex, additional_utxos, funding_signer, p2pkh_start_idx)
 
-        signed_tx, change_amount, final_op_push_tx_sig, final_preimage =
+        signed_tx, change_amount, final_preimage =
           compute_preimage_passes(
             signed_tx, contract_utxo, resolved_args, sig_indices,
             method_name, method_needs_change, method_needs_new_amount,
@@ -865,7 +865,7 @@ module Runar
         sighash = compute_bip143_sighash(final_preimage)
 
         build_prepared_call(
-          sighash, final_preimage, final_op_push_tx_sig, signed_tx,
+          sighash, final_preimage, signed_tx,
           sig_indices, method_name, resolved_args, method_selector_hex,
           is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
           change_amount, method_needs_new_amount, new_satoshis, preimage_index,
@@ -1428,7 +1428,6 @@ module Runar
         end
 
         term_tx              = build_terminal_tx.call(term_unlock_script)
-        final_op_push_tx_sig = ''
         final_preimage       = ''
 
         if is_stateful
@@ -1463,27 +1462,26 @@ module Runar
           final_preimage       = preimage
 
         elsif needs_op_push_tx || !sig_indices.empty?
+          # N-433: preimage only -- build_stateful_prefix discards the signature.
           if needs_op_push_tx
-            sig_hex, preimage_hex = SDK.compute_op_push_tx(
+            preimage_hex = SDK.compute_op_push_tx_preimage(
               term_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
               resolve_sighash_type(method_name)
             )
-            final_op_push_tx_sig          = sig_hex
             resolved_args[preimage_index] = preimage_hex
           end
 
           real_unlock = build_unlocking_script(method_name, resolved_args, intent_witness_hex)
-          if needs_op_push_tx && !final_op_push_tx_sig.empty?
-            real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) + real_unlock
+          if needs_op_push_tx
+            real_unlock = build_stateful_prefix('', false) + real_unlock
             tmp_tx      = SDK.insert_unlocking_script(term_tx, 0, real_unlock)
-            final_sig, final_pre = SDK.compute_op_push_tx(
+            final_pre = SDK.compute_op_push_tx_preimage(
               tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
               resolve_sighash_type(method_name)
             )
             resolved_args[preimage_index] = final_pre
-            final_op_push_tx_sig          = final_sig
             final_preimage                = final_pre
-            real_unlock = build_stateful_prefix(final_sig, false) +
+            real_unlock = build_stateful_prefix('', false) +
                           build_unlocking_script(method_name, resolved_args, intent_witness_hex)
           end
           term_tx = SDK.insert_unlocking_script(term_tx, 0, real_unlock)
@@ -1797,8 +1795,7 @@ module Runar
         funding_signer: nil,
         method_uses_code_part: nil
       )
-        final_op_push_tx_sig = ''
-        final_preimage       = ''
+        final_preimage = ''
 
         if is_stateful
           signed_tx, change_amount, final_preimage =
@@ -1829,7 +1826,7 @@ module Runar
           end
 
         elsif needs_op_push_tx || !sig_indices.empty?
-          signed_tx, final_op_push_tx_sig, final_preimage =
+          signed_tx, final_preimage =
             stateless_preimage_pass(
               signed_tx, contract_utxo, resolved_args, method_name,
               code_sep_idx, needs_op_push_tx, preimage_index, intent_witness_hex
@@ -1849,11 +1846,11 @@ module Runar
           # otherwise the broadcast tx pays less than the fee floor even
           # though its real byte size is larger than what fee/change were
           # computed for.
-          if needs_op_push_tx && !final_op_push_tx_sig.empty?
+          if needs_op_push_tx
             # Reconstructs exactly what stateless_preimage_pass just spliced
             # into signed_tx's input 0 (resolved_args[preimage_index] was
             # mutated in place by that call).
-            real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) +
+            real_unlock = build_stateful_prefix('', false) +
                           build_unlocking_script(method_name, resolved_args, intent_witness_hex)
 
             # N-258: a zero-mutable-field StatefulSmartContract merge. Each
@@ -1867,7 +1864,7 @@ module Runar
             build_extra_unlock = lambda do |tx, i|
               mu       = extra_contract_utxos[i]
               args_for = (resolved_per_input_args[i] || resolved_args).dup
-              extra_sig, extra_pre = SDK.compute_op_push_tx(
+              extra_pre = SDK.compute_op_push_tx_preimage(
                 tx, i + 1, mu.script, mu.satoshis, code_sep_idx,
                 resolve_sighash_type(method_name)
               )
@@ -1878,7 +1875,7 @@ module Runar
               end
               sig_indices.each { |idx| args_for[idx] = signer.sign(tx, i + 1, sig_subscript, mu.satoshis) }
               args_for[preimage_index] = extra_pre
-              build_stateful_prefix(extra_sig, false) + build_unlocking_script(method_name, args_for, intent_witness_hex)
+              build_stateful_prefix('', false) + build_unlocking_script(method_name, args_for, intent_witness_hex)
             end
             extra_real_unlocks = extra_contract_utxos.each_index.map { |i| build_extra_unlock.call(signed_tx, i) }
 
@@ -1909,7 +1906,7 @@ module Runar
             # in the final unlock (same scriptCode => same preimage byte
             # length, so this does not reopen the sizing question above).
             signed_tx = SDK.insert_unlocking_script(signed_tx, 0, real_unlock)
-            signed_tx, final_op_push_tx_sig, final_preimage =
+            signed_tx, final_preimage =
               stateless_preimage_pass(
                 signed_tx, contract_utxo, resolved_args, method_name,
                 code_sep_idx, needs_op_push_tx, preimage_index, intent_witness_hex
@@ -1925,7 +1922,7 @@ module Runar
           final_preimage = resolved_args[preimage_index] if final_preimage.empty? && needs_op_push_tx
         end
 
-        [signed_tx, change_amount, final_op_push_tx_sig, final_preimage]
+        [signed_tx, change_amount, final_preimage]
       end
       # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/ParameterLists, Metrics/PerceivedComplexity
 
@@ -2063,45 +2060,41 @@ module Runar
 
       def stateless_preimage_pass(signed_tx, contract_utxo, resolved_args, method_name,
                                   code_sep_idx, needs_op_push_tx, preimage_index, intent_witness_hex = '')
-        final_op_push_tx_sig = ''
-        final_preimage       = ''
+        final_preimage = ''
 
+        # N-433: preimage only -- build_stateful_prefix discards the signature.
         if needs_op_push_tx
-          sig_hex, preimage_hex = SDK.compute_op_push_tx(
+          preimage_hex = SDK.compute_op_push_tx_preimage(
             signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
             resolve_sighash_type(method_name)
           )
-          final_op_push_tx_sig          = sig_hex
           resolved_args[preimage_index] = preimage_hex
         end
 
         real_unlock = build_unlocking_script(method_name, resolved_args, intent_witness_hex)
-        if needs_op_push_tx && !final_op_push_tx_sig.empty?
-          real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) + real_unlock
+        if needs_op_push_tx
+          real_unlock = build_stateful_prefix('', false) + real_unlock
           tmp_tx      = SDK.insert_unlocking_script(signed_tx, 0, real_unlock)
-          final_sig, final_pre = SDK.compute_op_push_tx(
+          final_pre = SDK.compute_op_push_tx_preimage(
             tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
             resolve_sighash_type(method_name)
           )
           resolved_args[preimage_index] = final_pre
-          final_op_push_tx_sig          = final_sig
           final_preimage                = final_pre
-          real_unlock = build_stateful_prefix(final_sig, false) +
+          real_unlock = build_stateful_prefix('', false) +
                         build_unlocking_script(method_name, resolved_args, intent_witness_hex)
         end
         signed_tx = SDK.insert_unlocking_script(signed_tx, 0, real_unlock)
 
-        [signed_tx, final_op_push_tx_sig, final_preimage]
+        [signed_tx, final_preimage]
       end
 
       # rubocop:disable Metrics/ParameterLists
-      # N-213: the 3rd positional param is unused in the body -- callers still
-      # pass compute_preimage_passes' returned signature (no consumer
-      # post-BUG-100; PreparedCall.new below carries no op_push_tx_sig kwarg),
-      # so it's accepted for call-site compatibility but ignored, same as
-      # build_stateful_prefix's op_sig_hex param.
+      # N-213/N-433: no OP_PUSH_TX signature is computed or threaded through
+      # (no consumer post-BUG-100; PreparedCall.new below carries no
+      # op_push_tx_sig kwarg).
       def build_prepared_call(
-        sighash, final_preimage, _final_op_push_tx_sig, signed_tx,
+        sighash, final_preimage, signed_tx,
         sig_indices, method_name, resolved_args, method_selector_hex,
         is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
         change_amount, method_needs_new_amount, new_satoshis, preimage_index,

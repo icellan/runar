@@ -1288,7 +1288,6 @@ export class RunarContract {
       };
 
       let termTx = buildTerminalTx(termUnlockScript);
-      let finalOpPushTxSig = '';
       let finalPreimage = '';
 
       if (isStateful) {
@@ -1323,26 +1322,25 @@ export class RunarContract {
         finalPreimage = second.preimage;
       } else if (needsOpPushTx || sigIndices.length > 0) {
         // Stateless terminal — keep placeholder sigs
+        // N-433: preimage only -- buildStatefulPrefix ignores the signature.
         if (needsOpPushTx) {
-          const { sigHex, preimageHex } = this.computeOpPushTxWithCodeSep(
+          const { preimageHex } = this.computeOpPushTxPreimageWithCodeSep(
             termTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
-          finalOpPushTxSig = sigHex;
           resolvedArgs[preimageIndex] = preimageHex;
         }
         // Don't sign Sig params — keep 72-byte placeholders
         let realUnlock = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
-        if (needsOpPushTx && finalOpPushTxSig) {
-          realUnlock = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlock;
+        if (needsOpPushTx) {
+          realUnlock = this.buildStatefulPrefix('') + realUnlock;
           termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
           invalidateTxCache(termTx);
-          const { sigHex: finalSig, preimageHex: finalPre } = this.computeOpPushTxWithCodeSep(
+          const { preimageHex: finalPre } = this.computeOpPushTxPreimageWithCodeSep(
             termTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
           resolvedArgs[preimageIndex] = finalPre;
-          finalOpPushTxSig = finalSig;
           finalPreimage = finalPre;
-          realUnlock = this.buildStatefulPrefix(finalSig) +
+          realUnlock = this.buildStatefulPrefix('') +
             this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
         }
         termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
@@ -1812,7 +1810,6 @@ export class RunarContract {
       }
     }
 
-    let finalOpPushTxSig = '';
     let finalPreimage = '';
 
     if (isStateful) {
@@ -1967,26 +1964,25 @@ export class RunarContract {
       }
     } else if (needsOpPushTx || sigIndices.length > 0) {
       // Stateless: keep placeholder sigs, compute OP_PUSH_TX
+      // N-433: preimage only -- buildStatefulPrefix ignores the signature.
       if (needsOpPushTx) {
-        const { sigHex, preimageHex } = this.computeOpPushTxWithCodeSep(
+        const { preimageHex } = this.computeOpPushTxPreimageWithCodeSep(
           tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
-        finalOpPushTxSig = sigHex;
         resolvedArgs[preimageIndex] = preimageHex;
       }
       // Don't sign Sig params — keep placeholders
       let realUnlockingScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
-      if (needsOpPushTx && finalOpPushTxSig) {
-        realUnlockingScript = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlockingScript;
+      if (needsOpPushTx) {
+        realUnlockingScript = this.buildStatefulPrefix('') + realUnlockingScript;
         tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
         invalidateTxCache(tx);
-        const { sigHex: finalSig, preimageHex: finalPre } = this.computeOpPushTxWithCodeSep(
+        const { preimageHex: finalPre } = this.computeOpPushTxPreimageWithCodeSep(
           tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
         resolvedArgs[preimageIndex] = finalPre;
-        finalOpPushTxSig = finalSig;
         finalPreimage = finalPre;
-        realUnlockingScript = this.buildStatefulPrefix(finalSig) +
+        realUnlockingScript = this.buildStatefulPrefix('') +
           this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
 
         // N-258: a zero-mutable-field StatefulSmartContract merge. Each
@@ -2004,7 +2000,7 @@ export class RunarContract {
         const buildExtraUnlock = async (currentTx: BsvTransaction, i: number): Promise<string> => {
           const mu = extraContractUtxos[i]!;
           const inputArgs = [...(resolvedPerInputArgs?.[i] ?? resolvedArgs)];
-          const { sigHex: extraOpSig, preimageHex: extraPre } = this.computeOpPushTxWithCodeSep(
+          const { preimageHex: extraPre } = this.computeOpPushTxPreimageWithCodeSep(
             currentTx, i + 1, mu.script, mu.satoshis, methodIndex,
           );
           const currentHex = currentTx.toHex();
@@ -2013,7 +2009,7 @@ export class RunarContract {
             inputArgs[idx] = await signer.sign(currentHex, i + 1, sigSubscript, mu.satoshis);
           }
           inputArgs[preimageIndex] = extraPre;
-          return this.buildStatefulPrefix(extraOpSig) + this.buildUnlockingScript(methodName, inputArgs, witnessHex);
+          return this.buildStatefulPrefix('') + this.buildUnlockingScript(methodName, inputArgs, witnessHex);
         };
         const extraRealUnlocks: string[] = [];
         for (let i = 0; i < extraContractUtxos.length; i++) {
@@ -2077,13 +2073,12 @@ export class RunarContract {
         // byte length, so this does not reopen the sizing question above).
         tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
         invalidateTxCache(tx);
-        const { sigHex: rebuiltSig, preimageHex: rebuiltPre } = this.computeOpPushTxWithCodeSep(
+        const { preimageHex: rebuiltPre } = this.computeOpPushTxPreimageWithCodeSep(
           tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
         resolvedArgs[preimageIndex] = rebuiltPre;
-        finalOpPushTxSig = rebuiltSig;
         finalPreimage = rebuiltPre;
-        realUnlockingScript = this.buildStatefulPrefix(rebuiltSig) +
+        realUnlockingScript = this.buildStatefulPrefix('') +
           this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
 
         // N-258: re-derive every extra input's preimage and Sig against the
