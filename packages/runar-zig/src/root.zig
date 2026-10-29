@@ -303,6 +303,7 @@ test {
     _ = @import("sdk_n296_merge_per_input_sig_test.zig");
     _ = @import("sdk_n286_stateful_merge_prepared_test.zig");
     _ = @import("sdk_n253_preparecall_no_oppushtx_sign_test.zig");
+    _ = @import("sdk_n434_oppushtx_alloc_failure_test.zig");
     _ = @import("sdk_n426_change_address_guard_test.zig");
     _ = @import("sdk_n412_stateless_intent_witness_test.zig");
     _ = @import("sdk_mock_broadcast_validation_test.zig");

@@ -224,15 +224,11 @@ fn computeOpPushTxImpl(
     errdefer allocator.free(sig_hex);
 
     // Encode preimage as hex
-    const preimage_hex = allocator.alloc(u8, preimage_bytes.len * 2) catch {
-        allocator.free(sig_hex);
-        return OpPushTxError.OutOfMemory;
-    };
-    _ = bsvz.primitives.hex.encodeLower(preimage_bytes, preimage_hex) catch {
-        allocator.free(sig_hex);
-        allocator.free(preimage_hex);
-        return OpPushTxError.InvalidEncoding;
-    };
+    // N-434: `sig_hex` is owned by the errdefer above; freeing it by hand here
+    // too would free it twice on every failure path.
+    const preimage_hex = allocator.alloc(u8, preimage_bytes.len * 2) catch return OpPushTxError.OutOfMemory;
+    errdefer allocator.free(preimage_hex);
+    _ = bsvz.primitives.hex.encodeLower(preimage_bytes, preimage_hex) catch return OpPushTxError.InvalidEncoding;
 
     return .{
         .sig_hex = sig_hex,
