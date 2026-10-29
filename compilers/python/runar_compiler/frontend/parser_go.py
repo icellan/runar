@@ -24,6 +24,7 @@ from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_num
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
+    invalid_escape_sequence_message,
     lex_error,
     with_lex_errors,
 )
@@ -472,10 +473,13 @@ def _tokenize_go(
                 col += 1
             else:
                 lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
-            # Process escape sequences to get the raw string value
-            processed = _process_go_string_escapes(val)
+            # N-437: decode with Go's string-literal rules; an escape Go
+            # refuses is refused here too.
+            processed, raw_bytes, esc_err = _decode_go_string(val)
+            if esc_err is not None:
+                lex.append(lex_error(esc_err, file_name, line, start_col))
             string_tok = Token(TOK_STRING, processed, line, start_col)
-            string_tok.raw = _process_go_string_escapes(val, as_bytes=True)
+            string_tok.raw = raw_bytes
             tokens.append(string_tok)
             continue
 
@@ -568,50 +572,70 @@ def _tokenize_go(
     return tokens
 
 
-def _process_go_string_escapes(s: str, as_bytes: bool = False) -> str:
-    """Process Go string escape sequences and return the literal value.
+_GO_SIMPLE_ESCAPES = {
+    "a": "\x07", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+    "v": "\v", "\\": "\\", '"': '"',
+}
+_HEX_DIGITS = "0123456789abcdefABCDEF"
 
-    N-435: with ``as_bytes`` the result is the Go string's BYTES, one latin-1
-    char per byte -- literal source text is UTF-8 encoded, a ``\\xNN`` escape is
-    the single byte NN (what ``[]byte(s)`` yields in Go).
+
+def _decode_go_string(s: str) -> tuple[str, str, str | None]:
+    """Decode the body of a Go interpreted string literal (N-437).
+
+    Returns ``(val, raw, error)`` following https://go.dev/ref/spec#String_literals.
+    ``raw`` is the Go string's BYTES, one latin-1 char per byte: literal text
+    and ``\\u``/``\\U`` escapes are UTF-8 encoded, ``\\xNN`` and ``\\NNN``
+    (octal, at most 255) are the single byte. ``val`` keeps one char per
+    escape for the bare-literal (hex) path. ``error`` is the shared
+    invalid-escape diagnostic for an escape Go refuses.
     """
-    def lit(ch: str) -> str:
-        return ch.encode("utf-8").decode("latin-1") if as_bytes else ch
-
-    result: list[str] = []
+    val: list[str] = []
+    raw: list[str] = []
     i = 0
-    while i < len(s):
-        if s[i] == "\\" and i + 1 < len(s):
-            c = s[i + 1]
-            if c == "n":
-                result.append("\n")
-                i += 2
-            elif c == "t":
-                result.append("\t")
-                i += 2
-            elif c == "r":
-                result.append("\r")
-                i += 2
-            elif c == "\\":
-                result.append("\\")
-                i += 2
-            elif c == '"':
-                result.append('"')
-                i += 2
-            elif c == "x" and i + 3 < len(s):
-                hex_val = s[i + 2:i + 4]
-                try:
-                    result.append(chr(int(hex_val, 16)))
-                except ValueError:
-                    result.append(s[i:i + 4])
-                i += 4
-            else:
-                result.append(lit(s[i]))
-                i += 1
-        else:
-            result.append(lit(s[i]))
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c != "\\":
+            val.append(c)
+            raw.append(c.encode("utf-8").decode("latin-1"))
             i += 1
-    return "".join(result)
+            continue
+        e = s[i + 1] if i + 1 < n else ""
+        if e in _GO_SIMPLE_ESCAPES and e != "":
+            val.append(_GO_SIMPLE_ESCAPES[e])
+            raw.append(_GO_SIMPLE_ESCAPES[e])
+            i += 2
+        elif e == "x":
+            h = s[i + 2:i + 4]
+            if len(h) != 2 or any(d not in _HEX_DIGITS for d in h):
+                return "".join(val), "".join(raw), invalid_escape_sequence_message("\\x")
+            val.append(chr(int(h, 16)))
+            raw.append(chr(int(h, 16)))
+            i += 4
+        elif e in ("u", "U"):
+            width = 4 if e == "u" else 8
+            h = s[i + 2:i + 2 + width]
+            ok = len(h) == width and all(d in _HEX_DIGITS for d in h)
+            cp = int(h, 16) if ok else -1
+            if cp < 0 or cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+                return "".join(val), "".join(raw), invalid_escape_sequence_message("\\" + e)
+            ch = chr(cp)
+            val.append(ch)
+            raw.append(ch.encode("utf-8").decode("latin-1"))
+            i += 2 + width
+        elif e != "" and "0" <= e <= "7":
+            j = i + 1
+            while j < n and j < i + 4 and "0" <= s[j] <= "7":
+                j += 1
+            run = s[i + 1:j]
+            if len(run) < 3 or int(run, 8) > 0xFF:
+                return "".join(val), "".join(raw), invalid_escape_sequence_message("\\" + run)
+            val.append(chr(int(run, 8)))
+            raw.append(chr(int(run, 8)))
+            i += 4
+        else:
+            return "".join(val), "".join(raw), invalid_escape_sequence_message("\\" + e)
+    return "".join(val), "".join(raw), None
 
 
 # ---------------------------------------------------------------------------
@@ -1913,12 +1937,17 @@ class _GoParser:
                 if sel_name == "ByteString" and self.check(TOK_LPAREN):
                     saved_pos = self.pos
                     self.advance()  # consume '('
-                    if self.check(TOK_STRING):
+                    if self.check(TOK_STRING) or self.check(TOK_BACKTICK_STRING):
                         str_tok = self.advance()
                         if self.check(TOK_RPAREN):
                             self.advance()  # consume ')'
-                            # Hex-encode the Go string's bytes (N-435).
-                            hex_str = (str_tok.raw if str_tok.raw is not None else str_tok.value).encode("latin-1", errors="replace").hex()
+                            if str_tok.kind == TOK_BACKTICK_STRING:
+                                # N-437: a raw string is its text verbatim as
+                                # UTF-8, carriage returns discarded (Go spec).
+                                hex_str = str_tok.value.replace("\r", "").encode("utf-8").hex()
+                            else:
+                                # Hex-encode the Go string's bytes (N-435).
+                                hex_str = (str_tok.raw if str_tok.raw is not None else str_tok.value).encode("latin-1", errors="replace").hex()
                             return ByteStringLiteral(value=hex_str)
                     # Fall back: restore and parse as args for type-conversion unwrap.
                     self.pos = saved_pos

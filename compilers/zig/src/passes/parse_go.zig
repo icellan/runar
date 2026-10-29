@@ -108,7 +108,12 @@ pub fn parseGo(allocator: Allocator, source: []const u8, file_name: []const u8) 
     while (guard <= source.len) : (guard += 1) {
         if (t.next().kind == .eof) break;
     }
-    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    var errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    // N-437: a string-literal escape Go refuses is refused here too.
+    if (t.bad_escape) |be| {
+        const msg = std.fmt.allocPrint(allocator, lex_diag.INVALID_ESCAPE_SEQUENCE_FMT, .{be.text}) catch lex_diag.UNTERMINATED_STRING_LITERAL;
+        errs = lex_diag.prepend(allocator, errs, file_name, msg, be.at);
+    }
     return .{ .contract = r.contract, .errors = lex_diag.prependUnexpected(allocator, errs, file_name, t.unexpected) };
 }
 
@@ -291,6 +296,9 @@ const Tokenizer = struct {
     unterminated: ?lex_diag.Pos = null,
     /// N-214: the first unrecognised character, if any.
     unexpected: ?lex_diag.Unexpected = null,
+    /// N-437: the first string-literal escape Go refuses (its text, located
+    /// at the opening quote), if any.
+    bad_escape: ?struct { at: lex_diag.Pos, text: []const u8 } = null,
     pos: usize,
     line: u32,
     col: u32,
@@ -385,6 +393,11 @@ const Tokenizer = struct {
                 _ = self.advance();
             } else if (self.unterminated == null) {
                 self.unterminated = .{ .line = sl, .col = sc };
+            }
+            if (self.bad_escape == null) {
+                if (decodeGoBody(std.heap.page_allocator, self.source[start + 1 .. content_end], null) catch null) |esc| {
+                    self.bad_escape = .{ .at = .{ .line = sl, .col = sc }, .text = esc };
+                }
             }
             return .{ .kind = .string_literal, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
@@ -709,62 +722,94 @@ fn mapGoBuiltinCamel(allocator: Allocator, name: []const u8) []const u8 {
     return mapped;
 }
 
-/// Decode Go string escape sequences (\n, \t, \r, \0, \\, \", \xNN) from the
-/// raw text of a Go string literal, then hex-encode the resulting bytes. Used
-/// so that `runar.ByteString("\x00\x6a")` in source becomes a ByteString
-/// literal with hex value `"006a"`.
-fn decodeGoEscapesAndHex(allocator: Allocator, raw: []const u8) ![]const u8 {
-    var decoded: std.ArrayListUnmanaged(u8) = .empty;
-    defer decoded.deinit(allocator);
+/// N-437: decode the body of a Go interpreted string literal with Go's rules
+/// (https://go.dev/ref/spec#String_literals): `\a \b \f \n \r \t \v \\ \"`,
+/// `\xNN`, octal `\NNN` (at most 255) and `\uNNNN` / `\UNNNNNNNN` (UTF-8
+/// encoded); literal text is already UTF-8. The bytes are appended to `out`
+/// when given. Returns the offending escape (a slice of `body`, the backslash
+/// plus the escape letter, or the whole octal run) for an escape Go refuses,
+/// else null. `allocator` is only used when `out` is set.
+fn decodeGoBody(allocator: Allocator, body: []const u8, out: ?*std.ArrayListUnmanaged(u8)) !?[]const u8 {
     var i: usize = 0;
-    while (i < raw.len) {
-        const c = raw[i];
-        if (c == '\\' and i + 1 < raw.len) {
-            const nx = raw[i + 1];
-            switch (nx) {
-                'n' => { try decoded.append(allocator, '\n'); i += 2; },
-                't' => { try decoded.append(allocator, '\t'); i += 2; },
-                'r' => { try decoded.append(allocator, '\r'); i += 2; },
-                '0' => { try decoded.append(allocator, 0); i += 2; },
-                '\\' => { try decoded.append(allocator, '\\'); i += 2; },
-                '"' => { try decoded.append(allocator, '"'); i += 2; },
-                'x' => {
-                    if (i + 3 < raw.len) {
-                        const h1 = raw[i + 2];
-                        const h2 = raw[i + 3];
-                        const isHex = std.ascii.isHex(h1) and std.ascii.isHex(h2);
-                        if (isHex) {
-                            const hex_pair = [_]u8{ h1, h2 };
-                            const b = try std.fmt.parseInt(u8, &hex_pair, 16);
-                            try decoded.append(allocator, b);
-                            i += 4;
-                        } else {
-                            try decoded.append(allocator, c);
-                            i += 1;
-                        }
-                    } else {
-                        try decoded.append(allocator, c);
-                        i += 1;
-                    }
-                },
-                else => {
-                    try decoded.append(allocator, nx);
-                    i += 2;
-                },
-            }
-        } else {
-            try decoded.append(allocator, c);
+    while (i < body.len) {
+        const c = body[i];
+        if (c != '\\') {
+            if (out) |o| try o.append(allocator, c);
             i += 1;
+            continue;
+        }
+        const e: u8 = if (i + 1 < body.len) body[i + 1] else 0;
+        const simple: ?u8 = switch (e) {
+            'a' => 0x07,
+            'b' => 0x08,
+            'f' => 0x0c,
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => 0x0b,
+            '\\' => '\\',
+            '"' => '"',
+            else => null,
+        };
+        if (simple) |s| {
+            if (out) |o| try o.append(allocator, s);
+            i += 2;
+        } else if (e == 'x') {
+            if (i + 4 > body.len or !std.ascii.isHex(body[i + 2]) or !std.ascii.isHex(body[i + 3])) return body[i .. i + 2];
+            if (out) |o| try o.append(allocator, std.fmt.parseInt(u8, body[i + 2 .. i + 4], 16) catch unreachable);
+            i += 4;
+        } else if (e == 'u' or e == 'U') {
+            const width: usize = if (e == 'u') 4 else 8;
+            if (i + 2 + width > body.len) return body[i .. i + 2];
+            var cp: u32 = 0;
+            for (body[i + 2 .. i + 2 + width]) |d| {
+                if (!std.ascii.isHex(d)) return body[i .. i + 2];
+                cp = cp * 16 + (std.fmt.charToDigit(d, 16) catch unreachable);
+            }
+            if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) return body[i .. i + 2];
+            if (out) |o| {
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(@intCast(cp), &buf) catch return body[i .. i + 2];
+                try o.appendSlice(allocator, buf[0..n]);
+            }
+            i += 2 + width;
+        } else if (e >= '0' and e <= '7') {
+            var j = i + 1;
+            while (j < body.len and j < i + 4 and body[j] >= '0' and body[j] <= '7') j += 1;
+            const run = body[i + 1 .. j];
+            if (run.len < 3) return body[i..j];
+            const b = std.fmt.parseInt(u16, run, 8) catch unreachable;
+            if (b > 0xff) return body[i..j];
+            if (out) |o| try o.append(allocator, @intCast(b));
+            i += 4;
+        } else {
+            if (i + 1 >= body.len) return body[i .. i + 1];
+            return body[i .. i + 1 + lex_diag.charLen(body, i + 1)];
         }
     }
-    // Hex-encode the decoded bytes.
-    const hex = try allocator.alloc(u8, decoded.items.len * 2);
+    return null;
+}
+
+/// Hex-encode `bytes`.
+fn hexOfBytes(allocator: Allocator, bytes: []const u8) ![]const u8 {
+    const hex = try allocator.alloc(u8, bytes.len * 2);
     const digits = "0123456789abcdef";
-    for (decoded.items, 0..) |b, idx| {
+    for (bytes, 0..) |b, idx| {
         hex[idx * 2] = digits[(b >> 4) & 0xf];
         hex[idx * 2 + 1] = digits[b & 0xf];
     }
     return hex;
+}
+
+/// Decode the raw text of a Go string literal (N-437: Go's rules, see
+/// `decodeGoBody`), then hex-encode the resulting bytes. Used so that
+/// `runar.ByteString("\x00\x6a")` in source becomes a ByteString literal with
+/// hex value `"006a"`. The tokenizer has already refused an invalid escape.
+fn decodeGoEscapesAndHex(allocator: Allocator, raw: []const u8) ![]const u8 {
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    defer decoded.deinit(allocator);
+    _ = try decodeGoBody(allocator, raw, &decoded);
+    return hexOfBytes(allocator, decoded.items);
 }
 
 /// The Rúnar binary operator each `BigintBig` helper stands for.
@@ -2349,6 +2394,30 @@ const Parser = struct {
                 }
                 const member_tok = self.bump();
                 const member = member_tok.text;
+
+                // N-437: runar.ByteString() -- a raw string is its text
+                // verbatim as UTF-8, carriage returns discarded (Go spec).
+                if (self.current.kind == .lparen and std.mem.eql(u8, member, "ByteString") and
+                    expr == .identifier and std.mem.eql(u8, expr.identifier, "runar"))
+                {
+                    const saved_tokenizer = self.tokenizer;
+                    const saved_current = self.current;
+                    _ = self.bump(); // '('
+                    if (self.current.kind == .backtick_string) {
+                        const raw_tok = self.bump();
+                        if (self.current.kind == .rparen) {
+                            _ = self.bump(); // ')'
+                            var kept: std.ArrayListUnmanaged(u8) = .empty;
+                            for (raw_tok.text) |b| {
+                                if (b != '\r') kept.append(self.allocator, b) catch return null;
+                            }
+                            expr = .{ .literal_bytes = hexOfBytes(self.allocator, kept.items) catch return null };
+                            continue;
+                        }
+                    }
+                    self.tokenizer = saved_tokenizer;
+                    self.current = saved_current;
+                }
 
                 // Check if this is a call: expr.member(args)
                 if (self.current.kind == .lparen) {

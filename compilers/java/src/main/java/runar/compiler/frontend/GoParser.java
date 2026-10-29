@@ -518,8 +518,14 @@ public final class GoParser {
                 } else {
                     lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
-                Token stringTok = new Token(Tok.STRING, processGoStringEscapes(val, false), line, startCol);
-                stringTok.raw = processGoStringEscapes(val, true);
+                // N-437: decode with Go's string-literal rules; an escape Go
+                // refuses is refused here too.
+                GoString dec = decodeGoString(val);
+                if (dec.error() != null) {
+                    lex.add(LexDiag.at(filename, line, startCol, dec.error()));
+                }
+                Token stringTok = new Token(Tok.STRING, dec.val(), line, startCol);
+                stringTok.raw = dec.raw();
                 tokens.add(stringTok);
                 continue;
             }
@@ -649,54 +655,90 @@ public final class GoParser {
     }
 
     /**
-     * N-435: with {@code asBytes} the result is the Go string's BYTES, one
-     * latin-1 char per byte: literal source text is UTF-8 encoded, a
-     * {@code \xNN} escape is the single byte NN (what {@code []byte(s)} yields
-     * in Go).
+     * N-437: the decoded body of a Go interpreted string literal, per
+     * https://go.dev/ref/spec#String_literals. {@code raw} is the Go string's
+     * BYTES, one latin-1 char per byte: literal text and {@code \}u / {@code \}U
+     * escapes are UTF-8 encoded, {@code \}xNN and octal {@code \}NNN (at most
+     * 255) are the single byte (what {@code []byte(s)} yields in Go).
+     * {@code val} keeps one char per escape for the bare-literal (hex) path.
+     * {@code error} is the shared invalid-escape diagnostic for an escape Go
+     * refuses, or null.
      */
-    private static String processGoStringEscapes(String s, boolean asBytes) {
-        StringBuilder out = new StringBuilder(s.length());
+    private record GoString(String val, String raw, String error) {}
+
+    private static void appendUtf8(StringBuilder raw, int cp) {
+        for (byte bt : new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            raw.append((char) (bt & 0xff));
+        }
+    }
+
+    private static GoString decodeGoString(String s) {
+        StringBuilder val = new StringBuilder(s.length());
+        StringBuilder raw = new StringBuilder(s.length());
         int i = 0;
-        while (i < s.length()) {
+        int len = s.length();
+        while (i < len) {
             char c = s.charAt(i);
-            if (c == '\\' && i + 1 < s.length()) {
-                char n = s.charAt(i + 1);
-                switch (n) {
-                    case 'n': out.append('\n'); i += 2; break;
-                    case 't': out.append('\t'); i += 2; break;
-                    case 'r': out.append('\r'); i += 2; break;
-                    case '\\': out.append('\\'); i += 2; break;
-                    case '"': out.append('"'); i += 2; break;
-                    case 'x':
-                        if (i + 3 < s.length()) {
-                            String hex = s.substring(i + 2, i + 4);
-                            try {
-                                out.append((char) Integer.parseInt(hex, 16));
-                            } catch (NumberFormatException ex) {
-                                out.append(s, i, i + 4);
-                            }
-                            i += 4;
-                        } else {
-                            out.append(c);
-                            i++;
-                        }
-                        break;
-                    default:
-                        out.append(c);
-                        i++;
-                }
-            } else if (asBytes && c >= 0x80) {
+            if (c != '\\') {
                 int cp = s.codePointAt(i);
-                for (byte bt : new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
-                    out.append((char) (bt & 0xff));
-                }
+                val.appendCodePoint(cp);
+                appendUtf8(raw, cp);
                 i += Character.charCount(cp);
+                continue;
+            }
+            char e = i + 1 < len ? s.charAt(i + 1) : 0;
+            int simple = switch (e) {
+                case 'a' -> 0x07;
+                case 'b' -> 0x08;
+                case 'f' -> 0x0c;
+                case 'n' -> 0x0a;
+                case 'r' -> 0x0d;
+                case 't' -> 0x09;
+                case 'v' -> 0x0b;
+                case '\\' -> '\\';
+                case '"' -> '"';
+                default -> -1;
+            };
+            if (simple >= 0) {
+                val.append((char) simple);
+                raw.append((char) simple);
+                i += 2;
+            } else if (e == 'x') {
+                if (i + 4 > len || !isHexDigit(s.charAt(i + 2)) || !isHexDigit(s.charAt(i + 3))) {
+                    return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence("\\x"));
+                }
+                int b = Integer.parseInt(s.substring(i + 2, i + 4), 16);
+                val.append((char) b);
+                raw.append((char) b);
+                i += 4;
+            } else if (e == 'u' || e == 'U') {
+                int width = e == 'u' ? 4 : 8;
+                boolean ok = i + 2 + width <= len;
+                for (int k = 0; ok && k < width; k++) ok = isHexDigit(s.charAt(i + 2 + k));
+                long cp = ok ? Long.parseLong(s.substring(i + 2, i + 2 + width), 16) : -1;
+                if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                    return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence("\\" + e));
+                }
+                val.appendCodePoint((int) cp);
+                appendUtf8(raw, (int) cp);
+                i += 2 + width;
+            } else if (e >= '0' && e <= '7') {
+                int j = i + 1;
+                while (j < len && j < i + 4 && s.charAt(j) >= '0' && s.charAt(j) <= '7') j++;
+                String run = s.substring(i + 1, j);
+                if (run.length() < 3 || Integer.parseInt(run, 8) > 0xff) {
+                    return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence("\\" + run));
+                }
+                int b = Integer.parseInt(run, 8);
+                val.append((char) b);
+                raw.append((char) b);
+                i += 4;
             } else {
-                out.append(c);
-                i++;
+                String esc = e == 0 ? "\\" : "\\" + new String(Character.toChars(s.codePointAt(i + 1)));
+                return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence(esc));
             }
         }
-        return out.toString();
+        return new GoString(val.toString(), raw.toString(), null);
     }
 
     // ------------------------------------------------------------------
@@ -1943,11 +1985,17 @@ public final class GoParser {
                     if ("ByteString".equals(selName) && check(Tok.LPAREN)) {
                         int savedPos = pos;
                         advance(); // consume '('
-                        if (check(Tok.STRING)) {
+                        if (check(Tok.STRING) || check(Tok.BACKTICK_STRING)) {
                             Token strTok = advance();
                             if (check(Tok.RPAREN)) {
                                 advance();
-                                String hex = bytesToHex(strTok.raw != null ? strTok.raw : strTok.value);
+                                // N-437: a raw string is its text verbatim as UTF-8,
+                                // carriage returns discarded (Go spec).
+                                String bytes = strTok.kind == Tok.BACKTICK_STRING
+                                    ? new String(strTok.value.replace("\r", "").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                                        java.nio.charset.StandardCharsets.ISO_8859_1)
+                                    : (strTok.raw != null ? strTok.raw : strTok.value);
+                                String hex = bytesToHex(bytes);
                                 return new ByteStringLiteral(hex);
                             }
                         }

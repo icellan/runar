@@ -246,41 +246,64 @@ module RunarCompiler
       name[0].downcase + name[1..]
     end
 
-    # Decode Go string escape sequences (\n, \t, \r, \0, \\, \", \xNN) from the
-    # raw text of a Go string literal.
-    def self.go_decode_string_escapes(raw)
+    # N-437: decode the body of a Go interpreted string literal with Go's
+    # rules (https://go.dev/ref/spec#String_literals). Returns [bytes, bad]:
+    # `bytes` is the Go string's bytes (literal text and \u / \U escapes UTF-8
+    # encoded, \xNN and octal \NNN (at most 255) the single byte); `bad` is the
+    # offending escape (the backslash plus the escape letter, or the whole
+    # octal run) for an escape Go refuses, else nil.
+    GO_SIMPLE_ESCAPES = {
+      "a" => "\a", "b" => "\b", "f" => "\f", "n" => "\n",
+      "r" => "\r", "t" => "\t", "v" => "\v", "\\" => "\\", '"' => '"'
+    }.freeze
+
+    def self.go_decode_string(raw)
       out = String.new(encoding: Encoding::ASCII_8BIT)
       i = 0
       n = raw.length
       while i < n
         c = raw[i]
-        if c == "\\" && i + 1 < n
-          nx = raw[i + 1]
-          case nx
-          when "n" then out << "\n".b; i += 2
-          when "t" then out << "\t".b; i += 2
-          when "r" then out << "\r".b; i += 2
-          when "0" then out << "\x00".b; i += 2
-          when "\\" then out << "\\".b; i += 2
-          when '"' then out << '"'.b; i += 2
-          when "x"
-            if i + 3 < n && raw[i + 2].match?(/[0-9a-fA-F]/) && raw[i + 3].match?(/[0-9a-fA-F]/)
-              out << raw[(i + 2)..(i + 3)].to_i(16).chr
-              i += 4
-            else
-              out << c.b
-              i += 1
-            end
-          else
-            out << nx.b
-            i += 2
-          end
-        else
+        unless c == "\\"
           out << c.b
           i += 1
+          next
+        end
+        nx = i + 1 < n ? raw[i + 1] : ""
+        if GO_SIMPLE_ESCAPES.key?(nx)
+          out << GO_SIMPLE_ESCAPES[nx].b
+          i += 2
+        elsif nx == "x"
+          h = raw[(i + 2), 2].to_s
+          return [out, "\\x"] unless h.match?(/\A[0-9a-fA-F]{2}\z/)
+
+          out << h.to_i(16).chr
+          i += 4
+        elsif nx == "u" || nx == "U"
+          width = nx == "u" ? 4 : 8
+          h = raw[(i + 2), width].to_s
+          return [out, "\\#{nx}"] unless h.match?(/\A[0-9a-fA-F]+\z/) && h.length == width
+
+          cp = h.to_i(16)
+          return [out, "\\#{nx}"] if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)
+
+          out << [cp].pack("U").b
+          i += 2 + width
+        elsif nx.match?(/\A[0-7]\z/)
+          run = raw[(i + 1), 3].to_s[/\A[0-7]{1,3}/]
+          return [out, "\\#{run}"] if run.length < 3 || run.to_i(8) > 0xff
+
+          out << run.to_i(8).chr
+          i += 4
+        else
+          return [out, "\\#{nx}"]
         end
       end
-      out
+      [out, nil]
+    end
+
+    # The bytes of a Go interpreted string literal (see go_decode_string).
+    def self.go_decode_string_escapes(raw)
+      go_decode_string(raw).first
     end
 
     def self.go_map_type(name)
@@ -484,6 +507,9 @@ module RunarCompiler
           else
             lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end
+          # N-437: an escape Go refuses is refused here too.
+          _, bad_escape = Frontend.go_decode_string(val)
+          lex << Frontend.lex_error(Frontend.invalid_escape_sequence_message(bad_escape), file_name, line, start_col) if bad_escape
           tokens << GoToken.new(kind: GoTokens::TOK_STRING, value: val, line: line, col: start_col)
           next
         end
@@ -1695,11 +1721,18 @@ module RunarCompiler
             # Special-case runar.ByteString("literal") -> ByteStringLiteral
             # with hex-encoded raw bytes. Any other arg form (e.g. a variable)
             # falls through to the generic type-cast unwrap below.
-            if member_name == "ByteString" && check(TOK_LPAREN) && @tokens[@pos + 1]&.kind == TOK_STRING && @tokens[@pos + 2]&.kind == TOK_RPAREN
+            if member_name == "ByteString" && check(TOK_LPAREN) && [TOK_STRING, TOK_BACKTICK].include?(@tokens[@pos + 1]&.kind) && @tokens[@pos + 2]&.kind == TOK_RPAREN
               advance # consume '('
               str_tok = advance # consume string
               advance # consume ')'
-              hex_str = Frontend.go_decode_string_escapes(str_tok.value).bytes.map { |b| format("%02x", b) }.join
+              # N-437: a raw (backtick) string is its text verbatim as UTF-8,
+              # carriage returns discarded (Go spec).
+              str_bytes = if str_tok.kind == TOK_BACKTICK
+                            str_tok.value.delete("\r").b
+                          else
+                            Frontend.go_decode_string_escapes(str_tok.value)
+                          end
+              hex_str = str_bytes.bytes.map { |b| format("%02x", b) }.join
               return ByteStringLiteral.new(value: hex_str)
             end
 

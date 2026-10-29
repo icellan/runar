@@ -42,7 +42,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{invalid_escape_sequence_message, lex_error, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_go_directive_message};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
@@ -368,6 +368,94 @@ struct GoDirective {
     col: usize,
 }
 
+/// N-437: decode the body of a Go interpreted string literal with Go's rules
+/// (https://go.dev/ref/spec#String_literals). Returns `(val, raw, error)`:
+/// `raw` is the Go string's BYTES (literal text and `\u`/`\U` escapes UTF-8
+/// encoded, `\xNN` and `\NNN` octal (at most 255) the single byte); `val`
+/// keeps one char per escape for the bare-literal (hex) path; `error` is the
+/// shared invalid-escape diagnostic for an escape Go refuses.
+fn decode_go_string(body: &[char]) -> (String, Vec<u8>, Option<String>) {
+    let mut val = String::new();
+    let mut raw: Vec<u8> = Vec::new();
+    let mut i = 0;
+    let n = body.len();
+    macro_rules! fail {
+        ($esc:expr) => {
+            return (val, raw, Some(invalid_escape_sequence_message(&$esc)))
+        };
+    }
+    while i < n {
+        let c = body[i];
+        if c != '\\' {
+            val.push(c);
+            raw.extend_from_slice(c.to_string().as_bytes());
+            i += 1;
+            continue;
+        }
+        let e = if i + 1 < n { Some(body[i + 1]) } else { None };
+        let simple = match e {
+            Some('a') => Some('\x07'),
+            Some('b') => Some('\x08'),
+            Some('f') => Some('\x0c'),
+            Some('n') => Some('\n'),
+            Some('r') => Some('\r'),
+            Some('t') => Some('\t'),
+            Some('v') => Some('\x0b'),
+            Some('\\') => Some('\\'),
+            Some('"') => Some('"'),
+            _ => None,
+        };
+        if let Some(s) = simple {
+            val.push(s);
+            raw.push(s as u8);
+            i += 2;
+            continue;
+        }
+        match e {
+            Some('x') => {
+                let h: String = body.iter().skip(i + 2).take(2).collect();
+                if h.chars().count() != 2 || !h.chars().all(|d| d.is_ascii_hexdigit()) {
+                    fail!("\\x".to_string());
+                }
+                let b = u8::from_str_radix(&h, 16).unwrap();
+                val.push(b as char);
+                raw.push(b);
+                i += 4;
+            }
+            Some(u @ ('u' | 'U')) => {
+                let width = if u == 'u' { 4 } else { 8 };
+                let h: String = body.iter().skip(i + 2).take(width).collect();
+                let cp = if h.chars().count() == width && h.chars().all(|d| d.is_ascii_hexdigit()) {
+                    u32::from_str_radix(&h, 16).ok()
+                } else {
+                    None
+                };
+                match cp.and_then(char::from_u32) {
+                    Some(ch) => {
+                        val.push(ch);
+                        raw.extend_from_slice(ch.to_string().as_bytes());
+                        i += 2 + width;
+                    }
+                    None => fail!(format!("\\{}", u)),
+                }
+            }
+            Some(d) if ('0'..='7').contains(&d) => {
+                let run: String = body.iter().skip(i + 1).take(3).take_while(|x| ('0'..='7').contains(*x)).collect();
+                if run.len() < 3 || u32::from_str_radix(&run, 8).unwrap() > 0xff {
+                    fail!(format!("\\{}", run));
+                }
+                let b = u32::from_str_radix(&run, 8).unwrap() as u8;
+                val.push(b as char);
+                raw.push(b);
+                i += 4;
+            }
+            Some(other) => fail!(format!("\\{}", other)),
+            None => fail!("\\".to_string()),
+        }
+    }
+    (val, raw, None)
+}
+
 fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: &mut Vec<GoDirective>) -> Vec<Token> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
@@ -454,14 +542,15 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
             } else {
                 errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
-            tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c, raw: None });
+            // N-437: a raw string is its text verbatim, carriage returns discarded (Go spec).
+            let raw = Some(val.replace('\r', "").into_bytes());
+            tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c, raw });
             continue;
         }
 
         // Double-quoted string
         if ch == '"' {
-            let mut val = String::new();
-            let mut raw: Vec<u8> = Vec::new();
+            let mut body: Vec<char> = Vec::new();
             pos += 1;
             col += 1;
             // F-011: a Go interpreted string cannot span lines; one that
@@ -472,47 +561,11 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                     break;
                 }
                 if chars[pos] == '\\' && pos + 1 < chars.len() {
+                    body.push('\\');
                     pos += 1;
                     col += 1;
-                    match chars[pos] {
-                        'n' => { val.push('\n'); raw.push('\n' as u8); },
-                        't' => { val.push('\t'); raw.push('\t' as u8); },
-                        'r' => { val.push('\r'); raw.push('\r' as u8); },
-                        '0' => { val.push('\0'); raw.push('\0' as u8); },
-                        '\\' => { val.push('\\'); raw.push('\\' as u8); },
-                        '"' => { val.push('"'); raw.push('"' as u8); },
-                        'x' if pos + 2 < chars.len() => {
-                            let h1 = chars[pos + 1];
-                            let h2 = chars[pos + 2];
-                            if h1.is_ascii_hexdigit() && h2.is_ascii_hexdigit() {
-                                let hex_str: String = [h1, h2].iter().collect();
-                                if let Ok(b) = u8::from_str_radix(&hex_str, 16) {
-                                    val.push(b as char);
-                                    raw.push(b);
-                                    pos += 2;
-                                    col += 2;
-                                } else {
-                                    val.push('\\');
-                                    val.push('x');
-                                    raw.extend_from_slice(b"\\x");
-                                }
-                            } else {
-                                val.push('\\');
-                                val.push('x');
-                                raw.extend_from_slice(b"\\x");
-                            }
-                        }
-                        c => {
-                            val.push('\\');
-                            val.push(c);
-                            raw.push(b'\\');
-                            raw.extend_from_slice(c.to_string().as_bytes());
-                        }
-                    }
-                } else {
-                    val.push(chars[pos]);
-                    raw.extend_from_slice(chars[pos].to_string().as_bytes());
                 }
+                body.push(chars[pos]);
                 pos += 1;
                 col += 1;
             }
@@ -521,6 +574,12 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                 col += 1;
             } else {
                 errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
+            }
+            // N-437: decode with Go's string-literal rules; an escape Go
+            // refuses is refused here too.
+            let (val, raw, esc_err) = decode_go_string(&body);
+            if let Some(msg) = esc_err {
+                errors.push(lex_error(&msg, file, l, c - 1));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c, raw: Some(raw) });
             continue;
