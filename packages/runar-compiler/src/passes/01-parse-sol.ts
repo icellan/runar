@@ -38,7 +38,7 @@ type TokenType =
   | '==' | '!=' | '<' | '<=' | '>' | '>=' | '&&' | '||'
   | '<<' | '>>'
   | '&' | '|' | '^' | '~' | '!'
-  | '=' | '+=' | '-='
+  | '=' | '+=' | '-=' | '*=' | '/=' | '%='
   | '++' | '--'
   | 'eof';
 
@@ -118,6 +118,9 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     if (ch === '-' && peekN(1) === '-') { advance(); advance(); add('--', '--', l, c); continue; }
     if (ch === '+' && peekN(1) === '=') { advance(); advance(); add('+=', '+=', l, c); continue; }
     if (ch === '-' && peekN(1) === '=') { advance(); advance(); add('-=', '-=', l, c); continue; }
+    if (ch === '*' && peekN(1) === '=') { advance(); advance(); add('*=', '*=', l, c); continue; }
+    if (ch === '/' && peekN(1) === '=') { advance(); advance(); add('/=', '/=', l, c); continue; }
+    if (ch === '%' && peekN(1) === '=') { advance(); advance(); add('%=', '%=', l, c); continue; }
 
     // Single-char operators & punctuation
     const singles = '(){}[];,.:?+-*/%<>=&|^~!';
@@ -682,26 +685,19 @@ class SolParser {
       };
     }
 
-    // Compound assignments
-    if (this.current().type === '+=') {
+    // Compound assignments: the closed set in spec/grammar.md (`+= -= *= /= %=`)
+    const compoundOps = new Map<TokenType, BinaryOp>([
+      ['+=', '+'], ['-=', '-'], ['*=', '*'], ['/=', '/'], ['%=', '%'],
+    ]);
+    const compoundOp = compoundOps.get(this.current().type);
+    if (compoundOp !== undefined) {
       this.advance();
       const rhs = this.parseExpression();
       this.expect(';');
       return {
         kind: 'assignment',
         target: expr,
-        value: { kind: 'binary_expr', op: '+', left: expr, right: rhs },
-        sourceLocation: location,
-      };
-    }
-    if (this.current().type === '-=') {
-      this.advance();
-      const rhs = this.parseExpression();
-      this.expect(';');
-      return {
-        kind: 'assignment',
-        target: expr,
-        value: { kind: 'binary_expr', op: '-', left: expr, right: rhs },
+        value: { kind: 'binary_expr', op: compoundOp, left: expr, right: rhs },
         sourceLocation: location,
       };
     }

@@ -33,10 +33,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * that a compound state write or non-unit step in the for-update slot
  * (negatives N167/N168) is still refused, now by the loop-update rule.
  *
- * <p>What it does NOT prove: that the bitwise/shift compound forms
- * ({@code &= |= ^= <<= >>=}) agree across the other five tiers (their
- * {@code .runar.java} parsers refuse them today; only TS and Java accept),
- * on-chain execution of the result, or the fold-off byte stream.
+ * <p>What it does NOT prove: that the other six tiers agree with Java on the
+ * bitwise/shift compound forms ({@code &= |= ^= <<= >>=}) (measured at N-438:
+ * all seven tiers accept all ten operators on {@code .runar.java}; this file
+ * checks only the Java tier), on-chain execution of the result, or the
+ * fold-off byte stream.
  */
 class N130CompoundAssignTest {
 
