@@ -1998,8 +1998,9 @@ module RunarCompiler
 
         # String literal
         if tok.kind == TOK_STRING
+          lit_loc = loc
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: lit_loc)
         end
 
         # Identifier, keyword, or call

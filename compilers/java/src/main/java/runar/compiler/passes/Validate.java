@@ -1847,7 +1847,7 @@ public final class Validate {
                 error(
                     "ByteString literal '" + v + "' has odd length (" + v.length()
                         + ") — hex strings must have an even number of characters",
-                    null
+                    lit.sourceLocation()
                 );
                 return;
             }
@@ -1858,7 +1858,7 @@ public final class Validate {
                     error(
                         "ByteString literal '" + v + "' contains non-hex characters "
                             + "— only 0-9, a-f, A-F are allowed",
-                        null
+                        lit.sourceLocation()
                     );
                     return;
                 }

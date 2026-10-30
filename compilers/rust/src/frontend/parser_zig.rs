@@ -1993,7 +1993,7 @@ impl<'a> ZigParser<'a> {
         // String literal (hex ByteString)
         if matches!(self.peek(), Token::StringLit(_)) {
             if let Token::StringLit(v) = self.advance() {
-                return Expression::ByteStringLiteral { value: v };
+                return Expression::ByteStringLiteral { value: v, source_location: None };
             }
         }
 
@@ -2077,13 +2077,13 @@ impl<'a> ZigParser<'a> {
                         self.advance(); // (
                         let arg = self.parse_expression();
                         self.expect(&Token::RParen);
-                        if let Expression::ByteStringLiteral { value } = arg {
-                            return Expression::ByteStringLiteral { value };
+                        if let Expression::ByteStringLiteral { value, .. } = arg {
+                            return Expression::ByteStringLiteral { value, source_location: None };
                         }
                         self.errors.push(
                             "runar.hexToBytes expects a string literal argument".to_string(),
                         );
-                        return Expression::ByteStringLiteral { value: String::new() };
+                        return Expression::ByteStringLiteral { value: String::new(), source_location: None };
                     }
 
                     return Expression::Identifier { name: builtin };

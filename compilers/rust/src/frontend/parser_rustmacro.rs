@@ -1386,7 +1386,7 @@ impl RustDslParser {
             }
             TokenType::HexString(val) => {
                 self.advance_clone();
-                Expression::ByteStringLiteral { value: val }
+                Expression::ByteStringLiteral { value: val, source_location: None }
             }
             TokenType::True => { self.advance_clone(); Expression::BoolLiteral { value: true } }
             TokenType::False => { self.advance_clone(); Expression::BoolLiteral { value: false } }

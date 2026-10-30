@@ -78,6 +78,10 @@ class ByteStringLiteral:
     """A hex-encoded byte string literal."""
 
     value: str  # hex-encoded
+    # The literal's opening quote (N-432). Only the .runar.ts parser sets it,
+    # as the TS reference does. Not part of equality: two literals with the
+    # same value are the same literal wherever they were written.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass

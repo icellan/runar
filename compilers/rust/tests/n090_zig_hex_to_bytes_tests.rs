@@ -46,7 +46,7 @@ fn hex_to_bytes_initializer_is_a_bytestring_literal() {
         .find(|p| p.name == "prefix")
         .expect("property 'prefix'");
     match &prefix.initializer {
-        Some(Expression::ByteStringLiteral { value }) => assert_eq!(value, "1976a914"),
+        Some(Expression::ByteStringLiteral { value, .. }) => assert_eq!(value, "1976a914"),
         other => panic!("expected ByteStringLiteral initializer, got {:?}", other),
     }
 }

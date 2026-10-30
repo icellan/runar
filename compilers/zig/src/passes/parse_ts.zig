@@ -2097,7 +2097,7 @@ const Parser = struct {
             },
             .string_literal => blk: {
                 const tok = self.bump();
-                break :blk Expression{ .literal_bytes = tok.text };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = self.tokenSourceLoc(tok) } };
             },
             .lparen => blk: {
                 _ = self.bump();
@@ -2257,10 +2257,10 @@ const Parser = struct {
             if (std.mem.eql(u8, key, "body")) {
                 if (self.current.kind == .string_literal) {
                     const tok = self.bump();
-                    body_expr = Expression{ .literal_bytes = tok.text };
+                    body_expr = Expression{ .literal_bytes = .{ .value = tok.text } };
                 } else if (self.current.kind == .lbracket) {
                     const encoded = self.encodeAsmArrayBody();
-                    body_expr = Expression{ .literal_bytes = encoded };
+                    body_expr = Expression{ .literal_bytes = .{ .value = encoded } };
                 } else {
                     self.addError("asm() body must be a hex string literal or an array of opcode names / push() calls");
                     // Best-effort skip past the value
@@ -2281,7 +2281,7 @@ const Parser = struct {
 
         if (body_expr == null) {
             self.addError("asm() requires a 'body' field with a hex string literal value");
-            body_expr = Expression{ .literal_bytes = "" };
+            body_expr = Expression{ .literal_bytes = .{ .value = "" } };
         }
         // Defaults: in_arity = 0, out_arity = 1.
         const in_a = in_arity_expr orelse Expression{ .literal_int = 0 };

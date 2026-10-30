@@ -2398,7 +2398,7 @@ const Parser = struct {
                             _ = self.bump(); // ')'
                             var decoded: std.ArrayListUnmanaged(u8) = .empty;
                             _ = decodeGoBody(self.allocator, str_tok.text, &decoded) catch return null;
-                            expr = .{ .literal_bytes = hexOfBytes(self.allocator, decoded.items) catch return null };
+                            expr = .{ .literal_bytes = .{ .value = hexOfBytes(self.allocator, decoded.items) catch return null } };
                             continue;
                         }
                     } else if (self.current.kind == .backtick_string) {
@@ -2409,7 +2409,7 @@ const Parser = struct {
                             for (raw_tok.text) |b| {
                                 if (b != '\r') kept.append(self.allocator, b) catch return null;
                             }
-                            expr = .{ .literal_bytes = hexOfBytes(self.allocator, kept.items) catch return null };
+                            expr = .{ .literal_bytes = .{ .value = hexOfBytes(self.allocator, kept.items) catch return null } };
                             continue;
                         }
                     }
@@ -2519,7 +2519,7 @@ const Parser = struct {
                 const tok = self.bump();
                 var decoded: std.ArrayListUnmanaged(u8) = .empty;
                 _ = decodeGoBody(self.allocator, tok.text, &decoded) catch break :blk null;
-                break :blk Expression{ .literal_bytes = decoded.items };
+                break :blk Expression{ .literal_bytes = .{ .value = decoded.items } };
             },
             .backtick_string => blk: {
                 // N-439: a bare raw literal is its text verbatim, CR discarded.
@@ -2528,7 +2528,7 @@ const Parser = struct {
                 for (tok.text) |b| {
                     if (b != '\r') kept.append(self.allocator, b) catch break :blk null;
                 }
-                break :blk Expression{ .literal_bytes = kept.items };
+                break :blk Expression{ .literal_bytes = .{ .value = kept.items } };
             },
             .lparen => blk: {
                 _ = self.bump();
@@ -3057,7 +3057,7 @@ test "parse ByteString literal and variable (Go)" {
     const Finder = struct {
         fn find(expr: types.Expression) ?[]const u8 {
             return switch (expr) {
-                .literal_bytes => |v| v,
+                .literal_bytes => |v| v.value,
                 .binary_op => |bop| find(bop.left) orelse find(bop.right),
                 .call => |call| blk: {
                     for (call.args) |a| if (find(a)) |v| break :blk v;

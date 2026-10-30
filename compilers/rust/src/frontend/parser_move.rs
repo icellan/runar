@@ -2069,7 +2069,7 @@ impl<'a> MoveParser<'a> {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
             Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name) },
             Token::LParen => {
                 let expr = self.parse_expression();

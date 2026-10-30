@@ -1987,7 +1987,7 @@ impl<'a> JavaParser<'a> {
                 // the Go/Python/Ruby parser behaviour. `promote_literal_calls`
                 // unwraps the `fromHex(...)` wrapper after the postfix parse.
                 self.advance();
-                Some(Expression::ByteStringLiteral { value: s })
+                Some(Expression::ByteStringLiteral { value: s, source_location: None })
             }
             TokenType::Null => {
                 self.error(format!("null literals are unsupported in {}", self.file));
@@ -2249,8 +2249,8 @@ fn promote_literal_calls(expr: Expression) -> Expression {
         if args.len() == 1 {
             if let Expression::MemberExpr { property, .. } = callee.as_ref() {
                 if property == "fromHex" {
-                    if let Expression::ByteStringLiteral { value } = &args[0] {
-                        return Expression::ByteStringLiteral { value: value.clone() };
+                    if let Expression::ByteStringLiteral { value, .. } = &args[0] {
+                        return Expression::ByteStringLiteral { value: value.clone(), source_location: None };
                     }
                     // Support the Java literal being a string literal converted
                     // to ByteStringLiteral above or arriving as BigIntLiteral-
@@ -2923,7 +2923,7 @@ mod tests {
             Expression::BinaryExpr { op, right, .. } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match right.as_ref() {
-                    Expression::ByteStringLiteral { value } => assert_eq!(value, "deadbeef"),
+                    Expression::ByteStringLiteral { value, .. } => assert_eq!(value, "deadbeef"),
                     other => panic!("expected ByteStringLiteral on RHS, got {:?}", other),
                 }
             }

@@ -2409,7 +2409,7 @@ test "typeCheck: N-234 rejects a ByteString literal initializing a bigint proper
         .name = "x",
         .type_info = .bigint,
         .readonly = true,
-        .initializer = .{ .literal_bytes = "ab" },
+        .initializer = .{ .literal_bytes = .{ .value = "ab" } },
     };
 
     const contract = ContractNode{
@@ -2429,7 +2429,7 @@ test "typeCheck: N-234 rejects a toByteString(...) literal initializing a bigint
     const allocator = std.testing.allocator;
 
     // readonly x: bigint = toByteString('ab');
-    var args = [_]Expression{.{ .literal_bytes = "ab" }};
+    var args = [_]Expression{.{ .literal_bytes = .{ .value = "ab" } }};
     const call = try allocator.create(types.CallExpr);
     defer allocator.destroy(call);
     call.* = .{ .callee = "toByteString", .args = args[0..] };
@@ -2594,7 +2594,7 @@ test "typeCheck: valid builtin call sha256" {
     defer allocator.destroy(call);
     const args = try allocator.alloc(Expression, 1);
     defer allocator.free(args);
-    args[0] = .{ .literal_bytes = "cafe" };
+    args[0] = .{ .literal_bytes = .{ .value = "cafe" } };
     call.* = .{ .callee = "sha256", .args = args };
 
     const stmts = try allocator.alloc(Statement, 1);
@@ -2657,8 +2657,8 @@ test "typeCheck: wrong arity for builtin" {
     defer allocator.destroy(call);
     const args = try allocator.alloc(Expression, 2);
     defer allocator.free(args);
-    args[0] = .{ .literal_bytes = "a" };
-    args[1] = .{ .literal_bytes = "b" };
+    args[0] = .{ .literal_bytes = .{ .value = "a" } };
+    args[1] = .{ .literal_bytes = .{ .value = "b" } };
     call.* = .{ .callee = "sha256", .args = args };
 
     const stmts = try allocator.alloc(Statement, 1);
@@ -2953,7 +2953,7 @@ test "typeCheck: assert special case with 2 args" {
     const args = try allocator.alloc(Expression, 2);
     defer allocator.free(args);
     args[0] = .{ .literal_bool = true };
-    args[1] = .{ .literal_bytes = "error message" };
+    args[1] = .{ .literal_bytes = .{ .value = "error message" } };
     call.* = .{ .callee = "assert", .args = args };
 
     const stmts = try allocator.alloc(Statement, 1);
@@ -3041,7 +3041,7 @@ test "typeCheck: incompatible equality comparison" {
 test "inferExprTypeStatic: literal types" {
     try std.testing.expectEqual(.bigint, inferExprTypeStatic(.{ .literal_int = 42 }));
     try std.testing.expectEqual(.boolean, inferExprTypeStatic(.{ .literal_bool = true }));
-    try std.testing.expectEqual(.byte_string, inferExprTypeStatic(.{ .literal_bytes = "ff" }));
+    try std.testing.expectEqual(.byte_string, inferExprTypeStatic(.{ .literal_bytes = .{ .value = "ff" } }));
 }
 
 test "inferExprTypeStatic: binary ops" {

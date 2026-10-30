@@ -1185,7 +1185,7 @@ module RunarCompiler
         when BoolLiteral
           BoolLiteral.new(value: expr.value)
         when ByteStringLiteral
-          ByteStringLiteral.new(value: expr.value)
+          ByteStringLiteral.new(value: expr.value, source_location: expr.source_location)
         when Identifier
           Identifier.new(name: expr.name)
         when PropertyAccessExpr

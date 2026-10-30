@@ -1582,9 +1582,9 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 		if len(val) > 0 {
 			// N-436: TS counts UTF-16 code units; len(val) would count UTF-8 bytes.
 			if n := len(utf16.Encode([]rune(val))); n%2 != 0 {
-				ctx.addError(fmt.Sprintf("ByteString literal '%s' has odd length (%d) — hex strings must have an even number of characters", val, n))
+				ctx.addErrorWithLoc(fmt.Sprintf("ByteString literal '%s' has odd length (%d) — hex strings must have an even number of characters", val, n), &e.SourceLocation)
 			} else if !isHexString(val) {
-				ctx.addError(fmt.Sprintf("ByteString literal '%s' contains non-hex characters — only 0-9, a-f, A-F are allowed", val))
+				ctx.addErrorWithLoc(fmt.Sprintf("ByteString literal '%s' contains non-hex characters — only 0-9, a-f, A-F are allowed", val), &e.SourceLocation)
 			}
 		}
 	}

@@ -2453,13 +2453,13 @@ const Parser = struct {
         // Hex string literal (single-quoted)
         if (tok.kind == .hex_string) {
             _ = self.bump();
-            return Expression{ .literal_bytes = tok.text };
+            return Expression{ .literal_bytes = .{ .value = tok.text } };
         }
 
         // String literal (double-quoted)
         if (tok.kind == .string_literal) {
             _ = self.bump();
-            return Expression{ .literal_bytes = tok.text };
+            return Expression{ .literal_bytes = .{ .value = tok.text } };
         }
 
         // N-416: `nil` is not a Rúnar value; refused, never read as 0.

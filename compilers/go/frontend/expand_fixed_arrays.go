@@ -1370,7 +1370,7 @@ func cloneExpression(expr Expression) Expression {
 	case BoolLiteral:
 		return BoolLiteral{Value: e.Value}
 	case ByteStringLiteral:
-		return ByteStringLiteral{Value: e.Value}
+		return ByteStringLiteral{Value: e.Value, SourceLocation: e.SourceLocation}
 	case Identifier:
 		return Identifier{Name: e.Name}
 	case PropertyAccessExpr:

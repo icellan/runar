@@ -1224,12 +1224,14 @@ class _ValidationContext:
                 if units % 2 != 0:
                     self._add_error(
                         f"ByteString literal '{val}' has odd length ({units}) "
-                        f"\u2014 hex strings must have an even number of characters"
+                        f"\u2014 hex strings must have an even number of characters",
+                        expr.source_location,
                     )
                 elif not re.fullmatch(r'[0-9a-fA-F]*', val):
                     self._add_error(
                         f"ByteString literal '{val}' contains non-hex characters "
-                        f"\u2014 only 0-9, a-f, A-F are allowed"
+                        f"\u2014 only 0-9, a-f, A-F are allowed",
+                        expr.source_location,
                     )
 
     # -------------------------------------------------------------------

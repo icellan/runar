@@ -1614,12 +1614,14 @@ module RunarCompiler
             if units.odd?
               add_error(
                 "ByteString literal '#{val}' has odd length (#{units}) " \
-                "\u2014 hex strings must have an even number of characters"
+                "\u2014 hex strings must have an even number of characters",
+                loc: expr.source_location
               )
             elsif !val.match?(/\A[0-9a-fA-F]*\z/)
               add_error(
                 "ByteString literal '#{val}' contains non-hex characters " \
-                "\u2014 only 0-9, a-f, A-F are allowed"
+                "\u2014 only 0-9, a-f, A-F are allowed",
+                loc: expr.source_location
               )
             end
           end

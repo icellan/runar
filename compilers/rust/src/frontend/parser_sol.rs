@@ -1809,10 +1809,10 @@ impl<'a> SolParser<'a> {
     fn parse_primary(&mut self) -> Expression {
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
-            Token::HexLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::HexLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
             Token::Ident(name) => {
                 if name == "this" {
                     Expression::Identifier {

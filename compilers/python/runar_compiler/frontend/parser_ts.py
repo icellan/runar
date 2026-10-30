@@ -1620,8 +1620,9 @@ class _TsParser:
 
         # String literal
         if tok.kind == TOK_STRING:
+            loc = self.loc()
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=loc)
 
         # Identifier, keyword, or call
         if tok.kind == TOK_IDENT:

@@ -347,7 +347,7 @@ fn validateInitializerHex(
     expr: Expression,
 ) !void {
     switch (expr) {
-        .literal_bytes => |val| try checkByteStringHex(allocator, errors, val),
+        .literal_bytes => |lit| try checkByteStringHex(allocator, errors, lit.value, lit.location),
         .call => |c| for (c.args) |a| try validateInitializerHex(allocator, errors, a),
         .array_literal => |els| for (els) |el| try validateInitializerHex(allocator, errors, el),
         else => {},
@@ -364,6 +364,7 @@ fn checkByteStringHex(
     allocator: Allocator,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
     val: []const u8,
+    location: ?types.SourceLocation,
 ) !void {
     if (val.len == 0) return;
     const units = utf16Len(val);
@@ -374,6 +375,7 @@ fn checkByteStringHex(
                 "ByteString literal '{s}' has odd length ({d}) \u{2014} hex strings must have an even number of characters",
                 .{ val, units },
             ),
+            .location = location,
             .severity = .@"error",
             .owned_message = true,
         });
@@ -387,6 +389,7 @@ fn checkByteStringHex(
                     "ByteString literal '{s}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
                     .{val},
                 ),
+                .location = location,
                 .severity = .@"error",
                 .owned_message = true,
             });
@@ -443,7 +446,7 @@ fn walkExprForHex(
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
     switch (expr) {
-        .literal_bytes => |val| try checkByteStringHex(allocator, errors, val),
+        .literal_bytes => |lit| try checkByteStringHex(allocator, errors, lit.value, lit.location),
         .call => |c| {
             if (std.mem.eql(u8, c.callee, "asm")) return;
             for (c.args) |arg| try walkExprForHex(allocator, arg, errors);
@@ -1247,7 +1250,8 @@ fn checkAsmCall(
 
     // Body must be a ByteString literal with even-length hex.
     switch (call.args[0]) {
-        .literal_bytes => |body| {
+        .literal_bytes => |body_lit| {
+            const body = body_lit.value;
             if (body.len == 0) {
                 try errors.append(allocator, .{
                     .message = "asm() body must be a non-empty hex string literal",

@@ -456,7 +456,7 @@ fn parse_properties(
             };
 
             // Parse initializer if present (SWC ClassProp.value)
-            let initializer = prop.value.as_ref().map(|v| parse_expression(v, file, errors));
+            let initializer = prop.value.as_ref().map(|v| parse_expression(v, file, errors, cm));
 
             // Issue #109: a `/** @embedAlways */` (or `// @embedAlways`)
             // directive immediately preceding the field opts it out of DCE.
@@ -1135,15 +1135,15 @@ fn parse_statement_at_default_loc(
     cm: &SourceMap,
 ) -> Option<Statement> {
     match stmt {
-        Stmt::Decl(Decl::Var(var_decl)) => parse_variable_statement(var_decl, file, errors),
+        Stmt::Decl(Decl::Var(var_decl)) => parse_variable_statement(var_decl, file, errors, cm),
 
-        Stmt::Expr(expr_stmt) => parse_expression_statement(&expr_stmt.expr, file, errors),
+        Stmt::Expr(expr_stmt) => parse_expression_statement(&expr_stmt.expr, file, errors, cm),
 
         Stmt::If(if_stmt) => Some(parse_if_statement(if_stmt, file, errors, cm)),
 
         Stmt::For(for_stmt) => Some(parse_for_statement(for_stmt, file, errors, cm)),
 
-        Stmt::Return(ret_stmt) => Some(parse_return_statement(ret_stmt, file, errors)),
+        Stmt::Return(ret_stmt) => Some(parse_return_statement(ret_stmt, file, errors, cm)),
 
         // F-064: every other kind — a bare block `{ ... }` (empty or not)
         // included — is refused with the TS reference's diagnostic, never
@@ -1208,6 +1208,7 @@ fn parse_variable_statement(
     var_decl: &VarDecl,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Option<Statement> {
     if var_decl.decls.is_empty() {
         return None;
@@ -1258,7 +1259,7 @@ fn parse_variable_statement(
     let is_const = var_decl.kind == VarDeclKind::Const;
 
     let init = if let Some(ref init_expr) = decl.init {
-        parse_expression(init_expr, file, errors)
+        parse_expression(init_expr, file, errors, cm)
     } else {
         errors.push(Diagnostic::error(format!("Variable '{}' must have an initializer", name), None));
         Expression::BigIntLiteral { value: BigInt::from(0) }
@@ -1287,13 +1288,14 @@ fn parse_expression_statement(
     expr: &Expr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Option<Statement> {
     // Check if this is an assignment expression (a = b, this.x = b)
     if let Expr::Assign(assign) = expr {
-        return Some(parse_assignment_expr(assign, file, errors));
+        return Some(parse_assignment_expr(assign, file, errors, cm));
     }
 
-    let expression = parse_expression(expr, file, errors);
+    let expression = parse_expression(expr, file, errors, cm);
     Some(Statement::ExpressionStatement {
         expression,
         source_location: default_loc(file),
@@ -1304,12 +1306,13 @@ fn parse_assignment_expr(
     assign: &AssignExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Statement {
-    let target = parse_assign_target(&assign.left, file, errors);
+    let target = parse_assign_target(&assign.left, file, errors, cm);
 
     match assign.op {
         AssignOp::Assign => {
-            let value = parse_expression(&assign.right, file, errors);
+            let value = parse_expression(&assign.right, file, errors, cm);
             Statement::Assignment {
                 target,
                 value,
@@ -1331,8 +1334,8 @@ fn parse_assignment_expr(
             };
 
             if let Some(bin_op) = bin_op {
-                let right = parse_expression(&assign.right, file, errors);
-                let target_for_rhs = parse_assign_target(&assign.left, file, errors);
+                let right = parse_expression(&assign.right, file, errors, cm);
+                let target_for_rhs = parse_assign_target(&assign.left, file, errors, cm);
                 let value = Expression::BinaryExpr {
                     op: bin_op,
                     left: Box::new(target_for_rhs),
@@ -1344,7 +1347,7 @@ fn parse_assignment_expr(
                     source_location: default_loc(file),
                 }
             } else {
-                let value = parse_expression(&assign.right, file, errors);
+                let value = parse_expression(&assign.right, file, errors, cm);
                 Statement::Assignment {
                     target,
                     value,
@@ -1359,6 +1362,7 @@ fn parse_assign_target(
     target: &AssignTarget,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
     match target {
         AssignTarget::Simple(simple) => match simple {
@@ -1366,7 +1370,7 @@ fn parse_assign_target(
                 name: ident.id.sym.to_string(),
             },
             SimpleAssignTarget::Member(member) => {
-                parse_member_expression(member, file, errors)
+                parse_member_expression(member, file, errors, cm)
             }
             _ => {
                 errors.push(Diagnostic::error("Unsupported assignment target", None));
@@ -1390,7 +1394,7 @@ fn parse_if_statement(
     errors: &mut Vec<Diagnostic>,
     cm: &SourceMap,
 ) -> Statement {
-    let condition = parse_expression(&if_stmt.test, file, errors);
+    let condition = parse_expression(&if_stmt.test, file, errors, cm);
     let then_branch = parse_stmt_or_block(&if_stmt.cons, file, errors, cm);
 
     let else_branch = if_stmt
@@ -1434,7 +1438,7 @@ fn parse_for_statement(
     let init = if let Some(ref init_expr) = for_stmt.init {
         match init_expr {
             VarDeclOrExpr::VarDecl(var_decl) => {
-                if let Some(stmt) = parse_variable_statement(var_decl, file, errors) {
+                if let Some(stmt) = parse_variable_statement(var_decl, file, errors, cm) {
                     stmt
                 } else {
                     make_default_for_init(file)
@@ -1455,7 +1459,7 @@ fn parse_for_statement(
 
     // Parse condition
     let condition = if let Some(ref cond) = for_stmt.test {
-        parse_expression(cond, file, errors)
+        parse_expression(cond, file, errors, cm)
     } else {
         errors.push(Diagnostic::error("For loop must have a condition", None));
         Expression::BoolLiteral { value: false }
@@ -1463,7 +1467,7 @@ fn parse_for_statement(
 
     // Parse update
     let update = if let Some(ref upd) = for_stmt.update {
-        parse_for_update(upd, file, errors)
+        parse_for_update(upd, file, errors, cm)
     } else {
         errors.push(Diagnostic::error("For loop must have an update expression", None));
         Statement::ExpressionStatement {
@@ -1488,10 +1492,11 @@ fn parse_for_update(
     expr: &Expr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Statement {
     match expr {
         Expr::Update(update) => {
-            let operand = parse_expression(&update.arg, file, errors);
+            let operand = parse_expression(&update.arg, file, errors, cm);
             let is_increment = update.op == UpdateOp::PlusPlus;
             let expression = if is_increment {
                 Expression::IncrementExpr {
@@ -1510,7 +1515,7 @@ fn parse_for_update(
             }
         }
         _ => {
-            let expression = parse_expression(expr, file, errors);
+            let expression = parse_expression(expr, file, errors, cm);
             Statement::ExpressionStatement {
                 expression,
                 source_location: default_loc(file),
@@ -1523,11 +1528,12 @@ fn parse_return_statement(
     ret_stmt: &ReturnStmt,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Statement {
     let value = ret_stmt
         .arg
         .as_ref()
-        .map(|e| parse_expression(e, file, errors));
+        .map(|e| parse_expression(e, file, errors, cm));
 
     Statement::ReturnStatement {
         value,
@@ -1549,17 +1555,17 @@ fn make_default_for_init(file: &str) -> Statement {
 // Expressions
 // ---------------------------------------------------------------------------
 
-fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Expression {
+fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>, cm: &SourceMap) -> Expression {
     match expr {
-        Expr::Bin(bin) => parse_binary_expression(bin, file, errors),
+        Expr::Bin(bin) => parse_binary_expression(bin, file, errors, cm),
 
-        Expr::Unary(unary) => parse_unary_expression(unary, file, errors),
+        Expr::Unary(unary) => parse_unary_expression(unary, file, errors, cm),
 
-        Expr::Update(update) => parse_update_expression(update, file, errors),
+        Expr::Update(update) => parse_update_expression(update, file, errors, cm),
 
-        Expr::Call(call) => parse_call_expression(call, file, errors),
+        Expr::Call(call) => parse_call_expression(call, file, errors, cm),
 
-        Expr::Member(member) => parse_member_expression(member, file, errors),
+        Expr::Member(member) => parse_member_expression(member, file, errors, cm),
 
         Expr::SuperProp(super_prop) => {
             // super.x -- unlikely in Rúnar but handle gracefully
@@ -1571,7 +1577,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
                     property: ident.sym.to_string(),
                 },
                 SuperProp::Computed(comp) => {
-                    let _ = parse_expression(&comp.expr, file, errors);
+                    let _ = parse_expression(&comp.expr, file, errors, cm);
                     errors.push(Diagnostic::error("Computed super property access not supported", None));
                     Expression::Identifier {
                         name: "super".to_string(),
@@ -1611,6 +1617,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             // String literals are hex-encoded ByteString values
             Expression::ByteStringLiteral {
                 value: s.value.to_string(),
+                source_location: Some(real_loc(cm, file, s.span.lo)),
             }
         }
 
@@ -1619,19 +1626,21 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             if tpl.exprs.is_empty() && tpl.quasis.len() == 1 {
                 Expression::ByteStringLiteral {
                     value: tpl.quasis[0].raw.to_string(),
+                    source_location: Some(real_loc(cm, file, tpl.span.lo)),
                 }
             } else {
                 errors.push(Diagnostic::error("Template literals with expressions are not supported", None));
                 Expression::ByteStringLiteral {
                     value: String::new(),
+                    source_location: None,
                 }
             }
         }
 
         Expr::Cond(cond) => {
-            let condition = parse_expression(&cond.test, file, errors);
-            let consequent = parse_expression(&cond.cons, file, errors);
-            let alternate = parse_expression(&cond.alt, file, errors);
+            let condition = parse_expression(&cond.test, file, errors, cm);
+            let consequent = parse_expression(&cond.cons, file, errors, cm);
+            let alternate = parse_expression(&cond.alt, file, errors, cm);
             Expression::TernaryExpr {
                 condition: Box::new(condition),
                 consequent: Box::new(consequent),
@@ -1639,7 +1648,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             }
         }
 
-        Expr::Paren(paren) => parse_expression(&paren.expr, file, errors),
+        Expr::Paren(paren) => parse_expression(&paren.expr, file, errors, cm),
 
         Expr::This(_) => Expression::Identifier {
             name: "this".to_string(),
@@ -1655,25 +1664,25 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
                     parse_type_node(&as_expr.type_ann, file, errors);
                 }
             }
-            parse_expression(&as_expr.expr, file, errors)
+            parse_expression(&as_expr.expr, file, errors, cm)
         }
 
         Expr::TsConstAssertion(c) => {
             // `expr as const`: the assertion is erased (N-359, parity with the
             // other six tiers).
-            parse_expression(&c.expr, file, errors)
+            parse_expression(&c.expr, file, errors, cm)
         }
 
         Expr::TsNonNull(nn) => {
             // Non-null assertion: just parse the inner expression
-            parse_expression(&nn.expr, file, errors)
+            parse_expression(&nn.expr, file, errors, cm)
         }
 
         Expr::Assign(assign) => {
             // Assignment expression in expression context -- should be handled
             // at statement level, but in case it appears in an expression context
             errors.push(Diagnostic::error("Assignment expressions in expression context are not recommended", None));
-            let value = parse_expression(&assign.right, file, errors);
+            let value = parse_expression(&assign.right, file, errors, cm);
             value
         }
 
@@ -1684,7 +1693,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             for el in &arr.elems {
                 match el {
                     Some(swc::ExprOrSpread { spread: None, expr }) => {
-                        elements.push(parse_expression(expr, file, errors));
+                        elements.push(parse_expression(expr, file, errors, cm));
                     }
                     Some(_) => {
                         errors.push(Diagnostic::error(
@@ -1714,9 +1723,10 @@ fn parse_binary_expression(
     bin: &swc::BinExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
-    let left = parse_expression(&bin.left, file, errors);
-    let right = parse_expression(&bin.right, file, errors);
+    let left = parse_expression(&bin.left, file, errors, cm);
+    let right = parse_expression(&bin.right, file, errors, cm);
 
     let op = match bin.op {
         swc::BinaryOp::Add => BinaryOp::Add,
@@ -1762,8 +1772,9 @@ fn parse_unary_expression(
     unary: &SwcUnaryExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
-    let operand = parse_expression(&unary.arg, file, errors);
+    let operand = parse_expression(&unary.arg, file, errors, cm);
 
     let op = match unary.op {
         swc::UnaryOp::Bang => UnaryOp::Not,
@@ -1785,8 +1796,9 @@ fn parse_update_expression(
     update: &UpdateExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
-    let operand = parse_expression(&update.arg, file, errors);
+    let operand = parse_expression(&update.arg, file, errors, cm);
 
     if update.op == UpdateOp::PlusPlus {
         Expression::IncrementExpr {
@@ -1805,6 +1817,7 @@ fn parse_call_expression(
     call: &CallExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
     // Special-case asm({ body, in_arity?, out_arity? }) — normalise the
     // object-literal argument into a CallExpr with three positional args
@@ -1823,7 +1836,7 @@ fn parse_call_expression(
     }
 
     let callee = match &call.callee {
-        Callee::Expr(e) => parse_expression(e, file, errors),
+        Callee::Expr(e) => parse_expression(e, file, errors, cm),
         Callee::Super(_) => Expression::Identifier {
             name: "super".to_string(),
         },
@@ -1838,7 +1851,7 @@ fn parse_call_expression(
     let args: Vec<Expression> = call
         .args
         .iter()
-        .map(|arg| parse_expression(&arg.expr, file, errors))
+        .map(|arg| parse_expression(&arg.expr, file, errors, cm))
         .collect();
 
     Expression::CallExpr {
@@ -1932,16 +1945,18 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
                 Expr::Lit(Lit::Str(s)) => {
                     body_expr = Some(Expression::ByteStringLiteral {
                         value: s.value.to_string(),
+                        source_location: None,
                     });
                 }
                 Expr::Tpl(tpl) if tpl.exprs.is_empty() && tpl.quasis.len() == 1 => {
                     body_expr = Some(Expression::ByteStringLiteral {
                         value: tpl.quasis[0].raw.to_string(),
+                        source_location: None,
                     });
                 }
                 Expr::Array(arr) => {
                     let encoded = encode_asm_array_body(arr, errors);
-                    body_expr = Some(Expression::ByteStringLiteral { value: encoded });
+                    body_expr = Some(Expression::ByteStringLiteral { value: encoded, source_location: None });
                 }
                 other => {
                     errors.push(Diagnostic::error(
@@ -1953,6 +1968,7 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
                     ));
                     body_expr = Some(Expression::ByteStringLiteral {
                         value: String::new(),
+                        source_location: None,
                     });
                 }
             },
@@ -1985,6 +2001,7 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
         ));
         Expression::ByteStringLiteral {
             value: String::new(),
+            source_location: None,
         }
     });
     // Defaults: in_arity=0, out_arity=1. The out_arity=1 default reflects the
@@ -2311,13 +2328,14 @@ fn parse_member_expression(
     member: &SwcMemberExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
     let prop_name = match &member.prop {
         MemberProp::Ident(ident) => ident.sym.to_string(),
         MemberProp::Computed(comp) => {
             // Computed member access: obj[expr]
-            let object = parse_expression(&member.obj, file, errors);
-            let index = parse_expression(&comp.expr, file, errors);
+            let object = parse_expression(&member.obj, file, errors, cm);
+            let index = parse_expression(&comp.expr, file, errors, cm);
             return Expression::IndexAccess {
                 object: Box::new(object),
                 index: Box::new(index),
@@ -2337,7 +2355,7 @@ fn parse_member_expression(
     }
 
     // General member access: obj.method
-    let object = parse_expression(&member.obj, file, errors);
+    let object = parse_expression(&member.obj, file, errors, cm);
     Expression::MemberExpr {
         object: Box::new(object),
         property: prop_name,

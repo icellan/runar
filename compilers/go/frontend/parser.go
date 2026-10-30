@@ -1801,7 +1801,7 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		if len(text) >= 2 {
 			text = text[1 : len(text)-1]
 		}
-		return ByteStringLiteral{Value: text}
+		return ByteStringLiteral{Value: text, SourceLocation: p.loc(node)}
 
 	case "ternary_expression":
 		return p.parseTernaryExpression(node)
@@ -2543,7 +2543,7 @@ func (p *parseContext) parseStringLiteral(node *sitter.Node) Expression {
 	if len(text) >= 2 {
 		text = text[1 : len(text)-1]
 	}
-	return ByteStringLiteral{Value: text}
+	return ByteStringLiteral{Value: text, SourceLocation: p.loc(node)}
 }
 
 func (p *parseContext) parseParenExpression(node *sitter.Node) Expression {

@@ -2441,7 +2441,7 @@ impl<'a> GoParser<'a> {
 
             TokenType::StringLit(s) => {
                 self.advance();
-                Some(Expression::ByteStringLiteral { value: s })
+                Some(Expression::ByteStringLiteral { value: s, source_location: None })
             }
 
             TokenType::LParen => {
@@ -2595,7 +2595,7 @@ impl<'a> GoParser<'a> {
                                 // literal text, the raw byte for a \xNN escape).
                                 let bytes = raw.unwrap_or_else(|| s.clone().into_bytes());
                                 let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                                return Some(Expression::ByteStringLiteral { value: hex_str });
+                                return Some(Expression::ByteStringLiteral { value: hex_str, source_location: None });
                             }
                         }
                         // Roll back and fall through to default parse_call_args path.
@@ -3028,7 +3028,7 @@ func (c *LitDemo) Check() {
         // Walk the method body looking for a ByteString literal equal to "006a".
         fn find_bytestring_lit(expr: &Expression) -> Option<String> {
             match expr {
-                Expression::ByteStringLiteral { value } => Some(value.clone()),
+                Expression::ByteStringLiteral { value, .. } => Some(value.clone()),
                 Expression::CallExpr { callee, args, .. } => {
                     if let Some(v) = find_bytestring_lit(callee) {
                         return Some(v);

@@ -46,7 +46,9 @@ module RunarCompiler
     BoolLiteral = Struct.new(:value, keyword_init: true)
 
     # A hex-encoded byte string literal.
-    ByteStringLiteral = Struct.new(:value, keyword_init: true)
+    # source_location is the literal's opening quote (N-432). Only the
+    # .runar.ts parser sets it, as the TS reference does; elsewhere it is nil.
+    ByteStringLiteral = Struct.new(:value, :source_location, keyword_init: true)
 
     # A variable or name reference.
     Identifier = Struct.new(:name, keyword_init: true)

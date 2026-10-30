@@ -2557,8 +2557,8 @@ impl<'a> RbParser<'a> {
                 self.errors.push("'nil' is not a Rúnar value (use a number, true, false or a hex string)".to_string());
                 Expression::BigIntLiteral { value: BigInt::from(0) }
             }
-            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
             Token::Ivar(name) => {
                 // @var -> property access
                 let prop_name = snake_to_camel(&name);

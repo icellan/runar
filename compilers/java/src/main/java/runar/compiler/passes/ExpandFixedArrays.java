@@ -1306,7 +1306,7 @@ public final class ExpandFixedArrays {
     private static Expression cloneExpression(Expression expr) {
         if (expr instanceof BigIntLiteral lit) return new BigIntLiteral(lit.value());
         if (expr instanceof BoolLiteral lit) return new BoolLiteral(lit.value());
-        if (expr instanceof ByteStringLiteral lit) return new ByteStringLiteral(lit.value());
+        if (expr instanceof ByteStringLiteral lit) return new ByteStringLiteral(lit.value(), lit.sourceLocation());
         if (expr instanceof Identifier id) return new Identifier(id.name());
         if (expr instanceof PropertyAccessExpr pa) return new PropertyAccessExpr(pa.property());
         if (expr instanceof BinaryExpr be) {

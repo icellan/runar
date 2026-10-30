@@ -1795,8 +1795,9 @@ public final class TsParser {
             }
 
             if (tok.kind == TOK_STRING) {
+                SourceLocation litLoc = loc();
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, litLoc);
             }
 
             if (tok.kind == TOK_IDENT) {

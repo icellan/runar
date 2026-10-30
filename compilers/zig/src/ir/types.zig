@@ -380,7 +380,7 @@ pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, 
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {
-    literal_int: i64, literal_bool: bool, literal_bytes: []const u8, identifier: []const u8,
+    literal_int: i64, literal_bool: bool, literal_bytes: BytesLiteral, identifier: []const u8,
     /// Oversize decimal integer literal — produced by frontend parsers when the
     /// source text is a base-10 integer that overflows `i64`. The payload is the
     /// raw decimal text (optionally leading `-`, no `n` suffix, no underscores)
@@ -393,6 +393,10 @@ pub const Expression = union(enum) {
     call: *CallExpr, method_call: *MethodCall, ternary: *Ternary, index_access: *IndexAccess,
     increment: *IncrementExpr, decrement: *DecrementExpr, array_literal: []const Expression,
 };
+/// A ByteString literal. `location` is the literal's opening quote (N-432);
+/// only the .runar.ts parser sets it, as the TS reference does, so elsewhere
+/// it is null and the hex diagnostics print no location.
+pub const BytesLiteral = struct { value: []const u8, location: ?SourceLocation = null };
 pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
 pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression };
 pub const UnaryOp = struct { op: UnaryOperator, operand: Expression };

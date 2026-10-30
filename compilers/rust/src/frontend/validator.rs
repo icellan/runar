@@ -976,7 +976,7 @@ fn validate_asm_usage(
         }
 
         match &args[0] {
-            Expression::ByteStringLiteral { value } => {
+            Expression::ByteStringLiteral { value, .. } => {
                 if value.is_empty() {
                     errors.push(Diagnostic::error(
                         "asm() body must be a non-empty hex string literal",
@@ -1748,7 +1748,7 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
         | Expression::BoolLiteral { .. }
         | Expression::PropertyAccess { .. } => {}
 
-        Expression::ByteStringLiteral { value } => {
+        Expression::ByteStringLiteral { value, source_location } => {
             if !value.is_empty() {
                 // N-436: TS counts UTF-16 code units; value.len() would count UTF-8 bytes.
                 let units = value.encode_utf16().count();
@@ -1757,12 +1757,12 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
                         "ByteString literal '{}' has odd length ({}) \u{2014} hex strings must have an even number of characters",
                         value,
                         units
-                    ), None));
+                    ), source_location.clone()));
                 } else if !value.chars().all(|c| c.is_ascii_hexdigit()) {
                     errors.push(Diagnostic::error(format!(
                         "ByteString literal '{}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
                         value
-                    ), None));
+                    ), source_location.clone()));
                 }
             }
         }

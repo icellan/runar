@@ -260,6 +260,10 @@ func (BoolLiteral) exprMarker() {}
 // ByteStringLiteral represents a hex-encoded byte string literal.
 type ByteStringLiteral struct {
 	Value string // hex-encoded
+	// SourceLocation is the literal's opening quote (N-432). Only the
+	// .runar.ts parser sets it, as the TS reference does; elsewhere it is
+	// zero and the hex diagnostics print no location.
+	SourceLocation SourceLocation
 }
 
 func (ByteStringLiteral) exprMarker() {}

@@ -2182,7 +2182,7 @@ const Parser = struct {
                 // Bare string literals are only meaningful in ByteString.fromHex("hex"),
                 // which is rewritten in parsePostfix. Keep the raw payload here so
                 // the postfix can reinterpret it as hex.
-                break :blk Expression{ .literal_bytes = tok.text };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text } };
             },
             .lparen => blk: {
                 _ = self.bump();
@@ -2809,7 +2809,7 @@ test "ByteString.fromHex literal (Java)" {
     try std.testing.expectEqual(BinOperator.eq, eq_op.op);
     // Right operand must be a bytes literal with the hex payload.
     switch (eq_op.right) {
-        .literal_bytes => |raw| try std.testing.expectEqualStrings("deadbeef", raw),
+        .literal_bytes => |raw| try std.testing.expectEqualStrings("deadbeef", raw.value),
         else => return error.ExpectedByteStringLiteral,
     }
 }

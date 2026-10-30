@@ -484,7 +484,7 @@ fn extractLiteralValue(expr: Expression) ?ConstValue {
         .literal_int => |v| return .{ .integer = v },
         .literal_bigint => |s| return .{ .big_integer = s },
         .literal_bool => |v| return .{ .boolean = v },
-        .literal_bytes => |v| return .{ .string = v },
+        .literal_bytes => |v| return .{ .string = v.value },
         .unary_op => |uop| {
             if (uop.op == .negate) {
                 switch (uop.operand) {
@@ -510,7 +510,7 @@ fn extractLiteralValue(expr: Expression) ?ConstValue {
         // call node. Literal argument only.
         .call => |c| {
             if (validate.isToByteStringLiteral(expr)) {
-                return .{ .string = c.args[0].literal_bytes };
+                return .{ .string = c.args[0].literal_bytes.value };
             }
         },
         else => {},
@@ -2373,7 +2373,7 @@ fn lowerExprToRef(ctx: *LowerCtx, expr: Expression) LowerError![]const u8 {
             return try ctx.emit(makeLoadConstBool(v));
         },
         .literal_bytes => |v| {
-            return try ctx.emit(makeLoadConstString(ctx.allocator, v));
+            return try ctx.emit(makeLoadConstString(ctx.allocator, v.value));
         },
         .identifier => |name| {
             return try lowerIdentifier(ctx, name);
@@ -2631,7 +2631,7 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         var out_arity: i32 = 1;
         if (c.args.len >= 1) {
             switch (c.args[0]) {
-                .literal_bytes => |bs| body_hex = bs,
+                .literal_bytes => |bs| body_hex = bs.value,
                 else => {},
             }
         }
@@ -5346,7 +5346,7 @@ test "extractLiteralValue handles all literal types" {
     }
 
     // Bytes
-    const bytes_val = extractLiteralValue(.{ .literal_bytes = "deadbeef" });
+    const bytes_val = extractLiteralValue(.{ .literal_bytes = .{ .value = "deadbeef" } });
     try std.testing.expect(bytes_val != null);
     switch (bytes_val.?) {
         .string => |v| try std.testing.expectEqualStrings("deadbeef", v),

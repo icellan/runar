@@ -2306,7 +2306,7 @@ const Parser = struct {
             },
             .string_literal => blk: {
                 const tok = self.bump();
-                break :blk Expression{ .literal_bytes = tok.text };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text } };
             },
             .lparen => blk: {
                 _ = self.bump();
@@ -2375,10 +2375,10 @@ const Parser = struct {
             if (self.current.kind == .string_literal) {
                 const str_tok = self.bump();
                 _ = self.expect(.rparen);
-                return Expression{ .literal_bytes = str_tok.text };
+                return Expression{ .literal_bytes = .{ .value = str_tok.text } };
             }
             _ = self.expect(.rparen);
-            return Expression{ .literal_bytes = "" };
+            return Expression{ .literal_bytes = .{ .value = "" } };
         }
         // Unknown bytes method
         if (self.current.kind == .lparen) {

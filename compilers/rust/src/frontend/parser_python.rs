@@ -2635,8 +2635,8 @@ impl<'a> PyParser<'a> {
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
             Token::NoneLit => Expression::BigIntLiteral { value: BigInt::from(0) },
-            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
             Token::SelfKw => {
                 // self -> this
                 Expression::Identifier {
@@ -2660,7 +2660,7 @@ impl<'a> PyParser<'a> {
                                 }
                             };
                             self.expect(&Token::RParen);
-                            return Expression::ByteStringLiteral { value: val };
+                            return Expression::ByteStringLiteral { value: val, source_location: None };
                         }
                     }
                 }
@@ -3164,7 +3164,7 @@ class HexTest(SmartContract):
         let body = &contract.methods[0].body;
 
         if let Statement::VariableDecl { init, .. } = &body[0] {
-            if let Expression::ByteStringLiteral { value } = init {
+            if let Expression::ByteStringLiteral { value, .. } = init {
                 assert_eq!(value, "dead");
             } else {
                 panic!("Expected ByteStringLiteral, got {:?}", init);

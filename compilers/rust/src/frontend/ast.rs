@@ -347,6 +347,10 @@ pub enum Expression {
     },
     ByteStringLiteral {
         value: String, // hex-encoded
+        /// The literal's opening quote (N-432). Only the `.runar.ts` parser
+        /// sets it, as the TS reference does; elsewhere it is `None` and the
+        /// hex diagnostics print no location.
+        source_location: Option<SourceLocation>,
     },
     TernaryExpr {
         condition: Box<Expression>,

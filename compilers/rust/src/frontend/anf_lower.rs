@@ -296,7 +296,7 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
     match expr {
         Expression::BigIntLiteral { value } => Some(bigint_to_json(value)),
         Expression::BoolLiteral { value } => Some(serde_json::Value::Bool(*value)),
-        Expression::ByteStringLiteral { value } => {
+        Expression::ByteStringLiteral { value, .. } => {
             Some(serde_json::Value::String(value.clone()))
         }
         Expression::UnaryExpr {
@@ -320,7 +320,7 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
             if super::validator::is_to_byte_string_literal(expr) =>
         {
             match &args[0] {
-                Expression::ByteStringLiteral { value } => {
+                Expression::ByteStringLiteral { value, .. } => {
                     Some(serde_json::Value::String(value.clone()))
                 }
                 _ => None,
@@ -2487,7 +2487,7 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             value: serde_json::Value::Bool(*value),
         }),
 
-        Expression::ByteStringLiteral { value } => ctx.emit(ANFValue::LoadConst {
+        Expression::ByteStringLiteral { value, .. } => ctx.emit(ANFValue::LoadConst {
             value: serde_json::Value::String(value.clone()),
         }),
 
@@ -3275,7 +3275,7 @@ fn lower_call_expr(
             let mut bytes = String::new();
             let mut in_arity: usize = 0;
             let mut out_arity: usize = 1;
-            if let Some(Expression::ByteStringLiteral { value }) = args.get(0) {
+            if let Some(Expression::ByteStringLiteral { value, .. }) = args.get(0) {
                 bytes = value.clone();
             }
             if let Some(Expression::BigIntLiteral { value }) = args.get(1) {
