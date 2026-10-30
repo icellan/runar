@@ -56,7 +56,6 @@ public final class BuiltinRegistry {
 
         // ---------------- cryptographic hashes ----------------
         add(m, "sha256",          new String[][]{{"data", "ByteString"}}, "Sha256");
-        add(m, "Sha256Hash",      new String[][]{{"data", "ByteString"}}, "Sha256");
         add(m, "ripemd160",       new String[][]{{"data", "ByteString"}}, "Ripemd160");
         add(m, "hash160",         new String[][]{{"data", "ByteString"}}, "Ripemd160");
         add(m, "hash256",         new String[][]{{"data", "ByteString"}}, "Sha256");
