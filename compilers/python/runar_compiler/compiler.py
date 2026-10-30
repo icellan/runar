@@ -1382,8 +1382,12 @@ class CompilationError(Exception):
 
 
 def _read_file(path: str) -> str:
-    """Read a file as text."""
-    with open(path, "r", encoding="utf-8") as f:
+    """Read a file as text, without newline translation (N-440).
+
+    A lone CR must reach the tokenizers as CR: a .runar.go backtick raw
+    literal discards it (Go spec), where universal newlines made it an LF.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as f:
         return f.read()
 
 
