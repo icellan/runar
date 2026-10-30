@@ -68,6 +68,70 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 // program the folder did not change.
 func EliminateDeadBindingsAmong(method *ir.ANFMethod, candidates map[string]bool) {
 	eliminateDeadBindingsFiltered(method, candidates)
+	// N-446: the fold also orphans operands INSIDE `if` arms and loop bodies
+	// (`-5n` in an else arm). Filtering only the top level left them there,
+	// stack lowering pushed them, and the arms ended at different depths.
+	// Prune the nested scopes too, then re-filter the top level, to a fixed
+	// point (a nested removal can orphan a top-level operand).
+	for pruneNestedOrphans(method, candidates) {
+		eliminateDeadBindingsFiltered(method, candidates)
+	}
+}
+
+// pruneNestedOrphans removes fold-orphaned pure bindings from every nested
+// scope (`if` arms, `loop` bodies, recursively) and reports whether anything
+// was removed (N-446).
+//
+// A nested binding is removed only if it is a candidate (referenced before
+// folding), is referenced by NO binding anywhere in the method now (arm
+// bindings can be read after the `if` by name, so an arm is never filtered
+// against its own references alone), is not one of its `if`'s declared
+// Results (stack lowering requires those slots in both arms), is side-effect
+// free, and is not itself an `if` / `loop` (those are recursed into instead).
+// Only the candidate-restricted fold prune calls this; the EC-gated DCE stays
+// top-level, so fold-OFF output cannot move. Rebuilds every slice it changes
+// rather than editing one in place.
+func pruneNestedOrphans(method *ir.ANFMethod, candidates map[string]bool) bool {
+	removedAny := false
+	for {
+		refs := make(map[string]bool)
+		for i := range method.Body {
+			collectValueRefs(&method.Body[i].Value, refs)
+		}
+		changed := false
+		var filterScope func(scope []ir.ANFBinding, nested bool, protect map[string]bool) []ir.ANFBinding
+		filterScope = func(scope []ir.ANFBinding, nested bool, protect map[string]bool) []ir.ANFBinding {
+			out := make([]ir.ANFBinding, 0, len(scope))
+			for _, b := range scope {
+				switch b.Value.Kind {
+				case "if":
+					res := make(map[string]bool, len(b.Value.Results))
+					for _, r := range b.Value.Results {
+						res[r] = true
+					}
+					b.Value.Then = filterScope(b.Value.Then, true, res)
+					b.Value.Else = filterScope(b.Value.Else, true, res)
+					out = append(out, b)
+				case "loop":
+					b.Value.Body = filterScope(b.Value.Body, true, nil)
+					out = append(out, b)
+				default:
+					if nested && candidates[b.Name] && !refs[b.Name] && !protect[b.Name] && !HasSideEffect(&b.Value) {
+						changed = true
+						continue
+					}
+					out = append(out, b)
+				}
+			}
+			return out
+		}
+		next := filterScope(method.Body, false, nil)
+		if !changed {
+			return removedAny
+		}
+		method.Body = next
+		removedAny = true
+	}
 }
 
 func eliminateDeadBindingsFiltered(method *ir.ANFMethod, candidates map[string]bool) {

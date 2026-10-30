@@ -100,12 +100,97 @@ export function eliminateDeadBindingsAmong(
 ): ANFProgram {
   return {
     ...program,
-    methods: program.methods.map((method, i) => ({
-      ...method,
-      body: filterLiveBindings(method.body, returnsLastBinding(method), candidates[i]),
-    })),
+    methods: program.methods.map((method, i) => {
+      const keepLast = returnsLastBinding(method);
+      const cands = candidates[i];
+      let body = filterLiveBindings(method.body, keepLast, cands);
+      // N-446: the fold also orphans operands INSIDE `if` arms and loop
+      // bodies (`-5n` in an else arm). Filtering only the top level left them
+      // there, stack lowering pushed them, and the arms ended at different
+      // depths. Prune the nested scopes too, then re-filter the top level, to
+      // a fixed point (a nested removal can orphan a top-level operand).
+      if (cands !== undefined) {
+        for (;;) {
+          const nested = pruneNestedOrphans(body, cands);
+          if (nested === body) break;
+          body = filterLiveBindings(nested, keepLast, cands);
+        }
+      }
+      return { ...method, body };
+    }),
   };
 }
+
+/**
+ * N-446: remove fold-orphaned pure bindings from every nested scope (`if`
+ * arms, `loop` bodies, recursively). Returns `bindings` itself when nothing
+ * was removed.
+ *
+ * A nested binding is removed only if it is a candidate (referenced before
+ * folding), is referenced by NO binding anywhere in the method now (arm
+ * bindings can be read after the `if` by name, so an arm is never filtered
+ * against its own references alone), is not one of its `if`'s declared
+ * `results` (stack lowering requires those slots in both arms), is side-effect
+ * free, and is not itself an `if` / `loop` (those are recursed into instead).
+ * Only the candidate-restricted fold prune calls this; the EC-gated DCE stays
+ * top-level, so fold-OFF output cannot move.
+ */
+function pruneNestedOrphans(
+  bindings: ANFBinding[],
+  candidates: ReadonlySet<string>,
+): ANFBinding[] {
+  let current = bindings;
+  for (;;) {
+    const refs = new Set<string>();
+    for (const b of current) collectRefsFromValue(b.value, refs);
+    let changed = false;
+    const filterScope = (scope: ANFBinding[], protect: ReadonlySet<string>): ANFBinding[] => {
+      const out: ANFBinding[] = [];
+      let scopeChanged = false;
+      for (const b of scope) {
+        const v = b.value;
+        if (v.kind === 'if') {
+          const protectedResults = new Set(v.results ?? []);
+          const thenB = filterScope(v.then, protectedResults);
+          const elseB = filterScope(v.else, protectedResults);
+          if (thenB !== v.then || elseB !== v.else) {
+            out.push({ ...b, value: { ...v, then: thenB, else: elseB } });
+            scopeChanged = true;
+          } else {
+            out.push(b);
+          }
+        } else if (v.kind === 'loop') {
+          const body = filterScope(v.body, new Set());
+          if (body !== v.body) {
+            out.push({ ...b, value: { ...v, body } });
+            scopeChanged = true;
+          } else {
+            out.push(b);
+          }
+        } else if (
+          protect !== TOP_LEVEL &&
+          candidates.has(b.name) &&
+          !refs.has(b.name) &&
+          !protect.has(b.name) &&
+          !hasSideEffect(v)
+        ) {
+          scopeChanged = true;
+        } else {
+          out.push(b);
+        }
+      }
+      if (!scopeChanged) return scope;
+      changed = true;
+      return out;
+    };
+    const next = filterScope(current, TOP_LEVEL);
+    if (!changed) return current;
+    current = next;
+  }
+}
+
+/** Sentinel: the method's own body, which `filterLiveBindings` owns. */
+const TOP_LEVEL: ReadonlySet<string> = new Set<string>();
 
 /**
  * F-108: a private method's LAST binding is its return value — stack lowering

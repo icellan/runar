@@ -123,7 +123,89 @@ public final class Dce {
      */
     public static List<AnfBinding> eliminateDeadAmong(AnfMethod method, Set<String> candidates) {
         boolean keepLast = !method.isPublic() && !"constructor".equals(method.name());
-        return eliminateDead(method.body(), keepLast, candidates);
+        List<AnfBinding> body = eliminateDead(method.body(), keepLast, candidates);
+        // N-446: the fold also orphans operands INSIDE `if` arms and loop
+        // bodies (`-5n` in an else arm). Filtering only the top level left
+        // them there, stack lowering pushed them, and the arms ended at
+        // different depths. Prune the nested scopes too, then re-filter the
+        // top level, to a fixed point (a nested removal can orphan a
+        // top-level operand).
+        while (true) {
+            List<AnfBinding> nested = pruneNestedOrphans(body, candidates);
+            if (nested == body) return body;
+            body = eliminateDead(nested, keepLast, candidates);
+        }
+    }
+
+    /**
+     * N-446: remove fold-orphaned pure bindings from every nested scope
+     * ({@code if} arms, {@code loop} bodies, recursively). Returns
+     * {@code bindings} itself when nothing was removed.
+     *
+     * <p>A nested binding is removed only if it is a candidate (referenced
+     * before folding), is referenced by NO binding anywhere in the method now
+     * (arm bindings can be read after the {@code if} by name, so an arm is
+     * never filtered against its own references alone), is not one of its
+     * {@code if}'s declared {@code results} (stack lowering requires those
+     * slots in both arms), is side-effect free, and is not itself an
+     * {@code if} / {@code loop} (those are recursed into instead). Only the
+     * candidate-restricted fold prune calls this; the EC-gated DCE stays
+     * top-level, so fold-OFF output cannot move.
+     */
+    private static List<AnfBinding> pruneNestedOrphans(
+        List<AnfBinding> bindings, Set<String> candidates) {
+        List<AnfBinding> current = bindings;
+        while (true) {
+            Set<String> refs = new HashSet<>();
+            for (AnfBinding b : current) collectRefs(b.value(), refs);
+            List<AnfBinding> next = pruneScope(current, false, Set.of(), refs, candidates);
+            if (next == current) return current;
+            current = next;
+        }
+    }
+
+    private static List<AnfBinding> pruneScope(
+        List<AnfBinding> scope, boolean nested, Set<String> protect,
+        Set<String> refs, Set<String> candidates) {
+        List<AnfBinding> out = new ArrayList<>(scope.size());
+        boolean changed = false;
+        for (AnfBinding b : scope) {
+            AnfValue v = b.value();
+            if (v instanceof If ifv) {
+                Set<String> res = new HashSet<>(orEmpty(ifv.results()));
+                List<AnfBinding> thenSrc = orEmpty(ifv.thenBranch());
+                List<AnfBinding> elseSrc = orEmpty(ifv.elseBranch());
+                List<AnfBinding> thenB = pruneScope(thenSrc, true, res, refs, candidates);
+                List<AnfBinding> elseB = pruneScope(elseSrc, true, res, refs, candidates);
+                if (thenB != thenSrc || elseB != elseSrc) {
+                    out.add(new AnfBinding(b.name(),
+                        new If(ifv.cond(),
+                            thenB != thenSrc ? thenB : ifv.thenBranch(),
+                            elseB != elseSrc ? elseB : ifv.elseBranch(),
+                            ifv.results()), b.sourceLoc()));
+                    changed = true;
+                } else {
+                    out.add(b);
+                }
+            } else if (v instanceof Loop loop) {
+                List<AnfBinding> bodySrc = orEmpty(loop.body());
+                List<AnfBinding> body = pruneScope(bodySrc, true, Set.of(), refs, candidates);
+                if (body != bodySrc) {
+                    out.add(new AnfBinding(b.name(),
+                        new Loop(loop.count(), body, loop.iterVar(), loop.start(), loop.step()),
+                        b.sourceLoc()));
+                    changed = true;
+                } else {
+                    out.add(b);
+                }
+            } else if (nested && candidates.contains(b.name()) && !refs.contains(b.name())
+                && !protect.contains(b.name()) && !hasSideEffect(v)) {
+                changed = true;
+            } else {
+                out.add(b);
+            }
+        }
+        return changed ? out : scope;
     }
 
     private static List<AnfBinding> eliminateDead(List<AnfBinding> body, boolean keepLast) {

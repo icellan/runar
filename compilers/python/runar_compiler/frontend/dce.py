@@ -135,7 +135,102 @@ def eliminate_dead_bindings(
 
         current = filtered
 
+        # N-446: the fold also orphans operands INSIDE ``if`` arms and loop
+        # bodies (``-5n`` in an else arm). Filtering only the top level left
+        # them there, stack lowering pushed them, and the arms ended at
+        # different depths. Prune the nested scopes too, then re-filter the
+        # top level (a nested removal can orphan a top-level operand).
+        if not changed and candidates is not None:
+            pruned = _prune_nested_orphans(current, candidates)
+            if pruned is not current:
+                current = pruned
+                changed = True
+
     method.body = current
+
+
+def _prune_nested_orphans(
+    bindings: list[ANFBinding], candidates: set[str],
+) -> list[ANFBinding]:
+    """N-446: remove fold-orphaned pure bindings from every nested scope.
+
+    Walks ``if`` arms and ``loop`` bodies recursively; returns ``bindings``
+    itself when nothing was removed. A nested binding is removed only if it is
+    a candidate (referenced before folding), is referenced by NO binding
+    anywhere in the method now (arm bindings can be read after the ``if`` by
+    name, so an arm is never filtered against its own references alone), is
+    not one of its ``if``'s declared ``results`` (stack lowering requires those
+    slots in both arms), is side-effect free, and is not itself an ``if`` /
+    ``loop`` (those are recursed into instead). Only the candidate-restricted
+    fold prune calls this; the EC-gated DCE stays top-level, so fold-OFF
+    output cannot move. Changed bindings are copied, never edited in place.
+    """
+    import copy
+
+    current = bindings
+    while True:
+        refs: set[str] = set()
+        for b in current:
+            collect_refs(b.value, refs)
+        changed = False
+
+        def filter_scope(
+            scope: list[ANFBinding], nested: bool, protect: set[str],
+        ) -> list[ANFBinding]:
+            nonlocal changed
+            out: list[ANFBinding] = []
+            scope_changed = False
+            for b in scope:
+                v = b.value
+                if v.kind == "if":
+                    res = set(v.results or [])
+                    then_src = v.then or []
+                    else_src = v.else_ or []
+                    then_b = filter_scope(then_src, True, res)
+                    else_b = filter_scope(else_src, True, res)
+                    if then_b is not then_src or else_b is not else_src:
+                        nv = copy.copy(v)
+                        if then_b is not then_src:
+                            nv.then = then_b
+                        if else_b is not else_src:
+                            nv.else_ = else_b
+                        nb = copy.copy(b)
+                        nb.value = nv
+                        out.append(nb)
+                        scope_changed = True
+                    else:
+                        out.append(b)
+                elif v.kind == "loop":
+                    body_src = v.body or []
+                    body = filter_scope(body_src, True, set())
+                    if body is not body_src:
+                        nv = copy.copy(v)
+                        nv.body = body
+                        nb = copy.copy(b)
+                        nb.value = nv
+                        out.append(nb)
+                        scope_changed = True
+                    else:
+                        out.append(b)
+                elif (
+                    nested
+                    and b.name in candidates
+                    and b.name not in refs
+                    and b.name not in protect
+                    and not has_side_effect(v)
+                ):
+                    scope_changed = True
+                else:
+                    out.append(b)
+            if not scope_changed:
+                return scope
+            changed = True
+            return out
+
+        nxt = filter_scope(current, False, set())
+        if not changed:
+            return current
+        current = nxt
 
 
 def _returns_last_binding(method: ANFMethod) -> bool:

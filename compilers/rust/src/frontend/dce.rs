@@ -75,7 +75,81 @@ pub fn eliminate_dead_bindings_among(
     method: &ANFMethod,
     candidates: &HashSet<String>,
 ) -> ANFMethod {
-    eliminate_dead_bindings_filtered(method, Some(candidates))
+    let mut out = eliminate_dead_bindings_filtered(method, Some(candidates));
+    // N-446: the fold also orphans operands INSIDE `if` arms and loop bodies
+    // (`-5n` in an else arm). Filtering only the top level left them there,
+    // stack lowering pushed them, and the arms ended at different depths.
+    // Prune the nested scopes too, then re-filter the top level, to a fixed
+    // point (a nested removal can orphan a top-level operand).
+    while prune_nested_orphans(&mut out.body, candidates) {
+        out = eliminate_dead_bindings_filtered(&out, Some(candidates));
+    }
+    out
+}
+
+/// N-446: remove fold-orphaned pure bindings from every nested scope (`if`
+/// arms, `loop` bodies, recursively); returns whether anything was removed.
+///
+/// A nested binding is removed only if it is a candidate (referenced before
+/// folding), is referenced by NO binding anywhere in the method now (arm
+/// bindings can be read after the `if` by name, so an arm is never filtered
+/// against its own references alone), is not one of its `if`'s declared
+/// `results` (stack lowering requires those slots in both arms), is
+/// side-effect free, and is not itself an `if` / `loop` (those are recursed
+/// into instead). Only the candidate-restricted fold prune calls this; the
+/// EC-gated DCE stays top-level, so fold-OFF output cannot move.
+fn prune_nested_orphans(body: &mut Vec<ANFBinding>, candidates: &HashSet<String>) -> bool {
+    fn filter_scope(
+        scope: &mut Vec<ANFBinding>,
+        nested: bool,
+        protect: &HashSet<String>,
+        refs: &HashSet<String>,
+        candidates: &HashSet<String>,
+    ) -> bool {
+        let mut changed = false;
+        for b in scope.iter_mut() {
+            match &mut b.value {
+                ANFValue::If {
+                    then,
+                    else_branch,
+                    results,
+                    ..
+                } => {
+                    let res: HashSet<String> = results.iter().cloned().collect();
+                    changed |= filter_scope(then, true, &res, refs, candidates);
+                    changed |= filter_scope(else_branch, true, &res, refs, candidates);
+                }
+                ANFValue::Loop { body, .. } => {
+                    changed |= filter_scope(body, true, &HashSet::new(), refs, candidates);
+                }
+                _ => {}
+            }
+        }
+        if nested {
+            let before = scope.len();
+            scope.retain(|b| {
+                matches!(b.value, ANFValue::If { .. } | ANFValue::Loop { .. })
+                    || !candidates.contains(&b.name)
+                    || refs.contains(&b.name)
+                    || protect.contains(&b.name)
+                    || has_side_effect(&b.value)
+            });
+            changed |= scope.len() != before;
+        }
+        changed
+    }
+
+    let mut any = false;
+    loop {
+        let mut refs = HashSet::new();
+        for b in body.iter() {
+            collect_refs_from_value(&b.value, &mut refs);
+        }
+        if !filter_scope(body, false, &HashSet::new(), &refs, candidates) {
+            return any;
+        }
+        any = true;
+    }
 }
 
 fn eliminate_dead_bindings_filtered(

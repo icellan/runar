@@ -109,7 +109,110 @@ pub fn eliminateDeadBindingsAmongInMethod(
     method: types.ANFMethod,
     candidates: *const std.StringHashMap(void),
 ) ![]types.ANFBinding {
-    return eliminateDeadBindingsFiltered(allocator, method.body, returnsLastBinding(method), candidates);
+    const keep_last = returnsLastBinding(method);
+    var body = try eliminateDeadBindingsFiltered(allocator, method.body, keep_last, candidates);
+    // N-446: the fold also orphans operands INSIDE `if` arms and loop bodies
+    // (`-5n` in an else arm). Filtering only the top level left them there,
+    // stack lowering pushed them, and the arms ended at different depths.
+    // Prune the nested scopes too, then re-filter the top level, to a fixed
+    // point (a nested removal can orphan a top-level operand).
+    while (try pruneNestedOrphans(allocator, &body, candidates)) {
+        const next = try eliminateDeadBindingsFiltered(allocator, body, keep_last, candidates);
+        allocator.free(body);
+        body = next;
+    }
+    return body;
+}
+
+/// N-446: remove fold-orphaned pure bindings from every nested scope (`if`
+/// arms, `loop` bodies, recursively); returns whether anything was removed.
+///
+/// A nested binding is removed only if it is a candidate (referenced before
+/// folding), is referenced by NO binding anywhere in the method now (arm
+/// bindings can be read after the `if` by name, so an arm is never filtered
+/// against its own references alone), is not one of its `if`'s declared
+/// `results` (stack lowering requires those slots in both arms), is
+/// side-effect free, and is not itself an `if` / `loop` (those are recursed
+/// into instead). Only the candidate-restricted fold prune calls this; the
+/// EC-gated DCE stays top-level, so fold-OFF output cannot move. A changed
+/// `if` / `loop` node is re-allocated, never edited in place (its pointer may
+/// be shared with the pre-fold program). Replaced slices are not freed, for
+/// the same reason.
+fn pruneNestedOrphans(
+    allocator: Allocator,
+    body: *[]types.ANFBinding,
+    candidates: *const std.StringHashMap(void),
+) !bool {
+    var any = false;
+    while (true) {
+        var refs = std.StringHashMap(void).init(allocator);
+        defer refs.deinit();
+        for (body.*) |b| try collectRefs(b.value, &refs);
+        if (!try pruneScope(allocator, body, false, &.{}, &refs, candidates)) return any;
+        any = true;
+    }
+}
+
+fn pruneScope(
+    allocator: Allocator,
+    scope: *[]types.ANFBinding,
+    nested: bool,
+    protect: []const []const u8,
+    refs: *const std.StringHashMap(void),
+    candidates: *const std.StringHashMap(void),
+) !bool {
+    var changed = false;
+    var out = std.ArrayListUnmanaged(types.ANFBinding).empty;
+    errdefer out.deinit(allocator);
+    for (scope.*) |b| {
+        switch (b.value) {
+            .@"if" => |if_val| {
+                var then_b = if_val.then;
+                var else_b = if_val.@"else";
+                const t = try pruneScope(allocator, &then_b, true, if_val.results, refs, candidates);
+                const e = try pruneScope(allocator, &else_b, true, if_val.results, refs, candidates);
+                if (t or e) {
+                    const nv = try allocator.create(types.ANFIf);
+                    nv.* = if_val.*;
+                    nv.then = then_b;
+                    nv.@"else" = else_b;
+                    var nb = b;
+                    nb.value = .{ .@"if" = nv };
+                    try out.append(allocator, nb);
+                    changed = true;
+                } else try out.append(allocator, b);
+            },
+            .loop => |loop_val| {
+                var body_b = loop_val.body;
+                if (try pruneScope(allocator, &body_b, true, &.{}, refs, candidates)) {
+                    const nv = try allocator.create(types.ANFLoop);
+                    nv.* = loop_val.*;
+                    nv.body = body_b;
+                    var nb = b;
+                    nb.value = .{ .loop = nv };
+                    try out.append(allocator, nb);
+                    changed = true;
+                } else try out.append(allocator, b);
+            },
+            else => {
+                var is_result = false;
+                for (protect) |r| {
+                    if (std.mem.eql(u8, r, b.name)) is_result = true;
+                }
+                if (nested and candidates.contains(b.name) and !refs.contains(b.name) and
+                    !is_result and !hasSideEffect(b.value))
+                {
+                    changed = true;
+                } else try out.append(allocator, b);
+            },
+        }
+    }
+    if (!changed) {
+        out.deinit(allocator);
+        return false;
+    }
+    scope.* = try out.toOwnedSlice(allocator);
+    return true;
 }
 
 fn eliminateDeadBindingsImpl(allocator: Allocator, body: []types.ANFBinding, keep_last: bool) ![]types.ANFBinding {

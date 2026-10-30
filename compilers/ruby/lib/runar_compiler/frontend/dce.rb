@@ -132,9 +132,97 @@ module RunarCompiler
           end
 
           current = filtered
+
+          # N-446: the fold also orphans operands INSIDE +if+ arms and loop
+          # bodies (+-5n+ in an else arm). Filtering only the top level left
+          # them there, stack lowering pushed them, and the arms ended at
+          # different depths. Prune the nested scopes too, then re-filter the
+          # top level (a nested removal can orphan a top-level operand).
+          if !changed && !candidates.nil?
+            pruned = prune_nested_orphans(current, candidates)
+            unless pruned.equal?(current)
+              current = pruned
+              changed = true
+            end
+          end
         end
 
         method.body = current
+      end
+
+      # N-446: remove fold-orphaned pure bindings from every nested scope
+      # (+if+ arms, +loop+ bodies, recursively); returns +bindings+ itself
+      # when nothing was removed.
+      #
+      # A nested binding is removed only if it is a candidate (referenced
+      # before folding), is referenced by NO binding anywhere in the method
+      # now (arm bindings can be read after the +if+ by name, so an arm is
+      # never filtered against its own references alone), is not one of its
+      # +if+'s declared +results+ (stack lowering requires those slots in both
+      # arms), is side-effect free, and is not itself an +if+ / +loop+ (those
+      # are recursed into instead). Only the candidate-restricted fold prune
+      # calls this; the EC-gated DCE stays top-level, so fold-OFF output
+      # cannot move. Changed bindings are copied, never edited in place.
+      def self.prune_nested_orphans(bindings, candidates)
+        current = bindings
+        loop do
+          refs = Set.new
+          current.each { |b| collect_refs(b.value, refs) }
+          changed = false
+
+          filter_scope = lambda do |scope, nested, protect|
+            out = []
+            scope_changed = false
+            scope.each do |b|
+              v = b.value
+              if v.kind == "if"
+                res = Set.new(v.results || [])
+                then_src = v.then || []
+                else_src = v.else_ || []
+                then_b = filter_scope.call(then_src, true, res)
+                else_b = filter_scope.call(else_src, true, res)
+                if !then_b.equal?(then_src) || !else_b.equal?(else_src)
+                  nv = v.dup
+                  nv.then = then_b unless then_b.equal?(then_src)
+                  nv.else_ = else_b unless else_b.equal?(else_src)
+                  nb = b.dup
+                  nb.value = nv
+                  out << nb
+                  scope_changed = true
+                else
+                  out << b
+                end
+              elsif v.kind == "loop"
+                body_src = v.body || []
+                body = filter_scope.call(body_src, true, Set.new)
+                if !body.equal?(body_src)
+                  nv = v.dup
+                  nv.body = body
+                  nb = b.dup
+                  nb.value = nv
+                  out << nb
+                  scope_changed = true
+                else
+                  out << b
+                end
+              elsif nested && candidates.include?(b.name) && !refs.include?(b.name) &&
+                    !protect.include?(b.name) && !has_side_effect?(v)
+                scope_changed = true
+              else
+                out << b
+              end
+            end
+            next scope unless scope_changed
+
+            changed = true
+            out
+          end
+
+          nxt = filter_scope.call(current, false, Set.new)
+          return current unless changed
+
+          current = nxt
+        end
       end
 
       # F-108: whether +method+'s LAST binding is its return value. Stack
