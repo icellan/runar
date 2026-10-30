@@ -874,6 +874,30 @@ impl<'a> GoParser<'a> {
         }
     }
 
+    /// N-300: a free `init` / `main` is dropped (N-018), so a
+    /// `//runar:sighash` above it is refused as on a private func, with the
+    /// same diagnostic as the TS reference (which parses these as private
+    /// helpers). The current token is the func's name.
+    fn refuse_sighash_on_dropped_func(&mut self, func_token_index: usize) {
+        let name = match self.current().typ.clone() {
+            TokenType::Ident(n) if n == "init" || n == "main" => n,
+            _ => return,
+        };
+        let mut stub = MethodNode {
+            name,
+            params: Vec::new(),
+            body: Vec::new(),
+            visibility: Visibility::Private,
+            sighash_type: None,
+            source_location: SourceLocation {
+                file: self.file.clone(),
+                line: self.current().line,
+                column: self.current().col,
+            },
+        };
+        self.take_sighash(func_token_index, &mut stub);
+    }
+
     /// N-093: refuse every directive that is unknown or attached to no func
     /// declaration that becomes a contract method.
     fn report_stray_directives(&mut self) {
@@ -1032,9 +1056,12 @@ impl<'a> GoParser<'a> {
                     let (mut method, go_name, recv) = self.parse_method();
                     self.take_sighash(func_token_index, &mut method);
                     funcs.push((method, go_name, recv));
-                } else if let Some((mut func, go_name)) = self.parse_standalone_func() {
-                    self.take_sighash(func_token_index, &mut func);
-                    funcs.push((func, go_name, None));
+                } else {
+                    self.refuse_sighash_on_dropped_func(func_token_index);
+                    if let Some((mut func, go_name)) = self.parse_standalone_func() {
+                        self.take_sighash(func_token_index, &mut func);
+                        funcs.push((func, go_name, None));
+                    }
                 }
             } else if matches!(self.current().typ, TokenType::Type) {
                 let saved_pos = self.pos;

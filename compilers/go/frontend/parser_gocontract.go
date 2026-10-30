@@ -536,6 +536,11 @@ func (p *goContractParser) extractContract() *ContractNode {
 		}
 		// Skip the package-level init() or main() functions
 		if funcDecl.Name.Name == "init" || funcDecl.Name.Name == "main" {
+			// N-300: a //runar:sighash above it is refused as on a private
+			// func, with the same diagnostic as the TS reference (which
+			// parses these as private helpers).
+			pos := p.fset.Position(funcDecl.Pos())
+			p.goSighashFor(funcDecl, goFieldToCamel(funcDecl.Name.Name), false, p.locAt(pos))
 			continue
 		}
 		// F-010: an exported standalone function is a private helper too,

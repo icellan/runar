@@ -1136,6 +1136,14 @@ class _GoParser:
             # Standalone functions: skip init and main. F-010: an exported
             # standalone function is a private helper, as in the TS reference.
             if func_name in ("init", "main"):
+                # N-300: a //runar:sighash above it is refused as on a private
+                # func, with the same diagnostic as the TS reference (which
+                # parses these as private helpers).
+                skipped = resolve_native_sighash(
+                    func_name, False, self._take_sighash_directives(func_token_index),
+                )
+                if skipped is not None and skipped.error is not None:
+                    self.errors.append(Diagnostic(message=skipped.error, severity=Severity.ERROR, loc=location))
                 self._skip_func_body()
                 return None
             visibility = "private"
