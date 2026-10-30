@@ -1063,6 +1063,7 @@ impl<'a> IfTask<'a> {
             _ => {
                 ctx.lower_if_tail(
                     self.binding_name,
+                    self.then_bindings,
                     self.else_bindings,
                     self.results,
                     &self.pre_if_names,
@@ -3156,6 +3157,7 @@ impl LoweringContext {
     fn lower_if_tail(
         &mut self,
         binding_name: &str,
+        then_bindings: &[ANFBinding],
         else_bindings: &[ANFBinding],
         results: &[String],
         pre_if_names: &HashSet<String>,
@@ -3384,11 +3386,33 @@ impl LoweringContext {
                 }
                 else_ctx.sm.push(&then_name);
             } else {
+                // N-262: padding an EMPTY else arm is the legitimate #99
+                // fallback; padding a NON-EMPTY one writes a placeholder the
+                // post-ENDIF code reads as a value. Same sentence as Go's R-161
+                // guard.
+                if !else_bindings.is_empty() {
+                    panic!(
+                        "internal codegen error: conditional needs {} placeholder push(es) to balance a NON-EMPTY else arm (then depth {} != else depth {}); an empty push there becomes a value the post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding={:?}",
+                        then_ctx.sm.depth() - else_ctx.sm.depth(),
+                        then_ctx.sm.depth(),
+                        else_ctx.sm.depth(),
+                        binding_name
+                    );
+                }
                 else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
                 else_ctx.sm.push("");
             }
         }
         while else_ctx.sm.depth() > then_ctx.sm.depth() {
+            if !then_bindings.is_empty() {
+                panic!(
+                    "internal codegen error: conditional needs {} placeholder push(es) to balance a NON-EMPTY then arm (else depth {} != then depth {}); binding={:?}",
+                    else_ctx.sm.depth() - then_ctx.sm.depth(),
+                    else_ctx.sm.depth(),
+                    then_ctx.sm.depth(),
+                    binding_name
+                );
+            }
             then_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
             then_ctx.sm.push("");
         }

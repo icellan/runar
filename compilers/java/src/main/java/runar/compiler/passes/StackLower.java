@@ -3521,11 +3521,33 @@ public final class StackLower {
                     }
                     elseCtx.sm.push(thenName);
                 } else {
+                    // N-262: padding an EMPTY else arm is the legitimate #99
+                    // fallback; padding a NON-EMPTY one writes a placeholder
+                    // the post-ENDIF code reads as a value. Same sentence as
+                    // Go's R-161 guard.
+                    if (!elseB.isEmpty()) {
+                        throw new RuntimeException(
+                            "internal codegen error: conditional needs "
+                            + (thenCtx.sm.depth() - elseCtx.sm.depth())
+                            + " placeholder push(es) to balance a NON-EMPTY else arm (then depth "
+                            + thenCtx.sm.depth() + " != else depth " + elseCtx.sm.depth()
+                            + "); an empty push there becomes a value the post-ENDIF code reads "
+                            + "(see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding=\""
+                            + bindingName + "\"");
+                    }
                     elseCtx.emitOp(new PushOp(PushValue.ofHex("")));
                     elseCtx.sm.push("");
                 }
             }
             while (elseCtx.sm.depth() > thenCtx.sm.depth()) {
+                if (!thenB.isEmpty()) {
+                    throw new RuntimeException(
+                        "internal codegen error: conditional needs "
+                        + (elseCtx.sm.depth() - thenCtx.sm.depth())
+                        + " placeholder push(es) to balance a NON-EMPTY then arm (else depth "
+                        + elseCtx.sm.depth() + " != then depth " + thenCtx.sm.depth()
+                        + "); binding=\"" + bindingName + "\"");
+                }
                 thenCtx.emitOp(new PushOp(PushValue.ofHex("")));
                 thenCtx.sm.push("");
             }

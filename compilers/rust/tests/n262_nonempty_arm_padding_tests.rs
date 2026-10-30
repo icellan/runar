@@ -1,0 +1,60 @@
+//! N-262 — `lower_if` phase 3 must refuse to pad a NON-EMPTY arm.
+//!
+//! Phase 3 balances the two arms of an OP_IF by pushing an OP_0 on the
+//! shallower one. Padding an arm with NO bindings is the legitimate #99
+//! fallback; padding an arm that DID compute something writes a placeholder
+//! the post-ENDIF code reads as a value (the OP_0-in-the-taken-arm shape). Go
+//! has refused it since R-161; the other six tiers padded silently.
+//!
+//! The program is hand-built `--ir` input: an arm ending in a non-terminal
+//! `assert` is one slot shallower than a sibling arm that leaves a value.
+//!
+//! Proves: both padding directions fail with the shared internal-codegen
+//! sentence (same words as compilers/go/codegen/stack.go), and padding an
+//! EMPTY arm still compiles. Does not prove that no source program reaches the
+//! guard (golden conformance covers the corpus).
+
+use runar_compiler_rust::compile_from_ir_str;
+
+const VALUE_ARM: &str = r#"[{"name":"a","value":{"kind":"load_const","value":1}}]"#;
+const ASSERT_ARM: &str = r#"[{"name":"k","value":{"kind":"load_const","value":1}},
+    {"name":"k2","value":{"kind":"assert","value":"k"}}]"#;
+
+fn ir(then_arm: &str, else_arm: &str) -> String {
+    format!(
+        r#"{{"contractName":"P","properties":[],"methods":[{{"name":"m","isPublic":true,
+        "params":[{{"name":"x","type":"bigint"}}],"body":[
+        {{"name":"t0","value":{{"kind":"load_param","name":"x"}}}},
+        {{"name":"t1","value":{{"kind":"load_const","value":0}}}},
+        {{"name":"t2","value":{{"kind":"bin_op","op":">","left":"t0","right":"t1"}}}},
+        {{"name":"t3","value":{{"kind":"if","cond":"t2","then":{then_arm},"else":{else_arm}}}}},
+        {{"name":"t4","value":{{"kind":"assert","value":"t3"}}}}]}}]}}"#
+    )
+}
+
+#[test]
+fn a_non_empty_else_arm_is_never_padded() {
+    let err = compile_from_ir_str(&ir(VALUE_ARM, ASSERT_ARM))
+        .expect_err("padding a non-empty else arm must be refused");
+    assert!(
+        err.contains("internal codegen error: conditional needs 1 placeholder push(es) to balance a NON-EMPTY else arm (then depth 1 != else depth 0)")
+            && err.contains("binding=\"t3\""),
+        "wrong diagnostic: {err}"
+    );
+}
+
+#[test]
+fn a_non_empty_then_arm_is_never_padded() {
+    let err = compile_from_ir_str(&ir(ASSERT_ARM, VALUE_ARM))
+        .expect_err("padding a non-empty then arm must be refused");
+    assert!(
+        err.contains("internal codegen error: conditional needs 1 placeholder push(es) to balance a NON-EMPTY then arm (else depth 1 != then depth 0)")
+            && err.contains("binding=\"t3\""),
+        "wrong diagnostic: {err}"
+    );
+}
+
+#[test]
+fn an_empty_else_arm_is_still_padded() {
+    compile_from_ir_str(&ir(VALUE_ARM, "[]")).expect("empty-arm padding stays legal");
+}

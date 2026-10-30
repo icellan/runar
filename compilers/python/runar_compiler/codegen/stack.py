@@ -2490,9 +2490,31 @@ class _LoweringContext:
                     else_ctx.sm.pop()
                 else_ctx.sm.push(then_name)
             else:
+                # N-262: padding an EMPTY else arm is the legitimate #99
+                # fallback; padding a NON-EMPTY one writes a placeholder the
+                # post-ENDIF code reads as a value.  Same sentence as Go's
+                # R-161 guard.
+                if else_bindings:
+                    raise RuntimeError(
+                        "internal codegen error: conditional needs "
+                        f"{then_ctx.sm.depth() - else_ctx.sm.depth()} placeholder push(es) "
+                        "to balance a NON-EMPTY else arm (then depth "
+                        f"{then_ctx.sm.depth()} != else depth {else_ctx.sm.depth()}); an "
+                        "empty push there becomes a value the post-ENDIF code reads (see "
+                        "GitHub issue #99 and the OP_0-in-the-taken-arm shape); "
+                        f'binding="{binding_name}"'
+                    )
                 else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
                 else_ctx.sm.push("")
         while else_ctx.sm.depth() > then_ctx.sm.depth():
+            if then_bindings:
+                raise RuntimeError(
+                    "internal codegen error: conditional needs "
+                    f"{else_ctx.sm.depth() - then_ctx.sm.depth()} placeholder push(es) "
+                    "to balance a NON-EMPTY then arm (else depth "
+                    f"{else_ctx.sm.depth()} != then depth {then_ctx.sm.depth()}); "
+                    f'binding="{binding_name}"'
+                )
             then_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
             then_ctx.sm.push("")
 

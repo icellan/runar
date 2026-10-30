@@ -3045,11 +3045,24 @@ class LoweringContext {
         }
         elseCtx.stackMap.push(thenName);
       } else {
+        // N-262: padding an EMPTY else arm is the legitimate #99 fallback;
+        // padding a NON-EMPTY one writes a placeholder the post-ENDIF code
+        // reads as a value. Same sentence as Go's R-161 guard.
+        if (elseBindings.length !== 0) {
+          throw new Error(
+            `internal codegen error: conditional needs ${thenCtx.stackMap.depth - elseCtx.stackMap.depth} placeholder push(es) to balance a NON-EMPTY else arm (then depth ${thenCtx.stackMap.depth} != else depth ${elseCtx.stackMap.depth}); an empty push there becomes a value the post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding="${bindingName}"`,
+          );
+        }
         elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
         elseCtx.stackMap.push(null);
       }
     }
     while (elseCtx.stackMap.depth > thenCtx.stackMap.depth) {
+      if (thenBindings.length !== 0) {
+        throw new Error(
+          `internal codegen error: conditional needs ${elseCtx.stackMap.depth - thenCtx.stackMap.depth} placeholder push(es) to balance a NON-EMPTY then arm (else depth ${elseCtx.stackMap.depth} != then depth ${thenCtx.stackMap.depth}); binding="${bindingName}"`,
+        );
+      }
       thenCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
       thenCtx.stackMap.push(null);
     }

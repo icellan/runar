@@ -6061,12 +6061,30 @@ const LowerCtx = struct {
                 const var_depth = else_ctx.stack.findDepth(then_name.?).?;
                 try duplicateBranchValueAtDepth(else_ctx, var_depth, then_name);
             } else {
+                // N-262: padding an EMPTY else arm is the legitimate #99
+                // fallback; padding a NON-EMPTY one writes a placeholder the
+                // post-ENDIF code reads as a value. Same sentence as Go's R-161
+                // guard.
+                if (else_bindings.len != 0) {
+                    std.log.warn(
+                        "internal codegen error: conditional needs {d} placeholder push(es) to balance a NON-EMPTY else arm (then depth {d} != else depth {d}); an empty push there becomes a value the post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding=\"{s}\"",
+                        .{ then_ctx.stack.depth() - else_ctx.stack.depth(), then_ctx.stack.depth(), else_ctx.stack.depth(), bind_name },
+                    );
+                    return LowerError.BranchStackMismatch;
+                }
                 try else_ctx.emitPushData("");
                 try else_ctx.stack.push(self.allocator, null);
                 else_ctx.trackDepth();
             }
         }
         while (else_ctx.stack.depth() > then_ctx.stack.depth()) {
+            if (ie.then_bindings.len != 0) {
+                std.log.warn(
+                    "internal codegen error: conditional needs {d} placeholder push(es) to balance a NON-EMPTY then arm (else depth {d} != then depth {d}); binding=\"{s}\"",
+                    .{ else_ctx.stack.depth() - then_ctx.stack.depth(), else_ctx.stack.depth(), then_ctx.stack.depth(), bind_name },
+                );
+                return LowerError.BranchStackMismatch;
+            }
             try then_ctx.emitPushData("");
             try then_ctx.stack.push(self.allocator, null);
             then_ctx.trackDepth();

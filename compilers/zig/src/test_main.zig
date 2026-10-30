@@ -78,6 +78,7 @@ test {
     _ = @import("tests/n051_branch_arm_private_helper.zig");
     _ = @import("tests/n051_codepart_len_slots.zig");
     _ = @import("tests/r072_method_scope_branch_arm.zig");
+    _ = @import("tests/n262_nonempty_arm_padding.zig");
     _ = @import("tests/n079_inlined_param_alias_branch_arm.zig");
     _ = @import("tests/n007_param_shadow_branch_arm.zig");
     _ = @import("tests/n046_block_scope_alpha_rename.zig");
