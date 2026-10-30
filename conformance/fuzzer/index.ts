@@ -68,6 +68,11 @@ interface FuzzerCLIOptions {
   /** Include stateful contracts in the generated distribution (IR mode only). */
   stateful: boolean;
   /**
+   * IR mode only (N-400): also draw `addRawOutput` / `addDataOutput` (stateful
+   * contracts) and a call to a private helper method.
+   */
+  extraKinds: boolean;
+  /**
    * Use the ANF-IR differential fuzzer (Item 7): generates random ANF
    * programs directly, skips the source-rendering frontends, and
    * stresses every tier's loader + stack-lowerer + emitter.
@@ -178,6 +183,7 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
     ir: false,
     renderStrategy: 'ts',
     stateful: false,
+    extraKinds: false,
     anf: false,
     canonical: false,
     execute: false,
@@ -231,6 +237,9 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
       }
       case '--stateful':
         opts.stateful = true;
+        break;
+      case '--extra-kinds':
+        opts.extraKinds = true;
         break;
       case '--anf':
         opts.anf = true;
@@ -321,6 +330,9 @@ Options:
                          native source (.runar.go / .runar.rs / .runar.py / …) to
                          also stress each compiler's frontend.
   --stateful             IR mode only. Mix stateful contracts into the sample.
+  --extra-kinds          IR mode only (N-400). Also draw addRawOutput /
+                         addDataOutput (stateful contracts) and a call to a
+                         private helper method; off by default.
   --anf                  Item 7 — direct ANF IR differential fuzzer.
                          Generates random valid ANF programs and asserts every
                          tier's --ir --hex pipeline produces byte-identical
@@ -477,7 +489,7 @@ async function main(): Promise<void> {
     console.log(`  Seed: ${opts.seed}`);
   }
   if (opts.ir) {
-    console.log(`  Generator: IR (render=${opts.renderStrategy}${opts.stateful ? ', stateful' : ''})`);
+    console.log(`  Generator: IR (render=${opts.renderStrategy}${opts.stateful ? ', stateful' : ''}${opts.extraKinds ? ', extra-kinds' : ''})`);
   }
   if (opts.anf) {
     console.log(
@@ -790,6 +802,7 @@ async function main(): Promise<void> {
       compareHex: opts.hex,
       renderStrategy: opts.renderStrategy,
       includeStateful: opts.stateful,
+      extraKinds: opts.extraKinds,
       findingsDir: opts.findingsDir,
       requireTiers: opts.requireTiers ?? opts.compilers,
       disableConstantFolding: !opts.foldOn,
@@ -816,6 +829,7 @@ async function main(): Promise<void> {
         generator: 'ir',
         renderStrategy: opts.renderStrategy,
         stateful: opts.stateful,
+        extraKinds: opts.extraKinds,
         results: results.map((r) => ({
           match: r.match,
           mismatchDetails: r.mismatchDetails,

@@ -114,6 +114,14 @@ function tsStmt(stmt: Stmt, indent: string): string {
       const args = [`${stmt.satoshis}n`, ...stmt.values.map(tsExpr)].join(', ');
       return `${indent}this.addOutput(${args});`;
     }
+    case 'add_raw_output':
+      return `${indent}this.addRawOutput(${stmt.satoshis}n, ${tsExpr(stmt.script)});`;
+    case 'add_data_output':
+      return `${indent}this.addDataOutput(${stmt.satoshis}n, ${tsExpr(stmt.script)});`;
+    case 'method_call':
+      return `${indent}this.${stmt.name}(${stmt.args.map(tsExpr).join(', ')});`;
+    case 'raw_script':
+      return `${indent}asm({ body: '${stmt.body}', in_arity: ${stmt.inArity}, out_arity: ${stmt.outArity} });`;
     case 'expr':
       return `${indent}${tsExpr(stmt.expr)};`;
   }
@@ -160,6 +168,7 @@ export function renderTypeScript(contract: GeneratedContract): string {
   if (usedFns.has('substr')) valueImports.push('substr');
   if (usedFns.has('split')) valueImports.push('split');
   if (usedFns.has('reverseBytes')) valueImports.push('reverseBytes');
+  if (usedFns.has('asm')) valueImports.push('asm');
   if (usedFns.has('abs')) valueImports.push('abs');
   if (usedFns.has('min')) valueImports.push('min');
   if (usedFns.has('max')) valueImports.push('max');
@@ -296,14 +305,21 @@ function goStmt(stmt: Stmt, indent: string): string {
       const args = [String(stmt.satoshis), ...stmt.values.map(goExpr)].join(', ');
       return `${indent}c.AddOutput(${args})`;
     }
+    case 'add_raw_output':
+      return `${indent}c.AddRawOutput(${stmt.satoshis}, ${goExpr(stmt.script)})`;
+    case 'add_data_output':
+      return `${indent}c.AddDataOutput(${stmt.satoshis}, ${goExpr(stmt.script)})`;
+    case 'method_call':
+      return `${indent}c.${stmt.name}(${stmt.args.map(goExpr).join(', ')})`;
+    case 'raw_script':
+      return `${indent}runar.Asm("${stmt.body}", ${stmt.inArity}, ${stmt.outArity})`;
     case 'expr':
       return `${indent}${goExpr(stmt.expr)}`;
   }
 }
 
 export function renderGo(contract: GeneratedContract): string {
-  const isStateful = contract.parentClass === 'StatefulSmartContract';
-  const embed = isStateful ? 'runar.StatefulSmartContract' : 'runar.SmartContract';
+  const embed = `runar.${contract.parentClass}`;
 
   const lines: string[] = [];
   lines.push('package contract');
@@ -324,7 +340,9 @@ export function renderGo(contract: GeneratedContract): string {
   for (const method of contract.methods) {
     lines.push('');
     const params = method.params.map((p) => `${p.name} ${goType(p.type)}`).join(', ');
-    lines.push(`func (c *${contract.name}) ${toPascalCase(method.name)}(${params}) {`);
+    // Go marks visibility by the case of the first letter.
+    const goName = method.visibility === 'private' ? method.name : toPascalCase(method.name);
+    lines.push(`func (c *${contract.name}) ${goName}(${params}) {`);
     for (const stmt of method.body) {
       lines.push(goStmt(stmt, '\t'));
     }
@@ -401,6 +419,14 @@ function rsStmt(stmt: Stmt, indent: string): string {
       const args = [String(stmt.satoshis), ...stmt.values.map(rsExpr)].join(', ');
       return `${indent}self.add_output(${args});`;
     }
+    case 'add_raw_output':
+      return `${indent}self.add_raw_output(${stmt.satoshis}, ${rsExpr(stmt.script)});`;
+    case 'add_data_output':
+      return `${indent}self.add_data_output(${stmt.satoshis}, ${rsExpr(stmt.script)});`;
+    case 'method_call':
+      return `${indent}self.${toSnakeCase(stmt.name)}(${stmt.args.map(rsExpr).join(', ')});`;
+    case 'raw_script':
+      return `${indent}asm("${stmt.body}", ${stmt.inArity}, ${stmt.outArity});`;
     case 'expr':
       return `${indent}${rsExpr(stmt.expr)};`;
   }
@@ -412,7 +438,7 @@ export function renderRust(contract: GeneratedContract): string {
   lines.push('');
 
   // Struct
-  lines.push('#[runar::contract]');
+  lines.push(contract.parentClass === 'UnsafeSmartContract' ? '#[runar::unsafe_contract]' : '#[runar::contract]');
   lines.push(`struct ${contract.name} {`);
   for (const prop of contract.properties) {
     if (prop.readonly) lines.push('    #[readonly]');
@@ -514,6 +540,15 @@ function pyStmt(stmt: Stmt, indent: string): string {
       const args = [String(stmt.satoshis), ...stmt.values.map(pyExpr)].join(', ');
       return `${indent}self.add_output(${args})`;
     }
+    case 'add_raw_output':
+      return `${indent}self.add_raw_output(${stmt.satoshis}, ${pyExpr(stmt.script)})`;
+    case 'add_data_output':
+      return `${indent}self.add_data_output(${stmt.satoshis}, ${pyExpr(stmt.script)})`;
+    case 'method_call':
+      // Python marks a private method by the leading underscore (no `@public`).
+      return `${indent}self._${toSnakeCase(stmt.name)}(${stmt.args.map(pyExpr).join(', ')})`;
+    case 'raw_script':
+      return `${indent}asm("${stmt.body}", ${stmt.inArity}, ${stmt.outArity})`;
     case 'expr':
       return `${indent}${pyExpr(stmt.expr)}`;
   }
@@ -522,10 +557,8 @@ function pyStmt(stmt: Stmt, indent: string): string {
 export function renderPython(contract: GeneratedContract): string {
   const usedFns = collectUsedFunctions(contract);
   const usedTypes = collectUsedTypes(contract);
-  const isStateful = contract.parentClass === 'StatefulSmartContract';
-
   // Build imports
-  const imports: string[] = [isStateful ? 'StatefulSmartContract' : 'SmartContract'];
+  const imports: string[] = [contract.parentClass];
   imports.push('assert_');
   if (usedFns.has('hash160')) imports.push('hash160');
   if (usedFns.has('sha256')) imports.push('sha256');
@@ -533,6 +566,7 @@ export function renderPython(contract: GeneratedContract): string {
   if (usedFns.has('checkSig')) imports.push('check_sig');
   if (usedFns.has('safediv')) imports.push('safediv');
   if (usedFns.has('safemod')) imports.push('safemod');
+  if (usedFns.has('asm')) imports.push('asm');
   if (usedFns.has('abs')) imports.push('abs');
   if (usedFns.has('min')) imports.push('min');
   if (usedFns.has('max')) imports.push('max');
@@ -553,8 +587,7 @@ export function renderPython(contract: GeneratedContract): string {
   lines.push(`from runar import ${[...new Set(imports)].join(', ')}`);
   lines.push('');
 
-  const base = isStateful ? 'StatefulSmartContract' : 'SmartContract';
-  lines.push(`class ${contract.name}(${base}):`);
+  lines.push(`class ${contract.name}(${contract.parentClass}):`);
 
   // Properties. `Readonly[T]` must be rendered whenever the IR marks the
   // property readonly — see the READONLY PARITY note above `renderTypeScript`.
@@ -583,8 +616,9 @@ export function renderPython(contract: GeneratedContract): string {
     const params = method.params.map((p) => `${toSnakeCase(p.name)}: ${pyType(p.type)}`).join(', ');
     const allParams = params ? `self, ${params}` : 'self';
 
-    lines.push('    @public');
-    lines.push(`    def ${toSnakeCase(method.name)}(${allParams}):`);
+    if (method.visibility === 'public') lines.push('    @public');
+    const pyName = (method.visibility === 'private' ? '_' : '') + toSnakeCase(method.name);
+    lines.push(`    def ${pyName}(${allParams}):`);
     if (method.body.length === 0) {
       lines.push('        pass');
     } else {
@@ -677,14 +711,21 @@ function zigStmt(stmt: Stmt, indent: string): string {
       const args = [String(stmt.satoshis), ...stmt.values.map(zigExpr)].join(', ');
       return `${indent}self.addOutput(${args});`;
     }
+    case 'add_raw_output':
+      return `${indent}self.addRawOutput(${stmt.satoshis}, ${zigExpr(stmt.script)});`;
+    case 'add_data_output':
+      return `${indent}self.addDataOutput(${stmt.satoshis}, ${zigExpr(stmt.script)});`;
+    case 'method_call':
+      return `${indent}self.${stmt.name}(${stmt.args.map(zigExpr).join(', ')});`;
+    case 'raw_script':
+      return `${indent}runar.asm("${stmt.body}", ${stmt.inArity}, ${stmt.outArity});`;
     case 'expr':
       return `${indent}${zigExpr(stmt.expr)};`;
   }
 }
 
 export function renderZig(contract: GeneratedContract): string {
-  const isStateful = contract.parentClass === 'StatefulSmartContract';
-  const contractType = isStateful ? 'runar.StatefulSmartContract' : 'runar.SmartContract';
+  const contractType = `runar.${contract.parentClass}`;
 
   const lines: string[] = [];
   lines.push('const runar = @import("runar");');
@@ -719,7 +760,7 @@ export function renderZig(contract: GeneratedContract): string {
     const selfType = method.mutatesState ? `*${contract.name}` : `*const ${contract.name}`;
     const params = method.params.map((p) => `${p.name}: ${zigType(p.type)}`).join(', ');
     const allParams = params ? `self: ${selfType}, ${params}` : `self: ${selfType}`;
-    lines.push(`    pub fn ${method.name}(${allParams}) void {`);
+    lines.push(`    ${method.visibility === 'public' ? 'pub fn' : 'fn'} ${method.name}(${allParams}) void {`);
     for (const stmt of method.body) {
       lines.push(zigStmt(stmt, '        '));
     }
@@ -796,14 +837,22 @@ function rbStmt(stmt: Stmt, indent: string): string {
       const args = [String(stmt.satoshis), ...stmt.values.map(rbExpr)].join(', ');
       return `${indent}add_output(${args})`;
     }
+    case 'add_raw_output':
+      return `${indent}add_raw_output(${stmt.satoshis}, ${rbExpr(stmt.script)})`;
+    case 'add_data_output':
+      return `${indent}add_data_output(${stmt.satoshis}, ${rbExpr(stmt.script)})`;
+    case 'method_call':
+      // Ruby marks a private method by the `private` section + leading underscore.
+      return `${indent}_${toSnakeCase(stmt.name)}(${stmt.args.map(rbExpr).join(', ')})`;
+    case 'raw_script':
+      return `${indent}asm("${stmt.body}", ${stmt.inArity}, ${stmt.outArity})`;
     case 'expr':
       return `${indent}${rbExpr(stmt.expr)}`;
   }
 }
 
 export function renderRuby(contract: GeneratedContract): string {
-  const isStateful = contract.parentClass === 'StatefulSmartContract';
-  const base = isStateful ? 'Runar::StatefulSmartContract' : 'Runar::SmartContract';
+  const base = `Runar::${contract.parentClass}`;
 
   const lines: string[] = [];
   lines.push("require 'runar'");
@@ -836,13 +885,17 @@ export function renderRuby(contract: GeneratedContract): string {
   for (const method of contract.methods) {
     lines.push('');
     const paramTypes = method.params.map((p) => `${toSnakeCase(p.name)}: ${rbType(p.type)}`).join(', ');
-    lines.push(`  runar_public ${paramTypes}`);
+    const isPrivate = method.visibility === 'private';
+    if (isPrivate) lines.push('  private');
+    lines.push(`  ${isPrivate ? 'params' : 'runar_public'} ${paramTypes}`);
     const paramNames = method.params.map((p) => toSnakeCase(p.name)).join(', ');
-    lines.push(`  def ${toSnakeCase(method.name)}(${paramNames})`);
+    lines.push(`  def ${isPrivate ? '_' : ''}${toSnakeCase(method.name)}(${paramNames})`);
     for (const stmt of method.body) {
       lines.push(rbStmt(stmt, '    '));
     }
     lines.push('  end');
+    // `private` is a section modifier: restore the default for what follows.
+    if (isPrivate) lines.push('  public');
   }
 
   lines.push('end');
@@ -1079,6 +1132,16 @@ function javaStmt(
       ].join(', ');
       return `${indent}this.addOutput(${args});`;
     }
+    case 'add_raw_output':
+      return `${indent}this.addRawOutput(${stmt.satoshis}L, ${javaExpr(stmt.script, bigintVars, boolVars)});`;
+    case 'add_data_output':
+      return `${indent}this.addDataOutput(${stmt.satoshis}L, ${javaExpr(stmt.script, bigintVars, boolVars)});`;
+    case 'method_call': {
+      const args = stmt.args.map((a) => javaExpr(a, bigintVars, boolVars)).join(', ');
+      return `${indent}${stmt.name}(${args});`;
+    }
+    case 'raw_script':
+      return `${indent}asm("${stmt.body}", ${stmt.inArity}, ${stmt.outArity});`;
     case 'expr':
       return `${indent}${javaExpr(stmt.expr, bigintVars, boolVars)};`;
   }
@@ -1087,7 +1150,6 @@ function javaStmt(
 export function renderJava(contract: GeneratedContract): string {
   const usedFns = collectUsedFunctions(contract);
   const usedTypes = collectUsedTypes(contract);
-  const isStateful = contract.parentClass === 'StatefulSmartContract';
   const contractName = javaIdent(contract.name);
 
   // Pre-seed locals from properties / method params in each method context.
@@ -1107,7 +1169,7 @@ export function renderJava(contract: GeneratedContract): string {
   // Imports. Keep the list small; javac is strict about unused imports? No,
   // only warnings. Emit everything we might reference to keep the renderer
   // simple.
-  lines.push(`import runar.lang.${isStateful ? 'StatefulSmartContract' : 'SmartContract'};`);
+  lines.push(`import runar.lang.${contract.parentClass};`);
   lines.push('import runar.lang.annotations.Public;');
   lines.push('import runar.lang.annotations.Readonly;');
 
@@ -1127,7 +1189,7 @@ export function renderJava(contract: GeneratedContract): string {
   // Static builtin imports.
   const staticImports = new Set<string>(['assertThat']);
   const knownBuiltins = [
-    'abs', 'min', 'max', 'within', 'safediv', 'safemod', 'clamp', 'sign',
+    'asm', 'abs', 'min', 'max', 'within', 'safediv', 'safemod', 'clamp', 'sign',
     'pow', 'mulDiv', 'percentOf', 'sqrt', 'gcd', 'log2',
     'hash160', 'sha256', 'hash256', 'ripemd160', 'checkSig', 'len', 'cat',
     'substr', 'split', 'reverseBytes',
@@ -1142,8 +1204,7 @@ export function renderJava(contract: GeneratedContract): string {
   lines.push('');
 
   // Class declaration.
-  const base = isStateful ? 'StatefulSmartContract' : 'SmartContract';
-  lines.push(`class ${contractName} extends ${base} {`);
+  lines.push(`class ${contractName} extends ${contract.parentClass} {`);
   lines.push('');
 
   // Fields.

@@ -34,6 +34,7 @@ import {
   arbGeneratedStatefulContract,
   arbGeneratedContractWideLoops,
   arbGeneratedStatefulContractWideLoops,
+  withExtraKinds,
   renderTypeScript,
   renderGo,
   renderRust,
@@ -59,6 +60,12 @@ export interface IRFuzzerOptions {
   compareHex?: boolean;
   /** Include stateful contracts in the generated distribution. */
   includeStateful?: boolean;
+  /**
+   * Opt-in (N-400): also draw `addRawOutput`, `addDataOutput` (stateful only)
+   * and a call to a private helper method — the kinds no other mode reaches.
+   * Off by default so the fixed-seed corpora of the CI gates stay unchanged.
+   */
+  extraKinds?: boolean;
   /** How each compiler should receive its source — shared TS or per-language. */
   renderStrategy?: RenderStrategy;
   /** Directory to save failing cases. */
@@ -592,7 +599,8 @@ export async function runIRDifferentialFuzzing(
   const wide = strategy === 'ts';
   const statelessArb = wide ? arbGeneratedContractWideLoops : arbGeneratedContract;
   const statefulArb = wide ? arbGeneratedStatefulContractWideLoops : arbGeneratedStatefulContract;
-  const arb = options.includeStateful ? fc.oneof(statelessArb, statefulArb) : statelessArb;
+  const baseArb = options.includeStateful ? fc.oneof(statelessArb, statefulArb) : statelessArb;
+  const arb = options.extraKinds ? withExtraKinds(baseArb) : baseArb;
 
   const contracts = fc.sample(arb, { numRuns: numPrograms, seed: options.seed });
   const compilerMap = dispatch(disableConstantFolding);

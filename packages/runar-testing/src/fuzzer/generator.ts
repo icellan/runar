@@ -1844,6 +1844,139 @@ function ensureEveryMutablePropertyIsWritten(
 }
 
 /**
+ * N-400 — opt-in generator option that reaches the three ANF kinds no fuzzer
+ * drew: `add_raw_output`, `add_data_output` and `method_call` (a call to a
+ * private method). Wrap any contract arbitrary with it; the DEFAULT
+ * arbitraries are untouched, so every fixed-seed corpus stays byte-stable.
+ *
+ * Per contract, independently (each with probability 1/2):
+ *   - a private `helper0(a: bigint)` method plus a call to it from a public
+ *     method. Stateful: the helper writes a mutable bigint property (the
+ *     shape of `conformance/tests/private-helper-outputs`); stateless: it
+ *     asserts. The call precedes every other statement of the caller.
+ *   - stateless only: `UnsafeSmartContract` with a terminal
+ *     `asm({ body, in_arity: 0, out_arity: 1 })` (ANF `raw_script`), appended
+ *     to a drawn public method. The contract's `parentClass` becomes
+ *     `UnsafeSmartContract`; nothing else about it changes.
+ *   - stateful only: `this.addDataOutput(sats, payloadBs)` and
+ *     `this.addRawOutput(sats, scriptBs)`, each reading a `ByteString`
+ *     parameter appended to a drawn public method and placed LAST (after any
+ *     explicit `addOutput`, so declaration order is the draw order).
+ * Stateless contracts get no output intrinsic: both are stateful-only.
+ */
+export function withExtraKinds(
+  base: fc.Arbitrary<GeneratedContract>,
+): fc.Arbitrary<GeneratedContract> {
+  return base.chain((contract) =>
+    fc
+      .tuple(
+        fc.boolean(), // private helper + call
+        fc.boolean(), // addDataOutput
+        fc.boolean(), // addRawOutput
+        fc.nat(), // which public method receives the call
+        fc.nat(), // which public method receives the data output
+        fc.nat(), // which public method receives the raw output
+        fc.constantFrom(0n, 1n, 1000n),
+        fc.constantFrom(0n, 1n, 1000n),
+        fc.boolean(), // asm raw_script (stateless only)
+        fc.nat(), // which public method receives the asm
+        fc.constantFrom('51', '52', '00', '5a'),
+      )
+      .chain(([doHelper, doData, doRaw, callIdx, dataIdx, rawIdx, dataSats, rawSats, doAsm, asmIdx, asmBody]) => {
+        const stateful = contract.parentClass === 'StatefulSmartContract';
+        // Deep-copy the methods: the base arbitrary's value must not be mutated.
+        const methods: GeneratedMethod[] = contract.methods.map((m) => ({
+          ...m,
+          params: [...m.params],
+          body: [...m.body],
+        }));
+        const publics = methods.filter((m) => m.visibility === 'public');
+        const pick = (i: number): GeneratedMethod => publics[i % publics.length]!;
+
+        let helper: GeneratedMethod | undefined;
+        let callArg: fc.Arbitrary<Expr> | undefined;
+        if (doHelper) {
+          const target = pick(callIdx);
+          const mutableBigint = contract.properties.find((p) => !p.readonly && p.type === 'bigint');
+          const helperParam: GeneratedParam = { name: 'delta', type: 'bigint' };
+          const ref: Expr = { kind: 'var_ref', name: 'delta' };
+          helper = {
+            name: 'helper0',
+            visibility: 'private',
+            params: [helperParam],
+            body:
+              stateful && mutableBigint
+                ? [
+                    {
+                      kind: 'assign',
+                      target: mutableBigint.name,
+                      value: {
+                        kind: 'binary',
+                        op: '+',
+                        left: { kind: 'property_ref', name: mutableBigint.name },
+                        right: ref,
+                      },
+                      isProperty: true,
+                    },
+                  ]
+                : [
+                    {
+                      kind: 'assert',
+                      condition: {
+                        kind: 'binary',
+                        op: '>',
+                        left: { kind: 'binary', op: '+', left: ref, right: { kind: 'bigint_literal', value: 1n } },
+                        right: ref,
+                      },
+                    },
+                  ],
+            mutatesState: stateful && !!mutableBigint,
+          };
+          const vars = [
+            ...contract.properties.filter((p) => p.type === 'bigint').map((p) => `this.${p.name}`),
+            ...target.params.filter((p) => p.type === 'bigint').map((p) => p.name),
+          ];
+          callArg = arbBigintExprIR(vars, 1);
+        }
+
+        const finish = (arg: Expr | undefined): GeneratedContract => {
+          if (helper && arg) {
+            const target = pick(callIdx);
+            target.body.unshift({ kind: 'method_call', name: helper.name, args: [arg] });
+            if (helper.mutatesState) target.mutatesState = true;
+            methods.push(helper);
+          }
+          if (stateful && doData) {
+            const m = pick(dataIdx);
+            m.params.push({ name: 'payloadBs', type: 'ByteString' });
+            m.body.push({
+              kind: 'add_data_output',
+              satoshis: dataSats,
+              script: { kind: 'var_ref', name: 'payloadBs' },
+            });
+          }
+          if (stateful && doRaw) {
+            const m = pick(rawIdx);
+            m.params.push({ name: 'scriptBs', type: 'ByteString' });
+            m.body.push({
+              kind: 'add_raw_output',
+              satoshis: rawSats,
+              script: { kind: 'var_ref', name: 'scriptBs' },
+            });
+          }
+          let parentClass = contract.parentClass;
+          if (!stateful && doAsm) {
+            pick(asmIdx).body.push({ kind: 'raw_script', body: asmBody, inArity: 0n, outArity: 1n });
+            parentClass = 'UnsafeSmartContract';
+          }
+          return { ...contract, parentClass, methods };
+        };
+        return callArg ? callArg.map((a) => finish(a)) : fc.constant(finish(undefined));
+      }),
+  );
+}
+
+/**
  * Generate a random stateful GeneratedContract IR.
  */
 export const arbGeneratedStatefulContract: fc.Arbitrary<GeneratedContract> =

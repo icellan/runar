@@ -127,11 +127,13 @@ interface AnfProgram {
   methods: AnfMethod[];
 }
 
-// Subset of the 19 ANF kinds the generator emits. We exclude `if` /
-// `loop` (nested bindings — generator quickly blows up combinatorially)
-// and the stateful-contract-only kinds (`get_state_script`,
-// `check_preimage`, `deserialize_state`, `add_output`,
-// `add_raw_output`, `add_data_output`) which need a coordinating
+// Subset of the 19 ANF kinds the generator emits. We exclude ten: `if` /
+// `loop` (nested bindings — generator quickly blows up combinatorially),
+// `method_call` and `raw_script` (a call between methods / the `asm`
+// escape hatch of `UnsafeSmartContract`; both need a contract shape this
+// straight-line generator does not build), and the six stateful-contract-only
+// kinds (`get_state_script`, `check_preimage`, `deserialize_state`,
+// `add_output`, `add_raw_output`, `add_data_output`) which need a coordinating
 // preimage parameter + state-continuation discipline that's not worth
 // the generator complexity for an in-the-loop fuzzer. (N-395: a program
 // that draws an `update_prop` is fed to every tier as a
@@ -169,11 +171,12 @@ interface AnfProgram {
 //     StatefulSmartContract method's lowering regardless of what the
 //     generator itself emits (`04-anf-lower.ts`), so any generated stateful
 //     contract compiled through that gate exercises them cross-tier too.
-//     `add_raw_output` and `add_data_output` remain uncovered — neither
-//     `contract-ir.ts` nor any other generator emits either kind, and
-//     nothing auto-injects them. Their real coverage is (a) the
-//     hand-written conformance fixtures, which do give 9-format / 7-tier
-//     parity, and (b) for `add_output` specifically,
+//     `add_raw_output` and `add_data_output` (and `method_call`) are
+//     covered since N-400, but ONLY when the opt-in `--ir --hex --extra-kinds`
+//     option is passed (`withExtraKinds` in the IR generator): no default
+//     mode, no CI gate and no auto-injection reaches them. Besides that,
+//     their coverage is (a) the hand-written conformance fixtures, which do
+//     give 9-format / 7-tier parity, and (b) for `add_output` specifically,
 //     `conformance/fuzzer/spend-shapes.ts`, whose randomized `addOutput`
 //     shapes additionally get an ABSOLUTE post-state oracle but are
 //     rendered to TypeScript only — one tier, not seven.

@@ -38,12 +38,13 @@ fails when this section drifts from them. File references are
 Constructs NO generator in this directory draws (so none of the modes below
 covers them; the conformance fixtures and the per-feature tests do): `ternary`
 expressions (the contract IR has the node, `contract-ir.ts`, but no generator
-emits it), private/helper methods (every generated method is `public`),
-`ByteString`-typed properties in the cross-tier modes, any crypto builtin
-(`checkSig`, hashes, EC, SLH-DSA, WOTS, BN254, ...), `FixedArray`, property
-initialisers, `addRawOutput` / `addDataOutput`, `UnsafeSmartContract` / `asm`
-(`raw_script`), and `method_call` ANF nodes. Hand-written conformance fixtures
-carry all of those; they are not fuzzed.
+emits it), `ByteString`-typed properties in the cross-tier modes, any crypto
+builtin (`checkSig`, hashes, EC, SLH-DSA, WOTS, BN254, ...), `FixedArray` and
+property initialisers. Hand-written conformance fixtures carry all of those;
+they are not fuzzed. Private/helper methods (`method_call`), `addRawOutput` /
+`addDataOutput` and `UnsafeSmartContract` / `asm` (`raw_script`) are drawn ONLY
+by the opt-in `--ir --extra-kinds` (N-400, below); every default mode and every
+CI gate leaves them out.
 
 ### `--anf`
 
@@ -60,8 +61,8 @@ corpus; fold-OFF exercises the loader, stack lowering and emitter only.
 **Never generates ANF kinds:** `method_call`, `if`, `loop`, `get_state_script`, `check_preimage`, `deserialize_state`, `add_output`, `add_raw_output`, `add_data_output`, `raw_script`
 
 **Cannot generate:** every program is straight-line. Besides the ten kinds above
-(the header comment in `anf-differential.ts` lists only the `if`/`loop` and
-stateful-only kinds; `method_call` and `raw_script` are also absent), the only
+(the header comment in `anf-differential.ts` names all ten: `if`, `loop`,
+`method_call`, `raw_script` and the six stateful-only kinds), the only
 `call` is `abs`; types are `bigint` and `boolean` only (no `ByteString`, so no
 byte ops, no `cat`/`substr`/`len`, no hashes); properties are all `bigint`. A
 program that draws `update_prop` is handed to every tier as a
@@ -70,8 +71,8 @@ around it (`check_preimage`, `deserialize_state`, `get_state_script`, the
 change-output `if`) is exercised INDIRECTLY, but the generator never emits those
 nodes itself. `if` / `loop` / `add_output` are reached by `--ir`
 (contract-level), not by this mode; `add_raw_output`, `add_data_output`,
-`method_call` and `raw_script` are reached by no fuzzer. Oracle: horizontal
-(tier agreement) only.
+`method_call` and `raw_script` are reached only by `--ir --extra-kinds`, not by
+this mode. Oracle: horizontal (tier agreement) only.
 
 ### `--ir`
 
@@ -101,9 +102,10 @@ same way.
 (stateful methods: `bigint` parameters only); expressions are `+ - * / %`
 (divisor a non-zero literal), comparisons, `&& || !`, `abs`/`min`/`max`,
 `pow` with a literal exponent, `<< >>` with a small literal count, `& | ^`.
-No ternary, no `ByteString`, no crypto builtin, no private methods, no
-`addRawOutput` / `addDataOutput`; `addOutput` takes satoshis from
-`{0, 1000, 1}` and the mutable properties only. Branches are the fixed
+No ternary, no `ByteString` property, no crypto builtin; no private methods,
+`addRawOutput` / `addDataOutput` or `asm` unless `--extra-kinds` is passed (see
+below); `addOutput` takes satoshis from `{0, 1000, 1}` and the mutable
+properties only. Branches are the fixed
 `BRANCH_SHAPES` families (`STATEFUL_BRANCH_SHAPES` adds the conditional
 property write). Loops are the fixed `IR_LOOP_SHAPES` families (single carrier,
 two-carrier cross-read, nested cross-read), at most ONE loop per method, with a
@@ -113,6 +115,25 @@ draws ascending unit-step half-open loops only (F-300); only `--render ts`
 (`const wide = strategy === 'ts'`) draws the wide loop forms, and no
 generator draws `|step| >= 2`. A native-render run's Zig/Rust/Go/Python/Ruby
 surfaces for those wide forms are therefore never compared.
+
+**`--extra-kinds` (N-400, opt-in, `withExtraKinds` in the IR generator).** Wraps
+the chosen arbitrary so that each contract independently may also carry (each
+with probability 1/2): a private `helper0(delta: bigint)` method called from the
+first statement of a public method (stateful: the helper writes a mutable
+bigint property; stateless: it asserts) = ANF `method_call`; for stateful
+contracts `this.addDataOutput(sats, payloadBs)` and `this.addRawOutput(sats,
+scriptBs)` reading a `ByteString` parameter appended to a public method and
+placed after any `addOutput` = `add_data_output` / `add_raw_output`; for
+stateless contracts a switch to `UnsafeSmartContract` with a terminal
+`asm({ body, in_arity: 0, out_arity: 1 })` = `raw_script`. Off by default, so no
+CI gate's fixed-seed corpus changed and no CI step runs it; run it by hand,
+e.g. `--ir --hex --stateful --extra-kinds --render native --num 200 --seed 400`
+(and `--render ts`). What it still cannot do: the `asm` body is one of four
+fixed one-opcode pushes with `in_arity` 0, helpers are void with one `bigint`
+parameter and are called once, the output scripts are parameters (never
+literals) and never derived from state, and no stateless contract draws an
+output intrinsic. Reachability of each kind is asserted at a fixed seed by
+`packages/runar-testing/src/__tests__/fuzzer-extra-kinds.test.ts`.
 
 ### `--execute`
 
