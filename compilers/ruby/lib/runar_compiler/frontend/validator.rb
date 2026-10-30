@@ -1609,9 +1609,11 @@ module RunarCompiler
         when ByteStringLiteral
           val = expr.value
           if val.length > 0
-            if val.length.odd?
+            # N-436: TS counts UTF-16 code units; String#length counts code points.
+            units = val.encode("UTF-16LE").bytesize / 2
+            if units.odd?
               add_error(
-                "ByteString literal '#{val}' has odd length (#{val.length}) " \
+                "ByteString literal '#{val}' has odd length (#{units}) " \
                 "\u2014 hex strings must have an even number of characters"
               )
             elsif !val.match?(/\A[0-9a-fA-F]*\z/)

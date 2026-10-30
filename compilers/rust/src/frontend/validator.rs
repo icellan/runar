@@ -1750,11 +1750,13 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
 
         Expression::ByteStringLiteral { value } => {
             if !value.is_empty() {
-                if value.len() % 2 != 0 {
+                // N-436: TS counts UTF-16 code units; value.len() would count UTF-8 bytes.
+                let units = value.encode_utf16().count();
+                if units % 2 != 0 {
                     errors.push(Diagnostic::error(format!(
                         "ByteString literal '{}' has odd length ({}) \u{2014} hex strings must have an even number of characters",
                         value,
-                        value.len()
+                        units
                     ), None));
                 } else if !value.chars().all(|c| c.is_ascii_hexdigit()) {
                     errors.push(Diagnostic::error(format!(

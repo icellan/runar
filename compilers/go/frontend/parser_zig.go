@@ -359,7 +359,7 @@ func (p *zigParser) tokenize(source string) []zigToken {
 			advance() // skip opening quote
 			// N-181: a Builder, not `val += …`, which copied the whole
 			// literal per byte (quadratic on a 4 MiB unterminated string).
-			// WriteRune(rune(b)) is exactly what string(b) appended before.
+			// WriteByte keeps the source bytes (UTF-8 intact); WriteRune(rune(b)) re-encoded each byte as Latin-1 (N-436).
 			var val strings.Builder
 			// F-011: a Zig string literal cannot span lines; one that reaches
 			// a line break (escaped or not) or end of file is unterminated.
@@ -369,9 +369,9 @@ func (p *zigParser) tokenize(source string) []zigToken {
 					if pos >= len(source) || peek() == '\n' || peek() == '\r' {
 						break
 					}
-					val.WriteRune(rune(advance()))
+					val.WriteByte(advance())
 				} else {
-					val.WriteRune(rune(advance()))
+					val.WriteByte(advance())
 				}
 			}
 			if peek() == '"' {

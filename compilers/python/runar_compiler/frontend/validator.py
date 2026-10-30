@@ -1215,9 +1215,11 @@ class _ValidationContext:
         elif isinstance(expr, ByteStringLiteral):
             val = expr.value
             if len(val) > 0:
-                if len(val) % 2 != 0:
+                # N-436: TS counts UTF-16 code units; len(val) counts code points.
+                units = len(val.encode("utf-16-le", "surrogatepass")) // 2
+                if units % 2 != 0:
                     self._add_error(
-                        f"ByteString literal '{val}' has odd length ({len(val)}) "
+                        f"ByteString literal '{val}' has odd length ({units}) "
                         f"\u2014 hex strings must have an even number of characters"
                     )
                 elif not re.fullmatch(r'[0-9a-fA-F]*', val):

@@ -365,15 +365,15 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				pos++
 				// N-181: a Builder, not `val += …`, which copied the whole
 				// literal per byte (quadratic on a 4 MiB unterminated string).
-				// WriteRune(rune(b)) is exactly what string(b) appended before.
+				// WriteByte keeps the source bytes (UTF-8 intact); WriteRune(rune(b)) re-encoded each byte as Latin-1 (N-436).
 				var val strings.Builder
 				for pos < len(line) && line[pos] != '\'' {
 					if line[pos] == '\\' && pos+1 < len(line) {
 						pos++ // skip backslash
-						val.WriteRune(rune(line[pos]))
+						val.WriteByte(line[pos])
 						pos++
 					} else {
-						val.WriteRune(rune(line[pos]))
+						val.WriteByte(line[pos])
 						pos++
 					}
 				}
@@ -395,10 +395,10 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				for pos < len(line) && line[pos] != '"' {
 					if line[pos] == '\\' && pos+1 < len(line) {
 						pos++ // skip backslash
-						val.WriteRune(rune(line[pos]))
+						val.WriteByte(line[pos])
 						pos++
 					} else {
-						val.WriteRune(rune(line[pos]))
+						val.WriteByte(line[pos])
 						pos++
 					}
 				}

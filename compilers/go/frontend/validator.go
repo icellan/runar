@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/icellan/runar/compilers/go/ir"
 )
@@ -1579,8 +1580,9 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 	case ByteStringLiteral:
 		val := e.Value
 		if len(val) > 0 {
-			if len(val)%2 != 0 {
-				ctx.addError(fmt.Sprintf("ByteString literal '%s' has odd length (%d) — hex strings must have an even number of characters", val, len(val)))
+			// N-436: TS counts UTF-16 code units; len(val) would count UTF-8 bytes.
+			if n := len(utf16.Encode([]rune(val))); n%2 != 0 {
+				ctx.addError(fmt.Sprintf("ByteString literal '%s' has odd length (%d) — hex strings must have an even number of characters", val, n))
 			} else if !isHexString(val) {
 				ctx.addError(fmt.Sprintf("ByteString literal '%s' contains non-hex characters — only 0-9, a-f, A-F are allowed", val))
 			}
