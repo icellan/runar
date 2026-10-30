@@ -15,18 +15,21 @@ pub const ByteBuiltins = struct {
 
     /// OP_SPLIT. Binds the right half of `data` at `idx`.
     pub fn checkSplit(self: *const ByteBuiltins, data: runar.ByteString, idx: i64, expectedTail: runar.ByteString) void {
+        _ = self;
         const tail = runar.split(data, idx);
         runar.assert(runar.bytesEq(tail, expectedTail));
     }
 
     /// OP_NUM2BIN. Fixed-width little-endian sign-magnitude encoding.
     pub fn checkInt2Str(self: *const ByteBuiltins, value: i64, width: i64, expected: runar.ByteString) void {
+        _ = self;
         const s = runar.int2str(value, width);
         runar.assert(runar.bytesEq(s, expected));
     }
 
     /// 520 unrolled OP_SPLIT / OP_CAT iterations -- one per possible byte.
     pub fn checkReverse(self: *const ByteBuiltins, data: runar.ByteString, expected: runar.ByteString) void {
+        _ = self;
         const r = runar.reverseBytes(data);
         runar.assert(runar.bytesEq(r, expected));
     }

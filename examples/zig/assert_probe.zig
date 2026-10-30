@@ -29,6 +29,14 @@ const sphincs_fixtures = @import("sphincs-wallet/fixtures.zig");
 const SPHINCSWallet = @import("sphincs-wallet/SPHINCSWallet.runar.zig").SPHINCSWallet;
 const StateCovenant = @import("state-covenant/StateCovenant.runar.zig").StateCovenant;
 const state_covenant_witness = @import("state-covenant/witness.zig");
+const IntentCurrentBlockHeight = @import("intent-current-block-height/IntentCurrentBlockHeight.runar.zig").IntentCurrentBlockHeight;
+const IntentOutputP2PKH = @import("intent-output-p2pkh/IntentOutputP2PKH.runar.zig").IntentOutputP2PKH;
+const IntentPrevOutputScript = @import("intent-prev-output-script/IntentPrevOutputScript.runar.zig").IntentPrevOutputScript;
+const ByteBuiltins = @import("byte-builtins/ByteBuiltins.runar.zig").ByteBuiltins;
+const P256EncodeNegate = @import("p256-encode-negate/P256EncodeNegate.runar.zig").P256EncodeNegate;
+const p256_vectors = @import("p256-encode-negate/vectors.zig");
+const P384EncodeNegate = @import("p384-encode-negate/P384EncodeNegate.runar.zig").P384EncodeNegate;
+const p384_vectors = @import("p384-encode-negate/vectors.zig");
 const Counter = @import("stateful-counter/Counter.runar.zig").Counter;
 const AnnotatedVault = @import("annotated-vault/AnnotatedVault.runar.zig").AnnotatedVault;
 const CountdownLoop = @import("countdown-loop/CountdownLoop.runar.zig").CountdownLoop;
@@ -179,7 +187,120 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "slhdsa-naive-192s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive192s);
     if (std.mem.eql(u8, probe_case, "slhdsa-naive-256f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256f);
     if (std.mem.eql(u8, probe_case, "slhdsa-naive-256s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256s);
+    if (std.mem.eql(u8, probe_case, "intent-current-block-height-past-deadline")) return probeIntentCurrentBlockHeightPastDeadline();
+    if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-wrong-pkh")) return probeIntentOutputP2PKHWrongPkh();
+    if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-wrong-amount")) return probeIntentOutputP2PKHWrongAmount();
+    if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-no-outputs")) return probeIntentOutputP2PKHNoOutputs();
+    if (std.mem.eql(u8, probe_case, "intent-prev-output-script-wrong-hash")) return probeIntentPrevOutputScriptWrongHash();
+    if (std.mem.eql(u8, probe_case, "intent-prev-output-script-no-witness")) return probeIntentPrevOutputScriptNoWitness();
+    if (std.mem.eql(u8, probe_case, "intent-prev-output-script-empty-witness")) return probeIntentPrevOutputScriptEmptyWitness();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-split-wrong")) return probeByteBuiltinsSplitWrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-int2str-wrong")) return probeByteBuiltinsInt2StrWrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-reverse-wrong")) return probeByteBuiltinsReverseWrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-sha256-wrong")) return probeByteBuiltinsSha256Wrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-ripemd-wrong")) return probeByteBuiltinsRipemdWrong();
+    if (std.mem.eql(u8, probe_case, "p256-encode-negate-wrong-negation")) return probeP256EncodeNegateWrongNegation();
+    if (std.mem.eql(u8, probe_case, "p256-encode-negate-wrong-prefix")) return probeP256EncodeNegateWrongPrefix();
+    if (std.mem.eql(u8, probe_case, "p256-encode-negate-negate-then-encode-wrong")) return probeP256EncodeNegateNegateThenEncodeWrong();
+    if (std.mem.eql(u8, probe_case, "p384-encode-negate-wrong-negation")) return probeP384EncodeNegateWrongNegation();
+    if (std.mem.eql(u8, probe_case, "p384-encode-negate-wrong-prefix")) return probeP384EncodeNegateWrongPrefix();
+    if (std.mem.eql(u8, probe_case, "p384-encode-negate-negate-then-encode-wrong")) return probeP384EncodeNegateNegateThenEncodeWrong();
     return error.UnknownProbeCase;
+}
+
+fn probeByteBuiltinsSplitWrong() !void {
+    const c = ByteBuiltins.init("", "");
+    c.checkSplit("abcdef", 2, "bcdef");
+}
+
+fn probeByteBuiltinsInt2StrWrong() !void {
+    const c = ByteBuiltins.init("", "");
+    c.checkInt2Str(258, 4, &[_]u8{ 0x01, 0x02, 0x00, 0x00 });
+}
+
+fn probeByteBuiltinsReverseWrong() !void {
+    const c = ByteBuiltins.init("", "");
+    c.checkReverse("abc", "abc");
+}
+
+fn probeByteBuiltinsSha256Wrong() !void {
+    const c = ByteBuiltins.init(runar.sha256("abc"), runar.ripemd160("abc"));
+    c.checkSha256("abd");
+}
+
+fn probeByteBuiltinsRipemdWrong() !void {
+    const c = ByteBuiltins.init(runar.sha256("abc"), runar.ripemd160("abc"));
+    c.checkRipemd("abd");
+}
+
+fn probeP256EncodeNegateWrongNegation() !void {
+    const c = P256EncodeNegate.init(p256_vectors.neg_g_compressed);
+    c.checkNegate(p256_vectors.g, p256_vectors.g);
+}
+
+fn probeP256EncodeNegateWrongPrefix() !void {
+    const c = P256EncodeNegate.init(p256_vectors.neg_g_compressed);
+    c.checkEncode(p256_vectors.g, p256_vectors.neg_g_compressed);
+}
+
+fn probeP256EncodeNegateNegateThenEncodeWrong() !void {
+    const c = P256EncodeNegate.init(p256_vectors.g_compressed);
+    c.checkNegateThenEncode(p256_vectors.g);
+}
+
+fn probeP384EncodeNegateWrongNegation() !void {
+    const c = P384EncodeNegate.init(p384_vectors.neg_g_compressed);
+    c.checkNegate(p384_vectors.g, p384_vectors.g);
+}
+
+fn probeP384EncodeNegateWrongPrefix() !void {
+    const c = P384EncodeNegate.init(p384_vectors.neg_g_compressed);
+    c.checkEncode(p384_vectors.g, p384_vectors.neg_g_compressed);
+}
+
+fn probeP384EncodeNegateNegateThenEncodeWrong() !void {
+    const c = P384EncodeNegate.init(p384_vectors.g_compressed);
+    c.checkNegateThenEncode(p384_vectors.g);
+}
+
+fn probeIntentCurrentBlockHeightPastDeadline() !void {
+    _ = runar.setMockBlockHeight(101);
+    var c = IntentCurrentBlockHeight.init(100, 0);
+    c.spend();
+}
+
+fn probeIntentOutputP2PKHWrongPkh() !void {
+    _ = runar.setMockSerialisedOutputs(runar.buildChangeOutput(runar.hash160(runar.BOB.pubKey), 5000));
+    var c = IntentOutputP2PKH.init(runar.hash160(runar.ALICE.pubKey), 5000, 0);
+    c.payBond();
+}
+
+fn probeIntentOutputP2PKHWrongAmount() !void {
+    _ = runar.setMockSerialisedOutputs(runar.buildChangeOutput(runar.hash160(runar.ALICE.pubKey), 4999));
+    var c = IntentOutputP2PKH.init(runar.hash160(runar.ALICE.pubKey), 5000, 0);
+    c.payBond();
+}
+
+fn probeIntentOutputP2PKHNoOutputs() !void {
+    var c = IntentOutputP2PKH.init(runar.hash160(runar.ALICE.pubKey), 5000, 0);
+    c.payBond();
+}
+
+fn probeIntentPrevOutputScriptWrongHash() !void {
+    _ = runar.setMockPrevOutputScript(0, "attacker-script");
+    var c = IntentPrevOutputScript.init(runar.hash256("prev-output-script"), 0);
+    c.bind();
+}
+
+fn probeIntentPrevOutputScriptNoWitness() !void {
+    var c = IntentPrevOutputScript.init(runar.hash256("prev-output-script"), 0);
+    c.bind();
+}
+
+fn probeIntentPrevOutputScriptEmptyWitness() !void {
+    _ = runar.setMockPrevOutputScript(0, "");
+    var c = IntentPrevOutputScript.init(runar.hash256(""), 0);
+    c.bind();
 }
 
 fn probeAnnotatedVaultWrongSig() !void {

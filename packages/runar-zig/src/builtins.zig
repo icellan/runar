@@ -382,30 +382,106 @@ pub fn extractSequence(preimage: base.SigHashPreimage) base.Bigint {
 // contracts. See docs/cross-covenant-pattern.md.
 // ============================================================================
 
-/// extractPrevOutputScript is the test-mode stub for the cross-input
-/// previous-output script witness-bridge intrinsic. The compiler emits
-/// hash256(witness) == expectedScriptHash on-chain; the off-chain mock
-/// cannot see other inputs, so this returns an empty ByteString.
-pub fn extractPrevOutputScript(input_index: base.Bigint, expected_script_hash: base.ByteString) base.ByteString {
-    _ = input_index;
-    _ = expected_script_hash;
+/// Mock witnesses for `extractPrevOutputScript`, keyed by input index. The
+/// compiler turns `extractPrevOutputScript(i, h)` into an injected
+/// `_prevOutScript_<i>` parameter plus `hash256(witness) == h`; natively the
+/// "unlocking script" is whatever a test registers with
+/// `setMockPrevOutputScript`. The slices are NOT copied: the caller keeps them
+/// alive (string literals and test-arena buffers both work).
+const mock_prev_output_capacity = 16;
+var mock_prev_output_indices: [mock_prev_output_capacity]base.Bigint = undefined;
+var mock_prev_output_scripts: [mock_prev_output_capacity]base.ByteString = undefined;
+var mock_prev_output_count: usize = 0;
+
+/// Registers the witness `extractPrevOutputScript(input_index, ..)` sees and
+/// returns the previous witness for that index (empty if none), so a test can
+/// restore it. Registering an empty slice is the same as having none.
+pub fn setMockPrevOutputScript(input_index: base.Bigint, script: base.ByteString) base.ByteString {
+    var i: usize = 0;
+    while (i < mock_prev_output_count) : (i += 1) {
+        if (mock_prev_output_indices[i] == input_index) {
+            const prev = mock_prev_output_scripts[i];
+            mock_prev_output_scripts[i] = script;
+            return prev;
+        }
+    }
+    if (mock_prev_output_count == mock_prev_output_capacity) {
+        // CONTRACT-ABORT: test-harness misuse, not a script condition.
+        @panic("setMockPrevOutputScript: too many distinct input indices");
+    }
+    mock_prev_output_indices[mock_prev_output_count] = input_index;
+    mock_prev_output_scripts[mock_prev_output_count] = script;
+    mock_prev_output_count += 1;
     return &[_]u8{};
 }
 
-/// requireOutputP2PKH is the test-mode stub for the P2PKH-output-binding
-/// intrinsic. The compiler emits a hashOutputs reconstruction + substring
-/// assertion on-chain; the off-chain mock has no real outputs to inspect,
-/// so this is a no-op.
-pub fn requireOutputP2PKH(output_index: base.Bigint, pubkey_hash: base.ByteString, amount: base.Bigint) void {
-    _ = output_index;
-    _ = pubkey_hash;
-    _ = amount;
+/// extractPrevOutputScript is the native form of the cross-input
+/// previous-output script witness-bridge intrinsic. The compiler emits
+/// `hash256(witness) == expectedScriptHash` on-chain, with the witness
+/// supplied by the unlocking script; natively the witness is the one a test
+/// registered with `setMockPrevOutputScript` (empty when none was), and the
+/// same equality is asserted, so a witness that does not hash to
+/// `expected_script_hash` aborts as the script would. It cannot see other
+/// inputs, so it does not check that the witness is a real previous output.
+/// See docs/cross-covenant-pattern.md.
+pub fn extractPrevOutputScript(input_index: base.Bigint, expected_script_hash: base.ByteString) base.ByteString {
+    var witness: base.ByteString = &[_]u8{};
+    var i: usize = 0;
+    while (i < mock_prev_output_count) : (i += 1) {
+        if (mock_prev_output_indices[i] == input_index) witness = mock_prev_output_scripts[i];
+    }
+    assert(bytesEq(hash256(witness), expected_script_hash));
+    return witness;
 }
 
-/// currentBlockHeight is the test-mode stub for the locktime-as-height
-/// shorthand. On-chain the compiler desugars to extractLocktime(txPreimage).
+var mock_serialised_outputs: base.ByteString = &[_]u8{};
+
+/// Sets the serialised transaction outputs `requireOutputP2PKH` inspects (the
+/// native counterpart of the compiler's injected `_serialisedOutputs`
+/// witness) and returns the previous value. The slice is not copied.
+pub fn setMockSerialisedOutputs(outputs: base.ByteString) base.ByteString {
+    const prev = mock_serialised_outputs;
+    mock_serialised_outputs = outputs;
+    return prev;
+}
+
+/// requireOutputP2PKH is the native form of the P2PKH-output-binding
+/// intrinsic. On-chain the compiler asserts that bytes 0..34 of the injected
+/// `_serialisedOutputs` witness are `num2bin(amount, 8) || 1976a914 ||
+/// pubkey_hash || 88ac`, after binding the witness to the preimage's
+/// hashOutputs. Natively the witness is the one registered with
+/// `setMockSerialisedOutputs` (empty when none was) and the 34-byte
+/// comparison is made; the hashOutputs binding needs a preimage and is not
+/// modelled. The compiler accepts output index 0 only (the offset i*34 is an
+/// output boundary only for index 0), so any other index aborts here too.
+pub fn requireOutputP2PKH(output_index: base.Bigint, pubkey_hash: base.ByteString, amount: base.Bigint) void {
+    assert(output_index == 0);
+    // A hash that is not 20 bytes makes the on-chain expected output a
+    // different length, which can never equal the 34-byte slice.
+    assert(pubkey_hash.len == 20);
+    var expected: [34]u8 = undefined;
+    @memcpy(expected[0..8], num2bin(amount, 8));
+    @memcpy(expected[8..12], &[_]u8{ 0x19, 0x76, 0xa9, 0x14 });
+    @memcpy(expected[12..32], pubkey_hash);
+    @memcpy(expected[32..34], &[_]u8{ 0x88, 0xac });
+    assert(mock_serialised_outputs.len >= 34 and bytesEq(mock_serialised_outputs[0..34], &expected));
+}
+
+var mock_block_height: base.Bigint = 0;
+
+/// Sets what `currentBlockHeight` returns in test mode and returns the
+/// previous value, like `setMockContinuationAmount`.
+pub fn setMockBlockHeight(height: base.Bigint) base.Bigint {
+    const prev = mock_block_height;
+    mock_block_height = height;
+    return prev;
+}
+
+/// currentBlockHeight is the native form of the locktime-as-height shorthand.
+/// On-chain the compiler desugars to extractLocktime(txPreimage); natively it
+/// returns the value set with `setMockBlockHeight` (0 by default).
 pub fn currentBlockHeight() base.Bigint {
-    return 0;
+    return mock_block_height;
 }
 
 /// continuationAmount is the test-mode stub for the read-only view of the
@@ -527,6 +603,97 @@ pub fn num2bin(value: anytype, size: base.Bigint) base.ByteString {
         error.InvalidEncoding => @panic("num2bin: size too small"),
         error.OutOfMemory => @panic("OOM"),
     };
+}
+
+/// N-375: `split(data, index)` -- the tail of `data` from `index`, the half
+/// Rúnar's tuple-free surface keeps (`OP_SPLIT` then `OP_NIP`). `OP_SPLIT`
+/// FAILS on a position below zero or past the end and does not clamp, so this
+/// aborts there; `index == len` is legal and yields the empty string.
+pub fn split(data: base.ByteString, index: base.Bigint) base.ByteString {
+    // CONTRACT-ABORT: OP_SPLIT fails on a position outside the element.
+    const n = std.math.cast(usize, index) orelse @panic("split: position is negative");
+    if (n > data.len) @panic("split: position is past the end of the data");
+    return data[n..];
+}
+
+/// N-375: `int2str` is `num2bin` under another name (every frontend maps both
+/// spellings to one builtin and every tier emits OP_NUM2BIN): a fixed-width
+/// little-endian sign-magnitude encoding, `width` being bytes and not a
+/// radix. OP_NUM2BIN fails on a negative size or one too small for the value.
+pub fn int2str(value: anytype, width: base.Bigint) base.ByteString {
+    // CONTRACT-ABORT: OP_NUM2BIN fails on a negative size.
+    if (width < 0) @panic("int2str: width is negative");
+    return num2bin(value, width);
+}
+
+/// The most bytes `reverseBytes` can reverse: every tier lowers it to a fixed
+/// unrolled loop of exactly this many peel-one-byte iterations and drops the
+/// remainder, so past it the script would return the reverse of only the
+/// first 520 bytes.
+pub const reverse_bytes_max = 520;
+
+/// N-375: `data` with its bytes in the opposite order. Aborts past
+/// `reverse_bytes_max`, as returning the whole reversal would hand the caller
+/// a value the script cannot produce.
+pub fn reverseBytes(data: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: the emitted loop handles 520 bytes and drops the rest.
+    if (data.len > reverse_bytes_max) @panic("reverseBytes: more than 520 bytes");
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
+    const out = std.heap.page_allocator.alloc(u8, data.len) catch @panic("OOM");
+    for (data, 0..) |byte, i| out[data.len - 1 - i] = byte;
+    return out;
+}
+
+const p256_field_prime: u256 = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff;
+const p384_field_prime: u384 = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff;
+
+/// Negates a NIST point given as raw `x || y` big-endian: `(x, p - y)`. Aborts
+/// on a wrong width or a coordinate that is not below the field prime, as the
+/// emitted script does (its guards cover canonicity AND the width).
+fn nistNegate(comptime Int: type, comptime coord_len: usize, prime: Int, point: base.ByteString, what: []const u8) base.ByteString {
+    // CONTRACT-ABORT: the emitted script guards the point width.
+    if (point.len != 2 * coord_len) @panic(what);
+    const x = std.mem.readInt(Int, point[0..coord_len], .big);
+    const y = std.mem.readInt(Int, point[coord_len..][0..coord_len], .big);
+    // CONTRACT-ABORT: the emitted script guards coordinate canonicity.
+    if (x >= prime or y >= prime) @panic(what);
+    const neg_y: Int = if (y == 0) 0 else prime - y;
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
+    const out = std.heap.page_allocator.alloc(u8, 2 * coord_len) catch @panic("OOM");
+    @memcpy(out[0..coord_len], point[0..coord_len]);
+    std.mem.writeInt(Int, out[coord_len..][0..coord_len], neg_y, .big);
+    return out;
+}
+
+/// `02`/`03` (the parity of y) followed by x, for a raw `x || y` NIST point.
+fn nistEncodeCompressed(comptime coord_len: usize, point: base.ByteString, what: []const u8) base.ByteString {
+    // CONTRACT-ABORT: the emitted script guards the point width.
+    if (point.len != 2 * coord_len) @panic(what);
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
+    const out = std.heap.page_allocator.alloc(u8, 1 + coord_len) catch @panic("OOM");
+    out[0] = 0x02 | (point[2 * coord_len - 1] & 1);
+    @memcpy(out[1..], point[0..coord_len]);
+    return out;
+}
+
+/// N-375: P-256 negation, `(x, p - y)`, of a 64-byte `x || y` point.
+pub fn p256Negate(point: base.P256Point) base.P256Point {
+    return nistNegate(u256, 32, p256_field_prime, point, "p256Negate: point must be 64 bytes with canonical coordinates");
+}
+
+/// N-375: 33-byte compressed encoding of a 64-byte P-256 point.
+pub fn p256EncodeCompressed(point: base.P256Point) base.ByteString {
+    return nistEncodeCompressed(32, point, "p256EncodeCompressed: point must be 64 bytes");
+}
+
+/// N-375: P-384 negation, `(x, p - y)`, of a 96-byte `x || y` point.
+pub fn p384Negate(point: base.P384Point) base.P384Point {
+    return nistNegate(u384, 48, p384_field_prime, point, "p384Negate: point must be 96 bytes with canonical coordinates");
+}
+
+/// N-375: 49-byte compressed encoding of a 96-byte P-384 point.
+pub fn p384EncodeCompressed(point: base.P384Point) base.ByteString {
+    return nistEncodeCompressed(48, point, "p384EncodeCompressed: point must be 96 bytes");
 }
 
 pub fn bin2num(bytes: base.ByteString) i64 {
