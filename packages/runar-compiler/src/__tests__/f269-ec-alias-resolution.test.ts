@@ -167,6 +167,16 @@ const PROBES: Record<string, ANFProgram> = {
     b('k', konst(2n)),
     b('t', call('ecMul', 'ga', 'k')),
   ]),
+  // N-353: operand identity is BINDING-NAME equality in every tier. c1 and c2
+  // are distinct bindings that happen to hold the same constant G; the old Go
+  // engine unified them by payload and folded c1 + (-c2) to INFINITY, the other
+  // six tiers (correctly by their rule) did not.
+  'N-353 NEGATIVE: distinct const bindings with equal payloads are not one $x': probe([
+    b('c1', konst(G_HEX)),
+    b('c2', konst(G_HEX)),
+    b('nc2', call('ecNegate', 'c2')),
+    b('t', call('ecAdd', 'c1', 'nc2')),
+  ]),
   // NEGATIVE — the exact ANF pass 04 emits for
   //   let a = p; const y = a; a = q; ecAdd(y, ecNegate(a))
   // `a` is bound twice; y is p and a is q, so p + (-q) must NOT fold.
@@ -313,6 +323,11 @@ class IfReassign extends SmartContract {
     const funcs = r.anf!.methods.find((m) => m.name === 'unlock')!.body
       .filter((x) => x.value.kind === 'call').map((x) => (x.value as { func: string }).func);
     expect(funcs).toContain('ecAdd');
+  });
+
+  it('N-353: distinct const bindings with equal payloads do not unify (name equality, --ir c1=G; c2=G)', () => {
+    const shape = optimizedSpend(PROBES['N-353 NEGATIVE: distinct const bindings with equal payloads are not one $x']!);
+    expect(shape).toContain('t = call ecAdd c1 nc2');
   });
 
   it('NEGATIVE: an alias cycle (hand-written --ir) terminates and does not fold', () => {

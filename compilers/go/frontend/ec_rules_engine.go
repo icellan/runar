@@ -393,19 +393,13 @@ func matchPatternArg(pat ecPattern, argName string, nested bool, lookup map[stri
 	switch {
 	case pat.Var != "":
 		if prev, ok := binds[pat.Var]; ok {
-			// Same-var must bind to the same underlying argument. We check
-			// the binding both names reach through aliases and, failing
-			// that, whether both arguments resolve to the same constant
-			// value — this matters for rule 11 ($p appears twice).
+			// Same-var must bind to the same underlying binding, through
+			// aliases (the TS sameBinding rule). Two distinct bindings that
+			// merely hold equal constants are NOT the same $x (N-353): every
+			// tier decides operand identity by name.
 			cp, okP := canonicalName(prev, lookup, rebound)
 			ca, okA := canonicalName(argName, lookup, rebound)
-			if !okP || !okA {
-				return false
-			}
-			if cp == ca {
-				return true
-			}
-			return sameResolvedValue(cp, ca, lookup)
+			return okP && okA && cp == ca
 		}
 		if nested {
 			if _, ok := canonicalName(argName, lookup, rebound); !ok {
@@ -491,35 +485,6 @@ func resolveValue(argName string, lookup map[string]*ir.ANFValue, rebound map[st
 		return nil
 	}
 	return lookup[c]
-}
-
-// sameResolvedValue reports whether two canonical arg names refer to the same
-// value — either by name, or both being load_const with the same payload.
-// An "@ref:" payload is a NAME, not a value: two aliases of one rebound name
-// carry the same string while holding different values (F-269 attempt 2 /
-// N-353), so it never makes two bindings equal.
-func sameResolvedValue(a, b string, lookup map[string]*ir.ANFValue) bool {
-	if a == b {
-		return true
-	}
-	va := lookup[a]
-	vb := lookup[b]
-	if va == nil || vb == nil {
-		return false
-	}
-	if va.Kind != "load_const" || vb.Kind != "load_const" {
-		return false
-	}
-	if va.ConstString != nil && vb.ConstString != nil {
-		if len(*va.ConstString) >= 5 && (*va.ConstString)[:5] == "@ref:" {
-			return false
-		}
-		return *va.ConstString == *vb.ConstString
-	}
-	if va.ConstBigInt != nil && vb.ConstBigInt != nil {
-		return va.ConstBigInt.Cmp(vb.ConstBigInt) == 0
-	}
-	return false
 }
 
 // isInfinityOrZeroMulGen matches either a load_const INFINITY or an
