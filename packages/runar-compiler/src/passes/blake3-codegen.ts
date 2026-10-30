@@ -442,7 +442,7 @@ function getCompressOps(): StackOp[] {
  * (standard BLAKE3): a 4-byte byte-string is already a little-endian word.
  */
 export function emitBlake3Compress(emit: (op: StackOp) => void): void {
-  for (const op of getCompressOps()) emit(op);
+  for (const op of getCompressOps()) emit({ ...op }); // copy: emitOp stamps sourceLoc in place (N-351)
 }
 
 /**
@@ -489,7 +489,7 @@ export function emitBlake3Hash(emit: (op: StackOp) => void): void {
   // Splice compression ops
   // Compress with the real block_len taken from the alt stack.
   const compressOps = generateCompressOps(7, /* blockLenFromAlt */ true);
-  for (const op of compressOps) em.e_raw(op);
+  for (const op of compressOps) em.e_raw({ ...op }); // copy: see emitBlake3Compress (N-351)
   em.depth = 1;
 
   em.assert(1, 'blake3Hash final');

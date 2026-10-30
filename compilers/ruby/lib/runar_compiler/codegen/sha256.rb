@@ -87,8 +87,10 @@ module RunarCompiler
           @ops << sop
         end
 
+        # The op is copied: spliced ops come from the shared compress cache and
+        # emit_op stamps :source_loc on the Hash it receives (N-351).
         def e_raw(sop)
-          @ops << sop
+          @ops << sop.dup
         end
 
         def oc(code)
@@ -521,7 +523,7 @@ module RunarCompiler
       #
       # @param emit [Proc] callback that receives a StackOp
       def self.emit_sha256_compress(emit)
-        _get_guarded_compress_ops.each { |op| emit.call(op) }
+        _get_guarded_compress_ops.each { |op| emit.call(op.dup) } # copy: emit_op stamps :source_loc in place (N-351)
       end
 
       # Emit SHA-256 finalization in Bitcoin Script.

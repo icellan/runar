@@ -611,7 +611,7 @@ module RunarCompiler
       #
       # @param emit [Proc] callback that receives a StackOp
       def self.emit_blake3_compress(emit)
-        _get_compress_ops.each { |op| emit.call(op) }
+        _get_compress_ops.each { |op| emit.call(op.dup) } # copy: emit_op stamps :source_loc in place (N-351)
       end
 
       # Emit BLAKE3 hash for a message up to 64 bytes.

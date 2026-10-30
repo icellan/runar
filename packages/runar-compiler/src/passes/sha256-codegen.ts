@@ -218,6 +218,13 @@ function generateCompressOps(guardOperands: boolean): StackOp[] {
   return em.ops;
 }
 
+// A cached op must never be handed out directly: emitOp stamps sourceLoc on the
+// object it receives, so the first call site would pin its location on the
+// cache for the life of the process (N-351).
+function cloneOp(op: StackOp): StackOp {
+  return { ...op };
+}
+
 // Cache the ops since they're identical every time
 let _compressOpsCache: StackOp[] | null = null;
 function getCompressOps(): StackOp[] {
@@ -241,7 +248,7 @@ function getGuardedCompressOps(): StackOp[] {
  * Aborts unless the state is 32 bytes and the block 64 bytes (F-114).
  */
 export function emitSha256Compress(emit: (op: StackOp) => void): void {
-  for (const op of getGuardedCompressOps()) emit(op);
+  for (const op of getGuardedCompressOps()) emit(cloneOp(op));
 }
 
 /**
@@ -306,7 +313,7 @@ export function emitSha256Finalize(emit: (op: StackOp) => void): void {
   em.binOp('OP_CAT');          // [state, block1(64 bytes)]
   // Splice sha256Compress ops (consumes state+block, produces result)
   const compressOps = getCompressOps();
-  for (const op of compressOps) em.e_raw(op);
+  for (const op of compressOps) em.e_raw(cloneOp(op));
   em.depth = 1; // after compress: 1 result
 
   em.oc('OP_ELSE');
@@ -329,12 +336,12 @@ export function emitSha256Finalize(emit: (op: StackOp) => void): void {
   em.toAlt();                   // save block2
 
   // First compress: [state, block1]
-  for (const op of compressOps) em.e_raw(op);
+  for (const op of compressOps) em.e_raw(cloneOp(op));
   em.depth = 1; // after first compress: [midState]
 
   // Second compress: [midState, block2]
   em.fromAlt();                 // [midState, block2]
-  for (const op of compressOps) em.e_raw(op);
+  for (const op of compressOps) em.e_raw(cloneOp(op));
   em.depth = 1; // after second compress: [result]
 
   em.oc('OP_ENDIF');
