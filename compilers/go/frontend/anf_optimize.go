@@ -38,9 +38,14 @@ var infinityHex = strings.Repeat("0", 128)
 // rewritten, so a dead pure binding in a method next to an EC-rewritten one
 // survived here alone and the script carried a push/drop no other tier emits.
 func OptimizeEC(program *ir.ANFProgram) *ir.ANFProgram {
+	// N-201: candidates[mi] is the set of names method mi referenced before
+	// any rewrite — the candidate set of the nested prune below. It is nil
+	// for a method no rule fired in (whose pre-rewrite refs are its refs).
+	candidates := make([]map[string]bool, len(program.Methods))
 	anyChanged := false
 	for mi := range program.Methods {
-		if optimizeMethodEC(&program.Methods[mi], program.Properties) {
+		if refs, changed := optimizeMethodEC(&program.Methods[mi], program.Properties); changed {
+			candidates[mi] = refs
 			anyChanged = true
 		}
 	}
@@ -50,79 +55,123 @@ func OptimizeEC(program *ir.ANFProgram) *ir.ANFProgram {
 	if anyChanged {
 		for mi := range program.Methods {
 			method := &program.Methods[mi]
+			// N-201: an untouched method's pre-rewrite refs are its refs
+			// now, taken before the top-level DCE as TS takes them.
+			refs := candidates[mi]
+			if refs == nil {
+				refs = make(map[string]bool)
+				for j := range method.Body {
+					collectValueRefs(&method.Body[j].Value, refs)
+				}
+			}
 			EliminateDeadBindings(method)
+			// N-201: a rewrite inside an if arm or a loop body orphans its
+			// operands there, and the DCE above filters only the top level;
+			// an orphan left in an arm unbalances the arms (the N-446
+			// hazard). Same candidate rule as the constant folder's prune.
+			EliminateDeadBindingsAmong(method, refs)
 		}
 	}
 	return program
 }
 
-// optimizeMethodEC applies the EC rewrite rules to one method's top-level
-// bindings until none fires, and reports whether any did.
-func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) bool {
+// optimizeMethodEC applies the EC rewrite rules to one method's bindings —
+// top level, if arms and loop bodies (N-201) — until none fires, and reports
+// whether any did. When one did, it also returns the names the method
+// referenced BEFORE the first rewrite (the N-201 nested-prune candidates);
+// optimizeBodyEC never mutates its input, so the old body is still intact
+// when they are collected.
+func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) (map[string]bool, bool) {
 	// F-086: names a minted helper binding must avoid (params, properties,
-	// nested bindings — the lookup below only covers top-level bindings).
+	// nested bindings — the lookup below only covers the current scope).
 	used := collectUsedNames(method, properties)
 	// F-269: names bound more than once; alias resolution never passes
 	// through one (see canonicalName in ec_rules_engine.go).
 	rebound := collectReboundNames(method)
 
-	// Build a lookup map from binding name to its value.
-	lookup := make(map[string]*ir.ANFValue)
-	for i := range method.Body {
-		lookup[method.Body[i].Name] = &method.Body[i].Value
+	var before map[string]bool
+	for {
+		body, changed := optimizeBodyEC(method.Body, map[string]*ir.ANFValue{}, "", used, rebound)
+		if !changed {
+			break
+		}
+		if before == nil {
+			before = make(map[string]bool)
+			for j := range method.Body {
+				collectValueRefs(&method.Body[j].Value, before)
+			}
+		}
+		method.Body = body
 	}
+	return before, before != nil
+}
 
-	anyChanged := false
-	changed := true
-	for changed {
-		changed = false
-		var newBindings []ir.ANFBinding // new bindings to insert before a given binding
-		insertBefore := make(map[string][]ir.ANFBinding)
-
-		for i := range method.Body {
-			b := &method.Body[i]
-			extra, ok := optimizeBindingECWithInserts(b, lookup, used, rebound)
+// optimizeBodyEC is one left-to-right sweep over a scope (the TS reference's
+// optimizeBodyOnce, anf-ec.ts): each binding is tried once against the values
+// of the bindings before it, as already rewritten in this sweep. N-201: it
+// descends into if arms (then before else) and loop bodies at the position of
+// their binding, each with its own lookup seeded from the enclosing scope, so
+// nothing an arm binds is visible in the other arm or after the if; `hidden`
+// is a loop's iteration variable, which the body must not resolve through an
+// outer binding of the same name. Helpers a rewrite mints are inserted just
+// before the rewritten binding, in the same scope.
+func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden string, used map[string]bool, rebound map[string]bool) ([]ir.ANFBinding, bool) {
+	lookup := make(map[string]*ir.ANFValue, len(outer)+len(body))
+	for k, v := range outer {
+		lookup[k] = v
+	}
+	if hidden != "" {
+		delete(lookup, hidden)
+	}
+	changed := false
+	out := make([]ir.ANFBinding, 0, len(body))
+	for i := range body {
+		b := body[i]
+		switch b.Value.Kind {
+		case "if":
+			thenB, thenChanged := optimizeBodyEC(b.Value.Then, lookup, "", used, rebound)
+			elseB, elseChanged := optimizeBodyEC(b.Value.Else, lookup, "", used, rebound)
+			if thenChanged || elseChanged {
+				b.Value.Then = thenB
+				b.Value.Else = elseB
+				changed = true
+			}
+		case "loop":
+			bodyB, bodyChanged := optimizeBodyEC(b.Value.Body, lookup, b.Value.IterVar, used, rebound)
+			if bodyChanged {
+				b.Value.Body = bodyB
+				changed = true
+			}
+		default:
+			// The binding's own (pre-rewrite) value is visible to its rule,
+			// as in TS, where it is registered before tryRewrite.
+			cur := b.Value
+			lookup[b.Name] = &cur
+			extra, ok := optimizeBindingECWithInserts(&b, lookup, used, rebound)
 			if ok {
 				changed = true
-				anyChanged = true
-				if len(extra) > 0 {
-					// N-218: every helper a rewrite mints (the N-104/N-251
-					// gate bindings, the fused-scalar helper) takes the
-					// rewritten binding's own SourceLoc, mirroring F-343 in
-					// the TS reference (anf-ec.ts optimizeBodyOnce) — it
-					// exists only because of that source expression, and
-					// stack lowering maps opcodes through binding.SourceLoc.
-					for j := range extra {
-						extra[j].SourceLoc = b.SourceLoc
-					}
-					insertBefore[b.Name] = extra
-					// Register new bindings in lookup map
-					for j := range extra {
-						lookup[extra[j].Name] = &extra[j].Value
-					}
+				// N-218: every helper a rewrite mints (the N-104/N-251
+				// gate bindings, the fused-scalar helper) takes the
+				// rewritten binding's own SourceLoc, mirroring F-343 in
+				// the TS reference (anf-ec.ts optimizeBodyOnce) — it
+				// exists only because of that source expression, and
+				// stack lowering maps opcodes through binding.SourceLoc.
+				for j := range extra {
+					extra[j].SourceLoc = b.SourceLoc
+					hv := extra[j].Value
+					lookup[extra[j].Name] = &hv
 				}
+				out = append(out, extra...)
 			}
 		}
-		_ = newBindings
-
-		if len(insertBefore) > 0 {
-			var rebuilt []ir.ANFBinding
-			for _, b := range method.Body {
-				if pre, ok := insertBefore[b.Name]; ok {
-					rebuilt = append(rebuilt, pre...)
-				}
-				rebuilt = append(rebuilt, b)
-			}
-			method.Body = rebuilt
-			// Rebuild lookup from scratch since slice was reallocated
-			lookup = make(map[string]*ir.ANFValue)
-			for i := range method.Body {
-				lookup[method.Body[i].Name] = &method.Body[i].Value
-			}
-		}
+		final := b.Value
+		lookup[b.Name] = &final
+		out = append(out, b)
 	}
-
-	return anyChanged
+	if !changed {
+		return body, false
+	}
+	return out, true
 }
 
 // optimizeBindingECWithInserts is like optimizeBindingEC but also returns

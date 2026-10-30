@@ -74,6 +74,18 @@ impl ValueMap {
         self.values.insert(name, value);
     }
 
+    /// N-201: the map an `if` arm or a loop body starts from (the TS
+    /// `ValueMap.nestedScope`) — every binding visible at the `if`/`loop`,
+    /// and nothing the nested scope binds flows back out. `hidden` is a
+    /// loop's iteration variable, never resolved through an outer binding.
+    fn nested_scope(&self, hidden: Option<&str>) -> ValueMap {
+        let mut scope = ValueMap { values: self.values.clone(), rebound: self.rebound.clone() };
+        if let Some(h) = hidden {
+            scope.values.remove(h);
+        }
+        scope
+    }
+
     /// F-269 (user decision R77): the binding `arg` ultimately names,
     /// following `load_const "@ref:<x>"` aliases — pass 04's
     /// `const y = <expr>` and the ones R1/R2/R3/R7 leave behind. The TS
@@ -699,7 +711,8 @@ fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMet
     // number of EC calls or replaces a call with a constant, so the loop
     // terminates.
     loop {
-        let (next, pass_changed) = optimize_method_ec_once(&body, &mut used_names, &rebound);
+        let (next, pass_changed) =
+            optimize_method_ec_once(&body, &mut used_names, &ValueMap::new(rebound.clone()), None);
         body = next;
         if !pass_changed {
             break;
@@ -720,19 +733,54 @@ fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMet
     }, true)
 }
 
-/// One rewrite pass over `body`. Returns the new body and whether it changed.
+/// One rewrite pass over a scope. Returns the new body and whether it changed.
+///
+/// N-201: the pass descends into `if` arms (then before else) and loop bodies
+/// at the position of their binding, each with its own scope seeded from the
+/// enclosing one (`ValueMap::nested_scope`), exactly as the TS
+/// `optimizeBodyOnce`; it used to visit the top level only.
 fn optimize_method_ec_once(
     body: &[ANFBinding],
     used_names: &mut HashSet<String>,
-    rebound: &HashSet<String>,
+    outer: &ValueMap,
+    hidden: Option<&str>,
 ) -> (Vec<ANFBinding>, bool) {
-    let mut value_map = ValueMap::new(rebound.clone());
+    let mut value_map = outer.nested_scope(hidden);
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 
     for binding in body {
         // Register binding value for lookups
         value_map.insert(binding.name.clone(), binding.value.clone());
+
+        if matches!(binding.value, ANFValue::If { .. } | ANFValue::Loop { .. }) {
+            let mut value = binding.value.clone();
+            let nested_changed = match &mut value {
+                ANFValue::If { then, else_branch, .. } => {
+                    let (then_b, then_c) = optimize_method_ec_once(then, used_names, &value_map, None);
+                    let (else_b, else_c) = optimize_method_ec_once(else_branch, used_names, &value_map, None);
+                    *then = then_b;
+                    *else_branch = else_b;
+                    then_c || else_c
+                }
+                ANFValue::Loop { body: loop_body, iter_var, .. } => {
+                    let hidden = iter_var.clone();
+                    let (body_b, body_c) =
+                        optimize_method_ec_once(loop_body, used_names, &value_map, Some(&hidden));
+                    *loop_body = body_b;
+                    body_c
+                }
+                _ => unreachable!(),
+            };
+            if nested_changed {
+                value_map.insert(binding.name.clone(), value.clone());
+                result.push(ANFBinding { name: binding.name.clone(), value, source_loc: binding.source_loc.clone() });
+                changed = true;
+            } else {
+                result.push(binding.clone());
+            }
+            continue;
+        }
 
         let mut extra_bindings = Vec::new();
         let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings, used_names);
@@ -780,6 +828,19 @@ fn optimize_method_ec_once(
 /// some rewrite fired: if `any_changed` is false the program is returned
 /// untouched, dead bindings included (F-219; same gate as TS `optimizeEC`).
 pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
+    // N-201: the names each method references before any rewrite — the
+    // candidate set of the nested prune below.
+    let candidates: Vec<HashSet<String>> = program
+        .methods
+        .iter()
+        .map(|m| {
+            let mut refs = HashSet::new();
+            for b in &m.body {
+                super::dce::collect_refs_from_value(&b.value, &mut refs);
+            }
+            refs
+        })
+        .collect();
     let mut any_changed = false;
     let optimized_methods: Vec<ANFMethod> = program
         .methods
@@ -798,9 +859,15 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
     }
 
     // Run dead binding elimination to clean up orphaned bindings
+    // N-201: then prune the operands a rewrite inside an if arm or a loop
+    // body orphaned there — the DCE above filters only the top level, and an
+    // orphan left in an arm unbalances the arms (the N-446 hazard). Same
+    // candidate rule as the constant folder's prune.
     let cleaned_methods: Vec<ANFMethod> = optimized_methods
         .iter()
         .map(eliminate_dead_bindings_method)
+        .zip(candidates.iter())
+        .map(|(m, refs)| super::dce::eliminate_dead_bindings_among(&m, refs))
         .collect();
 
     ANFProgram {

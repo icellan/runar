@@ -16,7 +16,7 @@ import type {
   Call,
   LoadConst,
 } from '../ir/index.js';
-import { eliminateDeadBindings } from './dce.js';
+import { collectRefsFromValue, eliminateDeadBindings, eliminateDeadBindingsAmong } from './dce.js';
 
 // ---------------------------------------------------------------------------
 // EC constants
@@ -54,6 +54,21 @@ const G_HEX = bigintToHex32(GEN_X) + bigintToHex32(GEN_Y);
 class ValueMap extends Map<string, ANFValue> {
   constructor(readonly rebound: ReadonlySet<string>) {
     super();
+  }
+
+  /**
+   * N-201: the map an `if` arm or a loop body starts from — every binding
+   * visible at the `if` / `loop`, and nothing the nested scope binds flows
+   * back out (each arm gets its own copy, so a then-arm binding is never
+   * visible in the else arm or after the `if`). `hidden` is a loop's
+   * iteration variable: its value changes per unrolled iteration, so the body
+   * must not resolve it through an outer binding of the same name.
+   */
+  nestedScope(hidden?: string): ValueMap {
+    const scope = new ValueMap(this.rebound);
+    for (const [k, v] of this) scope.set(k, v);
+    if (hidden !== undefined) scope.delete(hidden);
+    return scope;
   }
 }
 
@@ -533,19 +548,51 @@ function tryRewrite(
  * One left-to-right sweep: each binding is tried once, against the values of
  * the bindings before it as already rewritten in this sweep. Returns null when
  * no rule fired.
+ *
+ * N-201: the sweep descends into `if` arms (then before else) and loop bodies
+ * at the position of their binding, each with its own scope seeded from the
+ * bindings visible there (`ValueMap.nestedScope`). It used to visit the
+ * top-level body only, so an EC call inside an arm or a loop body was never
+ * rewritten (`if (c) { r = ecMulGen(0n); }` shipped the full ~850 KB
+ * multiplier). Helpers a nested rewrite mints go into that nested scope, just
+ * before the rewritten binding, as at top level.
  */
 function optimizeBodyOnce(
   body: readonly ANFBinding[],
   usedNames: Set<string>,
-  rebound: ReadonlySet<string>,
+  outer: ValueMap,
+  hidden?: string,
 ): ANFBinding[] | null {
-  const valueMap = new ValueMap(rebound);
+  const valueMap = outer.nestedScope(hidden);
   const result: ANFBinding[] = [];
   let changed = false;
 
   for (const binding of body) {
     // Register binding value for lookups
     valueMap.set(binding.name, binding.value);
+
+    const v = binding.value;
+    if (v.kind === 'if' || v.kind === 'loop') {
+      let nested: ANFValue | null = null;
+      if (v.kind === 'if') {
+        const thenB = optimizeBodyOnce(v.then, usedNames, valueMap);
+        const elseB = optimizeBodyOnce(v.else, usedNames, valueMap);
+        if (thenB !== null || elseB !== null) {
+          nested = { ...v, then: thenB ?? v.then, else: elseB ?? v.else };
+        }
+      } else {
+        const bodyB = optimizeBodyOnce(v.body, usedNames, valueMap, v.iterVar);
+        if (bodyB !== null) nested = { ...v, body: bodyB };
+      }
+      if (nested !== null) {
+        result.push({ ...binding, value: nested });
+        valueMap.set(binding.name, nested);
+        changed = true;
+      } else {
+        result.push(binding);
+      }
+      continue;
+    }
 
     const extraBindings: ANFBinding[] = [];
     const rewritten = tryRewrite(binding, valueMap, extraBindings, usedNames);
@@ -588,7 +635,7 @@ function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string
   let anyChanged = false;
 
   for (;;) {
-    const next = optimizeBodyOnce(body, usedNames, rebound);
+    const next = optimizeBodyOnce(body, usedNames, new ValueMap(rebound));
     if (next === null) break;
     body = next;
     anyChanged = true;
@@ -624,5 +671,18 @@ export function optimizeEC(program: ANFProgram): ANFProgram {
   };
 
   // Run dead binding elimination to clean up orphaned bindings
-  return eliminateDeadBindings(result);
+  const pruned = eliminateDeadBindings(result);
+
+  // N-201: a rewrite inside an `if` arm or a loop body orphans its operands
+  // there (the `0` under `ecMulGen(0n)`), and the DCE above filters only the
+  // top level. Left in an arm, the orphan is pushed and the arms end at
+  // unequal depths (the N-446 hazard). Prune nested scopes with the same
+  // candidate rule the constant folder's prune uses: only names referenced
+  // before this pass ran.
+  const candidates = program.methods.map((m) => {
+    const refs = new Set<string>();
+    for (const bnd of m.body) collectRefsFromValue(bnd.value, refs);
+    return refs;
+  });
+  return eliminateDeadBindingsAmong(pruned, candidates);
 }

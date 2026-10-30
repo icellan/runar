@@ -99,7 +99,7 @@ public final class AnfOptimize {
         if (!anyChanged) return program;
 
         // N-097 / N-195: the hasEcCalls check above is only a fast path (a
-        // rule can only fire on a top-level EC call). The DCE gate is the TS
+        // rule can only fire on an EC call, at any depth since N-201). The DCE gate is the TS
         // reference's (anf-ec.ts optimizeEC): dead-binding elimination runs
         // over EVERY method iff a rewrite fired in ANY method; otherwise the
         // program is returned untouched, dead bindings included.
@@ -113,8 +113,17 @@ public final class AnfOptimize {
         if (!fired) return program;
 
         List<AnfMethod> cleaned = new ArrayList<>(opts.size());
-        for (AnfMethod method : opts) {
-            cleaned.add(method.withBody(eliminateDead(method)));
+        for (int i = 0; i < opts.size(); i++) {
+            AnfMethod method = opts.get(i);
+            AnfMethod dced = method.withBody(eliminateDead(method));
+            // N-201: a rewrite inside an if arm or a loop body orphans its
+            // operands there, and the DCE above filters only the top level;
+            // an orphan left in an arm unbalances the arms (the N-446
+            // hazard). Same candidate rule as the constant folder's prune:
+            // only names the method referenced before this pass ran.
+            Set<String> candidates = new HashSet<>();
+            for (AnfBinding b : program.methods().get(i).body()) Dce.collectRefs(b.value(), candidates);
+            cleaned.add(dced.withBody(Dce.eliminateDeadAmong(dced, candidates)));
         }
         return program.withMethods(cleaned);
     }
@@ -196,33 +205,9 @@ public final class AnfOptimize {
         boolean converged = false;
         boolean fired = false;
         for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
-            // value_map maps binding name → its current ANFValue. We rebuild
-            // the body in order, allowing each subsequent binding to see the
-            // optimized form of earlier ones.
-            Map<String, AnfValue> valueMap = new ValueMap(reboundNames);
-            List<AnfBinding> next = new ArrayList<>(body.size());
-            boolean changed = false;
-            for (AnfBinding b : body) {
-                int preludeStart = next.size();
-                AnfValue optimized = tryOptimize(b.name(), b.value(), valueMap, next, usedNames);
-                AnfBinding rebound = b;
-                if (optimized != null) {
-                    // N-218: every helper a rewrite mints (the N-104/N-251
-                    // gate bindings, the fused-scalar helper) takes the
-                    // rewritten binding's own sourceLoc, mirroring F-343 in
-                    // the TS reference (anf-ec.ts optimizeBodyOnce) — it
-                    // exists only because of that source expression, and
-                    // stack lowering maps opcodes through binding.sourceLoc.
-                    for (int i = preludeStart; i < next.size(); i++) {
-                        AnfBinding h = next.get(i);
-                        next.set(i, new AnfBinding(h.name(), h.value(), b.sourceLoc()));
-                    }
-                    rebound = new AnfBinding(b.name(), optimized, b.sourceLoc());
-                    changed = true;
-                }
-                valueMap.put(rebound.name(), rebound.value());
-                next.add(rebound);
-            }
+            List<AnfBinding> next = optimizeBodyOnce(body, new ValueMap(reboundNames), null, usedNames);
+            boolean changed = next != null;
+            if (next == null) next = body;
             body = next;
             if (!changed) {
                 converged = true;
@@ -242,6 +227,72 @@ public final class AnfOptimize {
         // No rule fired: hand back the same method so run() can tell. Dead-
         // binding elimination is run()'s, over every method (N-097).
         return fired ? method.withBody(body) : method;
+    }
+
+    /**
+     * One left-to-right sweep over a scope (the TS {@code optimizeBodyOnce}):
+     * each binding is tried once against the values of the bindings before
+     * it, as already rewritten in this sweep. N-201: it descends into if arms
+     * (then before else) and loop bodies at the position of their binding,
+     * each with its own scope ({@link ValueMap#nestedScope}); it used to visit
+     * the top level only. Returns {@code null} when no rule fired.
+     */
+    private static List<AnfBinding> optimizeBodyOnce(List<AnfBinding> body, ValueMap outer, String hidden,
+                                                     Set<String> usedNames) {
+        ValueMap valueMap = outer.nestedScope(hidden);
+        List<AnfBinding> next = new ArrayList<>(body.size());
+        boolean changed = false;
+        for (AnfBinding b : body) {
+            valueMap.put(b.name(), b.value());
+            if (b.value() instanceof If ifv) {
+                List<AnfBinding> thenB = optimizeBodyOnce(orEmpty(ifv.thenBranch()), valueMap, null, usedNames);
+                List<AnfBinding> elseB = optimizeBodyOnce(orEmpty(ifv.elseBranch()), valueMap, null, usedNames);
+                if (thenB != null || elseB != null) {
+                    If nv = new If(ifv.cond(),
+                        thenB != null ? thenB : ifv.thenBranch(),
+                        elseB != null ? elseB : ifv.elseBranch(),
+                        ifv.results());
+                    valueMap.put(b.name(), nv);
+                    next.add(new AnfBinding(b.name(), nv, b.sourceLoc()));
+                    changed = true;
+                } else {
+                    next.add(b);
+                }
+                continue;
+            }
+            if (b.value() instanceof Loop lp) {
+                List<AnfBinding> bodyB = optimizeBodyOnce(orEmpty(lp.body()), valueMap, lp.iterVar(), usedNames);
+                if (bodyB != null) {
+                    Loop nv = new Loop(lp.count(), bodyB, lp.iterVar(), lp.start(), lp.step());
+                    valueMap.put(b.name(), nv);
+                    next.add(new AnfBinding(b.name(), nv, b.sourceLoc()));
+                    changed = true;
+                } else {
+                    next.add(b);
+                }
+                continue;
+            }
+            int preludeStart = next.size();
+            AnfValue optimized = tryOptimize(b.name(), b.value(), valueMap, next, usedNames);
+            AnfBinding rebound = b;
+            if (optimized != null) {
+                // N-218: every helper a rewrite mints (the N-104/N-251
+                // gate bindings, the fused-scalar helper) takes the
+                // rewritten binding's own sourceLoc, mirroring F-343 in
+                // the TS reference (anf-ec.ts optimizeBodyOnce) — it
+                // exists only because of that source expression, and
+                // stack lowering maps opcodes through binding.sourceLoc.
+                for (int i = preludeStart; i < next.size(); i++) {
+                    AnfBinding h = next.get(i);
+                    next.set(i, new AnfBinding(h.name(), h.value(), b.sourceLoc()));
+                }
+                rebound = new AnfBinding(b.name(), optimized, b.sourceLoc());
+                changed = true;
+            }
+            valueMap.put(rebound.name(), rebound.value());
+            next.add(rebound);
+        }
+        return changed ? next : null;
     }
 
     /**
@@ -270,6 +321,20 @@ public final class AnfOptimize {
 
         ValueMap(Set<String> rebound) {
             this.rebound = rebound;
+        }
+
+        /**
+         * N-201: the map an if arm or a loop body starts from (the TS
+         * {@code ValueMap.nestedScope}) — every binding visible at the
+         * if/loop, and nothing the nested scope binds flows back out.
+         * {@code hidden} is a loop's iteration variable, never resolved
+         * through an outer binding.
+         */
+        ValueMap nestedScope(String hidden) {
+            ValueMap scope = new ValueMap(rebound);
+            scope.putAll(this);
+            if (hidden != null) scope.remove(hidden);
+            return scope;
         }
     }
 

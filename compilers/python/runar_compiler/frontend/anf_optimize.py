@@ -58,10 +58,19 @@ def optimize_ec(program: ANFProgram) -> ANFProgram:
         return program
 
     # N-097: the has-EC-call check above is only a fast path (a rule can only
-    # fire on a top-level EC call). The gate is the TS reference's
+    # fire on an EC call, at any depth since N-201). The gate is the TS reference's
     # (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY method
     # iff a rewrite fired in ANY method, else the program is returned
     # untouched, dead bindings included.
+    # N-201: the names each method references before any rewrite -- the
+    # candidate set of the nested prune below.
+    candidates: list[set[str]] = []
+    for method in program.methods:
+        refs: set[str] = set()
+        for binding in method.body:
+            _collect_refs(binding.value, refs)
+        candidates.append(refs)
+
     result = deepcopy(program)
     fired = False
     for method in result.methods:
@@ -71,19 +80,34 @@ def optimize_ec(program: ANFProgram) -> ANFProgram:
         return program
 
     # Dead binding elimination
-    for method in result.methods:
+    for method, refs in zip(result.methods, candidates):
         _eliminate_dead_bindings(method)
+        # N-201: a rewrite inside an if arm or a loop body orphans its
+        # operands there, and the DCE above filters only the top level; an
+        # orphan left in an arm unbalances the arms (the N-446 hazard). Same
+        # candidate rule as the constant folder's prune.
+        _eliminate_dead_bindings(method, refs)
     return result
 
 
 def _has_ec_calls(method: ANFMethod) -> bool:
-    """Check if a method has any EC intrinsic calls."""
+    """Check if a method has any EC intrinsic call, at any depth (N-201: if
+    arms and loop bodies are rewritten too)."""
     ec_funcs = {"ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecOnCurve",
                 "ecModReduce", "ecEncodeCompressed", "ecMakePoint", "ecPointX", "ecPointY"}
-    for binding in method.body:
-        if binding.value.kind == "call" and binding.value.func in ec_funcs:
-            return True
-    return False
+
+    def walk(bindings) -> bool:
+        for binding in bindings or ():
+            v = binding.value
+            if v.kind == "call" and v.func in ec_funcs:
+                return True
+            if v.kind == "if" and (walk(v.then) or walk(v.else_)):
+                return True
+            if v.kind == "loop" and walk(v.body):
+                return True
+        return False
+
+    return walk(method.body)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +150,17 @@ class _ValueMap(dict):
         super().__init__()
         self.rebound = rebound
 
+    def nested_scope(self, hidden: Optional[str] = None) -> "_ValueMap":
+        """N-201: the map an if arm or a loop body starts from (the TS
+        ValueMap.nestedScope) -- every binding visible at the if/loop, and
+        nothing the nested scope binds flows back out. ``hidden`` is a loop's
+        iteration variable, never resolved through an outer binding."""
+        scope = _ValueMap(self.rebound)
+        scope.update(self)
+        if hidden is not None:
+            scope.pop(hidden, None)
+        return scope
+
 
 def _collect_rebound_names(method: ANFMethod) -> set[str]:
     """F-269: every name bound more than once in the method -- binding names at
@@ -157,37 +192,70 @@ def _collect_rebound_names(method: ANFMethod) -> set[str]:
 
 
 def _optimize_method(method: ANFMethod, properties) -> bool:
-    """Rewrite one method's top-level EC calls to a fixed point; True iff a rule fired."""
-    value_map = _ValueMap(_collect_rebound_names(method))
+    """Rewrite one method's EC calls -- top level, if arms and loop bodies
+    (N-201) -- to a fixed point; True iff a rule fired."""
+    rebound = _collect_rebound_names(method)
     used_names = _collect_used_names(method, properties)
     fired = False
-    changed = True
-    while changed:
-        changed = False
-        new_body: list[ANFBinding] = []
-        for binding in method.body:
-            # `new_body` doubles as the prelude list: a rule that folds a new
-            # constant appends its binding here, i.e. immediately BEFORE the
-            # binding being rewritten (see _fresh_const_name).
-            prelude_start = len(new_body)
-            optimized = _try_optimize(binding.value, value_map, new_body, used_names, binding.name)
-            if optimized is not None:
-                # N-218: every helper a rewrite mints (the N-104/N-251 gate
-                # bindings, the fused-scalar helper) takes the rewritten
-                # binding's own source_loc, mirroring F-343 in the TS
-                # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
-                # because of that source expression, and stack lowering maps
-                # opcodes through binding.source_loc.
-                for helper in new_body[prelude_start:]:
-                    helper.source_loc = binding.source_loc
-                binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
-                changed = True
-                fired = True
-            value_map[binding.name] = binding.value
-            new_body.append(binding)
+    while True:
+        new_body = _optimize_body(method.body, _ValueMap(rebound), None, used_names)
+        if new_body is None:
+            break
         method.body = new_body
-
+        fired = True
     return fired
+
+
+def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
+                   used_names: set[str]) -> Optional[list[ANFBinding]]:
+    """One left-to-right sweep over a scope (the TS optimizeBodyOnce): each
+    binding is tried once against the values of the bindings before it, as
+    already rewritten in this sweep. N-201: it descends into if arms (then
+    before else) and loop bodies at the position of their binding, each with
+    its own scope (_ValueMap.nested_scope). Returns None when no rule fired."""
+    value_map = outer.nested_scope(hidden)
+    new_body: list[ANFBinding] = []
+    changed = False
+    for binding in body or []:
+        v = binding.value
+        if v.kind in ("if", "loop"):
+            value_map[binding.name] = v
+            if v.kind == "if":
+                then_b = _optimize_body(v.then, value_map, None, used_names)
+                else_b = _optimize_body(v.else_, value_map, None, used_names)
+                if then_b is not None or else_b is not None:
+                    if then_b is not None:
+                        v.then = then_b
+                    if else_b is not None:
+                        v.else_ = else_b
+                    changed = True
+            else:
+                body_b = _optimize_body(v.body, value_map, v.iter_var, used_names)
+                if body_b is not None:
+                    v.body = body_b
+                    changed = True
+            new_body.append(binding)
+            continue
+        # `new_body` doubles as the prelude list: a rule that folds a new
+        # constant appends its binding here, i.e. immediately BEFORE the
+        # binding being rewritten (see _fresh_const_name).
+        prelude_start = len(new_body)
+        value_map[binding.name] = v
+        optimized = _try_optimize(v, value_map, new_body, used_names, binding.name)
+        if optimized is not None:
+            # N-218: every helper a rewrite mints (the N-104/N-251 gate
+            # bindings, the fused-scalar helper) takes the rewritten
+            # binding's own source_loc, mirroring F-343 in the TS
+            # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
+            # because of that source expression, and stack lowering maps
+            # opcodes through binding.source_loc.
+            for helper in new_body[prelude_start:]:
+                helper.source_loc = binding.source_loc
+            binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
+            changed = True
+        value_map[binding.name] = binding.value
+        new_body.append(binding)
+    return new_body if changed else None
 
 
 # ---------------------------------------------------------------------------

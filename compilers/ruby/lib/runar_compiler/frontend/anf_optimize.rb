@@ -50,17 +50,32 @@ module RunarCompiler
         return program unless any_changed
 
         # N-097: the has-EC-call check above is only a fast path (a rule can
-        # only fire on a top-level EC call). The gate is the TS reference's
+        # only fire on an EC call, at any depth since N-201). The gate is the TS reference's
         # (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY
         # method iff a rewrite fired in ANY method, else the program is
         # returned untouched, dead bindings included.
+        # N-201: the names each method references before any rewrite -- the
+        # candidate set of the nested prune below.
+        candidates = program.methods.map do |m|
+          refs = Set.new
+          m.body.each { |b| DCE.collect_refs(b.value, refs) }
+          refs
+        end
+
         result = deep_copy_program(program)
         fired = false
         result.methods.each { |m| fired = true if optimize_method(m, result.properties) }
         return program unless fired
 
         # Dead binding elimination
-        result.methods.each { |method| eliminate_dead_bindings(method) }
+        result.methods.each_with_index do |method, i|
+          eliminate_dead_bindings(method)
+          # N-201: a rewrite inside an if arm or a loop body orphans its
+          # operands there, and the DCE above filters only the top level; an
+          # orphan left in an arm unbalances the arms (the N-446 hazard).
+          # Same candidate rule as the constant folder's prune.
+          DCE.eliminate_dead_bindings(method, candidates[i])
+        end
         result
       end
 
@@ -134,10 +149,18 @@ module RunarCompiler
       # EC call detection
       # -----------------------------------------------------------------
 
+      # Any EC intrinsic call at any depth (N-201: if arms and loop bodies
+      # are rewritten too).
       def self.has_ec_calls?(method)
-        method.body.any? do |binding|
-          binding.value.kind == "call" && EC_FUNCS.include?(binding.value.func)
+        walk = lambda do |bindings|
+          (bindings || []).any? do |binding|
+            v = binding.value
+            (v.kind == "call" && EC_FUNCS.include?(v.func)) ||
+              (v.kind == "if" && (walk.call(v.then) || walk.call(v.else_))) ||
+              (v.kind == "loop" && walk.call(v.body))
+          end
         end
+        walk.call(method.body)
       end
       private_class_method :has_ec_calls?
 
@@ -186,6 +209,17 @@ module RunarCompiler
           super()
           @rebound = rebound
         end
+
+        # N-201: the map an if arm or a loop body starts from (the TS
+        # ValueMap.nestedScope) -- every binding visible at the if/loop, and
+        # nothing the nested scope binds flows back out. +hidden+ is a loop's
+        # iteration variable, never resolved through an outer binding.
+        def nested_scope(hidden = nil)
+          scope = ValueMap.new(@rebound)
+          each { |k, v| scope[k] = v }
+          scope.delete(hidden) if hidden
+          scope
+        end
       end
 
       # F-269: every name bound more than once in the method -- binding names
@@ -220,44 +254,80 @@ module RunarCompiler
       end
       private_class_method :collect_rebound_names
 
+      # Rewrite one method's EC calls -- top level, if arms and loop bodies
+      # (N-201) -- to a fixed point; true iff a rule fired.
       def self.optimize_method(method, properties)
-        value_map = ValueMap.new(collect_rebound_names(method))
+        rebound = collect_rebound_names(method)
         used_names = collect_used_names(method, properties)
         fired = false
-        changed = true
-        while changed
-          changed = false
-          new_body = []
-          method.body.each do |binding|
-            # +new_body+ doubles as the prelude list: a rule that folds a new
-            # constant appends its binding here, i.e. immediately BEFORE the
-            # binding being rewritten (see fresh_const_name).
-            prelude_start = new_body.length
-            optimized = try_optimize(binding.value, value_map, new_body, used_names, binding.name)
-            if optimized
-              # N-218: every helper a rewrite mints (the N-104/N-251 gate
-              # bindings, the fused-scalar helper) takes the rewritten
-              # binding's own source_loc, mirroring F-343 in the TS
-              # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
-              # because of that source expression, and stack lowering maps
-              # opcodes through binding.source_loc.
-              new_body[prelude_start..].each { |helper| helper.source_loc = binding.source_loc }
-              binding = IR::ANFBinding.new(
-                name: binding.name,
-                value: optimized,
-                source_loc: binding.source_loc
-              )
-              changed = true
-              fired = true
-            end
-            value_map[binding.name] = binding.value
-            new_body << binding
-          end
+        loop do
+          new_body = optimize_body(method.body, ValueMap.new(rebound), nil, used_names)
+          break if new_body.nil?
           method.body = new_body
+          fired = true
         end
-
         fired
       end
+
+      # One left-to-right sweep over a scope (the TS optimizeBodyOnce): each
+      # binding is tried once against the values of the bindings before it,
+      # as already rewritten in this sweep. N-201: it descends into if arms
+      # (then before else) and loop bodies at the position of their binding,
+      # each with its own scope (ValueMap#nested_scope). nil when no rule
+      # fired.
+      def self.optimize_body(body, outer, hidden, used_names)
+        value_map = outer.nested_scope(hidden)
+        new_body = []
+        changed = false
+        (body || []).each do |binding|
+          v = binding.value
+          if v.kind == "if" || v.kind == "loop"
+            value_map[binding.name] = v
+            if v.kind == "if"
+              then_b = optimize_body(v.then, value_map, nil, used_names)
+              else_b = optimize_body(v.else_, value_map, nil, used_names)
+              unless then_b.nil? && else_b.nil?
+                v.then = then_b unless then_b.nil?
+                v.else_ = else_b unless else_b.nil?
+                changed = true
+              end
+            else
+              body_b = optimize_body(v.body, value_map, v.iter_var, used_names)
+              unless body_b.nil?
+                v.body = body_b
+                changed = true
+              end
+            end
+            new_body << binding
+            next
+          end
+          # +new_body+ doubles as the prelude list: a rule that folds a new
+          # constant appends its binding here, i.e. immediately BEFORE the
+          # binding being rewritten (see fresh_const_name).
+          prelude_start = new_body.length
+          value_map[binding.name] = v
+          optimized = try_optimize(v, value_map, new_body, used_names, binding.name)
+          if optimized
+            # N-218: every helper a rewrite mints (the N-104/N-251 gate
+            # bindings, the fused-scalar helper) takes the rewritten
+            # binding's own source_loc, mirroring F-343 in the TS
+            # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
+            # because of that source expression, and stack lowering maps
+            # opcodes through binding.source_loc.
+            new_body[prelude_start..].each { |helper| helper.source_loc = binding.source_loc }
+            binding = IR::ANFBinding.new(
+              name: binding.name,
+              value: optimized,
+              source_loc: binding.source_loc
+            )
+            changed = true
+          end
+          value_map[binding.name] = binding.value
+          new_body << binding
+        end
+        changed ? new_body : nil
+      end
+      private_class_method :optimize_body
       private_class_method :optimize_method
 
       # -----------------------------------------------------------------

@@ -64,7 +64,7 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
     if (!any_ec) return program;
 
     // N-097: the has-EC-call check above is only a fast path (a rule can only
-    // fire on a top-level EC call). The DCE gate is the TS reference's
+    // fire on an EC call, at any depth since N-201). The DCE gate is the TS reference's
     // (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY method
     // iff a rewrite fired in ANY method; otherwise the bodies are returned as
     // copies, dead bindings included.
@@ -74,10 +74,21 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
         new_methods[i] = try optimizeMethod(allocator, method, program.properties, &fired);
     }
     if (fired) {
-        for (new_methods) |*method| {
+        for (new_methods, 0..) |*method, i| {
             const optimized_body = try dce.eliminateDeadBindingsInMethod(allocator, method.*);
             allocator.free(method.body);
             method.body = optimized_body;
+            // N-201: a rewrite inside an if arm or a loop body orphans its
+            // operands there, and the DCE above filters only the top level;
+            // an orphan left in an arm unbalances the arms (the N-446
+            // hazard). Same candidate rule as the constant folder's prune:
+            // only names the method referenced before this pass ran.
+            var candidates = std.StringHashMap(void).init(allocator);
+            defer candidates.deinit();
+            for (program.methods[i].body) |b| try dce.collectRefs(b.value, &candidates);
+            const pruned = try dce.eliminateDeadBindingsAmongInMethod(allocator, method.*, &candidates);
+            allocator.free(method.body);
+            method.body = pruned;
         }
     }
 
@@ -171,6 +182,17 @@ const ValueMap = struct {
         try self.map.put(name, value);
     }
 
+    /// N-201: the map an if arm or a loop body starts from (the TS
+    /// `ValueMap.nestedScope`) -- every binding visible at the if/loop, and
+    /// nothing the nested scope binds flows back out. `hidden` is a loop's
+    /// iteration variable, never resolved through an outer binding. The
+    /// caller deinits the returned map.
+    fn nestedScope(self: *ValueMap, hidden: ?[]const u8) !ValueMap {
+        var scope = ValueMap{ .map = try self.map.clone(), .rebound = self.rebound };
+        if (hidden) |h| _ = scope.map.remove(h);
+        return scope;
+    }
+
     /// F-269 (user decision R77): the binding `name` ultimately names,
     /// following load_const "@ref:<x>" aliases -- pass 04's
     /// `const y = <expr>` and the ones R1/R2/R3/R7 leave behind (the TS
@@ -222,8 +244,9 @@ const ValueMap = struct {
     }
 };
 
-/// Rewrite one method's top-level EC calls to a fixed point. Sets `fired`
-/// when any rule fires; dead binding elimination is the caller's (N-097).
+/// Rewrite one method's EC calls -- top level, if arms and loop bodies
+/// (N-201) -- to a fixed point. Sets `fired` when any rule fires; dead binding
+/// elimination is the caller's (N-097).
 fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []const types.ANFProperty, fired: *bool) !types.ANFMethod {
     var body = try allocator.alloc(types.ANFBinding, method.body.len);
     @memcpy(body, method.body);
@@ -241,41 +264,13 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
     try collectReboundNames(&rebound_seen, &rebound, method.body);
 
     // Fixed-point iteration: keep applying rules until nothing changes.
-    var changed = true;
-    while (changed) {
-        changed = false;
-        var value_map = ValueMap{ .map = std.StringHashMap(types.ANFValue).init(allocator), .rebound = &rebound };
-        defer value_map.map.deinit();
-
-        var new_body = std.ArrayListUnmanaged(types.ANFBinding).empty;
-        defer new_body.deinit(allocator);
-
-        for (body) |binding| {
-            var current = binding;
-            // `new_body` doubles as the prelude list: a rule that folds a new
-            // constant appends its binding here, i.e. immediately BEFORE the
-            // binding being rewritten (see `freshConstName`).
-            const prelude_start = new_body.items.len;
-            if (tryOptimize(allocator, binding.name, current.value, &value_map, &used_names, &new_body)) |optimized| {
-                // N-218: every helper a rewrite mints (the N-104/N-251 gate
-                // bindings, the fused-scalar helper) takes the rewritten
-                // binding's own source_loc, mirroring F-343 in the TS
-                // reference (anf-ec.ts optimizeBodyOnce) -- it exists only
-                // because of that source expression, and stack lowering maps
-                // opcodes through binding.source_loc.
-                for (new_body.items[prelude_start..]) |*helper| helper.source_loc = binding.source_loc;
-                current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
-                changed = true;
-                fired.* = true;
-            }
-            try value_map.put(current.name, current.value);
-            try new_body.append(allocator, current);
-        }
-
-        if (changed) {
-            allocator.free(body);
-            body = try new_body.toOwnedSlice(allocator);
-        }
+    while (true) {
+        var top = ValueMap{ .map = std.StringHashMap(types.ANFValue).init(allocator), .rebound = &rebound };
+        defer top.map.deinit();
+        const next = (try optimizeBody(allocator, body, &top, null, &used_names)) orelse break;
+        allocator.free(body);
+        body = next;
+        fired.* = true;
     }
 
     return .{
@@ -289,10 +284,86 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
     };
 }
 
+/// One left-to-right sweep over a scope (the TS `optimizeBodyOnce`): each
+/// binding is tried once against the values of the bindings before it, as
+/// already rewritten in this sweep. N-201: it descends into if arms (then
+/// before else) and loop bodies at the position of their binding, each with
+/// its own scope (`ValueMap.nestedScope`). Returns null when no rule fired;
+/// otherwise a newly allocated body (the input is not freed).
+fn optimizeBody(
+    allocator: Allocator,
+    body: []const types.ANFBinding,
+    outer: *ValueMap,
+    hidden: ?[]const u8,
+    used_names: *std.StringHashMap(void),
+) !?[]types.ANFBinding {
+    var value_map = try outer.nestedScope(hidden);
+    defer value_map.map.deinit();
+
+    var new_body = std.ArrayListUnmanaged(types.ANFBinding).empty;
+    defer new_body.deinit(allocator);
+    var changed = false;
+
+    for (body) |binding| {
+        var current = binding;
+        switch (binding.value) {
+            .@"if" => |iv| {
+                try value_map.put(binding.name, binding.value);
+                const then_b = try optimizeBody(allocator, iv.then, &value_map, null, used_names);
+                const else_b = try optimizeBody(allocator, iv.@"else", &value_map, null, used_names);
+                if (then_b != null or else_b != null) {
+                    const ni = try allocator.create(types.ANFIf);
+                    ni.* = iv.*;
+                    if (then_b) |t| ni.then = t;
+                    if (else_b) |e| ni.@"else" = e;
+                    current.value = .{ .@"if" = ni };
+                    changed = true;
+                }
+            },
+            .loop => |lv| {
+                try value_map.put(binding.name, binding.value);
+                if (try optimizeBody(allocator, lv.body, &value_map, lv.iter_var, used_names)) |nb| {
+                    const nl = try allocator.create(types.ANFLoop);
+                    nl.* = lv.*;
+                    nl.body = nb;
+                    current.value = .{ .loop = nl };
+                    changed = true;
+                }
+            },
+            else => {
+                // `new_body` doubles as the prelude list: a rule that folds a
+                // new constant appends its binding here, i.e. immediately
+                // BEFORE the binding being rewritten (see `freshConstName`).
+                const prelude_start = new_body.items.len;
+                try value_map.put(binding.name, binding.value);
+                if (tryOptimize(allocator, binding.name, current.value, &value_map, used_names, &new_body)) |optimized| {
+                    // N-218: every helper a rewrite mints (the N-104/N-251
+                    // gate bindings, the fused-scalar helper) takes the
+                    // rewritten binding's own source_loc, mirroring F-343 in
+                    // the TS reference (anf-ec.ts optimizeBodyOnce) -- it
+                    // exists only because of that source expression, and
+                    // stack lowering maps opcodes through binding.source_loc.
+                    for (new_body.items[prelude_start..]) |*helper| helper.source_loc = binding.source_loc;
+                    current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
+                    changed = true;
+                }
+            },
+        }
+        try value_map.put(current.name, current.value);
+        try new_body.append(allocator, current);
+    }
+
+    if (!changed) return null;
+    return try new_body.toOwnedSlice(allocator);
+}
+
 fn hasEcCalls(body: []const types.ANFBinding) bool {
     for (body) |binding| {
         switch (binding.value) {
             .call => |c| if (ec_funcs.has(c.func)) return true,
+            // N-201: if arms and loop bodies are rewritten too.
+            .@"if" => |iv| if (hasEcCalls(iv.then) or hasEcCalls(iv.@"else")) return true,
+            .loop => |lv| if (hasEcCalls(lv.body)) return true,
             else => {},
         }
     }
