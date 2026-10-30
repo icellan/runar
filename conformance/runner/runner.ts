@@ -2080,13 +2080,18 @@ async function irRoundTripOneTier(
 
   const errors: string[] = [];
   try {
-    const direct = await artifactOf(['--source', sourceFile, ...foldFlag()], '--source', `${stem}.direct.json`);
+    // N-445: this leg compares only script/parentClass/abi/stateFields, so it
+    // asks for the artifact without its sourceMap (--no-source-map). The
+    // default artifact carries one (N-152), and for the Go-only bn254-pairing
+    // fixture that is 566 MB of an 831 MB artifact: past the capture cap below
+    // and past V8's maximum string length.
+    const direct = await artifactOf(['--source', sourceFile, '--no-source-map', ...foldFlag()], '--source', `${stem}.direct.json`);
     const emit = await runCmd(cmd, [...binArgs, '--source', sourceFile, '--emit-ir', ...foldFlag()], opts('--emit-ir'));
     requireCleanExit(spec, emit, '--emit-ir');
     if (emit.code !== 0) throw new Error(`--emit-ir ${describeExit(emit)}: ${emit.stderr.split('\n').slice(0, 5).join(' | ')}`);
     writeFileSync(irFile, emit.stdout, 'utf-8');
     const ir = JSON.parse(emit.stdout) as Record<string, unknown>;
-    const viaIr = await artifactOf(id === 'zig' ? ['compile-ir', irFile] : ['--ir', irFile], '--ir', `${stem}.via-ir.json`);
+    const viaIr = await artifactOf(id === 'zig' ? ['compile-ir', irFile, '--no-source-map'] : ['--ir', irFile, '--no-source-map'], '--ir', `${stem}.via-ir.json`);
 
     if (typeof direct.parentClass !== 'string') {
       errors.push(`${id}: the --source artifact carries no parentClass (vacuous comparison)`);

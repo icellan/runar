@@ -473,3 +473,71 @@ describe('N-152: artifact asm / buildTimestamp / sourceMap / ir (7 tiers)', () =
     });
   }
 });
+
+/**
+ * N-445 - `--no-source-map`: the artifact's `sourceMap` key is opt-out.
+ *
+ * N-152 made every tier's default artifact carry a `sourceMap`. For the Go-only
+ * `bn254-pairing` fixture that is an 831 MB artifact (566 MB of it sourceMap):
+ * the `--ir-roundtrip` runner's 256 MiB capture cap killed it, and no JS
+ * consumer can `JSON.parse` a string that large. The round trip compares only
+ * script, parentClass, abi and stateFields, so it asks every tier for the
+ * artifact without a source map.
+ *
+ * Proves: for each available non-TS tier, `--no-source-map` yields an artifact
+ * with no `sourceMap` key and the same `script`/`abi` as the default artifact
+ * (which still carries a non-empty sourceMap), and `--no-source-map` together
+ * with `--emit-source-map` exits non-zero with a "mutually exclusive"
+ * diagnostic and writes no file. The runner's `--ir-roundtrip` leg then passes
+ * on `bn254-pairing` (Go) instead of reporting a capture-cap harness failure.
+ * Does not prove: the flag on the `--ir` input path (an IR carries no source
+ * locations, so there is no sourceMap to omit), that TS grew the flag (the
+ * round-trip leg does not drive TS), or the other fixtures' round trips.
+ */
+describe('N-445: --no-source-map omits the artifact sourceMap (6 native tiers)', () => {
+  const native = available.filter((t) => t.id !== 'ts');
+  const withFlag = (tier: Tier, src: string, extra: string[]) => {
+    const { args, file } = artifactArgs(tier, src);
+    const argv = [...tier.prefix, ...args, ...extra];
+    const res = spawnSync(tier.cmd!, argv, {
+      cwd: tier.cwd,
+      encoding: 'utf-8',
+      timeout: tier.timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return { res, file, argv };
+  };
+
+  for (const tier of native) {
+    it(`${tier.id}: --no-source-map drops sourceMap, keeps script and abi`, () => {
+      const src = tsSource('stateful-counter');
+      const dflt = compileArtifact(tier, src);
+      expect((dflt.sourceMap?.mappings as unknown[] | undefined)?.length ?? 0, `${tier.id}: default`).toBeGreaterThan(0);
+      const { res, file, argv } = withFlag(tier, src, ['--no-source-map']);
+      expect(res.status, `${tier.id} ${argv.join(' ')}: ${res.stderr}`).toBe(0);
+      const a = JSON.parse(file === null ? res.stdout : readFileSync(file, 'utf8')) as Record<string, any>;
+      expect('sourceMap' in a, `${tier.id}: sourceMap key present`).toBe(false);
+      expect(a.script).toBe(dflt.script);
+      expect(a.abi).toEqual(dflt.abi);
+    });
+
+    it(`${tier.id}: --no-source-map with --emit-source-map is a usage error`, () => {
+      const smFile = join(mkdtempSync(join(OUT, 'n445-')), 'sm.json');
+      const { res, argv } = withFlag(tier, tsSource('basic-p2pkh'), ['--no-source-map', '--emit-source-map', smFile]);
+      expect(res.error, `${tier.id} could not run`).toBeUndefined();
+      expect(res.status, `${tier.id} ${argv.join(' ')}`).not.toBe(0);
+      expect(`${res.stderr}${res.stdout}`, `${tier.id}: diagnostic`).toMatch(/mutually exclusive/);
+      expect(() => readFileSync(smFile), `${tier.id}: wrote ${smFile}`).toThrow();
+    });
+  }
+
+  const go = available.find((t) => t.id === 'go');
+  if (go) {
+    it('the --ir-roundtrip leg completes on bn254-pairing (go) without the capture cap', async () => {
+      const { runAllIrRoundTripChecks } = await import('../runner/runner.js');
+      const report = await runAllIrRoundTripChecks(join(REPO, 'conformance/tests'), { filter: 'bn254-pairing' });
+      expect(report.failures).toEqual([]);
+      expect(report.results.map((r) => r.status)).toEqual(['ok']);
+    }, 600_000);
+  }
+});

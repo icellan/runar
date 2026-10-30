@@ -51,6 +51,7 @@ working flag no output mentioned:
 | `--parse-only` | Run passes 1-2 only and print `parser ok`. Used by the conformance runner's all-tier parser-only matrix |
 | `--emit-ir-to <path>` | Write the same ANF JSON `--emit-ir` prints to a file and KEEP compiling, so one process yields both artefacts |
 | `--emit-source-map <path>` | Write the artifact's sourceMap JSON to a path; runs independently of `--emit-ir` / `--hex` |
+| `--no-source-map` | Omit the sourceMap key from the `--emit-artifact` JSON. Mutually exclusive with `--emit-source-map` |
 | `--emit-artifact <path>` | Write the deployable artifact JSON to a path |
 | `--daemon` | Line-delimited JSON RPC on stdin/stdout, for the conformance runner's Java daemon |
 | `-h`, `--help` | Print the flag list and exit |

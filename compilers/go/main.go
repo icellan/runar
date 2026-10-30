@@ -102,6 +102,10 @@ func main() {
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
+	// N-445: opt out of the artifact's sourceMap key (N-152 made it default).
+	// Large artifacts (Bn254Pairing: 831 MB, 566 MB of it sourceMap) exceed
+	// V8's max string length and the conformance runner's capture cap.
+	noSourceMap := flag.Bool("no-source-map", false, "omit the sourceMap key from the artifact (mutually exclusive with --emit-source-map)")
 	// F-305: the main --source/--ir compile path had no way to set
 	// CompileOptions.Groth16WAVKey, so a contract whose method body calls
 	// runar.AssertGroth16WitnessAssisted could only be compiled through the
@@ -117,12 +121,17 @@ func main() {
 		// N-152: the CLI artifact always carries its sourceMap, like the TS,
 		// Rust, Python, Ruby and Zig artifacts do. --emit-source-map only
 		// additionally writes the table to its own file.
-		IncludeSourceMap: true,
+		IncludeSourceMap: !*noSourceMap,
 		Groth16WAVKey:    *groth16WAVKey,
 	}
 
+	if *noSourceMap && *emitSourceMap != "" {
+		fmt.Fprintln(os.Stderr, "--no-source-map and --emit-source-map are mutually exclusive")
+		os.Exit(1)
+	}
+
 	if *irFile == "" && *sourceFile == "" {
-		fmt.Fprintln(os.Stderr, "Usage: runar-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir] [--emit-ir-to <path>]")
+		fmt.Fprintln(os.Stderr, "Usage: runar-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir] [--emit-ir-to <path>] [--no-source-map]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Phase 1: Compile from ANF IR JSON to Bitcoin Script (--ir).")
 		fmt.Fprintln(os.Stderr, "Phase 2: Compile from .runar.ts source to Bitcoin Script (--source).")

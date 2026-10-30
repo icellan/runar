@@ -229,7 +229,7 @@ public final class Cli {
         // runs independently of --emit-ir / --hex, so one invocation can produce
         // several artefacts; with no other output flag it is the sole output.
         if (parsed.emitArtifact != null) {
-            int rc = writeArtifact(anf, parentClassName(contract), parsed.emitArtifact);
+            int rc = writeArtifact(anf, parentClassName(contract), parsed.emitArtifact, parsed.noSourceMap);
             if (rc != 0) return rc;
             if (!parsed.emitIr && !parsed.hex) return 0;
         }
@@ -384,7 +384,7 @@ public final class Cli {
         // F-038 has none; the field is then omitted and the SDK falls back to
         // `stateFields non-empty` (RunarArtifact#parentStateful).
         if (parsed.emitArtifact != null) {
-            int rc = writeArtifact(anf, anf.parentClass(), parsed.emitArtifact);
+            int rc = writeArtifact(anf, anf.parentClass(), parsed.emitArtifact, parsed.noSourceMap);
             if (rc != 0) return rc;
             if (!parsed.emitIr && !parsed.hex) return 0;
         }
@@ -430,7 +430,7 @@ public final class Cli {
      *
      * <p>Returns 0 on success, non-zero on failure.
      */
-    private int writeArtifact(AnfProgram anf, String parentClass, String path) {
+    private int writeArtifact(AnfProgram anf, String parentClass, String path, boolean noSourceMap) {
         PassLocation.clear();
         try {
             StackProgram stack = StackLower.run(anf);
@@ -625,7 +625,7 @@ public final class Cli {
             }
             // N-152: opcode-to-source mappings, omitted when empty (matches Go).
             // sourceFile is repo-relative POSIX, as in the --emit-source-map file.
-            if (!emit.sourceMap().isEmpty()) {
+            if (!noSourceMap && !emit.sourceMap().isEmpty()) {
                 List<String> maps = new ArrayList<>();
                 for (Emit.SourceMapping m : emit.sourceMap()) {
                     maps.add("{\"opcodeIndex\": " + m.opcodeIndex()
@@ -756,6 +756,7 @@ public final class Cli {
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
         stream.println("  --disable-constant-folding   disable the constant-folding optimizer (required for conformance)");
         stream.println("  --emit-source-map <path>     write the artifact's sourceMap JSON to <path>");
+        stream.println("  --no-source-map              omit the sourceMap key from the artifact");
         stream.println("  --emit-artifact <path>       write the deployable artifact JSON to <path>");
         stream.println("  --daemon                     run in daemon mode (line-delimited JSON RPC on stdin/stdout)");
         stream.println("  --version                    print version and exit");
@@ -1053,6 +1054,9 @@ public final class Cli {
         // GAP-002: when non-null, after compile finishes write the
         // sourceMap object ({"mappings":[...]}) to this path.
         String emitSourceMap;
+        // N-445: omit the artifact's sourceMap key. Mutually exclusive with
+        // --emit-source-map.
+        boolean noSourceMap;
         // When non-null, write the canonical ANF JSON (the same bytes
         // --emit-ir prints) to this path and CONTINUE, so a single process
         // can hand back both the IR and the script hex. Used by the
@@ -1088,12 +1092,16 @@ public final class Cli {
                     case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
                     case "--emit-source-map" -> out.emitSourceMap = requireValue(list, "--emit-source-map");
+                    case "--no-source-map" -> out.noSourceMap = true;
                     case "--emit-artifact" -> out.emitArtifact = requireValue(list, "--emit-artifact");
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
                     case "-h", "--help" -> out.help = true;
                     default -> throw new CliError("unknown flag: " + arg);
                 }
+            }
+            if (out.noSourceMap && out.emitSourceMap != null) {
+                throw new CliError("--no-source-map and --emit-source-map are mutually exclusive");
             }
             return out;
         }

@@ -134,14 +134,24 @@ module RunarCompiler
         opts.on("--emit-source-map PATH", "After a successful compile, write artifact.sourceMap JSON to PATH") do |path|
           options[:emit_source_map] = path
         end
+
+        opts.on("--no-source-map", "Omit the sourceMap key from the artifact (mutually exclusive with --emit-source-map)") do
+          options[:no_source_map] = true
+        end
       end
 
       parser.parse!(argv)
 
+      # N-445: refuse the contradictory pair rather than silently dropping one.
+      if options[:no_source_map] && options[:emit_source_map]
+        $stderr.puts "Error: --no-source-map and --emit-source-map are mutually exclusive"
+        exit 1
+      end
+
       if !options[:ir] && !options[:source]
         $stderr.puts(
           "Usage: runar-compiler-ruby [--ir <path> | --source <path>] " \
-          "[--output <path>] [--hex] [--asm] [--emit-ir]"
+          "[--output <path>] [--hex] [--asm] [--emit-ir] [--no-source-map]"
         )
         $stderr.puts ""
         $stderr.puts "Phase 1: Compile from ANF IR JSON to Bitcoin Script (--ir)."
@@ -285,6 +295,9 @@ module RunarCompiler
       # Advisory only: the exit code stays 0 and stdout still carries nothing
       # but the artifact bytes.
       warnings.each { |w| $stderr.puts "warning: #{w}" }
+
+      # N-445: --no-source-map drops the sourceMap key from the artifact.
+      artifact.source_map = nil if options[:no_source_map]
 
       # Determine output
       if options[:hex]

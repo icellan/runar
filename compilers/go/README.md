@@ -157,6 +157,7 @@ runar-compiler-go --source MyContract.runar.ts --groth16-wa-vk MyContract.groth1
 | `--parse-only` | Phase 2 | Stop after parse + validate; exits 0 with a `parser ok` marker (requires `--source`) |
 | `--disable-constant-folding` | both | Disable the ANF constant folding pass |
 | `--emit-source-map <path>` | both | After a successful compile, write `artifact.sourceMap` JSON to this path |
+| `--no-source-map` | both | Omit the `sourceMap` key from the artifact (it is present by default and can dominate the size of a large artifact). Mutually exclusive with `--emit-source-map` |
 | `--groth16-wa-vk <path>` | both | Path to a SP1-format Groth16 `vk.json` file; required to compile a `--source`/`--ir` contract whose method body calls `assertGroth16WitnessAssisted` (F-305). Distinct from the `groth16-wa` subcommand below, which synthesizes a bare fixed-VK verifier and takes no `--source`/`--ir` file at all. |
 
 ### `debug` subcommand: step-through Bitcoin Script execution

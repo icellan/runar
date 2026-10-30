@@ -400,7 +400,7 @@ Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-re
 
 ### Source maps
 
-Every tier supports an opt-in `--emit-source-map=<path>` CLI flag (GAP-002). When passed, after a successful compile the tier writes the artifact's `sourceMap` field as a canonical `{"mappings":[...]}` JSON object to the given path. The default behaviour (no flag) is unchanged across all tiers.
+Every tier supports an opt-in `--emit-source-map=<path>` CLI flag (GAP-002). When passed, after a successful compile the tier writes the artifact's `sourceMap` field as a canonical `{"mappings":[...]}` JSON object to the given path. The default behaviour (no flag) is unchanged across all tiers. Every tier's artifact carries a `sourceMap` by default; the `--no-source-map` flag (N-445) omits that key (it is a usage error together with `--emit-source-map`). It exists for artifacts too large to hold as one string, e.g. the Go-only `bn254-pairing` fixture, whose `sourceMap` alone is ~566 MB.
 
 The schema is defined once in `packages/runar-ir-schema/src/artifact.ts`:
 

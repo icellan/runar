@@ -83,6 +83,11 @@ struct Args {
     /// After a successful compile, write artifact.sourceMap JSON to this path.
     #[arg(long)]
     emit_source_map: Option<PathBuf>,
+
+    /// Omit the sourceMap key from the artifact (mutually exclusive with
+    /// --emit-source-map). The artifact carries one by default.
+    #[arg(long)]
+    no_source_map: bool,
 }
 
 fn main() {
@@ -120,6 +125,12 @@ fn main() {
         ..Default::default()
     };
 
+    // N-445: refuse the contradictory pair rather than silently dropping one.
+    if args.no_source_map && args.emit_source_map.is_some() {
+        eprintln!("--no-source-map and --emit-source-map are mutually exclusive");
+        process::exit(1);
+    }
+
     if args.ir.is_none() && args.source.is_none() {
         eprintln!("Error: must provide --ir or --source flag.");
         eprintln!();
@@ -133,6 +144,7 @@ fn main() {
         eprintln!("  --asm            Output only script ASM");
         eprintln!("  --emit-ir        Output only ANF IR JSON (requires --source)");
         eprintln!("  --emit-ir-to <p> Write ANF IR JSON to <p> and keep compiling (requires --source)");
+        eprintln!("  --no-source-map  Omit the sourceMap key from the artifact");
         process::exit(1);
     }
 
@@ -260,7 +272,7 @@ fn main() {
         }
     }
 
-    let artifact = if let Some(ref source_path) = args.source {
+    let mut artifact = if let Some(ref source_path) = args.source {
         // R-237: go through the result-bearing API so advisory diagnostics reach
         // the operator. `compile_from_source_with_options` returns
         // Result<RunarArtifact, String> — one value, with nowhere to put a
@@ -295,6 +307,11 @@ fn main() {
             }
         }
     };
+
+    // N-445: --no-source-map drops the sourceMap key from the artifact.
+    if args.no_source_map {
+        artifact.source_map = None;
+    }
 
     // --emit-source-map: write the artifact's sourceMap field as canonical
     // JSON ({"mappings":[...]}) to the requested path. Always emit the

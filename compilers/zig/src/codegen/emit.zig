@@ -730,16 +730,19 @@ pub fn emitArtifact(
     stack_program: types.StackProgram,
     anf_program: types.ANFProgram,
 ) ![]const u8 {
-    return emitArtifactStamped(allocator, stack_program, anf_program, null);
+    return emitArtifactStamped(allocator, stack_program, anf_program, null, true);
 }
 
 /// As `emitArtifact`, writing `build_timestamp` (an ISO 8601 string) into the
-/// artifact's `buildTimestamp` field when it is non-null (N-152).
+/// artifact's `buildTimestamp` field when it is non-null (N-152). The
+/// `sourceMap` key is omitted when `include_source_map` is false (N-445,
+/// the CLI's `--no-source-map`).
 pub fn emitArtifactStamped(
     allocator: std.mem.Allocator,
     stack_program: types.StackProgram,
     anf_program: types.ANFProgram,
     build_timestamp: ?[]const u8,
+    include_source_map: bool,
 ) ![]const u8 {
     // Emit script with dispatch table
     var ctx = EmitContext.init(allocator);
@@ -995,7 +998,7 @@ pub fn emitArtifactStamped(
     // sourceMap — opcode-to-source-location mappings.
     // Wrapped in {"mappings":[...]} to match the canonical schema declared
     // in packages/runar-ir-schema/src/schemas/artifact.schema.json#SourceMap.
-    if (ctx.source_map.items.len > 0) {
+    if (include_source_map and ctx.source_map.items.len > 0) {
         try w.writeAll(",\"sourceMap\":{\"mappings\":[");
         for (ctx.source_map.items, 0..) |mapping, i| {
             if (i > 0) try w.writeByte(',');

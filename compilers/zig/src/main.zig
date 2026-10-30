@@ -33,6 +33,9 @@ const CompileOptions = struct {
     disable_constant_folding: bool = false,
     parse_only: bool = false,
     emit_source_map_path: ?[]const u8 = null,
+    /// N-445: `--no-source-map` omits the artifact's sourceMap key. Mutually
+    /// exclusive with `--emit-source-map`.
+    no_source_map: bool = false,
     /// `--emit-ir-to <path>`: write the SAME bytes `--emit-ir` would print to
     /// this file and then CONTINUE compiling, so one process yields both the
     /// ANF IR and the script hex. The conformance runner drives every tier with
@@ -47,6 +50,8 @@ const ParseOptionsError = error{
     MissingFlagValue,
     /// N-220: a second input (`--source` / `--ir`) after the first one.
     ConflictingInputs,
+    /// N-445: `--no-source-map` together with `--emit-source-map`.
+    ConflictingSourceMapFlags,
 };
 
 fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding: bool) ParseOptionsError!CompileOptions {
@@ -89,6 +94,10 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
             opts.emit_source_map_path = arg["--emit-source-map=".len..];
             continue;
         }
+        if (std.mem.eql(u8, arg, "--no-source-map")) {
+            opts.no_source_map = true;
+            continue;
+        }
         // --emit-ir-to <PATH> writes the canonical ANF IR JSON (byte-identical
         // to what --emit-ir prints) to PATH, then continues compiling.
         if (std.mem.eql(u8, arg, "--emit-ir-to")) {
@@ -103,6 +112,7 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
         }
         return error.UnknownFlag;
     }
+    if (opts.no_source_map and opts.emit_source_map_path != null) return error.ConflictingSourceMapFlags;
     return opts;
 }
 
@@ -138,6 +148,7 @@ pub fn main(init: std.process.Init) !void {
                 error.UnsupportedFlag => "error: --disable-constant-folding is only valid for source compilation\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
                 error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
+                error.ConflictingSourceMapFlags => "Error: --no-source-map and --emit-source-map are mutually exclusive\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -159,6 +170,7 @@ pub fn main(init: std.process.Init) !void {
                 error.UnsupportedFlag => "error: unsupported compile flag\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
                 error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
+                error.ConflictingSourceMapFlags => "Error: --no-source-map and --emit-source-map are mutually exclusive\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -187,6 +199,7 @@ pub fn main(init: std.process.Init) !void {
                 error.UnsupportedFlag => "error: unsupported source flag\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
                 error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
+                error.ConflictingSourceMapFlags => "Error: --no-source-map and --emit-source-map are mutually exclusive\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -238,6 +251,7 @@ fn printUsage() void {
         \\  --emit-ir                 Output canonical ANF IR JSON (stop after pass 4)
         \\  --hex                     Output script hex only (no artifact JSON)
         \\  --disable-constant-folding  Skip constant folding pass
+        \\  --no-source-map           Omit the sourceMap key from the artifact
         \\
         \\Formats: .runar.zig, .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.java, .json
         \\
@@ -366,7 +380,7 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
     var ts_buf: [emit.BUILD_TIMESTAMP_LEN]u8 = undefined;
-    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, optimized_program, buildTimestamp(&ts_buf, io));
+    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, optimized_program, buildTimestamp(&ts_buf, io), !opts.no_source_map);
 
     // --emit-source-map (N-186): this path never looked at the flag, so
     // `--source IR.json --emit-source-map Y` exited 0 with no Y. An ANF IR
@@ -509,7 +523,7 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // compilers without parsing JSON.
     // Pass 6: Emit full artifact
     var ts_buf: [emit.BUILD_TIMESTAMP_LEN]u8 = undefined;
-    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, program, buildTimestamp(&ts_buf, io));
+    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, program, buildTimestamp(&ts_buf, io), !opts.no_source_map);
 
     // --emit-source-map: extract the artifact's sourceMap object (or emit
     // the empty {"mappings":[]} wrapper if absent) and write it to PATH.

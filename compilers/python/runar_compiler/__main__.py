@@ -123,13 +123,27 @@ def main() -> None:
         metavar="PATH",
         help="After a successful compile, write artifact.sourceMap JSON to this path",
     )
+    parser.add_argument(
+        "--no-source-map",
+        dest="no_source_map",
+        action="store_true",
+        help="Omit the sourceMap key from the artifact (mutually exclusive with --emit-source-map)",
+    )
 
     args = parser.parse_args()
+
+    # N-445: refuse the contradictory pair rather than silently dropping one.
+    if args.no_source_map and args.emit_source_map:
+        print(
+            "Error: --no-source-map and --emit-source-map are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if not args.ir and not args.source:
         print(
             "Usage: runar-compiler-python [--ir <path> | --source <path>] "
-            "[--output <path>] [--hex] [--asm] [--emit-ir]",
+            "[--output <path>] [--hex] [--asm] [--emit-ir] [--no-source-map]",
             file=sys.stderr,
         )
         print("", file=sys.stderr)
@@ -295,6 +309,10 @@ def main() -> None:
     # nothing but the artifact bytes.
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
+
+    # N-445: --no-source-map drops the sourceMap key from the artifact.
+    if args.no_source_map:
+        artifact.source_map = None
 
     # Determine output
     if args.hex:
