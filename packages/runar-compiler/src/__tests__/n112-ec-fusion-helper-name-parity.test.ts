@@ -39,6 +39,10 @@ const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 // Rule 10 fires on t6 (ecAdd(ecMulGen(2), ecMulGen(3))), Rule 9 on t13
 // (ecMul(ecMul(p, 2), 3)) and Rule 11 on t23 (ecAdd(ecMul(g, 2), ecMul(g, 3))).
 // ecOnCurve + assert keep each fused binding (and its helper) alive.
+// N-397: `a` and `b` are compared with the parameter `n`, not a literal. The
+// folder now sees through `a = @ref:t`, so `a == 999n` would fold to true, the
+// prune would drop the locals, and the collision probe would no longer collide
+// under fold-ON.
 const FUSION_SOURCE = `import { SmartContract, assert, ecAdd, ecMul, ecMulGen, ecOnCurve, Point } from 'runar-lang';
 
 class EcFusion extends SmartContract {
@@ -46,15 +50,15 @@ class EcFusion extends SmartContract {
         super();
     }
 
-    public spend(p: Point) {
+    public spend(p: Point, n: bigint) {
         const a: bigint = 999n;
         const b: bigint = 998n;
         assert(ecOnCurve(ecAdd(ecMulGen(2n), ecMulGen(3n))));
         assert(ecOnCurve(ecMul(ecMul(p, 2n), 3n)));
         const g: Point = ecMul(p, 7n);
         assert(ecOnCurve(ecAdd(ecMul(g, 2n), ecMul(g, 3n))));
-        assert(a == 999n);
-        assert(b == 998n);
+        assert(a == n);
+        assert(b == n - 1n);
     }
 }
 `;

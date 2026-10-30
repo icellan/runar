@@ -144,6 +144,15 @@ public final class ConstantFold {
         // shares a compiler temp's name). The env must track the LATEST binding:
         // a rebinding to a non-constant drops the old constant, or later uses
         // would fold with a value the name no longer holds.
+        //
+        // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not
+        // itself a constant, but when its target currently holds one the alias
+        // holds the same value, so later uses of the alias fold too. The
+        // binding stays an alias; the prune removes it if the fold orphaned it.
+        if (slot == null && folded instanceof LoadConst lc && lc.value() instanceof BytesConst bs
+            && bs.hex() != null && bs.hex().startsWith("@ref:")) {
+            slot = env.get(bs.hex().substring(5));
+        }
         if (slot != null) {
             env.put(binding.name(), slot);
         } else {

@@ -324,9 +324,16 @@ function foldBinding(binding: ANFBinding, env: ConstEnv): ANFBinding {
   // shares a compiler temp's name). The env must track the LATEST binding:
   // a rebinding to a non-constant drops the old constant, or later uses
   // would fold with a value the name no longer holds (N-064).
+  //
+  // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not itself a
+  // constant, but when its target currently holds one the alias holds the
+  // same value, so later uses of the alias fold too. The binding stays an
+  // alias; the prune removes it if the fold orphaned it.
   const v = foldedValue.kind === 'load_const' ? foldedValue.value : undefined;
   if (v !== undefined && !(typeof v === 'string' && v.startsWith('@ref:'))) {
     env.set(name, v);
+  } else if (typeof v === 'string' && v.startsWith('@ref:') && env.has(v.slice(5))) {
+    env.set(name, env.get(v.slice(5))!);
   } else {
     env.delete(name);
   }

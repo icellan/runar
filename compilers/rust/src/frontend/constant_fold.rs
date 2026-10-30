@@ -408,7 +408,18 @@ fn fold_binding(binding: &ANFBinding, env: &mut ConstEnv) -> ANFBinding {
     // shares a compiler temp's name). The env must track the LATEST binding:
     // a rebinding to a non-constant drops the old constant, or later uses
     // would fold with a value the name no longer holds (N-064).
+    //
+    // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not itself a
+    // constant, but when its target currently holds one the alias holds the
+    // same value, so later uses of the alias fold too. The binding stays an
+    // alias; the prune removes it if the fold orphaned it.
+    let alias_target = match &folded_value {
+        ANFValue::LoadConst { value: serde_json::Value::String(s) } => s.strip_prefix("@ref:"),
+        _ => None,
+    };
     if let Some(cv) = anf_value_to_const(&folded_value) {
+        env.insert(binding.name.clone(), cv);
+    } else if let Some(cv) = alias_target.and_then(|t| env.get(t)).cloned() {
         env.insert(binding.name.clone(), cv);
     } else {
         env.remove(&binding.name);

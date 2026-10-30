@@ -127,7 +127,8 @@ const CASES = [_]Case{
         .label = "self-read-both-arms/fold-on",
         .source = SELF_READ_BOTH_ARMS,
         .disable_constant_folding = false,
-        .want = "000340428fa069517c00a06351787c9376776751787c947677687c750340428fa0",
+        // N-397 (2026-10-30): re-pinned; the folder now sees through `m0 = @ref:t`, so `m0 + 1n` / `m0 - 1n` fold to 2 / 0 in the arms (-8 B).
+        .want = "000340428fa069517c00a06352767767007677687c750340428fa0",
     },
     .{
         .label = "self-read-both-arms/fold-off",

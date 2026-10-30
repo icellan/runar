@@ -353,8 +353,9 @@ class TestExpandFixedArrays < Minitest::Test
     # N-045 took it 7849 -> 7857: the mutable PubKey playerO is width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY, +4) before each of its two continuation commits.
     # N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
     # N-376 took it 7855 -> 7801: the ROT ROT ROT -> [] peephole rule deletes 18 identity ROT^3 runs (54 bytes).
-    assert_equal 7801, v1.script.length / 2, "v1 script must be 7801 bytes"
-    assert_equal 7801, v2.script.length / 2, "v2 script must be 7801 bytes"
+    # N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
+    assert_equal 7798, v1.script.length / 2, "v1 script must be 7798 bytes"
+    assert_equal 7798, v2.script.length / 2, "v2 script must be 7798 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

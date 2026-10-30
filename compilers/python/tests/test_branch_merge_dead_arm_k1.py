@@ -125,7 +125,8 @@ def compile_script_hex(source: str, disable_constant_folding: bool) -> str:
         ),
         (
             "self-read-both-arms/fold-on", SELF_READ_BOTH_ARMS, False,
-            "000340428fa069517c00a06351787c9376776751787c947677687c750340428fa0",
+            # N-397 (2026-10-30): re-pinned; the folder now sees through `m0 = @ref:t`, so `m0 + 1n` / `m0 - 1n` fold to 2 / 0 in the arms (-8 B).
+            "000340428fa069517c00a06352767767007677687c750340428fa0",
         ),
         (
             "self-read-both-arms/fold-off", SELF_READ_BOTH_ARMS, True,

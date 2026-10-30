@@ -438,9 +438,17 @@ func foldBinding(binding ir.ANFBinding, env *constEnv) ir.ANFBinding {
 	// shares a compiler temp's name). The env must track the LATEST binding:
 	// a rebinding to a non-constant drops the old constant, or later uses
 	// would fold with a value the name no longer holds (N-064).
+	//
+	// N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not itself a
+	// constant, but when its target currently holds one the alias holds the
+	// same value, so later uses of the alias fold too. The binding stays an
+	// alias; the prune removes it if the fold orphaned it.
 	var cv *constValue
 	if foldedValue.Kind == "load_const" {
 		cv = anfValueToConst(foldedValue)
+		if cv == nil && foldedValue.ConstString != nil && strings.HasPrefix(*foldedValue.ConstString, "@ref:") {
+			cv = env.get(strings.TrimPrefix(*foldedValue.ConstString, "@ref:"))
+		}
 	}
 	if cv != nil {
 		env.set(binding.Name, cv)

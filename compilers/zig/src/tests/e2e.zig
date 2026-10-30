@@ -628,7 +628,9 @@ fn compileTsToHex(alloc: std.mem.Allocator, source: []const u8, path: []const u8
     const expanded = try expand_fixed_arrays.expand(alloc, contract);
     if (expanded.errors.len > 0) return error.ExpandFailed;
     var program = try anf_lower.lowerToANF(alloc, expanded.contract);
-    program = try constant_fold.foldConstants(alloc, program);
+    // N-397: the prune variant, as compiler_api.zig and the six peer CLIs run
+    // it; the bare fold leaves the operands an `@ref:`-alias fold orphans.
+    program = try constant_fold.foldConstantsAndPrune(alloc, program);
     program = try ec_optimizer.optimize(alloc, program);
     const stack_program = try stack_lower.lower(alloc, program);
     const optimized_methods = try peephole.optimize(alloc, stack_program.methods);
@@ -706,7 +708,8 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // N-045 took it 7849 -> 7857: the mutable PubKey playerO is width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY, +4) before each of its two continuation commits.
     // N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
     // N-376 took it 7855 -> 7801: the ROT ROT ROT -> [] peephole rule deletes 18 identity ROT^3 runs (54 bytes).
-    const expected_bytes: usize = 7801;
+    // N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
+    const expected_bytes: usize = 7798;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

@@ -520,6 +520,14 @@ fn foldBinding(allocator: Allocator, binding: ANFBinding, env: *ConstEnv) anyerr
         if (!skip) {
             try env.put(binding.name, cv);
             registered = true;
+        } else if (env.get(cv.string["@ref:".len..])) |target| {
+            // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not
+            // itself a constant, but when its target currently holds one the
+            // alias holds the same value, so later uses of the alias fold too.
+            // The binding stays an alias; the prune removes it if the fold
+            // orphaned it.
+            try env.put(binding.name, target);
+            registered = true;
         }
     }
     if (!registered) _ = env.remove(binding.name);

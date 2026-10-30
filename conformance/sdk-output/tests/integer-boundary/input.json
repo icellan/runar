@@ -26,11 +26,11 @@
         }
       ]
     },
-    "script": "0901000000feffffff000900000000000000800009000000000000000001100100000000000000ffffffffffffff3f537a537a937b937c937c93009c",
+    "script": "1002000000feffff7f01000000000000407c93009c",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 58,
+        "byteOffset": 19,
         "name": "target",
         "type": "bigint",
         "valueEncoding": "scriptnum"
@@ -44,7 +44,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 58,
+          "byteOffset": 19,
           "slot": "target"
         },
         {

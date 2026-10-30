@@ -129,7 +129,8 @@ func TestBranchMergeK1AndDeadArm_SevenTierScript(t *testing.T) {
 		{"dead-arm-k2/fold-off", deadArmK2Source, true,
 			"00014e8f006351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"self-read-both-arms/fold-on", selfReadBothArmsSource, false,
-			"000340428fa069517c00a06351787c9376776751787c947677687c750340428fa0"},
+			// N-397 (2026-10-30): re-pinned; the folder now sees through `m0 = @ref:t`, so `m0 + 1n` / `m0 - 1n` fold to 2 / 0 in the arms (-8 B).
+			"000340428fa069517c00a06352767767007677687c750340428fa0"},
 		{"self-read-both-arms/fold-off", selfReadBothArmsSource, true,
 			"000340420f8fa069517c00a06351787c9376776751787c947677687c750340420f8fa0"},
 		{"const-condition-k1/fold-on", constConditionK1Source, false,

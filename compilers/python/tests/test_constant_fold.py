@@ -691,7 +691,30 @@ class TestCrossTypeEquality:
 
 class TestRefAliases:
     def test_ref_alias_not_folded(self):
-        """@ref: prefixed strings in load_const should not be treated as constants."""
+        """@ref: prefixed strings in load_const should not be treated as constants.
+
+        N-397: the alias string itself is never a constant. An alias whose
+        target is not a constant (here a parameter) must leave its uses
+        unfolded; ``test_ref_alias_to_constant_folds`` covers the other case.
+        """
+        p = _make_program([_make_method("m", [
+            _b("t0", _load_param("a")),
+            _b("x", ANFValue(kind="load_const", raw_value='"@ref:t0"', const_string="@ref:t0")),
+            _b("t1", _mk_int(3)),
+            _b("t2", _bin_op("+", "x", "t1")),
+        ])])
+        r = fold_constants(p)
+        # x aliases a runtime value, so t2 should not be folded
+        _assert_not_folded(r.methods[0].body[3].value, "bin_op")
+        # and the alias binding itself is kept as the alias, not rewritten
+        assert r.methods[0].body[1].value.const_string == "@ref:t0"
+
+    def test_ref_alias_to_constant_folds(self):
+        """N-397: an alias of a constant holds that constant, so its uses fold.
+
+        ``const x = 5n`` lowers to ``t0 = 5; x = @ref:t0``; ``x + 3n`` must fold
+        to 8 (the target's value), and the alias binding stays an alias.
+        """
         p = _make_program([_make_method("m", [
             _b("t0", _mk_int(5)),
             _b("x", ANFValue(kind="load_const", raw_value='"@ref:t0"', const_string="@ref:t0")),
@@ -699,8 +722,8 @@ class TestRefAliases:
             _b("t2", _bin_op("+", "x", "t1")),
         ])])
         r = fold_constants(p)
-        # x is a @ref: alias, not a real constant, so t2 should not be folded
-        _assert_not_folded(r.methods[0].body[3].value, "bin_op")
+        _assert_load_const_int(r.methods[0].body[3].value, 8)
+        assert r.methods[0].body[1].value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
