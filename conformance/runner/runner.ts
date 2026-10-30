@@ -1354,7 +1354,7 @@ async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
       `import { compile } from '${pathToFileURL(resolve(REPO_ROOT, 'packages/runar-compiler/src/index.ts')).href}';` +
       `import { readFileSync } from 'fs';` +
       `const src = readFileSync(${JSON.stringify(tmpFile)}, 'utf-8');` +
-      `const r = compile(src, { fileName: ${JSON.stringify(tmpFile)}, parseOnly: true });` +
+      `const r = compile(src, { fileName: ${JSON.stringify(tmpFile)}, validateOnly: true });` +
       `if (!r.success) { for (const d of r.diagnostics) { if (d.severity === 'error') process.stderr.write('parse error: ' + (d.message||'') + '\\n'); } process.exit(1); }` +
       `process.stdout.write('parser ok\\n');`;
     driverFile = join(tmpDir, `driver-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);

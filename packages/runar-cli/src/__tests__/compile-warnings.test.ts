@@ -110,16 +110,11 @@ describe('compileCommand — validator warnings', () => {
   }, 60_000);
 
   // --parse-only is where the other six tiers print their warnings, because
-  // their --parse-only runs parse + validate. The TS compiler's parseOnly
-  // early-exits BEFORE the validate pass (packages/runar-compiler/src/index.ts,
-  // `if (opts.parseOnly) return ...` sitting above "Pass 2: Validate"), so no
-  // validator warning is *reachable* here — there is nothing to suppress and
-  // nothing to print. That divergence is a separate finding about what
-  // --parse-only means in the TS tier, not something to paper over by
-  // inventing a warning. This test pins the current behaviour so that if
-  // TS --parse-only ever starts validating, someone comes back and wires the
-  // warnings through.
-  it('emits only the parser-ok marker in --parse-only mode (TS skips validate there)', async () => {
+  // their --parse-only runs parse + validate. N-415: the TS CLI's --parse-only
+  // now runs the validate pass too (it passes `validateOnly` to compile()), so
+  // the validator warning is reachable here and is printed like in the natives,
+  // while stdout stays exactly the "parser ok" marker the conformance runner reads.
+  it('prints the validator warning and the parser-ok marker in --parse-only mode', async () => {
     const src = writeSource('WarnStateful.runar.ts', WARNING_SOURCE);
     const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -127,13 +122,14 @@ describe('compileCommand — validator warnings', () => {
 
     await compileCommand([src], { output: path.join(tmpDir, 'out'), parseOnly: true });
 
-    // stdout stays exactly the "parser ok" marker the conformance runner reads.
     const written = stdoutSpy.mock.calls.map(c => String(c[0])).join('');
     expect(written).toBe('parser ok\n');
     expect(process.exitCode).not.toBe(1);
-    // No warning-severity diagnostic exists on this path, so none is printed.
     const errLines = errSpy.mock.calls.map(c => String(c[0]));
-    expect(errLines.filter(l => l.startsWith('warning: '))).toEqual([]);
+    expect(
+      errLines.some(l => l.startsWith('warning: ') && l.includes('StatefulSmartContract has no mutable properties')),
+      `validator warning did not reach stderr under --parse-only; got ${JSON.stringify(errLines)}`,
+    ).toBe(true);
   }, 60_000);
 
   it('prints no warning line and exits 0 for a clean contract', async () => {

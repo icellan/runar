@@ -127,7 +127,7 @@ export async function compileCommand(
       disableConstantFolding?: boolean;
       disablePeephole?: boolean;
       disableEcOptimizer?: boolean;
-      parseOnly?: boolean;
+      validateOnly?: boolean;
     },
   ) => unknown;
   type CompileFromANFFn = (
@@ -315,7 +315,10 @@ export async function compileCommand(
         disableConstantFolding: options.disableConstantFolding,
         disablePeephole: options.disablePeephole,
         disableEcOptimizer: options.disableEcOptimizer,
-        parseOnly: options.parseOnly,
+        // N-415: the CLI's `--parse-only` is Pass 1 (parse) + Pass 2 (validate),
+        // as in the six native CLIs and the conformance parser-only matrix; the
+        // library's `parseOnly` option stops after Pass 1, so it is not used here.
+        validateOnly: options.parseOnly,
       }) as CompileResultLike;
     } catch (err) {
       console.error(`  Compilation error: ${(err as Error).message}`);
