@@ -25,6 +25,18 @@
     },
     {
       "method": "settle",
+      "args": ["50003n", "0xd478216cab60ec851fba8b4224be3127c8829d6b6e6ed7acf69fff42c61d440c13", "0x1b", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "N-380 / F-368 non-canonical signature: the accepted sig + 1*n (same padding), which squares to the same residue. The script asserts sig < n and aborts; the off-chain verifiers reject it too (R172)."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0x6984575cac60ec851fba8b4224be3127f0e5ff6d6e6ed7acf69fff42c61d440c23", "0x1b", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "N-380 / F-368 non-canonical signature: the accepted sig + 2*n (same padding), which squares to the same residue. The script asserts sig < n and aborts; the off-chain verifiers reject it too (R172)."
+    },
+    {
+      "method": "settle",
       "constructorArgs": {
         "oraclePubKey": "251n",
         "receiver": { "$pubkey": "alice" }

@@ -74,3 +74,24 @@ def test_honest_signature_verifies():
     padding = _int_to_le_bytes(padding_int, (padding_int.bit_length() + 7) // 8 or 1)
 
     assert rabin_verify(msg, sig, padding, pubkey) is True
+
+
+def test_non_canonical_sig_ge_n_rejected():
+    """N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts.
+
+    Proves: the canonical sig and the second root n - sig verify; sig + n and
+    sig + 2n (same padding) are rejected. Does not prove the verdict equals the
+    consensus interpreter's (conformance/negatives/f368 does that).
+    """
+    msg = b"attack at dawn"
+    sig_int, padding_int = _rabin_sign(msg)
+    pubkey = _int_to_le_bytes(N, 64)
+    padding = _int_to_le_bytes(padding_int, (padding_int.bit_length() + 7) // 8 or 1)
+
+    def enc(v: int) -> bytes:
+        return _int_to_le_bytes(v, (v.bit_length() + 7) // 8 or 1)
+
+    assert rabin_verify(msg, enc(sig_int), padding, pubkey) is True
+    assert rabin_verify(msg, enc(N - sig_int), padding, pubkey) is True
+    assert rabin_verify(msg, enc(sig_int + N), padding, pubkey) is False
+    assert rabin_verify(msg, enc(sig_int + 2 * N), padding, pubkey) is False

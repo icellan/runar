@@ -966,6 +966,10 @@ pub fn verifyRabinSig(message: base.ByteString, sig: base.RabinSig, padding: bas
     defer pad_limit.deinit();
     if (pad_bn.cmp(&pad_limit) != .lt) return false;
 
+    // Enforce sig < n, mirroring the on-chain F-368 gate: sig + k*n squares to
+    // the same residue but the deployed script aborts on it.
+    if (sig_bn.cmp(&modulus) != .lt) return false;
+
     var sig_sq = sig_bn.mul(&sig_bn) catch return false;
     defer sig_sq.deinit();
     var lhs_sum = sig_sq.add(&pad_bn) catch return false;
@@ -2822,6 +2826,30 @@ test "verifyRabinSig rejects the sig=0/padding=SHA256(msg) forgery via the paddi
     const honest_pad = try honest_pad_bn.toLeBytes();
     defer std.heap.page_allocator.free(honest_pad);
     try std.testing.expect(verifyRabinSig(message, &[_]u8{0x00}, honest_pad, &small_mod));
+}
+
+// N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts on
+// chain. Proves: sig = 0 verifies under n = 251, and sig = n (0xfb) and
+// sig = 2n (0xf6 0x01), which square to the same residue, are rejected. Does
+// not prove the verdict equals the consensus interpreter's (conformance/
+// negatives/f368 does that).
+test "verifyRabinSig rejects non-canonical sig >= n" {
+    const modulus = [_]u8{0xfb}; // 251, little-endian
+    const message = "oracle-message";
+    var hash_bytes: [32]u8 = undefined;
+    Sha256Hasher.hash(message, &hash_bytes, .{});
+    var hash_bn = try BigUint.fromLeBytes(std.heap.page_allocator, &hash_bytes);
+    defer hash_bn.deinit();
+    var modulus_bn = try BigUint.fromLeBytes(std.heap.page_allocator, &modulus);
+    defer modulus_bn.deinit();
+    var padding_bn = try hash_bn.rem(&modulus_bn);
+    defer padding_bn.deinit();
+    const padding = try padding_bn.toLeBytes();
+    defer std.heap.page_allocator.free(padding);
+
+    try std.testing.expect(verifyRabinSig(message, &[_]u8{0x00}, padding, &modulus));
+    try std.testing.expect(!verifyRabinSig(message, &[_]u8{0xfb}, padding, &modulus));
+    try std.testing.expect(!verifyRabinSig(message, &[_]u8{ 0xf6, 0x01 }, padding, &modulus));
 }
 
 test "SLH SHA2 parameter sizes stay aligned with the published script matrix" {

@@ -149,6 +149,10 @@ public final class MockCrypto {
         // OP_WITHIN bound and blocks the sig=0 / padding=SHA256(msg) forgery.
         if (padBN.signum() < 0 || padBN.compareTo(RABIN_PADDING_LIMIT) >= 0) return false;
 
+        // Signature range: sig < n, mirroring the on-chain F-368 gate. sig + k*n
+        // squares to the same residue but the deployed script aborts on it.
+        if (sig.compareTo(pubKey) >= 0) return false;
+
         BigInteger hashBN = bytesToUnsignedLE(sha256(msg.toByteArray()));
 
         BigInteger lhs = sig.multiply(sig).add(padBN).mod(pubKey);

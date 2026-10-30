@@ -422,6 +422,8 @@ export function verifyRabinSig(
   const padBytes = hexToBytes(padding as string);
   const padBN = rabinBytesToUnsignedLE(padBytes);
   if (padBN >= RABIN_PADDING_LIMIT) return false;
+  // Mirrors the on-chain `sig < n` gate (F-368): `sig + k*n` aborts in the script.
+  if (sig >= pubkey) return false;
   const lhs = ((sig * sig + padBN) % pubkey + pubkey) % pubkey;
   const rhs = (hashBN % pubkey + pubkey) % pubkey;
   return lhs === rhs;

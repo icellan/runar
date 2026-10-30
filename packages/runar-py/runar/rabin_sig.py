@@ -52,6 +52,11 @@ def rabin_verify(msg: bytes, sig: bytes, padding: bytes, pubkey: bytes) -> bool:
     if pad_int < 0 or pad_int >= RABIN_PADDING_LIMIT:
         return False
 
+    # Enforce sig < n, mirroring the on-chain F-368 gate: sig + k*n squares to
+    # the same residue but the deployed script aborts on it.
+    if sig_int >= n:
+        return False
+
     hash_bytes = hashlib.sha256(msg).digest()
     hash_int = _bytes_to_unsigned_le(hash_bytes)
 

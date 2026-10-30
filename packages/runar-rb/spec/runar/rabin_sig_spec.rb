@@ -81,6 +81,22 @@ RSpec.describe Runar::RabinSig do
       end
     end
 
+    # N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts on
+    # chain. Proves: sig = 10 and the second root n - sig = 199 verify; sig + n
+    # (219) and sig + 2n (428) with the same padding are rejected. Does not prove
+    # the verdict equals the consensus interpreter's (conformance/negatives/f368).
+    context 'with a non-canonical sig >= n (N-380)' do
+      it 'accepts the canonical sig and the second root n - sig' do
+        expect(described_class.rabin_verify(MSG_HEX, SIG_HEX, PADDING_HEX, PUBKEY_HEX)).to be true
+        expect(described_class.rabin_verify(MSG_HEX, 'c7000000', PADDING_HEX, PUBKEY_HEX)).to be true
+      end
+
+      it 'rejects sig + n and sig + 2n' do
+        expect(described_class.rabin_verify(MSG_HEX, 'db000000', PADDING_HEX, PUBKEY_HEX)).to be false
+        expect(described_class.rabin_verify(MSG_HEX, 'ac010000', PADDING_HEX, PUBKEY_HEX)).to be false
+      end
+    end
+
     context 'edge cases' do
       it 'returns false for an empty (zero-byte) pubkey' do
         expect(described_class.rabin_verify(MSG_HEX, SIG_HEX, PADDING_HEX, '')).to be false

@@ -55,6 +55,12 @@ func rabinVerifyImpl(msg, sig, padding, pubkey []byte) bool {
 		return false
 	}
 
+	// Enforce sig < n, mirroring the on-chain F-368 gate: sig + k*n squares to
+	// the same residue but the deployed script aborts on it.
+	if sigInt.Cmp(pkInt) >= 0 {
+		return false
+	}
+
 	// Compute SHA256(msg) as unsigned little-endian big integer
 	h := sha256.Sum256(msg)
 	hashBN := leBytesToBigInt(h[:])

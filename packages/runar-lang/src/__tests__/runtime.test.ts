@@ -424,6 +424,20 @@ describe('runtime builtins', () => {
         expect(verifyRabinSig(msg, 0n, paddingHex as unknown as import('../types.js').ByteString, nn)).toBe(true);
       });
 
+      // N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts
+      // on chain. Proves: with a crafted modulus nn = H - 7, (sig=0, padding=7)
+      // is accepted and sig = nn, 2*nn (the same residue, out of range) are
+      // rejected. Does not prove the verdict equals Spend's (f368 negatives do).
+      it('rejects non-canonical sig >= n that the on-chain gate aborts on (N-380)', () => {
+        const msg = toByteString('deadbeef');
+        const hashBN = hexToUnsignedLE(sha256(msg) as unknown as string);
+        const nn = hashBN - 7n;
+        const pad = leBigIntToHex(7n) as unknown as import('../types.js').ByteString;
+        expect(verifyRabinSig(msg, 0n, pad, nn)).toBe(true);
+        expect(verifyRabinSig(msg, nn, pad, nn)).toBe(false);
+        expect(verifyRabinSig(msg, 2n * nn, pad, nn)).toBe(false);
+      });
+
       it('control: an honest signature from the vendored test key still verifies', () => {
         // Vendored from packages/runar-testing/src/crypto/rabin.ts RABIN_TEST_KEY
         // and its rabinSign algorithm, inlined here because runar-lang must not
