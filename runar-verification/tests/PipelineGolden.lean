@@ -691,15 +691,21 @@ the constants had been honest all along.
 -- RUNAR_VERIFICATION_SHARD=1|8|22 RUNAR_VERIFICATION_SHARDS=22`) returned all
 -- three `.regenLive` anchors `[fresh]` and byte-exact against their
 -- expected-script.hex, so only their fingerprints move.
+-- 2026-10-30 (N-457 / R182): the model fingerprint moved to
+-- v1:64f:7219499b:9eddf410ce2933de (Stack/Peephole.lean wires
+-- checkMultiSigVerifyFuse into the executed peephole chain; Pipeline.lean
+-- gains its #guard). Sharded live regens (shards 1, 8, 22 of 22) returned
+-- all three `.regenLive` anchors `[fresh]` and byte-equal to their
+-- expected-script.hex, so only their fingerprints move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:64f:7210026b:a92fa5e196ca7c90"⟩,
+  ⟨"babybear", .regenLive, "v1:64f:7219499b:9eddf410ce2933de"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:64f:7210026b:a92fa5e196ca7c90"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:64f:7219499b:9eddf410ce2933de"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -722,7 +728,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:64f:7210026b:a92fa5e196ca7c90"⟩,
+  ⟨"state-covenant", .regenLive, "v1:64f:7219499b:9eddf410ce2933de"⟩,
 ]
 
 /--

@@ -7428,6 +7428,109 @@ theorem checkMultiSigVerifyFuse_pass_sound :
              = runOps (.rawBytes b :: rest') s
         exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
+/-! ### `checkMultiSigVerifyFuse` preserves `noIfOp` and `wellTypedRun` (N-457)
+
+The two facts `passAllInner15` needs to carry the rule inside the
+WT-preserving chain of `peepholePassAllFlat`. Same recipe as the
+`checkSigVerifyFuse` pair; `OP_CHECKMULTISIGVERIFY` has the same `.bytes`
+precondition as `OP_CHECKMULTISIG`. -/
+
+theorem applyCheckMultiSigVerifyFuse_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops →
+      noIfOp (applyCheckMultiSigVerifyFuse ops) := by
+  intro ops
+  induction ops using applyCheckMultiSigVerifyFuse.induct with
+  | case1 => intro _; exact True.intro
+  | case2 rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.opcode "OP_CHECKMULTISIG" :: .opcode "OP_VERIFY" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyCheckMultiSigVerifyFuse rest') := ih hRest'
+    show noIfOp (.opcode "OP_CHECKMULTISIGVERIFY" :: applyCheckMultiSigVerifyFuse rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyCheckMultiSigVerifyFuse rest') := ih hRest'
+    have hRewrite :
+        applyCheckMultiSigVerifyFuse (op :: rest')
+        = op :: applyCheckMultiSigVerifyFuse rest' :=
+      applyCheckMultiSigVerifyFuse.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyCheckMultiSigVerifyFuse_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyCheckMultiSigVerifyFuse ops) s := by
+  intro ops
+  induction ops using applyCheckMultiSigVerifyFuse.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.opcode "OP_CHECKMULTISIG" :: .opcode "OP_VERIFY" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨hPrecond, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    obtain ⟨b, rest_top, hStack⟩ := precondMet_bytes_extract s hPrecond
+    show wellTypedRun (.opcode "OP_CHECKMULTISIGVERIFY" :: applyCheckMultiSigVerifyFuse rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · show precondMet .bytes s
+      exact hPrecond
+    · intro s' hStepCMV
+      have hStepDef : stepNonIf (.opcode "OP_CHECKMULTISIGVERIFY") s
+                    = (if checkMultiSigStub b then
+                        .ok ({ s with stack := rest_top } : StackState)
+                       else .error .assertFailed) := by
+        rw [stepNonIf_opcode]
+        exact runOpcode_CHECKMULTISIGVERIFY_bytes s b rest_top hStack
+      rw [hStepDef] at hStepCMV
+      by_cases hSig : checkMultiSigStub b = true
+      · rw [hSig] at hStepCMV
+        simp at hStepCMV
+        have hSEq : s' = ({ s with stack := rest_top } : StackState) := hStepCMV.symm
+        have hStep1 : stepNonIf (.opcode "OP_CHECKMULTISIG") s
+                    = .ok (({ s with stack := rest_top } : StackState).push
+                            (.vBool (checkMultiSigStub b))) :=
+          stepNonIf_OPCHECKMULTISIG_anyBytes s b rest_top hStack
+        have hWell1 := hCont _ hStep1
+        have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+        have hStep2 : stepNonIf (.opcode "OP_VERIFY")
+                        (({ s with stack := rest_top } : StackState).push
+                          (.vBool (checkMultiSigStub b)))
+                    = .ok ({ s with stack := rest_top } : StackState) := by
+          rw [stepNonIf_opcode, runOpcode_verify_vBool, hSig]; rfl
+        have hWellRest : wellTypedRun rest' ({ s with stack := rest_top } : StackState) :=
+          hCont1 _ hStep2
+        rw [hSEq]
+        exact ih hRest' _ hWellRest
+      · rw [show checkMultiSigStub b = false from by
+              rcases h : checkMultiSigStub b with _ | _
+              · rfl
+              · exact absurd h hSig] at hStepCMV
+        simp at hStepCMV
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyCheckMultiSigVerifyFuse (op :: rest')
+        = op :: applyCheckMultiSigVerifyFuse rest' :=
+      applyCheckMultiSigVerifyFuse.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyCheckMultiSigVerifyFuse rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
 /-! ### Roll/Pick combinator rules
 
 The Lean stack lowerer emits a *bare* bundled `.roll d` / `.pick d` op,
@@ -8508,7 +8611,7 @@ attribute [implemented_by applyPushOneSub.tr] applyPushOneSub
 
 /-! ## End of tail-recursive runtime implementations. -/
 
-/-- All 19 proven peephole rules applied in TS-reference order.
+/-- All 20 proven peephole rules applied in TS-reference order.
 
 Used by `Pipeline.peepholeProgram` to maximize byte-exact match against
 TS goldens. Soundness for arbitrary input isn't claimed by this
@@ -8516,12 +8619,23 @@ composition — see `peepholePassFullPlus_sound` for the strongest
 soundness statement, which covers 12 of the rules under `wellTypedRun`
 and `equalVerifyFuse_eitherStrict` preconditions.
 
-Rule ordering mirrors `packages/runar-compiler/src/optimizer/peephole.ts`. -/
+Rule ordering mirrors `packages/runar-compiler/src/optimizer/peephole.ts`.
+
+N-457: `applyCheckMultiSigVerifyFuse` (`[OP_CHECKMULTISIG, OP_VERIFY] →
+[OP_CHECKMULTISIGVERIFY]`, TS's fourth VERIFY fuse) is the 20th rule. It
+sits inside `passAllInner15`, just after `applyDoubleSha256`, rather than
+beside the other three fuses: it is WT-preserving, so placing it there keeps
+the statements of `peepholePassAllFlat_sound` and
+`peepholePassAllFlat_preconditions` unchanged. The position is byte-neutral:
+no other rule consumes or produces an `[OP_CHECKMULTISIG, OP_VERIFY]`
+window, and the three VERIFY fuses that run after it each key on a
+different predecessor opcode. -/
 def peepholePassAllFlat (ops : List StackOp) : List StackOp :=
   applyEqualVerifyFuse <|
    applyCheckSigVerifyFuse <|
     applyNumEqualVerifyFuse <|
      applyZeroNumEqual <|
+      applyCheckMultiSigVerifyFuse <|
       applyDoubleSha256 <|
        applyDoubleDrop <|
         applyDoubleOver <|
@@ -10108,8 +10222,12 @@ WT-preserving so this carries WT under standard preconditions.
 Exposed (non-`private`) so that `Pipeline`-level callers can state the
 genuine `wellTypedRun` / `eitherStrict` preconditions that
 `peepholePassAllFlat_sound` requires for the two non-WT-preserving outer
-rules. -/
+rules.
+
+N-457: the chain now has 16 rules — `applyCheckMultiSigVerifyFuse` is
+outermost. The name is kept because Pipeline-level statements cite it. -/
 def passAllInner15 (ops : List StackOp) : List StackOp :=
+  applyCheckMultiSigVerifyFuse <|
   applyDoubleSha256 <|
    applyDoubleDrop <|
     applyDoubleOver <|
@@ -10179,13 +10297,17 @@ private theorem passAllInner15_sound :
   have hNoIf14 := applyDoubleDrop_preserves_noIfOp _ hNoIf13
   have hWT14 := applyDoubleDrop_preserves_wellTypedRun _ hNoIf13 s hWT13
   have hSound15 := doubleSha256_pass_sound _ hNoIf14 s hWT14
-  show runOps (applyDoubleSha256 (applyDoubleDrop (applyDoubleOver
+  have hNoIf15 := applyDoubleSha256_preserves_noIfOp _ hNoIf14
+  have hWT15 := applyDoubleSha256_preserves_wellTypedRun _ hNoIf14 s hWT14
+  -- N-457: checkMultiSigVerifyFuse, the 16th rule of this chain.
+  have hSound16 := checkMultiSigVerifyFuse_pass_sound _ hNoIf15 s hWT15
+  show runOps (applyCheckMultiSigVerifyFuse (applyDoubleSha256 (applyDoubleDrop (applyDoubleOver
         (applyDoubleNot (applyDoubleNegate (applyOneSub (applyOneAdd
           (applySubZero (applyAddZero (applyPushPushMul (applyPushPushSub
             (applyPushPushAdd (applyDoubleSwap (applyDupDrop
-              (applyDropAfterPush ops)))))))))))))) ) s
+              (applyDropAfterPush ops))))))))))))))) ) s
        = runOps ops s
-  exact hSound15.trans (hSound14.trans (hSound13.trans (hSound12.trans
+  exact hSound16.trans <| hSound15.trans (hSound14.trans (hSound13.trans (hSound12.trans
     (hSound11.trans (hSound10.trans (hSound9.trans (hSound8.trans
       (hSound7.trans (hSound6.trans (hSound5.trans (hSound4.trans
         (hSound3.trans (hSound2.trans hSound1)))))))))))))
@@ -10196,7 +10318,8 @@ private theorem passAllInner15_preserves_noIfOp :
     ∀ (ops : List StackOp), noIfOp ops → noIfOp (passAllInner15 ops) := by
   intro ops hNoIf
   unfold passAllInner15
-  exact applyDoubleSha256_preserves_noIfOp _
+  exact applyCheckMultiSigVerifyFuse_preserves_noIfOp _
+   (applyDoubleSha256_preserves_noIfOp _
     (applyDoubleDrop_preserves_noIfOp _
       (applyDoubleOver_preserves_noIfOp _
         (applyDoubleNot_preserves_noIfOp _
@@ -10210,7 +10333,7 @@ private theorem passAllInner15_preserves_noIfOp :
                         (applyPushPushAdd_preserves_noIfOp _
                           (applyDoubleSwap_preserves_noIfOp _
                             (applyDupDrop_preserves_noIfOp _
-                              (applyDropAfterPush_preserves_noIfOp _ hNoIf))))))))))))))
+                              (applyDropAfterPush_preserves_noIfOp _ hNoIf)))))))))))))))
 
 set_option maxHeartbeats 800000 in
 /-- WT preservation through the inner 15. -/
@@ -10247,12 +10370,14 @@ private theorem passAllInner15_preserves_wellTypedRun :
   have hWT13 := applyDoubleOver_preserves_wellTypedRun _ hNoIf12 s hWT12
   have hNoIf14 := applyDoubleDrop_preserves_noIfOp _ hNoIf13
   have hWT14 := applyDoubleDrop_preserves_wellTypedRun _ hNoIf13 s hWT13
-  show wellTypedRun (applyDoubleSha256 (applyDoubleDrop (applyDoubleOver
+  have hNoIf15 := applyDoubleSha256_preserves_noIfOp _ hNoIf14
+  have hWT15 := applyDoubleSha256_preserves_wellTypedRun _ hNoIf14 s hWT14
+  show wellTypedRun (applyCheckMultiSigVerifyFuse (applyDoubleSha256 (applyDoubleDrop (applyDoubleOver
         (applyDoubleNot (applyDoubleNegate (applyOneSub (applyOneAdd
           (applySubZero (applyAddZero (applyPushPushMul (applyPushPushSub
             (applyPushPushAdd (applyDoubleSwap (applyDupDrop
-              (applyDropAfterPush ops)))))))))))))) ) s
-  exact applyDoubleSha256_preserves_wellTypedRun _ hNoIf14 s hWT14
+              (applyDropAfterPush ops))))))))))))))) ) s
+  exact applyCheckMultiSigVerifyFuse_preserves_wellTypedRun _ hNoIf15 s hWT15
 
 set_option maxHeartbeats 4000000 in
 set_option linter.constructorNameAsVariable false in
@@ -10353,6 +10478,17 @@ theorem peepholePassAllFlat_runOps_eq
     runOps (peepholePassAllFlat ops) s = runOps ops s :=
   peepholePassAllFlat_sound ops hNoIf s hPre.1 hPre.2.1 hPre.2.2.1 hPre.2.2.2
 
+/-- N-457: `peepholePassAllFlat` is the four outer rules around
+`passAllInner15`, proved by unfolding both sides. It replaces a bare `show`
+whose defeq check exceeded its heartbeat budget once the inner chain grew a
+16th rule. -/
+theorem peepholePassAllFlat_eq_outer_inner (ops : List StackOp) :
+    peepholePassAllFlat ops
+      = applyEqualVerifyFuse (applyCheckSigVerifyFuse
+          (applyNumEqualVerifyFuse (applyZeroNumEqual (passAllInner15 ops)))) := by
+  unfold peepholePassAllFlat passAllInner15
+  rfl
+
 set_option maxHeartbeats 1600000 in
 /-- `noIfOp` preservation through the full 19-rule flat chain. Composes
 the inner-15 preservation with the four outer rules. -/
@@ -10363,8 +10499,7 @@ theorem peepholePassAllFlat_preserves_noIfOp :
   -- `peepholePassAllFlat`; the four outer rules wrap it.
   have hInner : noIfOp (passAllInner15 ops) :=
     passAllInner15_preserves_noIfOp ops hNoIf
-  show noIfOp (applyEqualVerifyFuse (applyCheckSigVerifyFuse
-        (applyNumEqualVerifyFuse (applyZeroNumEqual (passAllInner15 ops)))))
+  rw [peepholePassAllFlat_eq_outer_inner]
   exact applyEqualVerifyFuse_preserves_noIfOp _
     (applyCheckSigVerifyFuse_preserves_noIfOp _
       (applyNumEqualVerifyFuse_preserves_noIfOp _
@@ -10512,7 +10647,13 @@ theorem peepholePassAll_runOps_eq_of_flat_sound
   rw [peepholePassAll_eq_flat_of_noIfOp ops hNoIf]
   exact hFlatSound
 
-set_option maxHeartbeats 800000 in
+-- N-457: budget raised from 800000. Measured: a defeq check between two
+-- closed `noIfOp (<chain> ops)` terms costs roughly 2x per chain rule
+-- (about 15s / 31s / 161s at 16 / 17 / 20 rules), and the 20th rule pushed
+-- this theorem past the old budget. The linter is off because it timed out
+-- on the same terms (as on `peepholePassAllFlat_sound`).
+set_option maxHeartbeats 4000000 in
+set_option linter.constructorNameAsVariable false in
 /-- `noIfOp` preservation through `peepholePassAll`. For `noIfOp` inputs
 the `.ifOp`-descent preprocessor is the identity, so this reduces to
 `peepholePassAllFlat_preserves_noIfOp`. -/
@@ -11832,6 +11973,22 @@ private theorem applyCheckSigVerifyFuse_eq_self_of_arithEmit :
             simp [applyCheckSigVerifyFuse, ih hRest]
       | _ => exact absurd hOp (by simp only [isArithEmitOp]; decide)
 
+private theorem applyCheckMultiSigVerifyFuse_eq_self_of_arithEmit :
+    ∀ (ops : List StackOp), arithEmitNoFuse ops = true →
+      applyCheckMultiSigVerifyFuse ops = ops := by
+  intro ops
+  induction ops with
+  | nil => intro _; rfl
+  | cons op rest ih =>
+      intro h
+      obtain ⟨hOp, hRest⟩ := arithEmitNoFuse_cons_tail op rest h
+      cases op with
+      | swap => simp only [applyCheckMultiSigVerifyFuse, ih hRest]
+      | opcode c =>
+          rcases arithEmitOpcode_cases c hOp with hc | hc | hc | hc <;> subst hc <;>
+            simp [applyCheckMultiSigVerifyFuse, ih hRest]
+      | _ => exact absurd hOp (by simp only [isArithEmitOp]; decide)
+
 private theorem applyNumEqualVerifyFuse_eq_self_of_arithEmit :
     ∀ (ops : List StackOp), arithEmitNoFuse ops = true → applyNumEqualVerifyFuse ops = ops := by
   intro ops
@@ -12097,6 +12254,7 @@ theorem peepholePassAllFlat_eq_self_of_arithEmit
       applyDoubleOver_eq_self_of_arithEmit ops h,
       applyDoubleDrop_eq_self_of_arithEmit ops h,
       applyDoubleSha256_eq_self_of_arithEmit ops h,
+      applyCheckMultiSigVerifyFuse_eq_self_of_arithEmit ops h,
       applyZeroNumEqual_eq_self_of_arithEmit ops h,
       applyNumEqualVerifyFuse_eq_self_of_arithEmit ops h,
       applyCheckSigVerifyFuse_eq_self_of_arithEmit ops h,
@@ -12155,6 +12313,7 @@ private theorem peepholePassAllFlat_singleton_ifOp
     applyPushPushAdd, applyPushPushSub, applyPushPushMul, applyAddZero,
     applySubZero, applyOneAdd, applyOneSub, applyDoubleNegate,
     applyDoubleNot, applyDoubleOver, applyDoubleDrop, applyDoubleSha256,
+    applyCheckMultiSigVerifyFuse,
     applyZeroNumEqual, applyNumEqualVerifyFuse, applyCheckSigVerifyFuse,
     applyEqualVerifyFuse]
 
@@ -12531,6 +12690,9 @@ theorem peepholePassAllFlat_eq_self_of_mathByteEmit
       mathByteFlatRule_id applyDoubleSha256 rfl
         (by intro c rest hc; rcases hc with h|h|h|h <;> subst h <;> rfl)
         (dupId applyDoubleSha256 (by intro rest; rfl)) ops h,
+      mathByteFlatRule_id applyCheckMultiSigVerifyFuse rfl
+        (by intro c rest hc; rcases hc with h|h|h|h <;> subst h <;> rfl)
+        (dupId applyCheckMultiSigVerifyFuse (by intro rest; rfl)) ops h,
       mathByteFlatRule_id applyZeroNumEqual rfl
         (by intro c rest _; rfl) (dupId applyZeroNumEqual (by intro rest; rfl)) ops h,
       mathByteFlatRule_id applyNumEqualVerifyFuse rfl

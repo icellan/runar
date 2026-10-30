@@ -359,6 +359,29 @@ private def isUnknownOpcodeFixtureError : Except CompileError Unit → Bool
 #guard isUnknownOpcodeFixtureError
   (validateStackOp "m" (.opcode "OP_NOT_A_REAL_OPCODE"))
 
+/-- N-457: hex of one method body after the EXECUTED peephole chain
+(`peepholeProgram`, the one `hoistStack` / `compileSafe` /
+`compileHexSafe` run) and `Emit.emitFast`. -/
+private def peepholeEmitHexForGuard (ops : List StackOp) : String :=
+  Emit.bytesToHex (Emit.emitFast (peepholeProgram
+    { contractName := "T", methods := [{ name := "m", ops := ops }] }))
+
+/- N-457: the executed peephole pass fuses `[OP_CHECKMULTISIG, OP_VERIFY]`
+into `OP_CHECKMULTISIGVERIFY` (0xaf), as `peephole.ts` and all seven
+compiler tiers do. The op list is the tail of the `multisig-verify-fused`
+conformance fixture (`assert(checkMultiSig(..)); return x > 0`), whose
+golden ends `…53af00a0`; before the fix Lean emitted `…53ae6900a0`.
+Proves: the rule is wired into the pass `compileHexSafe` executes, and a
+bare `OP_CHECKMULTISIG` with no `OP_VERIFY` after it is left alone.
+Does not prove: soundness (that is `checkMultiSigVerifyFuse_pass_sound`,
+now composed into `passAllInner15_sound`), nor byte equality on any
+whole fixture (that is `pipelineGolden`). -/
+#guard peepholeEmitHexForGuard
+  [.opcode "OP_CHECKMULTISIG", .opcode "OP_VERIFY",
+   .push (.bigint 0), .opcode "OP_GREATERTHAN"] == "af00a0"
+
+#guard peepholeEmitHexForGuard [.opcode "OP_CHECKMULTISIG"] == "ae"
+
 /-! ## Shape-preservation theorems -/
 
 theorem peepholeProgram_preserves_contract_name (p : StackProgram) :
@@ -5941,7 +5964,7 @@ theorem peepholeMethodOps_single_opcode (op : String) :
   have hFlat : Peephole.peepholePassAllFlat [StackOp.opcode op] = [StackOp.opcode op] := by
     simp [Peephole.peepholePassAllFlat, Peephole.applyEqualVerifyFuse,
       Peephole.applyCheckSigVerifyFuse, Peephole.applyNumEqualVerifyFuse,
-      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256, Peephole.applyDoubleDrop,
+      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop,
       Peephole.applyDoubleOver, Peephole.applyDoubleNot, Peephole.applyDoubleNegate,
       Peephole.applyOneSub, Peephole.applyOneAdd, Peephole.applySubZero,
       Peephole.applyAddZero, Peephole.applyPushPushMul, Peephole.applyPushPushSub,
@@ -6314,7 +6337,7 @@ theorem peepholeMethodOps_hashAssert_sha256 :
     simp +decide [AgreesHashCall.hashAssertOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6346,7 +6369,7 @@ theorem peepholeMethodOps_hashAssert_hash160 :
     simp +decide [AgreesHashCall.hashAssertOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6611,7 +6634,7 @@ theorem peepholeMethodOps_hashChain_sha256_hash160 :
     (by simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6632,7 +6655,7 @@ theorem peepholeMethodOps_hashChain_hash160_sha256 :
     (by simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6653,7 +6676,7 @@ theorem peepholeMethodOps_hashChain_hash160_hash160 :
     (by simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6686,7 +6709,7 @@ theorem peepholeMethodOps_hashChain_sha256_sha256 :
     simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -7137,7 +7160,7 @@ theorem peepholeMethodOps_statefulPrologue :
     simp +decide [AgreesStateful.statefulPrologueOps,
       Peephole.peepholePassAllFlat, Peephole.applyEqualVerifyFuse,
       Peephole.applyCheckSigVerifyFuse, Peephole.applyNumEqualVerifyFuse,
-      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256,
+      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse,
       Peephole.applyDoubleDrop, Peephole.applyDoubleOver, Peephole.applyDoubleNot,
       Peephole.applyDoubleNegate, Peephole.applyOneSub, Peephole.applyOneAdd,
       Peephole.applySubZero, Peephole.applyAddZero, Peephole.applyPushPushMul,
@@ -8997,7 +9020,7 @@ theorem peepholeMethodOps_catOps :
     simp +decide [AgreesCat.catOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
