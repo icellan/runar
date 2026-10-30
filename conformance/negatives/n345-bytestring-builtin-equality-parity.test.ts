@@ -80,9 +80,13 @@ const CASES: Case[] = [
   },
   // Fold-ON already folds this to false in every tier; fold-OFF TS and Rust
   // compiled OP_NUMEQUAL, which is TRUE on-chain for 0100 vs 01.
+  // N-443 re-stamp: N-138 prunes the orphaned literal pushes, so fold-ON went
+  // from 0201005100777777777777 to 0077777777 (OP_0 then four OP_NIPs: always
+  // rejects, like the old script; 96 input tuples executed on @bsv/sdk Spend
+  // with no verdict difference).
   {
     name: 'TbsLit', body: "assert(toByteString('0100') === toByteString('01'));",
-    hex: '020100518777777777', foldOn: '0201005100777777777777',
+    hex: '020100518777777777', foldOn: '0077777777',
   },
   // Controls: already OP_EQUAL in every tier.
   { name: 'TbsVsParam', body: 'assert(toByteString(a) === b);', hex: '537a537a877777' },

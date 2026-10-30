@@ -46,9 +46,13 @@ class ${name} extends SmartContract {
 }
 `;
 
-// push 0xaa, push 0xaa, <folded bool> OP_IF ... (the dead pushes are NIPped).
-const FOLDED_TRUE = '01aa01aa51637b519c7777677b529c777768';
-const FOLDED_FALSE = '01aa01aa00637b519c7777677b529c777768';
+// <folded bool> OP_IF ... : N-138 prunes the two literal pushes the fold
+// orphans (they used to be pushed, then NIPped). Re-stamped from
+// 01aa01aa51637b519c7777677b529c777768 / 01aa01aa00637b519c7777677b529c777768
+// after executing old, new and fold-OFF scripts on the @bsv/sdk Spend engine
+// for x in -1..4: identical accept/reject on every input (N-443).
+const FOLDED_TRUE = '5163519c67529c68';
+const FOLDED_FALSE = '0063519c67529c68';
 
 const CASES: Array<{ name: string; cond: string; foldOn: string; foldOff: string }> = [
   { name: 'MixedEq', cond: "'aa' === 'AA'", foldOn: FOLDED_TRUE, foldOff: '01aa01aa8763519c67529c68' },
