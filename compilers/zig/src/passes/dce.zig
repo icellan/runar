@@ -98,7 +98,30 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
     return eliminateDeadBindingsImpl(allocator, body, false);
 }
 
+/// N-138: `eliminateDeadBindingsInMethod` restricted to bindings whose name is
+/// in `candidates`; every other binding is kept as if live. The constant folder
+/// uses it to drop the operand bindings its own rewrites orphaned (the `1`
+/// under a folded `-1n`) without also deleting bindings that were already dead
+/// before folding, so fold-ON output does not move for a program the folder did
+/// not change. Caller must free the returned slice; the input body is NOT freed.
+pub fn eliminateDeadBindingsAmongInMethod(
+    allocator: Allocator,
+    method: types.ANFMethod,
+    candidates: *const std.StringHashMap(void),
+) ![]types.ANFBinding {
+    return eliminateDeadBindingsFiltered(allocator, method.body, returnsLastBinding(method), candidates);
+}
+
 fn eliminateDeadBindingsImpl(allocator: Allocator, body: []types.ANFBinding, keep_last: bool) ![]types.ANFBinding {
+    return eliminateDeadBindingsFiltered(allocator, body, keep_last, null);
+}
+
+fn eliminateDeadBindingsFiltered(
+    allocator: Allocator,
+    body: []types.ANFBinding,
+    keep_last: bool,
+    candidates: ?*const std.StringHashMap(void),
+) ![]types.ANFBinding {
     var current = body;
     var owns_current = false;
     var changed = true;
@@ -135,7 +158,8 @@ fn eliminateDeadBindingsImpl(allocator: Allocator, body: []types.ANFBinding, kee
         for (current, 0..) |binding, i| {
             const live = try isReferencedExternally(allocator, binding, &own_refs[i], &ref_count);
             const root = keep_last and i == current.len - 1;
-            if (root or live or hasSideEffect(binding.value)) {
+            const protected = if (candidates) |c| !c.contains(binding.name) else false;
+            if (root or protected or live or hasSideEffect(binding.value)) {
                 try filtered.append(allocator, binding);
             } else {
                 changed = true;
@@ -199,7 +223,7 @@ fn isReferencedExternally(
 }
 
 /// Walk an ANFValue and collect all binding name references.
-fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
+pub fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
     switch (v) {
         // N-356: a reassigned parameter is bound under its own name and read
         // back as `load_param <name>`; count the read so DCE keeps the

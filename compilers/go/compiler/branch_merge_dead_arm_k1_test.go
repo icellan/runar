@@ -125,15 +125,15 @@ func TestBranchMergeK1AndDeadArm_SevenTierScript(t *testing.T) {
 	}{
 		{"dead-arm-k2/fold-on", deadArmK2Source, false,
 			// N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
-			"00014e01ce006351547a6e7b757b7567527978557a75687b75537a757b7c7ba177"},
+			"0001ce006351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"dead-arm-k2/fold-off", deadArmK2Source, true,
 			"00014e8f006351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"self-read-both-arms/fold-on", selfReadBothArmsSource, false,
-			"000340420f0340428f7b7ca069517b00a06351787c9376776751787c947677687c750340420f0340428f7b7ca07777"},
+			"000340428fa069517c00a06351787c9376776751787c947677687c750340428fa0"},
 		{"self-read-both-arms/fold-off", selfReadBothArmsSource, true,
 			"000340420f8fa069517c00a06351787c9376776751787c947677687c750340420f8fa0"},
 		{"const-condition-k1/fold-on", constConditionK1Source, false,
-			"000340420f0340428f7b7ca06951516352767767537677687c750340420f0340428f7b7ca0777777"},
+			"000340428fa06951516352767767537677687c750340428fa077"},
 		{"const-condition-k1/fold-off", constConditionK1Source, true,
 			"000340420f8fa06951516352767767537677687c750340420f8fa077"},
 	}
@@ -206,19 +206,19 @@ func TestBranchMergeK1AndDeadArm_ConstAndRuntimeConditionsAgree(t *testing.T) {
 		foldOffHex string
 	}{
 		{"if (false) {",
-			"00014e01ce006351547a6e7b757b7567527978557a75687b75537a757b7c7ba177",
+			"0001ce006351537a6e7b757b75676e547a75687b757b757ca1",
 			"00014e8f006351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"if (true) {",
-			"00014e01ce516351547a6e7b757b7567527978557a75687b75537a757b7c7ba177",
+			"0001ce516351537a6e7b757b75676e547a75687b757b757ca1",
 			"00014e8f516351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"if (p > 0n) {",
-			"00014e01ce537900a06351547a6e7b757b7567527978557a75687b75537a757b7c7ba177",
+			"0001ce527900a06351537a6e7b757b75676e547a75687b757b757ca1",
 			"00014e8f527900a06351537a6e7b757b75676e547a75687b757b757ca1"},
 	}
 
 	// The shared tail every case above must end with: the condition-push
 	// prefix is the only part allowed to vary. Starts at "63" (OP_IF).
-	const foldOnSuffix = "6351547a6e7b757b7567527978557a75687b75537a757b7c7ba177"
+	const foldOnSuffix = "6351537a6e7b757b75676e547a75687b757b757ca1"
 	const foldOffSuffix = "6351537a6e7b757b75676e547a75687b757b757ca1"
 
 	for _, tc := range cases {

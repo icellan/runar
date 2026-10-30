@@ -97,7 +97,14 @@ module RunarCompiler
       #
       # Uses iterative elimination to handle transitive dead code
       # (e.g., if A references B and A is dead, B may also become dead).
-      def self.eliminate_dead_bindings(method)
+      #
+      # N-138: when +candidates+ (a Set of names) is given, only a binding
+      # whose name is in it may be removed; every other binding is kept as if
+      # live. The constant folder uses this to drop the operand bindings its
+      # own rewrites orphaned (the +1+ under a folded +-1n+) without also
+      # deleting bindings that were already dead before folding, so fold-ON
+      # output does not move for a program the folder did not change.
+      def self.eliminate_dead_bindings(method, candidates = nil)
         keep_last = returns_last_binding?(method)
         current = method.body
         changed = true
@@ -115,6 +122,7 @@ module RunarCompiler
           filtered = []
           current.each_with_index do |binding, i|
             if (keep_last && i == current.length - 1) ||
+               (!candidates.nil? && !candidates.include?(binding.name)) ||
                referenced_externally?(binding, own_refs[i], ref_count) ||
                has_side_effect?(binding.value)
               filtered << binding

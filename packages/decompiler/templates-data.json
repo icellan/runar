@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-25T14:10:03.985Z",
+  "generatedAt": "2026-10-30T06:46:17.589Z",
   "compilerVersion": "0.5.0",
   "entries": [
     {
@@ -243,10 +243,10 @@
       "bytes": 27
     },
     {
-      "hex": "05ffffffff0005ffffffff000901000000feffffff0008ffffffffffffff7f51090000000000000080000500000000010500000000010900000000000000000108ffffffffffffff7f08ffffffffffffff7f100100000000000000ffffffffffffff3f597a577a93547a937c93597a93009c7777777777777777",
+      "hex": "0901000000feffffff000900000000000000800009000000000000000001100100000000000000ffffffffffffff3f537a537a937b937c937c93009c",
       "source": "import { SmartContract, assert } from 'runar-lang';\n\n/**\n * IntegerBoundary -- pins the seven tiers to one arbitrary-precision integer\n * domain (issue #162).\n *\n * Every literal here fits a signed 64-bit slot, and every folded RESULT\n * escapes one:\n *\n *   p  (2^32-1)^2   = 18446744065119617025          just past 2^63\n *   q  2^63         = 9223372036854775808           first value past a signed i64\n *   r  2^64         = 18446744073709551616          past an unsigned one too\n *   s  (2^63-1)^2   = 85070591730234615847396907784232501249   126 bits\n *\n * That shape is deliberate. A tier can parse every literal in this file with\n * a 64-bit integer type and still get the answer wrong, because the defect\n * lives in the constant folder and the load-const emitter rather than in the\n * lexer. The Zig tier used to abort outright on `s` and silently emit a\n * wrapped value for products past 2^128.\n *\n * Keeping the literals 64-bit-expressible is also what lets this fixture\n * exist in all nine formats: the Java surface builds bigints through\n * `Bigint.of(long)`, so it cannot write 2^64 directly -- but it can fold its\n * way there.\n */\nclass IntegerBoundary extends SmartContract {\n  readonly target: bigint;\n\n  constructor(target: bigint) {\n    super(target);\n    this.target = target;\n  }\n\n  public verify(delta: bigint): void {\n    const p: bigint = 4294967295n * 4294967295n;\n    const q: bigint = 9223372036854775807n + 1n;\n    const r: bigint = 4294967296n * 4294967296n;\n    const s: bigint = 9223372036854775807n * 9223372036854775807n;\n    assert(p + q + r + s + delta === this.target);\n  }\n}\n",
       "origin": "examples/ts/integer-boundary/IntegerBoundary.runar.ts",
-      "bytes": 122
+      "bytes": 60
     },
     {
       "hex": "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781788258947f77547f7501007e8100a169768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f758777",

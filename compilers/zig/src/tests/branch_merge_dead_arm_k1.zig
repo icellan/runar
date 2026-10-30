@@ -115,7 +115,7 @@ const CASES = [_]Case{
         .source = DEAD_ARM_K2,
         .disable_constant_folding = false,
         // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
-        .want = "00014e01ce006351547a6e7b757b7567527978557a75687b75537a757b7c7ba177",
+        .want = "0001ce006351537a6e7b757b75676e547a75687b757b757ca1",
     },
     .{
         .label = "dead-arm-k2/fold-off",
@@ -127,7 +127,7 @@ const CASES = [_]Case{
         .label = "self-read-both-arms/fold-on",
         .source = SELF_READ_BOTH_ARMS,
         .disable_constant_folding = false,
-        .want = "000340420f0340428f7b7ca069517b00a06351787c9376776751787c947677687c750340420f0340428f7b7ca07777",
+        .want = "000340428fa069517c00a06351787c9376776751787c947677687c750340428fa0",
     },
     .{
         .label = "self-read-both-arms/fold-off",
@@ -139,7 +139,7 @@ const CASES = [_]Case{
         .label = "const-condition-k1/fold-on",
         .source = CONST_CONDITION_K1,
         .disable_constant_folding = false,
-        .want = "000340420f0340428f7b7ca06951516352767767537677687c750340420f0340428f7b7ca0777777",
+        .want = "000340428fa06951516352767767537677687c750340428fa077",
     },
     .{
         .label = "const-condition-k1/fold-off",

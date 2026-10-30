@@ -113,7 +113,25 @@ public final class Dce {
         return eliminateDead(method.body(), keepLast);
     }
 
+    /**
+     * N-138: {@link #eliminateDead(AnfMethod)} restricted to bindings whose
+     * name is in {@code candidates}; every other binding is kept as if live.
+     * The constant folder uses it to drop the operand bindings its own
+     * rewrites orphaned (the {@code 1} under a folded {@code -1n}) without
+     * also deleting bindings that were already dead before folding, so
+     * fold-ON output does not move for a program the folder did not change.
+     */
+    public static List<AnfBinding> eliminateDeadAmong(AnfMethod method, Set<String> candidates) {
+        boolean keepLast = !method.isPublic() && !"constructor".equals(method.name());
+        return eliminateDead(method.body(), keepLast, candidates);
+    }
+
     private static List<AnfBinding> eliminateDead(List<AnfBinding> body, boolean keepLast) {
+        return eliminateDead(body, keepLast, null);
+    }
+
+    private static List<AnfBinding> eliminateDead(
+        List<AnfBinding> body, boolean keepLast, Set<String> candidates) {
         List<AnfBinding> current = body;
         while (true) {
             List<Set<String>> ownRefs = new ArrayList<>(current.size());
@@ -130,6 +148,7 @@ public final class Dce {
             for (int i = 0; i < current.size(); i++) {
                 AnfBinding b = current.get(i);
                 if ((keepLast && i == current.size() - 1)
+                    || (candidates != null && !candidates.contains(b.name()))
                     || isReferencedExternally(b, ownRefs.get(i), refCount)
                     || hasSideEffect(b.value())) {
                     kept.add(b);

@@ -136,7 +136,9 @@ export class BranchResidue extends SmartContract {
 }
 `,
   foldOff: '01425198021623857c53a063015967766877012d8f0093011ca177',
-  foldOn: '01425198021623857c53a06301615801597b757767766877012d01ad0093011ca17777',
+  // N-138 re-stamp: fold-ON dropped the orphaned `45` push and its trailing OP_DROP
+  // (fold-OFF is unchanged and keeps pinning the drain).
+  foldOn: '01425198021623857c53a06301615801597b75776776687701ad0093011ca177',
 };
 
 // ---------------------------------------------------------------------------
@@ -229,7 +231,7 @@ export class SinkDistance extends StatefulSmartContract {
   // Re-measured against the same mutant: fold-OFF 1494 / fold-ON 1510 hex
   // chars, different digests — still killed.
   foldOff: 'e09d8fba20bc9d24cd2cbe88250816061be18623a135e56bc7e5ac559801310a',
-  foldOn: '5a82cfcf45cc98f4857c80ff7345e5ae1ccb421fa73aea2a3d147a904368a658',
+  foldOn: '968674def6e9d75ba10e9fbabf2d9622d1b65ae2fb0720aafbe289964705563f',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -253,7 +255,9 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
         // F-024 (R14): +64 hex chars in both modes for the value check.
         // N-216: -4 hex chars in both modes (two reconcile rolls fold to OP_ROT).
         expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1474);
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1494);
+        // N-138 (2026-10-30): fold-ON no longer carries the dead operand pushes
+        // the folder orphaned (-22 hex chars); fold-OFF is unchanged.
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1472);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

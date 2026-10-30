@@ -207,8 +207,8 @@ def _expand_fixed_arrays(contract: Any) -> Any:
 
 def _fold_constants(program: ANFProgram) -> ANFProgram:
     """Constant folding: evaluate compile-time-known expressions (Pass 4.25)."""
-    from runar_compiler.frontend.constant_fold import fold_constants
-    return fold_constants(program)
+    from runar_compiler.frontend.constant_fold import fold_constants_and_prune
+    return fold_constants_and_prune(program)
 
 
 def _optimize_ec(program: ANFProgram) -> ANFProgram:

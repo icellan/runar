@@ -504,7 +504,7 @@ pub fn compile_from_source_str_with_options(
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
         anf_program = guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&anf_program)
+            frontend::constant_fold::fold_constants_and_prune(&anf_program)
         })
         .map_err(|e| e.message)?;
     }
@@ -639,7 +639,7 @@ pub fn compile_source_str_to_ir_collecting_warnings(
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
         anf_program = guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&anf_program)
+            frontend::constant_fold::fold_constants_and_prune(&anf_program)
         })
         .map_err(|e| e.message)?;
     }
@@ -1035,7 +1035,7 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     // Pass 4.25: Constant folding (optional, in case we receive unoptimized ANF from IR)
     if !opts.disable_constant_folding {
         program = guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&program)
+            frontend::constant_fold::fold_constants_and_prune(&program)
         })
         .map_err(|e| e.message)?;
     }
@@ -1250,7 +1250,7 @@ pub fn compile_from_source_str_with_result(
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
         anf_program = match guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&anf_program)
+            frontend::constant_fold::fold_constants_and_prune(&anf_program)
         }) {
             Ok(p) => p,
             Err(e) => {

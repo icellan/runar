@@ -57,6 +57,20 @@ func EliminateDeadCode(program *ir.ANFProgram) *ir.ANFProgram {
 // EliminateDeadBindings removes bindings that are not referenced by any other
 // binding, iteratively until no more can be removed.
 func EliminateDeadBindings(method *ir.ANFMethod) {
+	eliminateDeadBindingsFiltered(method, nil)
+}
+
+// EliminateDeadBindingsAmong is EliminateDeadBindings restricted to bindings
+// whose Name is in candidates: every other binding is kept as if live (N-138).
+// The constant folder uses it to drop the operand bindings its own rewrites
+// orphaned (the `1` under a folded `-1n`) without also deleting bindings that
+// were already dead before folding, so fold-ON output does not move for a
+// program the folder did not change.
+func EliminateDeadBindingsAmong(method *ir.ANFMethod, candidates map[string]bool) {
+	eliminateDeadBindingsFiltered(method, candidates)
+}
+
+func eliminateDeadBindingsFiltered(method *ir.ANFMethod, candidates map[string]bool) {
 	keepLast := returnsLastBinding(method)
 	for {
 		ownRefs := make([]map[string]bool, len(method.Body))
@@ -73,6 +87,7 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 		removed := false
 		for i, b := range method.Body {
 			if (keepLast && i == len(method.Body)-1) ||
+				(candidates != nil && !candidates[b.Name]) ||
 				isReferencedExternally(&method.Body[i], ownRefs[i], refCount) || HasSideEffect(&b.Value) {
 				kept = append(kept, b)
 			} else {

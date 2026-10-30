@@ -14,6 +14,7 @@ import type {
   ANFValue,
 } from '../ir/index.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
+import { collectRefsFromValue, eliminateDeadBindingsAmong } from './dce.js';
 
 // ---------------------------------------------------------------------------
 // Constant value type
@@ -545,6 +546,26 @@ export function foldConstants(program: ANFProgram): ANFProgram {
     ...program,
     methods: foldedMethods,
   };
+}
+
+/**
+ * N-138: `foldConstants`, then removal of the operand bindings the fold orphaned.
+ *
+ * `foldConstants` rewrites `t1 = -t0` to the constant `t1 = -1` but leaves
+ * `t0 = 1` in place, and stack lowering then pushes it and drops it again
+ * (`51 4f 7b 7c a0 77` for `a > -1n`). Only names that some binding referenced
+ * BEFORE folding are removal candidates, so a binding that was already dead is
+ * left exactly as it was and output for a program the fold did not touch is
+ * unchanged. `foldConstants` itself stays a pure rewrite (the IR path relies
+ * on that, see compileFromANF).
+ */
+export function foldConstantsAndPrune(program: ANFProgram): ANFProgram {
+  const candidates = program.methods.map((m) => {
+    const refs = new Set<string>();
+    for (const b of m.body) collectRefsFromValue(b.value, refs);
+    return refs;
+  });
+  return eliminateDeadBindingsAmong(foldConstants(program), candidates);
 }
 
 // ---------------------------------------------------------------------------

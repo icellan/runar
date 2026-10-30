@@ -107,7 +107,7 @@ func CompileContract(sourcePath string, constructorArgs map[string]interface{}) 
 // here (parse → LowerToANF), never from pre-lowered `--ir` input, so folding
 // is unconditionally correct — matching the compiler's source path.
 func optimizeANF(program *ir.ANFProgram) *ir.ANFProgram {
-	program = frontend.FoldConstants(program)
+	program = frontend.FoldConstantsAndPrune(program)
 	program = frontend.OptimizeEC(program)
 	return program
 }

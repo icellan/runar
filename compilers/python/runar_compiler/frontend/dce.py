@@ -91,11 +91,20 @@ def eliminate_dead_code(program: ANFProgram) -> ANFProgram:
     return program
 
 
-def eliminate_dead_bindings(method: ANFMethod) -> None:
+def eliminate_dead_bindings(
+    method: ANFMethod, candidates: set[str] | None = None,
+) -> None:
     """Remove bindings whose results are never referenced.
 
     Uses iterative elimination to handle transitive dead code
     (e.g., if A references B and A is dead, B may also become dead).
+
+    N-138: when ``candidates`` is given, only a binding whose name is in it may
+    be removed; every other binding is kept as if live. The constant folder uses
+    this to drop the operand bindings its own rewrites orphaned (the ``1``
+    under a folded ``-1n``) without also deleting bindings that were already
+    dead before folding, so fold-ON output does not move for a program the
+    folder did not change.
     """
     keep_last = _returns_last_binding(method)
     current = method.body
@@ -116,6 +125,7 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
         for i, binding in enumerate(current):
             if (
                 (keep_last and i == len(current) - 1)
+                or (candidates is not None and binding.name not in candidates)
                 or is_referenced_externally(binding, own_refs[i], ref_count)
                 or has_side_effect(binding.value)
             ):

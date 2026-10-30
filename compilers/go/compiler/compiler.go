@@ -290,7 +290,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
-		program = frontend.FoldConstants(program)
+		program = frontend.FoldConstantsAndPrune(program)
 	}
 
 	// EC optimization — algebraic simplification of EC calls.
@@ -755,7 +755,7 @@ func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptio
 	// the top of this function.
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
-		program = frontend.FoldConstants(program)
+		program = frontend.FoldConstantsAndPrune(program)
 	}
 
 	if !o.DisableEcOptimizer {
@@ -929,7 +929,7 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
-		result.ANF = frontend.FoldConstants(result.ANF)
+		result.ANF = frontend.FoldConstantsAndPrune(result.ANF)
 	}
 
 	// Pass 4.5: EC optimization

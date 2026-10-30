@@ -610,6 +610,31 @@ pub fn fold_constants(program: &ANFProgram) -> ANFProgram {
     }
 }
 
+/// `fold_constants` followed by removal of the operand bindings the fold
+/// orphaned (N-138).
+///
+/// `fold_constants` rewrites `t1 = -t0` to the constant `t1 = -1` but leaves
+/// `t0 = 1` in place, and stack lowering then pushes it and drops it again
+/// (`51 4f 7b 7c a0 77` for `a > -1n`). Only names that some binding referenced
+/// BEFORE folding are removal candidates, so a binding that was already dead is
+/// left exactly as it was. `fold_constants` itself stays a pure rewrite.
+pub fn fold_constants_and_prune(program: &ANFProgram) -> ANFProgram {
+    let mut folded = fold_constants(program);
+    folded.methods = program
+        .methods
+        .iter()
+        .zip(folded.methods.iter())
+        .map(|(before, after)| {
+            let mut candidates = std::collections::HashSet::new();
+            for b in &before.body {
+                super::dce::collect_refs_from_value(&b.value, &mut candidates);
+            }
+            super::dce::eliminate_dead_bindings_among(after, &candidates)
+        })
+        .collect();
+    folded
+}
+
 /// Apply constant folding without dead binding elimination.
 /// Public for testing.
 pub fn fold_constants_only(program: &ANFProgram) -> ANFProgram {

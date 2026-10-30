@@ -62,6 +62,26 @@ pub fn eliminate_dead_code(program: ANFProgram) -> ANFProgram {
 
 /// Eliminate dead (unreferenced, side-effect-free) bindings, iterating to fixed point.
 pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
+    eliminate_dead_bindings_filtered(method, None)
+}
+
+/// `eliminate_dead_bindings_method` restricted to bindings whose name is in
+/// `candidates`: every other binding is kept as if live (N-138). The constant
+/// folder uses it to drop the operand bindings its own rewrites orphaned (the
+/// `1` under a folded `-1n`) without also deleting bindings that were already
+/// dead before folding, so fold-ON output does not move for a program the
+/// folder did not change.
+pub fn eliminate_dead_bindings_among(
+    method: &ANFMethod,
+    candidates: &HashSet<String>,
+) -> ANFMethod {
+    eliminate_dead_bindings_filtered(method, Some(candidates))
+}
+
+fn eliminate_dead_bindings_filtered(
+    method: &ANFMethod,
+    candidates: Option<&HashSet<String>>,
+) -> ANFMethod {
     let keep_last = returns_last_binding(method);
     let mut body = method.body.clone();
     loop {
@@ -84,6 +104,7 @@ pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
         let mut index = 0usize;
         body.retain(|b| {
             let keep = (keep_last && index + 1 == before_len)
+                || candidates.map_or(false, |c| !c.contains(&b.name))
                 || is_referenced_externally(b, &own_refs[index], &ref_count)
                 || has_side_effect(&b.value);
             index += 1;

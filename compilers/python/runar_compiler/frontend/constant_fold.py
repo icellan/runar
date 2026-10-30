@@ -611,6 +611,28 @@ def _fold_method(method: ANFMethod) -> ANFMethod:
     )
 
 
+def fold_constants_and_prune(program: ANFProgram) -> ANFProgram:
+    """``fold_constants`` followed by removal of the operand bindings the fold
+    orphaned (N-138).
+
+    ``fold_constants`` rewrites ``t1 = -t0`` to the constant ``t1 = -1`` but
+    leaves ``t0 = 1`` in place, and stack lowering then pushes it and drops it
+    again (``51 4f 7b 7c a0 77`` for ``a > -1n``). Only names that some binding
+    referenced BEFORE folding are removal candidates, so a binding that was
+    already dead is left exactly as it was. ``fold_constants`` itself stays a
+    pure rewrite.
+    """
+    from runar_compiler.frontend.dce import collect_refs, eliminate_dead_bindings
+
+    folded = fold_constants(program)
+    for before, after in zip(program.methods, folded.methods):
+        candidates: set[str] = set()
+        for binding in before.body:
+            collect_refs(binding.value, candidates)
+        eliminate_dead_bindings(after, candidates)
+    return folded
+
+
 def fold_constants(program: ANFProgram) -> ANFProgram:
     """Apply constant folding to an ANF program.
 

@@ -122,7 +122,7 @@ import { lowerToStack, bakedPropPushOrigin } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
 import { optimizeEC } from './optimizer/anf-ec.js';
-import { foldConstants } from './optimizer/constant-fold.js';
+import { foldConstantsAndPrune } from './optimizer/constant-fold.js';
 import { eliminateDeadBindings } from './optimizer/dce.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
@@ -459,7 +459,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   // Pass 4.25: Constant folding (on by default)
   if (!opts.disableConstantFolding) {
     onProgress?.('Constant folding', 45);
-    anf = foldConstants(anf);
+    anf = foldConstantsAndPrune(anf);
   }
 
   // Pass 4.5: ANF EC Optimizer (always-on by default; opt-out for strict-roundtrip).

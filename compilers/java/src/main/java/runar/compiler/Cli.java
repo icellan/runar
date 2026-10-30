@@ -719,7 +719,7 @@ public final class Cli {
      */
     public static AnfProgram optimizeAnf(AnfProgram anf, boolean disableConstantFolding) {
         if (!disableConstantFolding) {
-            anf = ConstantFold.run(anf);
+            anf = ConstantFold.runAndPrune(anf);
         }
         // AnfOptimize delegates internally to {@link Dce#eliminateDead} for
         // dead-binding cleanup, but only as part of the EC rewrite: no path

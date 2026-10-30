@@ -334,7 +334,7 @@ module RunarCompiler
   # Constant folding: evaluate compile-time-known expressions (Pass 4.25).
   def self._fold_constants(program)
     require_relative "frontend/constant_fold"
-    Frontend::ConstantFold.fold_constants(program)
+    Frontend::ConstantFold.fold_constants_and_prune(program)
   end
   private_class_method :_fold_constants
 

@@ -85,6 +85,29 @@ function eliminateDeadInMethod(method: ANFMethod): ANFMethod {
 }
 
 /**
+ * N-138: dead-binding elimination restricted to `candidates[i]` for method `i`.
+ *
+ * Only a binding whose name is in the candidate set may be removed; everything
+ * else is kept as if live. The constant folder uses it to drop the operand
+ * bindings its own rewrites orphaned (the `1` under a folded `-1n`) without
+ * also deleting bindings that were already dead before folding — those are the
+ * unconditional-DCE question N-140 left open, and fold-ON output must not move
+ * for programs the folder did not change.
+ */
+export function eliminateDeadBindingsAmong(
+  program: ANFProgram,
+  candidates: ReadonlyArray<ReadonlySet<string>>,
+): ANFProgram {
+  return {
+    ...program,
+    methods: program.methods.map((method, i) => ({
+      ...method,
+      body: filterLiveBindings(method.body, returnsLastBinding(method), candidates[i]),
+    })),
+  };
+}
+
+/**
  * F-108: a private method's LAST binding is its return value — stack lowering
  * inlines the helper at each `method_call` and takes that binding as the
  * call's result — so it is a liveness root even though nothing inside the
@@ -283,7 +306,11 @@ function isReferencedExternally(
   return false;
 }
 
-function filterLiveBindings(bindings: ANFBinding[], keepLast: boolean): ANFBinding[] {
+function filterLiveBindings(
+  bindings: ANFBinding[],
+  keepLast: boolean,
+  candidates?: ReadonlySet<string>,
+): ANFBinding[] {
   // Iterate to a fixed point so transitively dead bindings are removed too.
   let current = bindings;
   let changed = true;
@@ -305,6 +332,7 @@ function filterLiveBindings(bindings: ANFBinding[], keepLast: boolean): ANFBindi
       const binding = current[i]!;
       if (
         (keepLast && i === current.length - 1) ||
+        (candidates !== undefined && !candidates.has(binding.name)) ||
         isReferencedExternally(binding, ownRefs[i]!, refCount) ||
         hasSideEffect(binding.value)
       ) {

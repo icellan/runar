@@ -68,6 +68,31 @@ public final class ConstantFold {
         return program.withMethods(folded);
     }
 
+    /**
+     * {@link #run} followed by removal of the operand bindings the fold
+     * orphaned (N-138).
+     *
+     * <p>{@code run} rewrites {@code t1 = -t0} to the constant {@code t1 = -1}
+     * but leaves {@code t0 = 1} in place, and stack lowering then pushes it and
+     * drops it again ({@code 51 4f 7b 7c a0 77} for {@code a > -1n}). Only
+     * names that some binding referenced BEFORE folding are removal
+     * candidates, so a binding that was already dead is left exactly as it
+     * was. {@code run} itself stays a pure rewrite.
+     */
+    public static AnfProgram runAndPrune(AnfProgram program) {
+        AnfProgram folded = run(program);
+        List<AnfMethod> pruned = new ArrayList<>(folded.methods().size());
+        for (int i = 0; i < folded.methods().size(); i++) {
+            java.util.Set<String> candidates = new java.util.HashSet<>();
+            for (AnfBinding b : program.methods().get(i).body()) {
+                Dce.collectRefs(b.value(), candidates);
+            }
+            AnfMethod m = folded.methods().get(i);
+            pruned.add(m.withBody(Dce.eliminateDeadAmong(m, candidates)));
+        }
+        return folded.withMethods(pruned);
+    }
+
     private static AnfMethod foldMethod(AnfMethod method) {
         Map<String, ConstSlot> env = new HashMap<>();
         List<AnfBinding> body = foldBindings(method.body(), env);

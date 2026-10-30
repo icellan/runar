@@ -385,7 +385,7 @@ pub fn runPipeline(
 
     // Pass 4.25: Constant Fold
     if (!opts.disable_constant_folding) {
-        program = constant_fold.foldConstants(work, program) catch |err| {
+        program = constant_fold.foldConstantsAndPrune(work, program) catch |err| {
             diag.addError(work, "  constant folding error: ", @errorName(err));
             return error.ANFLowerFailed;
         };
