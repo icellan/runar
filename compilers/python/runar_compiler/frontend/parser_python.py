@@ -873,6 +873,11 @@ class _PyParser:
                         self.errors.append(Diagnostic(
                             message=static_method_message(name),
                             severity=Severity.ERROR, loc=self.loc()))
+                    if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1].value == "__init__":
+                        # N-303: the TS reference decides "constructor" from the
+                        # name alone; decorators on __init__ are ignored.
+                        constructor = self.parse_constructor(properties)
+                        continue
                     method = self.parse_method(
                         "public" if "public" in decorators else "private", sighash_specs,
                     )

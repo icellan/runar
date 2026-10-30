@@ -1116,11 +1116,17 @@ const Parser = struct {
                     }
                     const def_loc = self.currentSourceLoc();
                     const is_init = std.mem.eql(u8, self.tokenizer.peek().text, "__init__");
-                    var method = self.parsePyMethod(if (any_public) "public" else "private");
                     if (is_init) {
+                        // N-303: the TS reference decides "constructor" from the
+                        // name alone; decorators on __init__ are ignored.
+                        const ctor_method = self.parsePyConstructorMethod(properties.items);
+                        constructor = self.methodToConstructor(ctor_method);
                         // N-093: the constructor is not a spending entry point.
                         if (sighash_specs.items.len > 0) self.addErrorAtLoc(def_loc, sighash_directive.LOST_SIGHASH_ERROR);
-                    } else if (sighash_directive.resolveNativeSighash(self.allocator, method.name, method.is_public, sighash_specs.items)) |r| switch (r) {
+                        continue;
+                    }
+                    var method = self.parsePyMethod(if (any_public) "public" else "private");
+                    if (sighash_directive.resolveNativeSighash(self.allocator, method.name, method.is_public, sighash_specs.items)) |r| switch (r) {
                         .value => |v| method.sighash_type = v,
                         .err => |e| self.addErrorAtLoc(def_loc, e),
                     };

@@ -1040,6 +1040,12 @@ public final class PyParser {
                             // N-050: a class-level function is not a contract method.
                             addError(LexDiag.staticMethod(pos + 1 < tokens.size() ? tokens.get(pos + 1).value : ""));
                         }
+                        if (pos + 1 < tokens.size() && tokens.get(pos + 1).value.equals("__init__")) {
+                            // N-303: the TS reference decides "constructor" from
+                            // the name alone; decorators on __init__ are ignored.
+                            constructor = parseConstructor(properties);
+                            continue;
+                        }
                         String visibility = decorators.contains("public") ? "public" : "private";
                         MethodNode method = parseMethod(visibility);
                         SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(

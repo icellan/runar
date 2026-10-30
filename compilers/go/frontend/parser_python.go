@@ -1097,6 +1097,13 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 						break
 					}
 				}
+				if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].value == "__init__" {
+					// N-303: the TS reference decides "constructor" from the
+					// name alone; decorators on __init__ are ignored.
+					ctor := p.parsePyConstructor(properties)
+					constructor = &ctor
+					continue
+				}
 				method := p.parsePyMethod(visibility)
 				sighashType, sighashErr := resolveNativeSighash(method.Name, visibility == "public", sighashSpecs)
 				if sighashErr != "" {
