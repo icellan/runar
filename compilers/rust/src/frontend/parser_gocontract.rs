@@ -543,7 +543,10 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
                 errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
             // N-437: a raw string is its text verbatim, carriage returns discarded (Go spec).
-            let raw = Some(val.replace('\r', "").into_bytes());
+            // N-439: the bare-literal (hex) path reads the token text, so it is
+            // the CR-free text too.
+            let val = val.replace('\r', "");
+            let raw = Some(val.clone().into_bytes());
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c, raw });
             continue;
         }

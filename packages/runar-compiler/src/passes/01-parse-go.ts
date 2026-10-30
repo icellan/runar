@@ -1418,6 +1418,13 @@ class GoParser extends ParserCore<GoToken> {
       return { kind: 'bytestring_literal', value: t.value };
     }
 
+    // N-439: a bare raw (backtick) literal is its text verbatim with carriage
+    // returns discarded (Go spec), then goes through the same hex check.
+    if (t.type === 'backtick') {
+      this.advance();
+      return { kind: 'bytestring_literal', value: t.value.replace(/\r/g, '') };
+    }
+
     // Boolean literals
     if (t.type === 'true') {
       this.advance();

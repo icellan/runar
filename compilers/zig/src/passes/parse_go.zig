@@ -801,17 +801,6 @@ fn hexOfBytes(allocator: Allocator, bytes: []const u8) ![]const u8 {
     return hex;
 }
 
-/// Decode the raw text of a Go string literal (N-437: Go's rules, see
-/// `decodeGoBody`), then hex-encode the resulting bytes. Used so that
-/// `runar.ByteString("\x00\x6a")` in source becomes a ByteString literal with
-/// hex value `"006a"`. The tokenizer has already refused an invalid escape.
-fn decodeGoEscapesAndHex(allocator: Allocator, raw: []const u8) ![]const u8 {
-    var decoded: std.ArrayListUnmanaged(u8) = .empty;
-    defer decoded.deinit(allocator);
-    _ = try decodeGoBody(allocator, raw, &decoded);
-    return hexOfBytes(allocator, decoded.items);
-}
-
 /// The Rúnar binary operator each `BigintBig` helper stands for.
 ///
 /// `runar.BigintBig` is *big.Int in packages/runar-go and Go has no operator
@@ -2403,7 +2392,16 @@ const Parser = struct {
                     const saved_tokenizer = self.tokenizer;
                     const saved_current = self.current;
                     _ = self.bump(); // '('
-                    if (self.current.kind == .backtick_string) {
+                    if (self.current.kind == .string_literal) {
+                        const str_tok = self.bump();
+                        if (self.current.kind == .rparen) {
+                            _ = self.bump(); // ')'
+                            var decoded: std.ArrayListUnmanaged(u8) = .empty;
+                            _ = decodeGoBody(self.allocator, str_tok.text, &decoded) catch return null;
+                            expr = .{ .literal_bytes = hexOfBytes(self.allocator, decoded.items) catch return null };
+                            continue;
+                        }
+                    } else if (self.current.kind == .backtick_string) {
                         const raw_tok = self.bump();
                         if (self.current.kind == .rparen) {
                             _ = self.bump(); // ')'
@@ -2437,15 +2435,7 @@ const Parser = struct {
                                 } else if (std.mem.eql(u8, member, "ByteString") and args.len == 1) {
                                     // runar.ByteString("literal") -> literal_bytes (hex-encoded);
                                     // runar.ByteString(variable) -> unwrap.
-                                    switch (args[0]) {
-                                        .literal_bytes => |raw| {
-                                            const hex = decodeGoEscapesAndHex(self.allocator, raw) catch raw;
-                                            expr = .{ .literal_bytes = hex };
-                                        },
-                                        else => {
-                                            expr = args[0];
-                                        },
-                                    }
+                                    expr = args[0];
                                 } else {
                                     // Builtin call: runar.CheckSig(sig, pk) -> checkSig(sig, pk)
                                     const builtin_name = mapGoBuiltinCamel(self.allocator, member);
@@ -2523,8 +2513,22 @@ const Parser = struct {
                 break :blk self.numberLiteral(tok);
             },
             .string_literal => blk: {
+                // N-439: a bare quoted literal is Go's decoded string (the
+                // tokenizer has already refused an invalid escape); the
+                // hex check then sees the decoded text, as in the Go tier.
                 const tok = self.bump();
-                break :blk Expression{ .literal_bytes = tok.text };
+                var decoded: std.ArrayListUnmanaged(u8) = .empty;
+                _ = decodeGoBody(self.allocator, tok.text, &decoded) catch break :blk null;
+                break :blk Expression{ .literal_bytes = decoded.items };
+            },
+            .backtick_string => blk: {
+                // N-439: a bare raw literal is its text verbatim, CR discarded.
+                const tok = self.bump();
+                var kept: std.ArrayListUnmanaged(u8) = .empty;
+                for (tok.text) |b| {
+                    if (b != '\r') kept.append(self.allocator, b) catch break :blk null;
+                }
+                break :blk Expression{ .literal_bytes = kept.items };
             },
             .lparen => blk: {
                 _ = self.bump();

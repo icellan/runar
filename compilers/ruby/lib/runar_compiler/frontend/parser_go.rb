@@ -1635,10 +1635,18 @@ module RunarCompiler
           return ByteStringLiteral.new(value: tok.value)
         end
 
-        # String literal -- used for hex-encoded ByteString values in Go contracts
+        # String literal -- used for hex-encoded ByteString values in Go contracts.
+        # N-439: the literal is first decoded with Go's string rules (the
+        # tokenizer has already refused an invalid escape), then the decoded
+        # text goes through the hex check; a raw (backtick) literal is its
+        # text verbatim, carriage returns discarded.
         if tok.kind == TOK_STRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: Frontend.go_decode_string_escapes(tok.value).force_encoding("UTF-8").scrub)
+        end
+        if tok.kind == TOK_BACKTICK
+          advance
+          return ByteStringLiteral.new(value: tok.value.delete("\r"))
         end
 
         # Boolean literals

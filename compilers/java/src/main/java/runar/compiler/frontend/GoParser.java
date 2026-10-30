@@ -1954,6 +1954,12 @@ public final class GoParser {
                 advance();
                 return new ByteStringLiteral(tok.value);
             }
+            // N-439: a bare raw (backtick) literal is its text verbatim with
+            // carriage returns discarded (Go spec), then goes through the hex check.
+            if (tok.kind == Tok.BACKTICK_STRING) {
+                advance();
+                return new ByteStringLiteral(tok.value.replace("\r", ""));
+            }
             if (tok.kind == Tok.IDENT) {
                 advance();
                 String name = tok.value;

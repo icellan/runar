@@ -1893,6 +1893,12 @@ class _GoParser:
             self.advance()
             return ByteStringLiteral(value=tok.value)
 
+        # N-439: a bare raw (backtick) literal is its text verbatim with
+        # carriage returns discarded (Go spec), then goes through the hex check.
+        if tok.kind == TOK_BACKTICK_STRING:
+            self.advance()
+            return ByteStringLiteral(value=tok.value.replace("\r", ""))
+
         # Identifier
         if tok.kind == TOK_IDENT:
             self.advance()
