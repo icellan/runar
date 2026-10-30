@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-30T06:46:17.589Z",
+  "generatedAt": "2026-10-30T18:32:59.089Z",
   "compilerVersion": "0.5.0",
   "entries": [
     {
@@ -231,10 +231,10 @@
       "bytes": 28
     },
     {
-      "hex": "76009c6375012e5379517c52797f777c7f750051807e8102fd00787c9f6958787ca1695152797c9300000054799f6357795854797c93517b7b7f777c7f750051807e8102fd00787c9f69585159537a935a7956797f77787f755a79787c87635167557968567a7559797b7c87635167547968557a755579537a93547a75537a7567527968537a7551547a9f6356795852797c93517b7b7f777c7f750051807e8102fd00787c9f69585159537a93597a54797f77787f75597a787c87635167567968577a75587a7b7c87635167557968567a75557a537a93547a75537a7567567a75557a75547a75687b697c777767519d767c8768",
+      "hex": "76009c6375012e5379517c52797f777c7f750051807e8102fd00787c9f6958787ca1695152797c9300000054799f6357795854797c93517b7b7f777c7f750051807e8102fd00787c9f69597c93587954797f77787f755879787c87635167537968547a7557797b7c87635167527968537a755379537a9367527968537a7551547a9f6356795852797c93517b7b7f777c7f750051807e8102fd00787c9f69597c93577a52797f77787f75577a787c87635167547968557a75567a7b7c87635167537968547a75537a537a9367567a75557a75547a75687b697c777767519d767c8768",
       "source": "import { SmartContract, assert, substr, bin2num, num2bin, cat } from 'runar-lang';\nimport type { ByteString } from 'runar-lang';\n\nclass StackTrackerReproV10min extends SmartContract {\n  constructor() { super(); }\n\n  public verifyMneeTxContainsBothOutputs(\n    rawTx: ByteString,\n    expectedMneeOutputBytes: ByteString,\n    expectedExtraDataOutputBytes: ByteString,\n  ) {\n    let p: bigint = 46n;\n\n    const outCount: bigint = bin2num(cat(substr(rawTx, p, 1n), num2bin(0n, 1n)));\n    assert(outCount < 0xfdn);\n    assert(outCount <= 8n);\n    p = p + 1n;\n\n    let foundMnee: boolean = false;\n    let foundExtra: boolean = false;\n\n    if (0n < outCount) {\n      const scriptLen: bigint = bin2num(cat(substr(rawTx, p + 8n, 1n), num2bin(0n, 1n)));\n      assert(scriptLen < 0xfdn);\n      const blobLen: bigint = 8n + 1n + scriptLen;\n      const blob: ByteString = substr(rawTx, p, blobLen);\n      if (blob === expectedMneeOutputBytes) { foundMnee = true; }\n      if (blob === expectedExtraDataOutputBytes) { foundExtra = true; }\n      p = p + blobLen;\n    }\n    if (1n < outCount) {\n      const scriptLen: bigint = bin2num(cat(substr(rawTx, p + 8n, 1n), num2bin(0n, 1n)));\n      assert(scriptLen < 0xfdn);\n      const blobLen: bigint = 8n + 1n + scriptLen;\n      const blob: ByteString = substr(rawTx, p, blobLen);\n      if (blob === expectedMneeOutputBytes) { foundMnee = true; }\n      if (blob === expectedExtraDataOutputBytes) { foundExtra = true; }\n      p = p + blobLen;\n    }\n\n    assert(foundMnee);\n    assert(foundExtra);\n  }\n\n  public other(x: ByteString) { assert(x === x); }\n}\n\nexport default StackTrackerReproV10min;\n",
       "origin": "examples/ts/if-without-else-multi-temp/StackTrackerReproV10min.runar.ts",
-      "bytes": 244
+      "bytes": 226
     },
     {
       "hex": "007b00a06351787c93677668777c00a06351787c936776687700a0",
