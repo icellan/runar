@@ -66,6 +66,33 @@ function repoRelativeFileName(absSourcePath: string): string {
 }
 
 /**
+ * Write `sm` (an artifact's sourceMap, or undefined) to `emitPath` as the
+ * canonical `{"mappings":[...]}` object. When there is no sourceMap, writes
+ * the empty `{"mappings":[]}` wrapper so downstream tooling can rely on a
+ * uniform shape. Shared by every compile path so none can drop the request
+ * (N-186).
+ */
+function writeSourceMapFile(emitPath: string, sm: unknown): string {
+  const smPath = path.resolve(process.cwd(), emitPath);
+  fs.mkdirSync(path.dirname(smPath), { recursive: true });
+  const payload: { mappings: Array<{ sourceFile: string; [k: string]: unknown }> } =
+    sm && typeof sm === 'object' && 'mappings' in (sm as Record<string, unknown>)
+      ? (sm as { mappings: Array<{ sourceFile: string; [k: string]: unknown }> })
+      : { mappings: [] };
+  // GAP-011: normalize sourceFile to a repo-relative path (POSIX) so
+  // goldens stay stable across worktree paths and developer machines.
+  const normalized = {
+    ...payload,
+    mappings: payload.mappings.map((m) => ({
+      ...m,
+      sourceFile: repoRelativeFileName(m.sourceFile),
+    })),
+  };
+  fs.writeFileSync(smPath, JSON.stringify(normalized, null, 2) + '\n');
+  return smPath;
+}
+
+/**
  * Compile one or more Rúnar contract source files into artifact JSON.
  *
  * For each input file:
@@ -208,6 +235,13 @@ export async function compileCommand(
       console.error(`  Compilation error: ${(err as Error).message}`);
       process.exitCode = 1;
       return;
+    }
+
+    // N-186: this branch never read --emit-source-map. An ANF IR carries no
+    // source locations, so the map is the empty wrapper — the same file the
+    // Go/Rust/Python/Ruby/Java/Zig CLIs write for an IR input.
+    if (options.emitSourceMap) {
+      writeSourceMapFile(options.emitSourceMap, undefined);
     }
 
     if (options.hex) {
@@ -382,6 +416,12 @@ export async function compileCommand(
         errorCount++;
         continue;
       }
+      // N-186: this branch used to `continue` before the --emit-source-map
+      // block, silently dropping the requested map. Write it to a file (it
+      // never touches stdout), then print the hex.
+      if (options.emitSourceMap) {
+        writeSourceMapFile(options.emitSourceMap, (artifact as { sourceMap?: unknown }).sourceMap);
+      }
       process.stdout.write(scriptHex + '\n');
       successCount++;
       continue;
@@ -396,28 +436,9 @@ export async function compileCommand(
     console.log(`  Artifact written: ${artifactPath}`);
 
     // --emit-source-map: write artifact.sourceMap to the requested path.
-    // Emits the canonical {"mappings":[...]} object; if the artifact has
-    // no sourceMap (e.g. fold-on path with no source-loc tracking), emit
-    // an empty {"mappings":[]} object so downstream tooling can rely on a
-    // uniform shape.
+    // (The --hex branch above writes it too, before it prints; N-186.)
     if (options.emitSourceMap) {
-      const smPath = path.resolve(process.cwd(), options.emitSourceMap);
-      fs.mkdirSync(path.dirname(smPath), { recursive: true });
-      const sm = (artifact as { sourceMap?: unknown }).sourceMap;
-      const payload: { mappings: Array<{ sourceFile: string; [k: string]: unknown }> } =
-        sm && typeof sm === 'object' && 'mappings' in (sm as Record<string, unknown>)
-          ? (sm as { mappings: Array<{ sourceFile: string; [k: string]: unknown }> })
-          : { mappings: [] };
-      // GAP-011: normalize sourceFile to a repo-relative path (POSIX) so
-      // goldens stay stable across worktree paths and developer machines.
-      const normalized = {
-        ...payload,
-        mappings: payload.mappings.map((m) => ({
-          ...m,
-          sourceFile: repoRelativeFileName(m.sourceFile),
-        })),
-      };
-      fs.writeFileSync(smPath, JSON.stringify(normalized, null, 2) + '\n');
+      const smPath = writeSourceMapFile(options.emitSourceMap, (artifact as { sourceMap?: unknown }).sourceMap);
       console.log(`  Source map written: ${smPath}`);
     }
 

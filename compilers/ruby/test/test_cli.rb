@@ -221,4 +221,42 @@ class TestCli < Minitest::Test
       assert_match(/\A[0-9a-f]+\z/, stdout.strip, "stdout must be hex, got: #{stdout}")
     end
   end
+
+  # --------------------------------------------------------------------
+  # --emit-source-map on every output mode (N-186)
+  #
+  # Zig and the TS CLI dropped --emit-source-map under --hex and for an IR
+  # input, exiting 0 with nothing written. This CLI already writes the map on
+  # those paths; these tests pin that. For --ir there are no source
+  # locations, so the map is the empty {"mappings": []} wrapper.
+  # Proves: the file exists with that shape and stdout stays the requested
+  # output. Does not prove: any other tier's CLI.
+  # --------------------------------------------------------------------
+
+  def run_with_source_map(*args)
+    require 'tmpdir'
+    Dir.mktmpdir do |dir|
+      sm_path = File.join(dir, 'source-map.json')
+      stdout, stderr, status = run_cli(*args, '--emit-source-map', sm_path)
+      assert status.success?, "must exit 0: #{stderr}"
+      assert File.exist?(sm_path), "--emit-source-map file was never written (N-186); stderr: #{stderr}"
+      sm = JSON.parse(File.read(sm_path))
+      assert sm.key?('mappings'), "source map must carry a mappings key, got: #{sm.keys}"
+      return [stdout, sm]
+    end
+  end
+
+  def test_hex_with_emit_source_map_writes_the_source_map
+    stdout, sm = run_with_source_map('--source', P2PKH_SOURCE, '--hex')
+    refute_empty sm['mappings'], 'a real source compile must carry mappings'
+    assert_match(/\A[0-9a-f]+\z/, stdout.strip)
+  end
+
+  def test_ir_input_with_emit_source_map_writes_the_empty_source_map
+    ir = File.join(BASIC_P2PKH, 'expected-ir.json')
+    [[], ['--hex'], ['--asm']].each do |extra|
+      _stdout, sm = run_with_source_map('--ir', ir, *extra)
+      assert_equal [], sm['mappings'], "IR input has no source locations (#{extra.inspect})"
+    end
+  end
 end

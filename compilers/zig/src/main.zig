@@ -302,6 +302,12 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     if (opts.emit_ir) {
         const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
         try writeStdout(io, canonical);
+        // N-186: honour --emit-source-map here too. Stack lowering is not
+        // run (--emit-ir's contract is "stop after the IR") and an IR has no
+        // source locations anyway, so the map is the empty wrapper.
+        if (opts.emit_source_map_path) |sm_path| {
+            try writeSourceMapToPath(work_allocator, io, "", sm_path, path);
+        }
         return;
     }
 
@@ -339,13 +345,22 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // appear in the artifact's "script" field), matching compileFromSource
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
+    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
+
+    // --emit-source-map (N-186): this path never looked at the flag, so
+    // `--source IR.json --emit-source-map Y` exited 0 with no Y. An ANF IR
+    // carries no source locations, so the artifact has no sourceMap and
+    // writeSourceMapToPath writes the empty {"mappings":[]} wrapper — the
+    // same file the Go/Rust/Python/Ruby/Java CLIs write for an IR input.
+    if (opts.emit_source_map_path) |sm_path| {
+        try writeSourceMapToPath(work_allocator, io, artifact, sm_path, path);
+    }
+
     if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
         try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 
-    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
     try writeStdoutLn(io, artifact);
 }
 
@@ -471,17 +486,13 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // locking script (same bytes that appear in the artifact's "script"
     // field), so downstream tools can compare byte-for-byte across
     // compilers without parsing JSON.
-    if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
-        try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
-        return;
-    }
-
     // Pass 6: Emit full artifact
     const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
 
     // --emit-source-map: extract the artifact's sourceMap object (or emit
     // the empty {"mappings":[]} wrapper if absent) and write it to PATH.
+    // This runs before the --hex return below (N-186): --hex used to return
+    // first, silently dropping the requested map.
     if (opts.emit_source_map_path) |sm_path| {
         try writeSourceMapToPath(work_allocator, io, artifact, sm_path, path);
     }
@@ -490,6 +501,11 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // populate and write the source map, stop here rather than also print
     // the full artifact.
     if (emit_ir_handled) {
+        return;
+    }
+
+    if (opts.hex_only) {
+        try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 

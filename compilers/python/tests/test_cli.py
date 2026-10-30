@@ -137,3 +137,45 @@ def test_emit_ir_with_emit_source_map_writes_the_source_map_and_prints_only_ir(
     assert "script" not in stdout_json, (
         f"stdout must carry ONLY the IR, not the compiled artifact; got: {proc.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# --emit-source-map on every output mode (N-186)
+#
+# Zig and the TS CLI dropped --emit-source-map under --hex and for an IR
+# input, exiting 0 with nothing written. This CLI already writes the map on
+# those paths; the tests pin that so it cannot regress into the same silent
+# drop. For --ir the input has no source locations, so the map is the empty
+# {"mappings": []} wrapper. Proves: the file exists with that shape and
+# stdout stays the requested output. Does not prove: other tiers' CLIs.
+# ---------------------------------------------------------------------------
+
+
+def _assert_source_map_written(proc: subprocess.CompletedProcess, sm_path: Path) -> dict:
+    import json as _json
+
+    assert proc.returncode == 0, f"must exit 0\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    assert sm_path.exists(), f"--emit-source-map file was never written (N-186); stderr: {proc.stderr}"
+    sm_json = _json.loads(sm_path.read_text(encoding="utf-8"))
+    assert "mappings" in sm_json, f"source map must carry a 'mappings' key, got: {sm_json}"
+    return sm_json
+
+
+def test_hex_with_emit_source_map_writes_the_source_map(tmp_path: Path) -> None:
+    sm_path = tmp_path / "source-map.json"
+    proc = _run(["--source", str(P2PKH_SOURCE), "--hex", "--emit-source-map", str(sm_path)])
+    sm_json = _assert_source_map_written(proc, sm_path)
+    assert sm_json["mappings"], "a real source compile must carry mappings"
+    assert proc.stdout.strip() and all(c in "0123456789abcdef" for c in proc.stdout.strip())
+
+
+@pytest.mark.parametrize("extra", [[], ["--hex"], ["--asm"]])
+def test_ir_input_with_emit_source_map_writes_the_empty_source_map(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    sm_path = tmp_path / "source-map.json"
+    proc = _run(
+        ["--ir", str(BASIC_P2PKH / "expected-ir.json"), *extra, "--emit-source-map", str(sm_path)]
+    )
+    sm_json = _assert_source_map_written(proc, sm_path)
+    assert sm_json["mappings"] == []

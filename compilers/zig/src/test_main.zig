@@ -160,6 +160,7 @@ test {
     _ = @import("tests/loop_update_clause.zig");
     _ = @import("tests/library_cli_parity.zig");
     _ = @import("tests/f255_emit_ir_source_map.zig");
+    _ = @import("tests/n186_source_map_paths.zig");
     _ = @import("tests/f230_unknown_format_parity.zig");
     _ = @import("tests/n034_ec_fusing_rules.zig");
     _ = @import("tests/f086_ec_fresh_name_collision.zig");
