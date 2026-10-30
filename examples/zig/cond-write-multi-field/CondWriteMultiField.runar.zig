@@ -10,11 +10,11 @@ pub const CondWriteMultiField = struct {
         return .{ .a = a, .b = b };
     }
 
-    pub fn bump(self: *CondWriteMultiField, flag: i64) void {
+    pub fn bump(self: *CondWriteMultiField, ctx: runar.StatefulContext, flag: i64) void {
         if (flag > 0) {
             self.a = self.a + 1;
             self.b = self.b + 2;
         }
-        self.addOutput(1000, self.a, self.b);
+        ctx.addOutput(1000, .{ self.a, self.b });
     }
 };

@@ -9,8 +9,8 @@ pub const DataOutputTest = struct {
         return .{ .count = count };
     }
 
-    pub fn publish(self: *DataOutputTest, payload: runar.ByteString) void {
+    pub fn publish(self: *DataOutputTest, ctx: runar.StatefulContext, payload: runar.ByteString) void {
         self.count = self.count + 1;
-        self.addDataOutput(0, payload);
+        ctx.addDataOutput(0, payload);
     }
 };

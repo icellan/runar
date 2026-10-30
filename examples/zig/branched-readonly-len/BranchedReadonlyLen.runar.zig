@@ -10,7 +10,7 @@ pub const BranchedReadonlyLen = struct {
         return .{ .count = count, .tag = tag };
     }
 
-    pub fn spend(self: *BranchedReadonlyLen, scratch: runar.ByteString) void {
+    pub fn spend(self: *BranchedReadonlyLen, ctx: runar.StatefulContext, scratch: runar.ByteString) void {
         if (runar.len(scratch) > 0) {
             self.count = self.count + 1;
             self.tag = scratch;
@@ -18,6 +18,6 @@ pub const BranchedReadonlyLen = struct {
             self.count = self.count - 1;
             self.tag = "3030";
         }
-        self.addOutput(1000, self.count, self.tag);
+        ctx.addOutput(1000, .{ self.count, self.tag });
     }
 };
