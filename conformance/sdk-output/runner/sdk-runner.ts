@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process';
-import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, constants, statSync, realpathSync } from 'fs';
-import { join, resolve } from 'path';
+import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, constants, statSync, realpathSync, utimesSync } from 'fs';
+import { join, resolve, extname } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
@@ -42,6 +42,78 @@ function isExecutable(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * N-441: a prebuilt tool binary is only reusable if nothing it was built from
+ * has changed since. Before this, any executable at the prebuilt path was run
+ * as-is, so a binary built before an SDK change kept passing while the change
+ * it should have exercised was never run (the Zig tool failed r062 after
+ * N-260/R100 and every battery stayed green on a stale binary).
+ */
+const SOURCE_EXTS = new Set([
+  '.go', '.mod', '.sum', '.rs', '.toml', '.zig', '.zon', '.java', '.kts', '.gradle', '.properties',
+]);
+const SKIP_DIRS = new Set([
+  'node_modules', 'target', 'build', 'dist', 'zig-out', 'zig-pkg', '.zig-cache', 'zig-cache',
+  '.gradle', '.git', '.worktrees', '__pycache__',
+]);
+
+/** Newest mtime (ms) of any source file under `paths` (files or directories); 0 if none. */
+function newestSourceMtime(paths: string[]): number {
+  let newest = 0;
+  const visit = (p: string): void => {
+    let st;
+    try {
+      st = statSync(p);
+    } catch {
+      return;
+    }
+    if (st.isDirectory()) {
+      let names: string[];
+      try {
+        names = readdirSync(p);
+      } catch {
+        return;
+      }
+      for (const n of names) {
+        if (SKIP_DIRS.has(n)) continue;
+        visit(join(p, n));
+      }
+    } else if (SOURCE_EXTS.has(extname(p))) {
+      if (st.mtimeMs > newest) newest = st.mtimeMs;
+    }
+  };
+  for (const p of paths) visit(p);
+  return newest;
+}
+
+/** True when `artifact` is missing or older than any source in `sources`. */
+function isStale(artifact: string, sources: string[]): boolean {
+  let built: number;
+  try {
+    built = statSync(artifact).mtimeMs;
+  } catch {
+    return true;
+  }
+  return newestSourceMtime(sources) > built;
+}
+
+/**
+ * Wrap a build step so that, once it succeeds, the artifact is stamped "now".
+ * Toolchains leave an up-to-date output untouched, which would otherwise keep
+ * it older than the sources and re-trigger the build on every run.
+ */
+function buildThenStamp(build: () => void, artifact: string): () => void {
+  return () => {
+    build();
+    const now = new Date();
+    try {
+      utimesSync(artifact, now, now);
+    } catch {
+      // A build that produced no artifact fails the run itself; nothing to stamp.
+    }
+  };
 }
 
 /**
@@ -99,7 +171,12 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
   // invocation.
   const goBin = join(toolsDir, 'go-sdk-tool-bin');
   const goSrc = join(toolsDir, 'go-sdk-tool.go');
-  if (isExecutable(goBin)) {
+  const goStale = isStale(goBin, [
+    goSrc,
+    join(ROOT, 'packages', 'runar-go'),
+    join(ROOT, 'compilers', 'go'),
+  ]);
+  if (isExecutable(goBin) && !goStale) {
     tools.push({
       name: 'go',
       cmd: goBin,
@@ -110,13 +187,13 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
       name: 'go',
       cmd: goBin,
       args: (input) => [input],
-      preBuild: () => {
+      preBuild: buildThenStamp(() => {
         execFileSync('go', ['build', '-o', goBin, goSrc], {
           cwd: ROOT,
           stdio: 'pipe',
           timeout: 120_000,
         });
-      },
+      }, goBin),
     });
   }
 
@@ -131,7 +208,14 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
   // discarding that output) means the stderr the runner ever sees is the
   // driver's own.
   const rsBin = join(toolsDir, 'rs-sdk-tool', 'target', 'release', 'rs-sdk-tool');
-  if (isExecutable(rsBin)) {
+  const rsStale = isStale(rsBin, [
+    join(toolsDir, 'rs-sdk-tool', 'src'),
+    join(toolsDir, 'rs-sdk-tool', 'Cargo.toml'),
+    join(ROOT, 'packages', 'runar-rs'),
+    join(ROOT, 'packages', 'runar-rs-macros'),
+    join(ROOT, 'compilers', 'rust'),
+  ]);
+  if (isExecutable(rsBin) && !rsStale) {
     tools.push({
       name: 'rust',
       cmd: rsBin,
@@ -142,7 +226,7 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
       name: 'rust',
       cmd: rsBin,
       args: (input) => [input],
-      preBuild: () => {
+      preBuild: buildThenStamp(() => {
         execFileSync('cargo', [
           'build', '--release',
           '--manifest-path', join(toolsDir, 'rs-sdk-tool', 'Cargo.toml'),
@@ -157,13 +241,20 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
           // protects a cold local dev run.
           timeout: 600_000,
         });
-      },
+      }, rsBin),
     });
   }
 
-  // Zig: prefer pre-built binary, fall back to zig build + run
+  // Zig: prefer pre-built binary, fall back to zig build + run. As with every
+  // compiled tool here, a binary older than its sources is rebuilt (N-441).
   const zigBin = join(toolsDir, 'zig-sdk-tool', 'zig-out', 'bin', 'zig-sdk-tool');
-  if (isExecutable(zigBin)) {
+  const zigStale = isStale(zigBin, [
+    join(toolsDir, 'zig-sdk-tool', 'src'),
+    join(toolsDir, 'zig-sdk-tool', 'build.zig'),
+    join(toolsDir, 'zig-sdk-tool', 'build.zig.zon'),
+    join(ROOT, 'packages', 'runar-zig'),
+  ]);
+  if (isExecutable(zigBin) && !zigStale) {
     tools.push({
       name: 'zig',
       cmd: zigBin,
@@ -175,13 +266,13 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
       name: 'zig',
       cmd: zigBin,
       args: (input) => [input],
-      preBuild: () => {
+      preBuild: buildThenStamp(() => {
         execFileSync('zig', ['build'], {
           cwd: zigToolDir,
           stdio: 'pipe',
           timeout: 120_000,
         });
-      },
+      }, zigBin),
     });
   }
 
@@ -216,7 +307,14 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
     }
     return 'gradle';
   };
-  if (existsSync(javaJar)) {
+  const javaStale = isStale(javaJar, [
+    join(javaToolDir, 'src'),
+    join(javaToolDir, 'build.gradle.kts'),
+    join(javaToolDir, 'settings.gradle.kts'),
+    join(ROOT, 'packages', 'runar-java'),
+    join(ROOT, 'compilers', 'java'),
+  ]);
+  if (existsSync(javaJar) && !javaStale) {
     tools.push({
       name: 'java',
       cmd: 'java',
@@ -227,14 +325,14 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
       name: 'java',
       cmd: 'java',
       args: (input) => ['-jar', javaJar, input],
-      preBuild: () => {
+      preBuild: buildThenStamp(() => {
         const gradle = resolveGradle();
         execFileSync(gradle, ['fatJar', '--no-daemon', '-x', 'javadoc'], {
           cwd: javaToolDir,
           stdio: 'pipe',
           timeout: 300_000,
         });
-      },
+      }, javaJar),
     });
   }
 

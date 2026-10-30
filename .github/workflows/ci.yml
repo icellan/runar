@@ -1086,6 +1086,7 @@ jobs:
           conformance/sdk-vertical
           conformance/sdk-call
           conformance/sdk-output/runner/sdk-runner-refusal-build-isolation.test.ts
+          conformance/sdk-output/runner/sdk-runner-stale-tool.test.ts
           conformance/sdk-output/runner/sdk-output-coverage-audit.test.ts
           conformance/runner/__tests__
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
