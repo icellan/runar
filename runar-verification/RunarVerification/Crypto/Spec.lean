@@ -1362,7 +1362,7 @@ example (msg sig pk : ByteArray) :
 Rabin signature verification has a *concrete arithmetic* spec: the
 verifier checks `(sig² + padding) mod pubKey == SHA256(msg)`. The
 lowering at `Stack.Lower.lowerVerifyRabinSigOpsLive` emits a fixed
-15-opcode body — see `Stack.Rabin.rabinBodyOps` — that exactly
+34-op body — see `Stack.Rabin.rabinBodyOps` — that exactly
 mirrors the TS reference `emitVerifyRabinSig` at
 `packages/runar-compiler/src/passes/rabin-codegen.ts:37-48`.
 

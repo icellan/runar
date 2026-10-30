@@ -16,7 +16,7 @@ import runar.compiler.ir.stack.StackOp;
  * {@code lower_verify_rabin_sig} routine in
  * {@code compilers/rust/src/codegen/stack.rs}.
  *
- * <p>The Rabin verification is a fixed 15-opcode sequence that takes
+ * <p>The Rabin verification is a fixed 34-op sequence that takes
  * {@code [msg, sig, padding, pubkey]} on the stack (with {@code pubkey}
  * on top) and produces a single boolean result. All four arguments are
  * consumed by the emitter; the caller is responsible for bringing them

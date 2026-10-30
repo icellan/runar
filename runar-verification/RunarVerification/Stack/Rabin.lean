@@ -8,13 +8,13 @@ import RunarVerification.Crypto.Spec
 `packages/runar-compiler/src/passes/rabin-codegen.ts` ⇒ `emitVerifyRabinSig`)
 
 Rabin signature verification checks the modular identity
-`(sig² + padding) mod pubKey == SHA256(msg)` using a fixed 15-opcode
+`(sig² + padding) mod pubKey == SHA256(msg)` using a fixed 34-op
 script body.
 
 BUG-010 (see `_review/BUG-010-rfc.md`) added a 5-opcode `OP_WITHIN`
 range check enforcing `0 ≤ padding < 65536` on-chain, closing the forgery
 exploit documented in `_review/BUG-004-finding.md`. It is modelled here as
-of 2026-08-16 — `rabinBodyOps` is the 15-opcode body, and
+of 2026-08-16 — `rabinBodyOps` is the 34-op body (as of F-368), and
 `runOps_rabinBodyOps_eq` carries the two bounds as hypotheses and consumes
 them at the `OP_VERIFY` step (outside the range the gate evaluates FALSE
 and the run is `.error .assertFailed`, which IS the intended behaviour).
@@ -34,11 +34,18 @@ defined here.
   `bottom→top: ..., msg, sig, padding, pubKey`  (`pubKey` = TOS)
 * On exit: `bottom→top: ..., bool`  (`true` on a valid Rabin signature)
 
-The body is the fixed 15-opcode sequence
+The body is the fixed 34-op sequence
 
+  `<0x00> OP_CAT OP_BIN2NUM`                  (pubKey as unsigned, F-144)
   `OP_SWAP`
+  `<0x00> OP_CAT OP_BIN2NUM`                  (padding as unsigned, F-144)
   `OP_DUP OP_0 <65536> OP_WITHIN OP_VERIFY`   (BUG-010 padding gate)
-  `OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL`
+  `OP_ROT`
+  `<0x00> OP_CAT OP_BIN2NUM`                  (sig as unsigned, F-144)
+  `OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY` (sig < pubKey, F-368)
+  `OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD`
+  `OP_ROT OP_SHA256 <0x00> OP_CAT OP_BIN2NUM`
+  `OP_ROT OP_MOD OP_NUMEQUAL`                 (digest mod pubKey, F-047)
 
 ## Source of truth
 
@@ -92,7 +99,7 @@ entry: msg sig padding pubKey
 ```
 -/
 
-/-- The 15-opcode Rabin verification body emitted *after* the four args
+/-- The 34-op Rabin verification body emitted *after* the four args
 have been loaded by `loadRefLive`. Mirrors the body section of
 `Stack.lowerVerifyRabinSigOpsLive` one-to-one, which in turn mirrors
 `emitVerifyRabinSig` (`packages/runar-compiler/src/passes/rabin-codegen.ts:53-70`).
@@ -166,7 +173,7 @@ suffix of the emitted op-list to `rabinBodyOps`, which is the
 load-bearing fact for any future `runOps`-level reasoning.
 -/
 
-/-- The 15-opcode body emitted by `lowerVerifyRabinSigOpsLive` is
+/-- The 34-op body emitted by `lowerVerifyRabinSigOpsLive` is
 byte-identical to `rabinBodyOps`. The four leading `loadRefOperand`
 blocks (operand-gated over `[msg, sig, padding, pubKey]`) are
 quotiented out by `arg loaders` — they are pure ref-loads that vary

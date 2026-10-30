@@ -1,14 +1,21 @@
 """Byte-frozen golden test for the extracted Rabin codegen module.
 
 ``emit_verify_rabin_sig`` in ``runar_compiler.codegen.rabin`` lowers the
-``verifyRabinSig`` builtin to a fixed 15-opcode sequence (post BUG-010):
+``verifyRabinSig`` builtin to a fixed 34-op sequence (post F-368):
 
+    <push 0x00> OP_CAT OP_BIN2NUM                   # pubKey as unsigned (F-144)
     OP_SWAP
-    OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   # 0 <= padding < 65536
-    OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+    <push 0x00> OP_CAT OP_BIN2NUM                   # padding as unsigned (F-144)
+    OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY    # 0 <= padding < 65536 (BUG-010)
+    OP_ROT
+    <push 0x00> OP_CAT OP_BIN2NUM                   # sig as unsigned (F-144)
+    OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY       # sig < pubKey (F-368)
+    OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+    OP_ROT OP_SHA256 <push 0x00> OP_CAT OP_BIN2NUM
+    OP_ROT OP_MOD OP_NUMEQUAL                       # digest mod pubKey (F-047)
 
-which computes ``(sig^2 + padding) mod pubKey == SHA256(msg)`` plus the
-BUG-010 padding range check.
+which computes ``(sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey``
+plus the BUG-010 padding range check and the F-368 canonical-signature check.
 
 This test pins that exact sequence so a regression in the extracted module
 fails locally instead of surfacing only as a hex divergence in the

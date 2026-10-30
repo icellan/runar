@@ -12,7 +12,7 @@ require 'runar_compiler/codegen/rabin'
 class TestRabinCodegen < Minitest::Test
   include CodegenTestHelpers
 
-  # Byte-frozen golden: the fixed 15-opcode Rabin verification sequence
+  # Byte-frozen golden: the fixed 34-op Rabin verification sequence
   # (sig^2 + padding) mod pubKey == SHA256(msg) AND 0 <= padding < 65536.
   # Mirrored across all 7 tiers. Position 9 is a push of 65536 (the BUG-010
   # padding limit), not an opcode — nil here means "skip opcode-code check,

@@ -864,7 +864,7 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     const hex = try compileSourceToHex(std.testing.allocator, source, "RabinOnly.runar.zig");
     defer std.testing.allocator.free(hex);
 
-    // Contiguous Rabin opcode subsequence (15 ops post-BUG-010; the PUSH 65536
+    // Contiguous Rabin opcode subsequence (34 ops post-F-368; the PUSH 65536
     // contributes 1 length byte + 3 data bytes = 4 hex octets in the middle).
     // Bytes:
     //   7c          OP_SWAP

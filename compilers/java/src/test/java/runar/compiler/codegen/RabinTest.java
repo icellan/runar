@@ -16,13 +16,20 @@ import runar.compiler.ir.stack.StackOp;
 /**
  * Direct unit tests for the Rabin signature verifier codegen.
  *
- * <p>The reference is the fixed 15-opcode sequence (post BUG-010) in
+ * <p>The reference is the fixed 34-op sequence (post F-368) in
  * {@code packages/runar-compiler/src/passes/rabin-codegen.ts}:
  *
  * <pre>
+ *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // pubKey as unsigned (F-144)
  *   OP_SWAP
- *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536
- *   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+ *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // padding as unsigned (F-144)
+ *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536 (BUG-010)
+ *   OP_ROT
+ *   &lt;push 0x00&gt; OP_CAT OP_BIN2NUM                   // sig as unsigned (F-144)
+ *   OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY      // sig &lt; pubKey (F-368)
+ *   OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD
+ *   OP_ROT OP_SHA256 &lt;push 0x00&gt; OP_CAT OP_BIN2NUM
+ *   OP_ROT OP_MOD OP_NUMEQUAL                       // digest mod pubKey (F-047)
  * </pre>
  *
  * <p>The Java emitter must produce that exact sequence to remain byte-identical
