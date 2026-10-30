@@ -3803,6 +3803,8 @@ struct UpdateBranch {
     value_bindings: Vec<ANFBinding>,
     #[allow(dead_code)]
     value_ref: String,
+    /// N-350: location of the branch's original update_prop statement.
+    update_loc: Option<SourceLocation>,
 }
 
 /// Find the max temp index (e.g. t47 → 47) in a binding tree.
@@ -3850,9 +3852,12 @@ fn all_bindings_side_effect_free(bindings: &[ANFBinding]) -> bool {
 }
 
 /// Extract the update_prop target from a branch's bindings.
-/// Returns (prop_name, value_bindings_before_update, value_ref) if the last
-/// binding is update_prop and all preceding bindings are side-effect-free.
-fn extract_branch_update(bindings: &[ANFBinding]) -> Option<(String, Vec<ANFBinding>, String)> {
+/// Returns (prop_name, value_bindings_before_update, value_ref, update_loc) if
+/// the last binding is update_prop and all preceding bindings are
+/// side-effect-free.
+fn extract_branch_update(
+    bindings: &[ANFBinding],
+) -> Option<(String, Vec<ANFBinding>, String, Option<SourceLocation>)> {
     if bindings.is_empty() {
         return None;
     }
@@ -3862,7 +3867,7 @@ fn extract_branch_update(bindings: &[ANFBinding]) -> Option<(String, Vec<ANFBind
         if !all_bindings_side_effect_free(&value_bindings) {
             return None;
         }
-        Some((prop_name.clone(), value_bindings, val_ref.clone()))
+        Some((prop_name.clone(), value_bindings, val_ref.clone(), last.source_loc.clone()))
     } else {
         None
     }
@@ -3921,6 +3926,7 @@ fn collect_update_branches(
         prop_name: then_update.0,
         value_bindings: then_update.1,
         value_ref: then_update.2,
+        update_loc: then_update.3,
     }];
 
     if else_bindings.is_empty() {
@@ -3959,6 +3965,7 @@ fn collect_update_branches(
             prop_name: else_update.0,
             value_bindings: else_update.1,
             value_ref: else_update.2,
+            update_loc: else_update.3,
         });
         return Some(branches);
     }
@@ -4126,6 +4133,10 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
         let (cond, then_bindings, else_bindings, own_results) = if_val.unwrap();
 
         let own_results = own_results.clone();
+        // N-350: the rewrite replaces this located `if`; keep its location on
+        // the shared condition temporaries, and each branch's own update
+        // statement location on that branch's synthesized bindings (Java F-188).
+        let if_loc = binding.source_loc.clone();
         let branches = collect_update_branches(
             cond,
             strip_declared_results(then_bindings, &own_results),
@@ -4152,7 +4163,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 result.push(ANFBinding {
                     name: new_name,
                     value: remap_value_refs(&csb.value, &name_map),
-                    source_loc: None,
+                    source_loc: csb.source_loc.clone().or_else(|| if_loc.clone()),
                 });
             }
             cond_refs.push(
@@ -4185,7 +4196,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         operand: cond_refs[j].clone().unwrap(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 negated_conds.push(neg_name);
             }
@@ -4202,7 +4213,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         right: negated_conds[j].clone(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 and_ref = and_name;
             }
@@ -4218,7 +4229,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         right: cond_refs[i].clone().unwrap(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 effective_conds.push(final_name);
             } else {
@@ -4262,7 +4273,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         right: cond_refs[i].clone().unwrap(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 or_ref = or_name;
             }
@@ -4272,12 +4283,14 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     value: or_ref,
                     is_auto_injected_state_check: false,
                 },
-                source_loc: None,
+                source_loc: if_loc.clone(),
             });
         }
 
         // 3. For each branch, emit: load_old, conditional if-expression, update_prop
         for (i, branch) in branches.iter().enumerate() {
+            let branch_loc = branch.update_loc.clone().or_else(|| if_loc.clone());
+
             // Load old property value
             let old_prop_ref = fresh();
             result.push(ANFBinding {
@@ -4286,7 +4299,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     name: branch.prop_name.clone(),
                     preserve: false,
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             });
 
             // Remap value bindings for the then-branch
@@ -4298,7 +4311,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 then_bindings.push(ANFBinding {
                     name: new_name,
                     value: remap_value_refs(&vb.value, &branch_map),
-                    source_loc: None,
+                    source_loc: vb.source_loc.clone().or_else(|| branch_loc.clone()),
                 });
             }
 
@@ -4331,7 +4344,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     value: ANFValue::LoadConst {
                         value: serde_json::Value::String(format!("@ref:{}", mapped_value_ref)),
                     },
-                    source_loc: None,
+                    source_loc: branch_loc.clone(),
                 });
             }
 
@@ -4342,7 +4355,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 value: ANFValue::LoadConst {
                     value: serde_json::Value::String(format!("@ref:{}", old_prop_ref)),
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             }];
 
             // Emit conditional if-expression
@@ -4355,7 +4368,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     else_branch: else_bindings,
                     results: Vec::new(),
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             });
 
             // Emit update_prop
@@ -4365,7 +4378,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     name: branch.prop_name.clone(),
                     value: cond_if_ref,
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             });
         }
     }

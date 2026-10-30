@@ -3153,6 +3153,8 @@ interface UpdateBranch {
   valueBindings: ANFBinding[];
   /** Temp holding the new value (from the update_prop). */
   valueRef: string;
+  /** N-350: location of the branch's original update_prop statement (may be absent). */
+  updateLoc?: ANFBinding['sourceLoc'];
 }
 
 /**
@@ -3248,7 +3250,7 @@ function collectUpdateBranches(
 
 function extractBranchUpdate(
   bindings: ANFBinding[],
-): { propName: string; valueBindings: ANFBinding[]; valueRef: string } | null {
+): { propName: string; valueBindings: ANFBinding[]; valueRef: string; updateLoc?: ANFBinding['sourceLoc'] } | null {
   if (bindings.length === 0) return null;
   const last = bindings[bindings.length - 1]!;
   if (last.value.kind !== 'update_prop') return null;
@@ -3258,6 +3260,7 @@ function extractBranchUpdate(
     propName: last.value.name,
     valueRef: last.value.value,
     valueBindings,
+    updateLoc: last.sourceLoc,
   };
 }
 
@@ -3428,6 +3431,12 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
     }
 
     const ifVal = binding.value;
+    // N-350: the rewrite replaces this located `if`; keep its location on the
+    // shared condition temporaries, and each branch's own update statement
+    // location on that branch's synthesized bindings (Java F-188 scheme).
+    const ifLoc = binding.sourceLoc;
+    const withLoc = (b: ANFBinding, loc: ANFBinding['sourceLoc']): ANFBinding =>
+      loc ? { ...b, sourceLoc: loc } : b;
     const branches = collectUpdateBranches(
       ifVal.cond,
       stripDeclaredResults(ifVal.then, ifVal.results),
@@ -3449,7 +3458,7 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
       for (const csb of branch.condSetupBindings) {
         const newName = fresh();
         nameMap[csb.name] = newName;
-        result.push({ name: newName, value: remapValueRefs(csb.value, nameMap) });
+        result.push(withLoc({ name: newName, value: remapValueRefs(csb.value, nameMap) }, csb.sourceLoc ?? ifLoc));
       }
       condRefs.push(
         branch.condRef
@@ -3475,10 +3484,10 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
       for (let j = negatedConds.length; j < i; j++) {
         if (condRefs[j] === null) continue;
         const negName = fresh();
-        result.push({
+        result.push(withLoc({
           name: negName,
           value: { kind: 'unary_op', op: '!', operand: condRefs[j]! },
-        });
+        }, ifLoc));
         negatedConds.push(negName);
       }
 
@@ -3486,20 +3495,20 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
       let andRef = negatedConds[0]!;
       for (let j = 1; j < Math.min(i, negatedConds.length); j++) {
         const andName = fresh();
-        result.push({
+        result.push(withLoc({
           name: andName,
           value: { kind: 'bin_op', op: '&&', left: andRef, right: negatedConds[j]! },
-        });
+        }, ifLoc));
         andRef = andName;
       }
 
       if (condRefs[i] !== null) {
         // Middle branch: AND with own condition
         const finalName = fresh();
-        result.push({
+        result.push(withLoc({
           name: finalName,
           value: { kind: 'bin_op', op: '&&', left: andRef, right: condRefs[i]! },
-        });
+        }, ifLoc));
         effectiveConds.push(finalName);
       } else {
         // Final else: just the AND of negations
@@ -3534,28 +3543,29 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
       let orRef = condRefs[0]!;
       for (let i = 1; i < condRefs.length; i++) {
         const orName = fresh();
-        result.push({
+        result.push(withLoc({
           name: orName,
           value: { kind: 'bin_op', op: '||', left: orRef, right: condRefs[i]! },
-        });
+        }, ifLoc));
         orRef = orName;
       }
-      result.push({
+      result.push(withLoc({
         name: fresh(),
         value: { kind: 'assert', value: orRef },
-      });
+      }, ifLoc));
     }
 
     // 3. For each branch, emit: load_old, conditional if-expression, update_prop
     for (let i = 0; i < branches.length; i++) {
       const branch = branches[i]!;
+      const branchLoc = branch.updateLoc ?? ifLoc;
 
       // Load old property value
       const oldPropRef = fresh();
-      result.push({
+      result.push(withLoc({
         name: oldPropRef,
         value: { kind: 'load_prop', name: branch.propName },
-      });
+      }, branchLoc));
 
       // Remap value bindings for the then-branch
       const branchMap: Record<string, string> = { ...nameMap };
@@ -3563,10 +3573,10 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
       for (const vb of branch.valueBindings) {
         const newName = fresh();
         branchMap[vb.name] = newName;
-        thenBindings.push({
+        thenBindings.push(withLoc({
           name: newName,
           value: remapValueRefs(vb.value, branchMap),
-        });
+        }, vb.sourceLoc ?? branchLoc));
       }
 
       // An arm's VALUE is its LAST binding. `valueBindings` is everything
@@ -3586,21 +3596,21 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
       const mappedValueRef = branchMap[branch.valueRef] ?? branch.valueRef;
       const thenLast = thenBindings[thenBindings.length - 1];
       if (!thenLast || thenLast.name !== mappedValueRef) {
-        thenBindings.push({
+        thenBindings.push(withLoc({
           name: fresh(),
           value: { kind: 'load_const', value: `@ref:${mappedValueRef}` },
-        });
+        }, branchLoc));
       }
 
       // Else branch: keep old property value
       const keepName = fresh();
       const elseBindings: ANFBinding[] = [
-        { name: keepName, value: { kind: 'load_const', value: `@ref:${oldPropRef}` } },
+        withLoc({ name: keepName, value: { kind: 'load_const', value: `@ref:${oldPropRef}` } }, branchLoc),
       ];
 
       // Emit conditional if-expression
       const condIfRef = fresh();
-      result.push({
+      result.push(withLoc({
         name: condIfRef,
         value: {
           kind: 'if',
@@ -3608,13 +3618,13 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
           then: thenBindings,
           else: elseBindings,
         },
-      });
+      }, branchLoc));
 
       // Emit update_prop
-      result.push({
+      result.push(withLoc({
         name: fresh(),
         value: { kind: 'update_prop', name: branch.propName, value: condIfRef },
-      });
+      }, branchLoc));
     }
   }
 

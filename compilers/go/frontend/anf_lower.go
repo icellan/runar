@@ -3263,6 +3263,9 @@ type updateBranch struct {
 	propName          string
 	valueBindings     []ir.ANFBinding
 	valueRef          string
+	// updateLoc is the location of the branch's original update_prop
+	// statement (N-350); nil when the source carried none.
+	updateLoc *ir.SourceLocation
 }
 
 // maxTempIndex finds the max temp index (e.g. t47 → 47) in a binding tree.
@@ -3354,21 +3357,21 @@ func allBindingsSideEffectFree(bindings []ir.ANFBinding) bool {
 }
 
 // extractBranchUpdate checks if a branch's bindings end with update_prop.
-// Returns (propName, valueBindings, valueRef, ok).
-func extractBranchUpdate(bindings []ir.ANFBinding) (string, []ir.ANFBinding, string, bool) {
+// Returns (propName, valueBindings, valueRef, updateLoc, ok).
+func extractBranchUpdate(bindings []ir.ANFBinding) (string, []ir.ANFBinding, string, *ir.SourceLocation, bool) {
 	if len(bindings) == 0 {
-		return "", nil, "", false
+		return "", nil, "", nil, false
 	}
 	last := &bindings[len(bindings)-1]
 	if last.Value.Kind != "update_prop" {
-		return "", nil, "", false
+		return "", nil, "", nil, false
 	}
 	valueBindings := make([]ir.ANFBinding, len(bindings)-1)
 	copy(valueBindings, bindings[:len(bindings)-1])
 	if !allBindingsSideEffectFree(valueBindings) {
-		return "", nil, "", false
+		return "", nil, "", nil, false
 	}
-	return last.Value.Name, valueBindings, last.Value.ValueRef, true
+	return last.Value.Name, valueBindings, last.Value.ValueRef, last.SourceLoc, true
 }
 
 // isAssertFalseElse checks if an else branch is just assert(false).
@@ -3414,7 +3417,7 @@ func stripDeclaredResults(bindings []ir.ANFBinding, results []string) []ir.ANFBi
 
 // collectUpdateBranches recursively collects update branches from a nested if-else chain.
 func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBinding) []updateBranch {
-	propName, valBindings, valRef, ok := extractBranchUpdate(thenBindings)
+	propName, valBindings, valRef, updateLoc, ok := extractBranchUpdate(thenBindings)
 	if !ok {
 		return nil
 	}
@@ -3424,6 +3427,7 @@ func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBin
 		propName:      propName,
 		valueBindings: valBindings,
 		valueRef:      valRef,
+		updateLoc:     updateLoc,
 	}}
 
 	if len(elseBindings) == 0 {
@@ -3459,12 +3463,13 @@ func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBin
 	}
 
 	// Otherwise, else branch should end with update_prop (final else)
-	if ePropName, eValBindings, eValRef, eOk := extractBranchUpdate(elseBindings); eOk {
+	if ePropName, eValBindings, eValRef, eLoc, eOk := extractBranchUpdate(elseBindings); eOk {
 		branches = append(branches, updateBranch{
 			condRef:       nil,
 			propName:      ePropName,
 			valueBindings: eValBindings,
 			valueRef:      eValRef,
+			updateLoc:     eLoc,
 		})
 		return branches
 	}
@@ -3641,6 +3646,10 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 			continue
 		}
 
+		// N-350: the rewrite replaces this located `if`; keep its location on
+		// the shared condition temporaries, and each branch's own update
+		// statement location on that branch's synthesized bindings (Java F-188).
+		ifLoc := binding.SourceLoc
 		branches := collectUpdateBranches(
 			binding.Value.Cond,
 			stripDeclaredResults(binding.Value.Then, binding.Value.Results),
@@ -3662,9 +3671,14 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 			for _, csb := range branch.condSetupBindings {
 				newName := fresh()
 				nameMap[csb.Name] = newName
+				csbLoc := csb.SourceLoc
+				if csbLoc == nil {
+					csbLoc = ifLoc
+				}
 				result = append(result, ir.ANFBinding{
-					Name:  newName,
-					Value: remapValueRefs(csb.Value, nameMap),
+					Name:      newName,
+					Value:     remapValueRefs(csb.Value, nameMap),
+					SourceLoc: csbLoc,
 				})
 			}
 			if branch.condRef != nil {
@@ -3699,6 +3713,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Op:      "!",
 						Operand: *condRefs[j],
 					},
+					SourceLoc: ifLoc,
 				})
 				negatedConds = append(negatedConds, negName)
 			}
@@ -3719,6 +3734,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Left:  andRef,
 						Right: negatedConds[j],
 					},
+					SourceLoc: ifLoc,
 				})
 				andRef = andName
 			}
@@ -3734,6 +3750,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Left:  andRef,
 						Right: *condRefs[i],
 					},
+					SourceLoc: ifLoc,
 				})
 				effectiveConds = append(effectiveConds, finalName)
 			} else {
@@ -3778,6 +3795,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Left:  orRef,
 						Right: *condRefs[i],
 					},
+					SourceLoc: ifLoc,
 				})
 				orRef = orName
 			}
@@ -3787,11 +3805,17 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					Kind:     "assert",
 					ValueRef: orRef,
 				},
+				SourceLoc: ifLoc,
 			})
 		}
 
 		// 3. For each branch, emit: load_old, conditional if-expression, update_prop
 		for i, branch := range branches {
+			branchLoc := branch.updateLoc
+			if branchLoc == nil {
+				branchLoc = ifLoc
+			}
+
 			// Load old property value
 			oldPropRef := fresh()
 			result = append(result, ir.ANFBinding{
@@ -3800,6 +3824,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					Kind: "load_prop",
 					Name: branch.propName,
 				},
+				SourceLoc: branchLoc,
 			})
 
 			// Remap value bindings for the then-branch
@@ -3811,9 +3836,14 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 			for _, vb := range branch.valueBindings {
 				newName := fresh()
 				branchMap[vb.Name] = newName
+				vbLoc := vb.SourceLoc
+				if vbLoc == nil {
+					vbLoc = branchLoc
+				}
 				thenBindings = append(thenBindings, ir.ANFBinding{
-					Name:  newName,
-					Value: remapValueRefs(vb.Value, branchMap),
+					Name:      newName,
+					Value:     remapValueRefs(vb.Value, branchMap),
+					SourceLoc: vbLoc,
 				})
 			}
 
@@ -3846,6 +3876,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						RawValue:    valueRaw,
 						ConstString: &valueRefStr,
 					},
+					SourceLoc: branchLoc,
 				})
 			}
 
@@ -3861,6 +3892,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						RawValue:    raw,
 						ConstString: &refStr,
 					},
+					SourceLoc: branchLoc,
 				},
 			}
 
@@ -3874,6 +3906,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					Then: thenBindings,
 					Else: elseBindings,
 				},
+				SourceLoc: branchLoc,
 			})
 
 			// Emit update_prop
@@ -3887,6 +3920,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					RawValue: valRefJSON,
 					ValueRef: condIfRef,
 				},
+				SourceLoc: branchLoc,
 			})
 		}
 	}

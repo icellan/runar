@@ -3403,7 +3403,8 @@ module RunarCompiler
     private_class_method :_all_side_effect_free?
 
     # Extract the update_prop target from a branch's last binding.
-    # Returns { prop_name:, value_bindings:, value_ref: } or nil.
+    # Returns { prop_name:, value_bindings:, value_ref:, update_loc: } or nil.
+    # update_loc (N-350) is the original update_prop statement's source_loc.
     def self._extract_branch_update(bindings)
       return nil if bindings.empty?
 
@@ -3416,7 +3417,8 @@ module RunarCompiler
       {
         prop_name: last.value.name,
         value_bindings: value_bindings,
-        value_ref: last.value.value_ref || last.value.raw_value
+        value_ref: last.value.value_ref || last.value.raw_value,
+        update_loc: last.source_loc
       }
     end
     private_class_method :_extract_branch_update
@@ -3705,6 +3707,10 @@ module RunarCompiler
         end
 
         if_val = binding.value
+        # N-350: the rewrite replaces this located `if`; keep its location on
+        # the shared condition temporaries, and each branch's own update
+        # statement location on that branch's synthesized bindings (Java F-188).
+        if_loc = binding.source_loc
         branches = _collect_update_branches(
           if_val.cond,
           _strip_declared_results(if_val.then || [], if_val.results),
@@ -3728,7 +3734,8 @@ module RunarCompiler
             name_map[csb.name] = new_name
             result << IR::ANFBinding.new(
               name: new_name,
-              value: _remap_value_refs(csb.value, name_map)
+              value: _remap_value_refs(csb.value, name_map),
+              source_loc: csb.source_loc || if_loc
             )
           end
           cond_refs << (branch[:cond_ref] ? (name_map[branch[:cond_ref]] || branch[:cond_ref]) : nil)
@@ -3754,7 +3761,8 @@ module RunarCompiler
               value: IR::ANFValue.new(kind: "unary_op").tap do |v|
                 v.op = "!"
                 v.operand = cond_refs[j]
-              end
+              end,
+              source_loc: if_loc
             )
             negated_conds << neg_name
           end
@@ -3769,7 +3777,8 @@ module RunarCompiler
                 v.op = "&&"
                 v.left = and_ref
                 v.right = negated_conds[j]
-              end
+              end,
+              source_loc: if_loc
             )
             and_ref = and_name
           end
@@ -3783,7 +3792,8 @@ module RunarCompiler
                 v.op = "&&"
                 v.left = and_ref
                 v.right = cond_refs[i]
-              end
+              end,
+              source_loc: if_loc
             )
             effective_conds << final_name
           else
@@ -3817,23 +3827,28 @@ module RunarCompiler
                 v.op = "||"
                 v.left = or_ref
                 v.right = cond_refs[i]
-              end
+              end,
+              source_loc: if_loc
             )
             or_ref = or_name
           end
           result << IR::ANFBinding.new(
             name: fresh.call,
-            value: _make_assert(or_ref)
+            value: _make_assert(or_ref),
+            source_loc: if_loc
           )
         end
 
         # 3. For each branch, emit: load_old, conditional if-expression, update_prop
         branches.each_with_index do |branch, i|
+          branch_loc = branch[:update_loc] || if_loc
+
           # Load old property value
           old_prop_ref = fresh.call
           result << IR::ANFBinding.new(
             name: old_prop_ref,
-            value: IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = branch[:prop_name] }
+            value: IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = branch[:prop_name] },
+            source_loc: branch_loc
           )
 
           # Remap value bindings for the then-branch
@@ -3844,7 +3859,8 @@ module RunarCompiler
             branch_map[vb.name] = new_name
             then_bindings << IR::ANFBinding.new(
               name: new_name,
-              value: _remap_value_refs(vb.value, branch_map)
+              value: _remap_value_refs(vb.value, branch_map),
+              source_loc: vb.source_loc || branch_loc
             )
           end
 
@@ -3866,7 +3882,8 @@ module RunarCompiler
           if then_bindings.empty? || then_bindings.last.name != then_value_ref
             then_bindings << IR::ANFBinding.new(
               name: fresh.call,
-              value: _make_load_const_string("@ref:#{then_value_ref}")
+              value: _make_load_const_string("@ref:#{then_value_ref}"),
+              source_loc: branch_loc
             )
           end
 
@@ -3875,7 +3892,8 @@ module RunarCompiler
           else_bindings = [
             IR::ANFBinding.new(
               name: keep_name,
-              value: _make_load_const_string("@ref:#{old_prop_ref}")
+              value: _make_load_const_string("@ref:#{old_prop_ref}"),
+              source_loc: branch_loc
             )
           ]
 
@@ -3887,7 +3905,8 @@ module RunarCompiler
               v.cond = effective_conds[i]
               v.then = then_bindings
               v.else_ = else_bindings
-            end
+            end,
+            source_loc: branch_loc
           )
 
           # Emit update_prop
@@ -3897,7 +3916,8 @@ module RunarCompiler
               v.name = branch[:prop_name]
               v.value_ref = cond_if_ref
               v.raw_value = cond_if_ref
-            end
+            end,
+            source_loc: branch_loc
           )
         end
       end

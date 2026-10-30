@@ -4107,6 +4107,8 @@ const UpdateBranch = struct {
     prop_name: []const u8,
     value_bindings: []const ANFBinding,
     value_ref: []const u8,
+    /// N-350: location of the branch's original update_prop statement.
+    update_loc: ?types.SourceLocation = null,
 };
 
 /// Find the max temp index (e.g. "t47" → 47) in a binding tree.
@@ -4182,6 +4184,7 @@ const BranchUpdate = struct {
     prop_name: []const u8,
     value_bindings: []const ANFBinding,
     value_ref: []const u8,
+    update_loc: ?types.SourceLocation = null,
 };
 
 fn extractBranchUpdate(bindings: []const ANFBinding) ?BranchUpdate {
@@ -4195,6 +4198,7 @@ fn extractBranchUpdate(bindings: []const ANFBinding) ?BranchUpdate {
                 .prop_name = up.name,
                 .value_bindings = value_bindings,
                 .value_ref = up.value,
+                .update_loc = last.source_loc,
             };
         },
         else => return null,
@@ -4255,6 +4259,7 @@ fn collectUpdateBranches(
         .prop_name = then_update.prop_name,
         .value_bindings = then_update.value_bindings,
         .value_ref = then_update.value_ref,
+        .update_loc = then_update.update_loc,
     });
 
     if (else_bindings.len == 0) {
@@ -4303,6 +4308,7 @@ fn collectUpdateBranches(
             .prop_name = eu.prop_name,
             .value_bindings = eu.value_bindings,
             .value_ref = eu.value_ref,
+            .update_loc = eu.update_loc,
         });
         return try branches.toOwnedSlice(allocator);
     }
@@ -4481,6 +4487,10 @@ fn liftBranchUpdateProps(
             },
         };
 
+        // N-350: the rewrite replaces this located `if`; keep its location on
+        // the shared condition temporaries, and each branch's own update
+        // statement location on that branch's synthesized bindings (Java F-188).
+        const if_loc = binding.source_loc;
         const branches_maybe = try collectUpdateBranches(
             allocator,
             if_val.cond,
@@ -4513,6 +4523,7 @@ fn liftBranchUpdateProps(
                 try result.append(allocator, .{
                     .name = new_name,
                     .value = remapped,
+                    .source_loc = csb.source_loc orelse if_loc,
                 });
             }
             if (branch.cond_ref) |cr| {
@@ -4544,6 +4555,7 @@ fn liftBranchUpdateProps(
                 try result.append(allocator, .{
                     .name = neg_name,
                     .value = .{ .unary_op = .{ .op = "!", .operand = cr } },
+                    .source_loc = if_loc,
                 });
                 try negated_conds.append(allocator, neg_name);
             }
@@ -4562,6 +4574,7 @@ fn liftBranchUpdateProps(
                         .right = negated_conds.items[k],
                         .result_type = null,
                     } },
+                    .source_loc = if_loc,
                 });
                 and_ref = and_name;
             }
@@ -4577,6 +4590,7 @@ fn liftBranchUpdateProps(
                         .right = cr,
                         .result_type = null,
                     } },
+                    .source_loc = if_loc,
                 });
                 try effective_conds.append(allocator, final_name);
             } else {
@@ -4622,22 +4636,27 @@ fn liftBranchUpdateProps(
                         .right = cond_refs.items[i].?,
                         .result_type = null,
                     } },
+                    .source_loc = if_loc,
                 });
                 or_ref = or_name;
             }
             try result.append(allocator, .{
                 .name = try fctx.fresh(),
                 .value = .{ .assert = .{ .value = or_ref } },
+                .source_loc = if_loc,
             });
         }
 
         // 3. For each branch, emit: load_old, conditional if-expression, update_prop.
         for (branches, 0..) |branch, i| {
+            const branch_loc = branch.update_loc orelse if_loc;
+
             // Load old property value.
             const old_prop_ref = try fctx.fresh();
             try result.append(allocator, .{
                 .name = old_prop_ref,
                 .value = .{ .load_prop = .{ .name = branch.prop_name } },
+                .source_loc = branch_loc,
             });
 
             // Remap value bindings for the then-branch.
@@ -4656,6 +4675,7 @@ fn liftBranchUpdateProps(
                 try then_bindings.append(allocator, .{
                     .name = new_name,
                     .value = remapped,
+                    .source_loc = vb.source_loc orelse branch_loc,
                 });
             }
 
@@ -4682,6 +4702,7 @@ fn liftBranchUpdateProps(
                     .value = .{ .load_const = .{ .value = .{
                         .string = try std.fmt.allocPrint(allocator, "@ref:{s}", .{mapped_value_ref}),
                     } } },
+                    .source_loc = branch_loc,
                 });
             }
 
@@ -4693,6 +4714,7 @@ fn liftBranchUpdateProps(
                 .value = .{ .load_const = .{ .value = .{
                     .string = try std.fmt.allocPrint(allocator, "@ref:{s}", .{old_prop_ref}),
                 } } },
+                .source_loc = branch_loc,
             });
 
             // Emit conditional if-expression.
@@ -4706,6 +4728,7 @@ fn liftBranchUpdateProps(
             try result.append(allocator, .{
                 .name = cond_if_ref,
                 .value = .{ .@"if" = new_if },
+                .source_loc = branch_loc,
             });
 
             // Emit update_prop.
@@ -4716,6 +4739,7 @@ fn liftBranchUpdateProps(
                     .name = branch.prop_name,
                     .value = cond_if_ref,
                 } },
+                .source_loc = branch_loc,
             });
         }
     }

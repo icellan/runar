@@ -3090,6 +3090,8 @@ class _UpdateBranch:
     prop_name: str
     value_bindings: list[ANFBinding]
     value_ref: str
+    # N-350: location of the branch's original update_prop statement.
+    update_loc: SourceLocation | None = None
 
 
 def _max_temp_index(bindings: list[ANFBinding]) -> int:
@@ -3127,8 +3129,9 @@ def _all_bindings_side_effect_free(bindings: list[ANFBinding]) -> bool:
 
 def _extract_branch_update(
     bindings: list[ANFBinding],
-) -> tuple[str, list[ANFBinding], str] | None:
-    """If *bindings* ends with ``update_prop``, return (prop_name, value_bindings, value_ref)."""
+) -> tuple[str, list[ANFBinding], str, SourceLocation | None] | None:
+    """If *bindings* ends with ``update_prop``, return
+    (prop_name, value_bindings, value_ref, update_loc)."""
     if not bindings:
         return None
     last = bindings[-1]
@@ -3137,7 +3140,7 @@ def _extract_branch_update(
     value_bindings = bindings[:-1]
     if not _all_bindings_side_effect_free(value_bindings):
         return None
-    return last.value.name or "", value_bindings, last.value.value_ref or ""
+    return last.value.name or "", value_bindings, last.value.value_ref or "", last.source_loc
 
 
 def _is_assert_false_else(bindings: list[ANFBinding]) -> bool:
@@ -3187,7 +3190,7 @@ def _collect_update_branches(
     then_update = _extract_branch_update(then_bindings)
     if then_update is None:
         return None
-    prop_name, val_bindings, val_ref = then_update
+    prop_name, val_bindings, val_ref, update_loc = then_update
 
     branches: list[_UpdateBranch] = [
         _UpdateBranch(
@@ -3196,6 +3199,7 @@ def _collect_update_branches(
             prop_name=prop_name,
             value_bindings=val_bindings,
             value_ref=val_ref,
+            update_loc=update_loc,
         )
     ]
 
@@ -3227,7 +3231,7 @@ def _collect_update_branches(
     # Otherwise, else branch should end with update_prop (final else)
     else_update = _extract_branch_update(else_bindings)
     if else_update is not None:
-        e_prop_name, e_val_bindings, e_val_ref = else_update
+        e_prop_name, e_val_bindings, e_val_ref, e_update_loc = else_update
         branches.append(
             _UpdateBranch(
                 cond_setup_bindings=[],
@@ -3235,6 +3239,7 @@ def _collect_update_branches(
                 prop_name=e_prop_name,
                 value_bindings=e_val_bindings,
                 value_ref=e_val_ref,
+                update_loc=e_update_loc,
             )
         )
         return branches
@@ -3374,6 +3379,10 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
             continue
 
         if_val = binding.value
+        # N-350: the rewrite replaces this located `if`; keep its location on
+        # the shared condition temporaries, and each branch's own update
+        # statement location on that branch's synthesized bindings (Java F-188).
+        if_loc = binding.source_loc
         branches = _collect_update_branches(
             if_val.cond or "",
             _strip_declared_results(if_val.then or [], if_val.results),
@@ -3397,6 +3406,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                 result.append(ANFBinding(
                     name=new_name,
                     value=_remap_value_refs(csb.value, name_map),
+                    source_loc=csb.source_loc or if_loc,
                 ))
             if branch.cond_ref is not None:
                 cond_refs.append(name_map.get(branch.cond_ref, branch.cond_ref))
@@ -3428,6 +3438,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         op="!",
                         operand=cond_refs[j],
                     ),
+                    source_loc=if_loc,
                 ))
                 negated_conds.append(neg_name)
 
@@ -3444,6 +3455,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         left=and_ref,
                         right=negated_conds[j],
                     ),
+                    source_loc=if_loc,
                 ))
                 and_ref = and_name
 
@@ -3458,6 +3470,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         left=and_ref,
                         right=cond_refs[i],
                     ),
+                    source_loc=if_loc,
                 ))
                 effective_conds.append(final_name)
             else:
@@ -3500,20 +3513,25 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         left=or_ref,
                         right=cond_refs[i],
                     ),
+                    source_loc=if_loc,
                 ))
                 or_ref = or_name
             result.append(ANFBinding(
                 name=fresh(),
                 value=_make_assert(or_ref),
+                source_loc=if_loc,
             ))
 
         # 3. For each branch, emit: load_old, conditional if-expression, update_prop
         for i, branch in enumerate(branches):
+            branch_loc = branch.update_loc or if_loc
+
             # Load old property value
             old_prop_ref = fresh()
             result.append(ANFBinding(
                 name=old_prop_ref,
                 value=ANFValue(kind="load_prop", name=branch.prop_name),
+                source_loc=branch_loc,
             ))
 
             # Remap value bindings for the then-branch
@@ -3525,6 +3543,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                 then_bindings.append(ANFBinding(
                     name=new_name,
                     value=_remap_value_refs(vb.value, branch_map),
+                    source_loc=vb.source_loc or branch_loc,
                 ))
 
             # An arm's VALUE is its LAST binding. value_bindings is everything
@@ -3552,6 +3571,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         raw_value=value_ref_str,
                         const_string=value_ref_str,
                     ),
+                    source_loc=branch_loc,
                 ))
 
             # Else branch: keep old property value
@@ -3565,6 +3585,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         raw_value=ref_str,
                         const_string=ref_str,
                     ),
+                    source_loc=branch_loc,
                 ),
             ]
 
@@ -3578,6 +3599,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     then=then_bindings,
                     else_=else_bindings,
                 ),
+                source_loc=branch_loc,
             ))
 
             # Emit update_prop pointing at the if-expression
@@ -3590,6 +3612,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     raw_value=cond_if_ref,
                     value_ref=cond_if_ref,
                 ),
+                source_loc=branch_loc,
             ))
 
     return result
