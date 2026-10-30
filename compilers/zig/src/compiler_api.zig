@@ -358,6 +358,27 @@ pub fn runPipeline(
 
     // Pass 2: Validate (Zig mode for .runar.zig — relaxes super() constructor requirement)
     const val_result = validateForFile(work, contract, file_name) catch return error.ValidationFailed;
+    // N-422: the reference raises the loop-START refusal from ANF lowering, i.e.
+    // AFTER type checking, so a program that is both (`let acc = seed; while
+    // (acc < 5) {..}; assert_eq!(acc, ..)`: the loop variable is out of scope
+    // after the loop) reports the type error, not the loop-start sentence. This
+    // tier raises it from validation (its parsers drop the start expression),
+    // so when that is the ONLY validation complaint let the type checker speak
+    // first. Acceptance is unchanged: the program is refused either way.
+    // `--parse-only` stops at validation, as before.
+    if (val_result.errors.len > 0 and opts.stop_after != .validate) {
+        var only_loop_start = true;
+        for (val_result.errors) |d| {
+            if (!std.mem.eql(u8, d.message, validate_pass.loop_start_diagnostic)) only_loop_start = false;
+        }
+        if (only_loop_start) {
+            const early_tc = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
+            if (early_tc.errors.len > 0) {
+                for (early_tc.errors) |message| diag.addError(work, "  type error: ", message);
+                return error.TypeCheckFailed;
+            }
+        }
+    }
     for (val_result.errors) |d| diag.addLocatedError(work, "  validation error: ", d);
     if (val_result.errors.len > 0) return error.ValidationFailed;
     for (val_result.warnings) |d| diag.addWarning(work, d.message);

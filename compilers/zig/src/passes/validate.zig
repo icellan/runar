@@ -1691,7 +1691,7 @@ fn findOutputIntrinsicInExpr(
 /// Python, Ruby and Java peers. This tier raises it earlier, in validation,
 /// because its parsers discard the start expression rather than carrying it to
 /// ANF; the user-visible sentence is identical either way.
-const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
+pub const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
     "For-loop iterators must start at an integer literal.";
 
 /// F-025: the BOUND's counterpart, for a bound that is a bare identifier (a

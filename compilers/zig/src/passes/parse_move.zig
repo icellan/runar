@@ -657,6 +657,11 @@ const Parser = struct {
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
+    /// N-422: the name declared by the statement immediately before the one
+    /// `parseMoveBlock` is about to parse, i.e. the only name a `while` there
+    /// can be iterating over. Lets `parseMoveWhile` mirror `n > i` as the
+    /// reference does.
+    move_prev_decl: ?[]const u8 = null,
     nest_error: ?[]const u8 = null,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: identifier_collision.DeclaredIdents = .{},
@@ -1408,6 +1413,12 @@ const Parser = struct {
             self.skipSemicolons();
             if (self.current.kind == .rbrace or self.current.kind == .eof) break;
             const starts_while = self.checkIdent("while");
+            self.move_prev_decl = null;
+            if (stmts.items.len > 0) switch (stmts.items[stmts.items.len - 1]) {
+                .let_decl => |ld| self.move_prev_decl = ld.name,
+                .const_decl => |cd| self.move_prev_decl = cd.name,
+                else => {},
+            };
             if (self.parseStatement()) |s| {
                 // N-421: a Move `while` must follow the declaration of its
                 // loop variable immediately; the fold below is the only place
@@ -1647,10 +1658,15 @@ const Parser = struct {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'while'
 
+        // N-422: read before the condition is parsed (the body's own blocks
+        // overwrite it).
+        const prev_decl = self.move_prev_decl;
         const has_paren = self.match(.lparen);
         const _cond = self.parseExpression();
-        // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
-        if (_cond) |c| loop_condition.normalize(c, null);
+        // N-115: `while (5 > i)` folds exactly like `while (i < 5)`. N-422: so
+        // does `while (n > i)`, whose left side is an identifier, once the
+        // iterator is known to be the preceding declaration.
+        if (_cond) |c| loop_condition.normalize(c, prev_decl);
         if (has_paren) {
             _ = self.expect(.rparen);
         }

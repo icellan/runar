@@ -184,6 +184,29 @@ def _type_check(contract: Any) -> Any:
     return type_check(contract)
 
 
+def _type_errors_ahead_of_loop_start(valid_result: Any, contract: Any) -> Any:
+    """N-422: let the type checker speak before a loop-START refusal.
+
+    The reference raises "Cannot determine loop start" from ANF lowering, i.e.
+    after type checking, so a program that is both a type error and a
+    non-literal-start loop (the loop variable is out of scope after the loop,
+    so ``let acc = seed; while (acc < 5) {..}; assert_eq!(acc, ..)`` is an
+    ``Undefined variable 'acc'``) reports the type error. This tier raises the
+    loop-start sentence from validation, so when that is the ONLY validation
+    complaint, return the type-check result if it has errors (else ``None``
+    and the caller reports the validation errors as before). The program is
+    refused either way; only which sentence is printed changes.
+    """
+    from runar_compiler.frontend.validator import LOOP_START_DIAGNOSTIC
+
+    if not valid_result.errors:
+        return None
+    if any(e.message != LOOP_START_DIAGNOSTIC for e in valid_result.errors):
+        return None
+    tc_result = _type_check(contract)
+    return tc_result if tc_result.errors else None
+
+
 def _lower_to_anf(contract: Any) -> ANFProgram:
     """Lower a ContractNode to ANF IR."""
     from runar_compiler.frontend.anf_lower import lower_to_anf
@@ -632,6 +655,9 @@ def compile_from_source_collecting_warnings(
 
     # Pass 2: Validate
     valid_result = _validate(parse_result.contract)
+    early_tc = _type_errors_ahead_of_loop_start(valid_result, parse_result.contract)
+    if early_tc is not None:
+        raise CompilationError("type check errors:\n  " + "\n  ".join(early_tc.error_strings()))
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
     warnings = valid_result.warning_strings()
@@ -731,6 +757,9 @@ def compile_source_to_ir_collecting_warnings(
         raise CompilationError(f"no contract found in {source_path}")
 
     valid_result = _validate(parse_result.contract)
+    early_tc = _type_errors_ahead_of_loop_start(valid_result, parse_result.contract)
+    if early_tc is not None:
+        raise CompilationError("type check errors:\n  " + "\n  ".join(early_tc.error_strings()))
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
     warnings = valid_result.warning_strings()
@@ -1495,6 +1524,11 @@ def _compile_from_source_str_with_result(
     # Pass 2: Validate
     try:
         valid_result = _validate(result.contract)
+        if not validate_only:
+            early_tc = _type_errors_ahead_of_loop_start(valid_result, result.contract)
+            if early_tc is not None:
+                result.diagnostics.extend(early_tc.errors)
+                return result
         result.diagnostics.extend(valid_result.errors)
         result.diagnostics.extend(valid_result.warnings)
     except Exception as e:

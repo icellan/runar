@@ -49,6 +49,14 @@ from runar_compiler.frontend.input_limits import MAX_CALL_DEPTH, call_depth_mess
 # Public API
 # ---------------------------------------------------------------------------
 
+#: The cross-tier loop-START sentence (shared verbatim with the other six
+#: tiers, which raise it from ANF lowering).
+LOOP_START_DIAGNOSTIC = (
+    "Cannot determine loop start at compile time. "
+    "For-loop iterators must start at an integer literal."
+)
+
+
 @dataclass
 class ValidationResult:
     """Output of the validation pass."""
@@ -896,11 +904,7 @@ class _ValidationContext:
         # in ``_extract_loop_shape`` stays as the backstop for ``--ir`` inputs,
         # which run no frontend at all.
         if stmt.init is not None and not _is_compile_time_constant(stmt.init.init):
-            self._add_error(
-                "Cannot determine loop start at compile time. "
-                "For-loop iterators must start at an integer literal.",
-                stmt.source_location,
-            )
+            self._add_error(LOOP_START_DIAGNOSTIC, stmt.source_location)
 
         self._validate_for_condition_tests_iterator(stmt)
 
