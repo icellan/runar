@@ -1636,6 +1636,103 @@ module RunarCompiler::Codegen
       end
     end
 
+    # The slots this arm inherited from the parent, as arm stack indices
+    # (bottom = 0) in the arm's current order. A slot is matched to the parent
+    # by name and multiplicity: for each name, the deepest
+    # min(parent count, arm count) occurrences. Everything else the arm holds
+    # (its results, a rebound local's new value) is not inherited.
+    def inherited_slots(parent)
+      parent_counts = parent.name_counts
+      seen = Hash.new(0)
+      inherited = []
+      @sm.slots.each_with_index do |n, i|
+        next if n.nil? || n.empty?
+
+        inherited << i if seen[n] < parent_counts[n]
+        seen[n] += 1
+      end
+      inherited
+    end
+
+    # The parent's order for the slots this arm inherited: the parent's named
+    # slots, bottom first, keeping for each name only its deepest occurrences,
+    # as many as the arm inherited. Phase 2 drops the SHALLOWEST occurrence of a
+    # name a sibling consumed, and the post-ENDIF reconcile removes the parent's
+    # shallowest occurrence, so this is exactly the order the parent goes on
+    # modelling after OP_ENDIF.
+    def parent_order(parent)
+      want = Hash.new(0)
+      inherited_slots(parent).each { |i| want[@sm.slots[i]] += 1 }
+      order = []
+      parent.slots.each do |n|
+        next if n.nil? || n.empty? || want[n].zero?
+
+        order << n
+        want[n] -= 1
+      end
+      order
+    end
+
+    # The arm slots to roll to the top, in turn, so that the inherited slots
+    # stand in +order+ (names, bottom first) with everything else above them in
+    # its current order. The longest run at the bottom already in place stays.
+    # Same-named slots keep their relative order, so a name held twice keeps its
+    # dead-below-live layout.
+    def alignment_rolls(parent, order)
+      inherited = inherited_slots(parent)
+      by_name = Hash.new { |h, k| h[k] = [] }
+      inherited.each { |i| by_name[@sm.slots[i]] << i }
+      taken = Hash.new(0)
+      target = order.map do |n|
+        idx = by_name[n][taken[n]]
+        taken[n] += 1
+        idx
+      end
+      in_set = inherited.to_h { |i| [i, true] }
+      @sm.depth.times { |i| target << i unless in_set[i] }
+      # Slots never rolled keep their relative order and sink to the bottom, so
+      # the longest increasing prefix of +target+ stays and the rest is rolled.
+      keep = 0
+      keep += 1 while keep < target.length && (keep.zero? || target[keep] > target[keep - 1])
+      target[keep..]
+    end
+
+    # Put this arm's inherited slots in +order+ (issue #178): see
+    # +alignment_rolls+. Emits nothing when they already are.
+    def align_inherited_layout(parent, order)
+      rolls = alignment_rolls(parent, order)
+      LoweringContext.roll_sequence(@sm.depth, rolls).each do |depth|
+        case depth
+        when 0
+          next
+        when 1
+          emit_op({ op: "swap" })
+          @sm.swap
+        when 2
+          emit_op({ op: "rot" })
+          @sm.push(@sm.remove_at_depth(2))
+        else
+          emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(depth) })
+          @sm.push("")
+          emit_op({ op: "roll", depth: depth })
+          @sm.pop
+          @sm.push(@sm.remove_at_depth(depth))
+        end
+      end
+    end
+
+    # Replay +rolls+ (arm indices, in turn) over a stack of +depth+ slots and
+    # return the depth each one rolls from.
+    def self.roll_sequence(depth, rolls)
+      current = (0...depth).to_a
+      rolls.map do |index|
+        pos = current.index(index)
+        current.delete_at(pos)
+        current << index
+        current.length - 1 - pos
+      end
+    end
+
     # -----------------------------------------------------------------
     # resolve_ref -- resolve a binding name to bring it to top of stack
     # -----------------------------------------------------------------
@@ -2802,6 +2899,33 @@ module RunarCompiler::Codegen
           end
         end
 
+        # Issue #178: both arms now hold the same inherited slots, but not
+        # necessarily in the parent's ORDER. Rebinding a local that is dead after
+        # the +if+ consumes its slot and pushes the new value on top
+        # (+w = w - 1n+ turns [w k] into [k w]); a nested +if+ without +else+
+        # that rebinds a live local leaves the new value on top of its
+        # neighbours. Everything below reads the arms by position and the parent
+        # goes on modelling its own order, so a read of a moved slot on that path
+        # took its neighbour's value.
+        #
+        # Roll each arm's inherited slots back into the parent's pre-+if+ order:
+        # the same contract the #149 +sink_below+ repair keeps for declared
+        # results, one layer earlier, so the parent's model of every slot it does
+        # not adopt stays "the depth it recorded before the branch" on every
+        # path. Emits nothing for an arm already in that order. Before the result
+        # trim, which removes the slots just beneath the results and so needs
+        # every inherited slot below them.
+        inherited_order = then_ctx.parent_order(@sm)
+        else_inherited_order = else_ctx.parent_order(@sm)
+        unless inherited_order == else_inherited_order
+          raise "internal codegen error: the conditional's arms inherit different " \
+                "parent slots (#{inherited_order.inspect} after the then-arm, " \
+                "#{else_inherited_order.inspect} after the else-arm); " \
+                "binding=#{binding_name.inspect}"
+        end
+        then_ctx.align_inherited_layout(@sm, inherited_order)
+        else_ctx.align_inherited_layout(@sm, inherited_order)
+
         # Branch-merged locals: trim each arm down to exactly its K result slots.
         #
         # ANF lowering ends both arms with an identical K-binding block that
@@ -2916,6 +3040,25 @@ module RunarCompiler::Codegen
                 "(see GitHub issue #99); binding=#{binding_name.inspect}"
         end
 
+        # Layer D: equal depth is not enough, the arms must agree slot by slot on
+        # every name the parent can read after OP_ENDIF. A slot only one arm names
+        # is skipped: a phase-3 placeholder, or the +if+'s own value, which each
+        # arm binds under its own temporary. Two different parent names at the
+        # same depth mean one path reads its neighbour's value (#178). Emits no
+        # opcodes.
+        then_ctx.sm.depth.times do |d|
+          tn = then_ctx.sm.peek_at_depth(d)
+          en = else_ctx.sm.peek_at_depth(d)
+          next if tn.nil? || tn.empty? || en.nil? || en.empty? || tn == en
+          next unless pre_if_names.include?(tn) && pre_if_names.include?(en)
+
+          raise "internal codegen error: conditional arms leave different stack " \
+                "layouts (depth #{d} holds #{tn.inspect} after the then-arm and " \
+                "#{en.inspect} after the else-arm), so every later read of either " \
+                "slot would take the wrong value on one path (see GitHub issue " \
+                "#178); binding=#{binding_name.inspect}"
+        end
+
         # NEW-018 needs the arms' post-branch name MULTISET. Snapshotted here
         # because the arms' op lists are consumed immediately after this point.
         post_branch_counts = then_ctx.sm.name_counts
@@ -2947,6 +3090,16 @@ module RunarCompiler::Codegen
             @sm.remove_at_depth(@sm.find_depth(name))
             excess -= 1
           end
+        end
+
+        # #178: what the parent still models is exactly the slots both arms
+        # inherited, and the arms were rolled into the parent's order above.
+        # Checked rather than assumed. Emits no opcodes.
+        modelled = @sm.slots.reject { |n| n.nil? || n.empty? }
+        unless modelled == inherited_order
+          raise "internal codegen error: after OP_ENDIF the parent models " \
+                "#{modelled.inspect} but both arms leave their inherited slots as " \
+                "#{inherited_order.inspect}; binding=#{binding_name.inspect}"
         end
 
         # C27: the N>=2 result reconcile below also applies when the else-branch
