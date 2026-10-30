@@ -150,10 +150,12 @@ interface FuzzerCLIOptions {
   /** Wall-clock budget in ms (anf / execute modes). */
   timeBudgetMs?: number;
   /**
-   * ANF mode only. Render each generated program to `.runar.ts` and compile it
+   * ANF mode: render each generated program to `.runar.ts` and compile it
    * from SOURCE in every tier with constant folding ON. Not via `--ir`: every
    * tier forces folding off on IR input, so the `--ir` path cannot fold
    * (N-003). Default off → fold-OFF `--ir`, matching the checked-in goldens.
+   * Also honoured by `--ir --hex` (N-399): compiles the generated contracts
+   * from source, folding ON.
    */
   foldOn: boolean;
 }
@@ -399,7 +401,7 @@ Options:
   --inputs <n>           Execute mode only. Input vectors per (contract, method)
                          (default 6).
   --time-budget-ms <n>   ANF / execute modes. Early-stop once wall-clock exceeded.
-  --fold-on              ANF mode only. Render each generated ANF program to
+  --fold-on              ANF mode: render each generated ANF program to
                          .runar.ts and compile it with --source <file> --hex in
                          every tier (TS in-process via compile()), constant
                          folding ON. It does NOT use --ir: every tier forces
@@ -410,6 +412,11 @@ Options:
                          Default is fold-OFF via --ir, matching the checked-in
                          goldens. Either mode must produce byte-identical hex
                          across all tiers.
+                         --ir --hex: compile the generated contracts from source
+                         in every tier with folding ON (omits
+                         --disable-constant-folding); fails if folding changed
+                         no program's TS bytes. Requires --hex. Not wired into
+                         the legacy default mode.
   --help, -h             Show this help message
 
 Examples:
@@ -772,6 +779,10 @@ async function main(): Promise<void> {
   }
 
   if (opts.ir) {
+    if (opts.foldOn && !opts.hex) {
+      console.error('--ir --fold-on requires --hex (the ANF-depth compare is not uniformly post-fold across tiers).');
+      process.exit(1);
+    }
     const report = await runIRDifferentialFuzzing(opts.num, {
       seed: opts.seed,
       compilers: opts.compilers,
@@ -781,6 +792,7 @@ async function main(): Promise<void> {
       includeStateful: opts.stateful,
       findingsDir: opts.findingsDir,
       requireTiers: opts.requireTiers ?? opts.compilers,
+      disableConstantFolding: !opts.foldOn,
     });
 
     const results = report.results;
@@ -824,7 +836,16 @@ async function main(): Promise<void> {
       );
     }
 
-    if (mismatches.length > 0 || report.missingRequiredTiers.length > 0) process.exit(1);
+    // N-399: a fold-ON --ir run in which folding changed no program's TS bytes
+    // compared fold-OFF under another name (the N-003 failure mode). Only
+    // judged when the ts tier ran, since that is what the counter reads.
+    const vacuousIrFoldOn =
+      opts.foldOn && opts.compilers.includes('ts') && results.length > 0 && report.foldedPrograms === 0;
+    if (vacuousIrFoldOn) {
+      console.error('VACUOUS RUN: --fold-on changed no program\'s bytes — folding never ran on what was compared.');
+    }
+
+    if (mismatches.length > 0 || report.missingRequiredTiers.length > 0 || vacuousIrFoldOn) process.exit(1);
     return;
   }
 

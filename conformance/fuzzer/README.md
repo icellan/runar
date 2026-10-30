@@ -79,11 +79,16 @@ Compares: 7 tiers on a generated CONTRACT (IR generator), rendered either to one
 TS source (`--render ts`, default) or to each tier's native surface
 (`--render native`, so each frontend is exercised). Compares final hex with
 `--hex`, ANF IR without it. `--stateful` mixes in `StatefulSmartContract`s.
-**Fold mode: always OFF.** Every tier is invoked with `--disable-constant-folding`
-(and the TS tier with `disableConstantFolding: true`), so no contract-level
-cross-tier comparison here ever runs the folder. The legacy default mode is
-fold-OFF the same way. Cross-tier fold-ON parity is fuzzed only by
-`--anf --fold-on`, on straight-line ANF programs.
+**Fold mode: OFF by default; `--fold-on` (with `--hex`) turns it ON (N-399).**
+By default every tier is invoked with `--disable-constant-folding` (and the TS
+tier with `disableConstantFolding: true`), matching the checked-in goldens. With
+`--hex --fold-on` the flag is omitted in every tier, so contracts with branches,
+loops and stateful scaffolding are compared fold-ON across all seven tiers; the
+run fails if folding changed no program's TS bytes (vacuous). `--fold-on`
+without `--hex` is refused: the ANF-depth compare reads each frontend's ANF,
+which is not uniformly post-fold. There is no per-fixture fold-ON allowlist in
+the fuzzer (the runner's `fold-on-allowlist.json` governs fixtures only). The
+legacy default mode is still always fold-OFF.
 
 `sourceLoc` is stripped ONLY in the ANF-depth compare (no `--hex`):
 `sortKeysDeep` in `ir-differential.ts` skips the key, because under
@@ -264,12 +269,12 @@ otherwise. Step names are matched verbatim by the doc test.
 | Fuzzer regression corpus replay | `ts-compiler` | every trigger | `--replay` equivalent | all checked-in reproducers, deterministic (`ci.yml`) |
 | Fuzzer regression corpus — entries are never deleted (rule 3) | `ts-compiler` | every trigger | replay guard | fails on a deleted entry vs the merge-base (`ci.yml`) |
 
-What the table implies: cross-tier fold-ON parity runs only for the `--anf
---fold-on` corpus (straight-line programs; the contract-level `--ir` runs are
-fold-OFF), while the oracles that do compile fold-ON (`--execute`,
-`--tri-modal`, `--spend-oracle`, `metamorphic-fuzz.ts`) are TS-tier only, so
-fold-ON on a contract with branches or loops is never compared across tiers by
-any fuzz mode. The cross-tier ANF-depth compare and every rotating-seed run happen
+What the table implies: no CI step runs `--ir --hex --fold-on` (N-399 added the
+mode, not a gate), so scheduled cross-tier fold-ON parity covers only the `--anf
+--fold-on` corpus (straight-line programs), while the oracles that do compile
+fold-ON (`--execute`, `--tri-modal`, `--spend-oracle`, `metamorphic-fuzz.ts`) are
+TS-tier only. Fold-ON on a contract with branches or loops is compared across
+tiers only when `--ir --hex --fold-on` is run by hand. The cross-tier ANF-depth compare and every rotating-seed run happen
 only after merge; those four oracles never run a native tier, so a divergence confined to one
 native compiler is only visible to the horizontal `--anf` / `--ir` modes and the
 conformance suite.
