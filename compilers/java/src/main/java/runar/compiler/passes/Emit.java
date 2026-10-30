@@ -114,7 +114,9 @@ public final class Emit {
         int codeSeparatorIndex,
         List<Integer> codeSeparatorIndices,
         /** N-051 — deploy-time pin length fields; empty when every pin is exact. */
-        List<CodePartLenSlot> codePartLenSlots
+        List<CodePartLenSlot> codePartLenSlots,
+        /** N-152 — space-separated human-readable disassembly, the artifact's {@code asm}. */
+        String scriptAsm
     ) {}
 
     /**
@@ -350,7 +352,8 @@ public final class Emit {
             List.copyOf(ctx.codeSepIndexSlots),
             ctx.codeSeparatorIndex,
             List.copyOf(ctx.codeSeparatorIndices),
-            List.copyOf(ctx.codePartLenSlots)
+            List.copyOf(ctx.codePartLenSlots),
+            publicMethods.isEmpty() ? "" : String.join(" ", ctx.asmParts)
         );
     }
 
@@ -517,6 +520,8 @@ public final class Emit {
 
     private static final class Ctx {
         final StringBuilder hex = new StringBuilder();
+        /** N-152: one entry per emitted opcode/push, the artifact's {@code asm} column. */
+        final java.util.List<String> asmParts = new java.util.ArrayList<>();
         final java.util.List<RawScriptSpan> rawScriptSpans = new java.util.ArrayList<>();
         // GAP-002: sourceMap accumulator + opcode index + pending loc.
         // Mirrors the EmitContext pattern from the TS / Go / Rust / Python
@@ -573,6 +578,7 @@ public final class Emit {
             }
             recordSourceMapping();
             appendHex(byteToHex(b));
+            asmParts.add(name);
             opcodeIndex++;
         }
 
@@ -589,6 +595,7 @@ public final class Emit {
             // the bump left every later mapping pointing one opcode short.
             recordSourceMapping();
             appendHex("00");
+            asmParts.add("OP_0");
             opcodeIndex++;
         }
 
@@ -609,12 +616,14 @@ public final class Emit {
             // appendHex("00"); this one called neither.
             recordSourceMapping();
             appendHex("00");
+            asmParts.add("OP_0");
             opcodeIndex++;
         }
 
         void emitPush(PushValue value) {
             recordSourceMapping();
             appendHex(encodePushValue(value));
+            asmParts.add(encodePushAsm(value));
             opcodeIndex++;
         }
 
@@ -630,6 +639,7 @@ public final class Emit {
             int offset = byteLength;
             recordSourceMapping();
             appendHex(bytesToHex(bytes));
+            asmParts.add("<raw " + bytes.length + " bytes>");
             rawScriptSpans.add(new RawScriptSpan(offset, bytes.length, inArity, outArity));
             opcodeIndex++;
         }
@@ -663,11 +673,12 @@ public final class Emit {
             emitOpcode("OP_DUP");
             // +1 skips the single-byte push header the 4-byte data push carries.
             int valueByteOffset = byteLength + 1;
+            int asmIndex = asmParts.size();
             emitPush(PushValue.ofHex("00000000"));
             emitOpcode("OP_BIN2NUM");
             emitOpcode("OP_NUMEQUAL");
             emitOpcode("OP_VERIFY");
-            codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, delta));
+            codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, asmIndex, delta));
             if (!exact) codePartLenSlots.add(new CodePartLenSlot(valueByteOffset));
         }
 
@@ -730,6 +741,7 @@ public final class Emit {
                 }
                 int start = fixup.valueByteOffset() * 2;
                 hex.replace(start, start + 8, le.toString());
+                asmParts.set(fixup.asmIndex(), "<" + le + ">");
             }
         }
     }
@@ -740,7 +752,7 @@ public final class Emit {
      * exists. {@code delta} is the deploy-time growth of the constructor-arg
      * placeholders.
      */
-    private record CodePartLenFixup(int valueByteOffset, int delta) {}
+    private record CodePartLenFixup(int valueByteOffset, int asmIndex, int delta) {}
 
     // ------------------------------------------------------------------
     // Script number encoding
@@ -791,6 +803,35 @@ public final class Emit {
                 if (b == 0x81) return "4f";
             }
             return bytesToHex(encodePushData(data));
+        }
+        throw new RuntimeException("unknown push value type");
+    }
+
+    /**
+     * N-152: the {@code asm} spelling of a push, identical to the TS emitter's
+     * {@code encodePushValue(...).asm}: small-integer opcodes by name, data as
+     * {@code <hex>} of the VALUE bytes (no push header).
+     */
+    static String encodePushAsm(PushValue value) {
+        if (value instanceof BoolPushValue b) {
+            return b.value() ? "OP_TRUE" : "OP_FALSE";
+        }
+        if (value instanceof BigIntPushValue i) {
+            BigInteger n = i.value();
+            if (n.signum() == 0) return "OP_0";
+            if (n.equals(BigInteger.valueOf(-1))) return "OP_1NEGATE";
+            if (n.signum() > 0 && n.compareTo(BigInteger.valueOf(16)) <= 0) return "OP_" + n.intValue();
+            return "<" + bytesToHex(encodeScriptNumber(n)) + ">";
+        }
+        if (value instanceof ByteStringPushValue bs) {
+            byte[] data = hexToBytes(bs.hex());
+            if (data.length == 0) return "OP_0";
+            if (data.length == 1) {
+                int b = data[0] & 0xff;
+                if (b >= 1 && b <= 16) return "OP_" + b;
+                if (b == 0x81) return "OP_1NEGATE";
+            }
+            return "<" + bytesToHex(data) + ">";
         }
         throw new RuntimeException("unknown push value type");
     }

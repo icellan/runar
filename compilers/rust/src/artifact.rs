@@ -309,13 +309,12 @@ pub fn assemble_artifact(
         })
     };
 
-    let ir = if include_anf {
-        Some(IRDebug {
-            anf: Some(program.clone()),
-        })
-    } else {
-        None
-    };
+    // N-152: spec/artifact-format.md section 3.8 - the `ir` debug snapshot is
+    // written only on request, and TS/Go/Python/Zig/Ruby/Java never write it
+    // by default. It used to be embedded whenever `include_anf` was set, which
+    // duplicated the whole ANF program on every artifact (the stateful ones
+    // already carry it at top level as `anf`). Nothing reads it.
+    let ir = None;
 
     Ok(RunarArtifact {
         version: SCHEMA_VERSION.to_string(),

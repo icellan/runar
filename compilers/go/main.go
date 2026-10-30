@@ -114,9 +114,10 @@ func main() {
 
 	opts := compiler.CompileOptions{
 		DisableConstantFolding: *disableConstFold,
-		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
-		// so the artifact carries the mapping table the user just asked for.
-		IncludeSourceMap: *emitSourceMap != "",
+		// N-152: the CLI artifact always carries its sourceMap, like the TS,
+		// Rust, Python, Ruby and Zig artifacts do. --emit-source-map only
+		// additionally writes the table to its own file.
+		IncludeSourceMap: true,
 		Groth16WAVKey:    *groth16WAVKey,
 	}
 

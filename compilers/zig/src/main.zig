@@ -8,6 +8,25 @@ const emit = @import("codegen/emit.zig");
 const compiler_api = @import("compiler_api.zig");
 const input_limits = @import("frontend/input_limits.zig");
 
+/// `SOURCE_DATE_EPOCH` (Unix seconds) as given to this process, or null. Set
+/// once in `main`; read by `buildTimestamp`. Reproducible-builds convention,
+/// honoured by every tier (R-212).
+var source_date_epoch: ?[]const u8 = null;
+
+/// N-152: the artifact's `buildTimestamp` - the `SOURCE_DATE_EPOCH` instant when
+/// that variable holds a non-negative integer, otherwise the wall clock. A
+/// malformed value is ignored, as in the Go and Java tiers.
+fn buildTimestamp(buf: *[emit.BUILD_TIMESTAMP_LEN]u8, io: std.Io) []const u8 {
+    if (source_date_epoch) |raw| {
+        if (std.fmt.parseInt(u64, std.mem.trim(u8, raw, " \t\r\n"), 10)) |secs| {
+            return emit.formatBuildTimestamp(buf, secs);
+        } else |_| {}
+    }
+    const now = std.Io.Clock.real.now(io);
+    const secs: i64 = now.toSeconds();
+    return emit.formatBuildTimestamp(buf, if (secs < 0) 0 else @intCast(secs));
+}
+
 const CompileOptions = struct {
     emit_ir: bool = false,
     hex_only: bool = false,
@@ -90,6 +109,7 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
+    source_date_epoch = init.environ_map.get("SOURCE_DATE_EPOCH");
 
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer args_list.deinit(allocator);
@@ -345,7 +365,8 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // appear in the artifact's "script" field), matching compileFromSource
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
-    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
+    var ts_buf: [emit.BUILD_TIMESTAMP_LEN]u8 = undefined;
+    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, optimized_program, buildTimestamp(&ts_buf, io));
 
     // --emit-source-map (N-186): this path never looked at the flag, so
     // `--source IR.json --emit-source-map Y` exited 0 with no Y. An ANF IR
@@ -487,7 +508,8 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // field), so downstream tools can compare byte-for-byte across
     // compilers without parsing JSON.
     // Pass 6: Emit full artifact
-    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
+    var ts_buf: [emit.BUILD_TIMESTAMP_LEN]u8 = undefined;
+    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, program, buildTimestamp(&ts_buf, io));
 
     // --emit-source-map: extract the artifact's sourceMap object (or emit
     // the empty {"mappings":[]} wrapper if absent) and write it to PATH.

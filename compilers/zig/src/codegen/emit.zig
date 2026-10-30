@@ -154,9 +154,13 @@ pub const EmitContext = struct {
         self.byte_offset += bytes_written;
         self.opcode_index += 1;
 
+        // N-152: data pushes are shown as `<hex>` of the VALUE bytes, exactly
+        // as the TS emitter spells them (spec/artifact-format.md section 3.6).
         const hex = try opcodes.bytesToHex(self.allocator, data);
-        try self.owned_asm_parts.append(self.allocator, hex);
-        try self.asm_parts.append(self.allocator, hex);
+        defer self.allocator.free(hex);
+        const shown = try std.fmt.allocPrint(self.allocator, "<{s}>", .{hex});
+        try self.owned_asm_parts.append(self.allocator, shown);
+        try self.asm_parts.append(self.allocator, shown);
     }
 
     /// Emit a script number with proper encoding and ASM representation.
@@ -178,10 +182,10 @@ pub const EmitContext = struct {
         } else if (n == -1) {
             try self.asm_parts.append(self.allocator, "OP_1NEGATE");
         } else {
-            // Show the decimal value
-            const num_str = try std.fmt.allocPrint(self.allocator, "{d}", .{n});
-            try self.owned_asm_parts.append(self.allocator, num_str);
-            try self.asm_parts.append(self.allocator, num_str);
+            // N-152: `<hex>` of the script-number VALUE bytes (the push header
+            // is the first written byte), as the TS emitter spells it. This
+            // used to be the decimal value, which no other tier prints.
+            try self.appendValueAsm(start);
         }
     }
 
@@ -202,11 +206,23 @@ pub const EmitContext = struct {
         self.byte_offset += bytes_written;
         self.opcode_index += 1;
 
-        // ASM: just show the decimal representation verbatim (the value is
-        // oversize by construction; small-int OP_N is unreachable here).
-        const num_str = try self.allocator.dupe(u8, decimal);
-        try self.owned_asm_parts.append(self.allocator, num_str);
-        try self.asm_parts.append(self.allocator, num_str);
+        // ASM: `<hex>` of the script-number VALUE bytes, like every other push
+        // (the value is oversize by construction; small-int OP_N is unreachable
+        // here).
+        try self.appendValueAsm(start);
+    }
+
+    /// N-152: append the `<hex>` asm for the push that was just written at
+    /// `script_bytes[start..]`: the value bytes without the 1-byte push header
+    /// (script numbers are always <= 75 bytes here).
+    fn appendValueAsm(self: *EmitContext, start: usize) !void {
+        const written = self.script_bytes.items[start..];
+        const value = if (written.len >= 2) written[1..] else written;
+        const hex = try opcodes.bytesToHex(self.allocator, value);
+        defer self.allocator.free(hex);
+        const shown = try std.fmt.allocPrint(self.allocator, "<{s}>", .{hex});
+        try self.owned_asm_parts.append(self.allocator, shown);
+        try self.asm_parts.append(self.allocator, shown);
     }
 
     /// Emit a push bool: true -> OP_TRUE (OP_1), false -> OP_FALSE (OP_0).
@@ -217,6 +233,9 @@ pub const EmitContext = struct {
         } else {
             try self.emitOpcode(.op_0);
         }
+        // N-152: same bytes, but the asm column spells a bool push as the TS
+        // emitter does (OP_TRUE / OP_FALSE), not as the opcode it lowers to.
+        self.asm_parts.items[self.asm_parts.items.len - 1] = if (b) "OP_TRUE" else "OP_FALSE";
     }
 
     /// Record a constructor slot at the current byte offset.
@@ -681,12 +700,46 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
 }
 
+/// Length of an RFC 3339 UTC second-resolution timestamp, `2023-11-14T22:13:20Z`.
+pub const BUILD_TIMESTAMP_LEN = 20;
+
+/// N-152: format `secs` (Unix seconds) as the artifact's `buildTimestamp`, the
+/// same spelling the Go tier writes (`time.RFC3339` in UTC).
+pub fn formatBuildTimestamp(buf: *[BUILD_TIMESTAMP_LEN]u8, secs: u64) []const u8 {
+    const es = std.time.epoch.EpochSeconds{ .secs = secs };
+    const year_day = es.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,
+        @intFromEnum(month_day.month),
+        @as(u32, month_day.day_index) + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
 /// Produce the full artifact JSON from a StackProgram and ANFProgram.
 /// Returns a JSON string. Caller owns the returned memory.
+///
+/// The artifact carries no `buildTimestamp`: this entry point has no clock.
+/// The CLI stamps through `emitArtifactStamped`.
 pub fn emitArtifact(
     allocator: std.mem.Allocator,
     stack_program: types.StackProgram,
     anf_program: types.ANFProgram,
+) ![]const u8 {
+    return emitArtifactStamped(allocator, stack_program, anf_program, null);
+}
+
+/// As `emitArtifact`, writing `build_timestamp` (an ISO 8601 string) into the
+/// artifact's `buildTimestamp` field when it is non-null (N-152).
+pub fn emitArtifactStamped(
+    allocator: std.mem.Allocator,
+    stack_program: types.StackProgram,
+    anf_program: types.ANFProgram,
+    build_timestamp: ?[]const u8,
 ) ![]const u8 {
     // Emit script with dispatch table
     var ctx = EmitContext.init(allocator);
@@ -837,6 +890,13 @@ pub fn emitArtifact(
     // asm
     try w.writeAll(",\"asm\":");
     try writeJsonString(w, asm_text);
+
+    // buildTimestamp — N-152: required by the artifact schema; the caller owns
+    // the clock (and SOURCE_DATE_EPOCH), this writer only places the value.
+    if (build_timestamp) |ts| {
+        try w.writeAll(",\"buildTimestamp\":");
+        try writeJsonString(w, ts);
+    }
 
     // constructorSlots — N-147: omitted when empty, matching the TS
     // assembler (`if (options?.constructorSlots && options.constructorSlots.length > 0)`).
@@ -1286,7 +1346,7 @@ test "emitStackInstruction — push_int large" {
     try emitStackInstruction(&ctx, .{ .push_int = 1000 });
     // 1000 = 0x03E8 LE -> e8 03, push: 02 e8 03
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xe8, 0x03 }, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("1000", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("<e803>", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_big_int_decimal secp256k1 group order" {
@@ -1356,7 +1416,7 @@ test "emitStackInstruction — push_bool true" {
 
     try emitStackInstruction(&ctx, .{ .push_bool = true });
     try std.testing.expectEqualSlices(u8, &.{0x51}, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("OP_1", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("OP_TRUE", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_bool false" {
@@ -1366,7 +1426,7 @@ test "emitStackInstruction — push_bool false" {
 
     try emitStackInstruction(&ctx, .{ .push_bool = false });
     try std.testing.expectEqualSlices(u8, &.{0x00}, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("OP_0", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("OP_FALSE", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_data" {
@@ -1376,7 +1436,7 @@ test "emitStackInstruction — push_data" {
 
     try emitStackInstruction(&ctx, .{ .push_data = &.{ 0xaa, 0xbb, 0xcc } });
     try std.testing.expectEqualSlices(u8, &.{ 0x03, 0xaa, 0xbb, 0xcc }, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("aabbcc", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("<aabbcc>", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_data uses OP_N for single-byte 1 through 16" {
@@ -2142,4 +2202,12 @@ test "emit raw_script round-trip writes bytes verbatim and records a span" {
     try std.testing.expectEqual(@as(u32, raw_hex.len / 2), span.length);
     try std.testing.expectEqual(@as(i32, 0), span.in_arity);
     try std.testing.expectEqual(@as(i32, 1), span.out_arity);
+}
+
+test "formatBuildTimestamp - matches Go time.RFC3339 in UTC" {
+    var buf: [BUILD_TIMESTAMP_LEN]u8 = undefined;
+    try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", formatBuildTimestamp(&buf, 1700000000));
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", formatBuildTimestamp(&buf, 0));
+    // Leap day, last second of a day.
+    try std.testing.expectEqualStrings("2024-02-29T23:59:59Z", formatBuildTimestamp(&buf, 1709251199));
 }

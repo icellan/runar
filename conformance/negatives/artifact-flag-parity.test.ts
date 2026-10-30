@@ -31,20 +31,16 @@ import { isCiEnv } from '../env.js';
  * `ir` snapshot, or that the SDKs act correctly on the flags.
  *
  * N-147 extends this file with a full top-level (and per-method ABI) KEY SET
- * comparison against TS — see the second describe block below. That found
+ * comparison against TS - see the second describe block below. That found
  * the `stateFields: []` / `codeSeparatorIndex: 0` divergence this header used
  * to call out (now fixed in `compilers/zig/src/codegen/emit.zig`, alongside
  * the same "emit the empty/default value instead of omitting the key" bug on
- * Zig's `constructorSlots`), plus several PRE-EXISTING, OUT-OF-SCOPE gaps
- * that are not this bug class and are deliberately allow-listed rather than
- * fixed here (see `KNOWN_KEY_EXCEPTIONS`): `templateDigest` and the enriched
- * `constructorSlots.{name,type,valueEncoding,...}` fields are TS-only
- * (feature not ported to any other tier); `sourceMap` is omitted by Go/Java
- * unless their CLI's `--emit-source-map` flag is passed (a CLI-default
- * difference, not an artifact-shape bug); `ir` is Rust-only (its CLI embeds a
- * debug IR snapshot by default); and Zig never emits `buildTimestamp` at all.
- * (`rawScriptSpans`, once never emitted by Go/Java/Zig, was fixed by N-151 —
- * see the third describe block below.)
+ * Zig's `constructorSlots`). N-152 then aligned the leftovers that were
+ * allow-listed there (Java `asm`, Zig `buildTimestamp`, Go/Java `sourceMap`,
+ * Rust's default `ir` snapshot) and shrank `KNOWN_KEY_EXCEPTIONS` to the
+ * documented TS-only metadata: `templateDigest` and the enriched
+ * `constructorSlots[]` descriptors. (`rawScriptSpans`, once never emitted by
+ * Go/Java/Zig, was fixed by N-151 - see the third describe block below.)
  */
 
 type Flags = {
@@ -111,7 +107,11 @@ function artifactArgs(tier: Tier, src: string): { args: string[]; file: string |
   }
 }
 
-function compileArtifact(tier: Tier, src: string): Record<string, any> {
+function compileArtifact(
+  tier: Tier,
+  src: string,
+  env?: Record<string, string>,
+): Record<string, any> {
   if (tier.cmd === null) throw new BrokenTier(`${tier.id}: no toolchain`);
   const { args, file } = artifactArgs(tier, src);
   const argv = [...tier.prefix, ...args];
@@ -120,6 +120,7 @@ function compileArtifact(tier: Tier, src: string): Record<string, any> {
     encoding: 'utf-8',
     timeout: tier.timeoutMs,
     maxBuffer: 64 * 1024 * 1024,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   });
   const where = `${tier.id} (${tier.cmd} ${argv.join(' ')})`;
   if (res.error) throw new BrokenTier(`${where} could not run: ${res.error.message}`);
@@ -204,43 +205,43 @@ describe('N-139: artifact isTerminal + anf presence follow parentClass (7 tiers)
 type KeyException = { missing?: string[]; extra?: string[] };
 
 /**
- * Per-tier, pre-existing top-level-key divergences from TS that are NOT the
- * N-147 bug class: the tier either lacks a whole feature, gates one behind a
- * CLI flag not passed by `artifactArgs`, or never emits a field even when it
- * is non-empty (data loss, not an omit-when-empty shape bug). Keep this list
- * narrow and justified — a new entry here should cite why it is a distinct,
- * separately-tracked gap, not a place to silence this test.
+ * Top-level artifact keys that only the TS reference emits, with the reason
+ * they are NOT part of the cross-tier artifact contract (N-152).
+ *
+ * `templateDigest` (spec/artifact-format.md section 3.13) is a recipe for
+ * recomputing the slot-excised template hash. Nothing reads it from an
+ * artifact: the TS SDK's `computeTemplateHash` recomputes the hash from the
+ * ABI and the constructor args, and the six native SDKs derive each slot's
+ * encoding from the ABI parameter type (`abi_value_encoding` in every
+ * `script_utils`). It is additive verification metadata, so it is documented
+ * as TS-only rather than ported to six compilers.
+ */
+const TS_ONLY_TOP_LEVEL_KEYS = ['templateDigest'];
+
+/**
+ * `constructorSlots[]` keys beyond `{paramIndex, byteOffset}` that only the TS
+ * reference emits (N-152). They are the verification descriptors of
+ * `ConstructorSlot` in packages/runar-ir-schema/src/artifact.ts. The TS SDK's
+ * `resolveSlotLayout` reads `slot.name` only as an optional cross-check against
+ * `abi.constructor.params`, and every SDK recomputes the encoding from the ABI
+ * parameter type, so no consumer needs them from a non-TS artifact.
+ */
+const TS_ONLY_SLOT_KEYS = ['name', 'type', 'valueEncoding', 'fixedValueByteLength', 'fixedPushHeaderBytes'];
+
+/**
+ * Per-tier top-level-key divergences from TS. After N-152 the only entries are
+ * the documented TS-only keys above: `asm` (Java), `buildTimestamp` (Zig),
+ * `sourceMap` (Go, Java) and Rust's default `ir` snapshot were aligned, not
+ * allow-listed. A new entry here must cite why it is a distinct, separately
+ * tracked gap, not a place to silence this test.
  */
 const KNOWN_KEY_EXCEPTIONS: Record<string, KeyException> = {
-  go: {
-    missing: [
-      'sourceMap', // written only via --emit-source-map, not passed here
-      'templateDigest', // TS-only enrichment of constructorSlots; not ported
-    ],
-  },
-  rust: {
-    missing: ['templateDigest'],
-    extra: ['ir'], // rust's --source CLI embeds a debug IR snapshot by default
-  },
-  python: {
-    missing: ['templateDigest'],
-  },
-  ruby: {
-    missing: ['templateDigest'],
-  },
-  java: {
-    missing: [
-      'sourceMap',
-      'templateDigest',
-      'asm', // Java's artifact JSON never includes a human-readable ASM field
-    ],
-  },
-  zig: {
-    missing: [
-      'templateDigest',
-      'buildTimestamp', // not emitted by compilers/zig/src/codegen/emit.zig at all
-    ],
-  },
+  go: { missing: TS_ONLY_TOP_LEVEL_KEYS },
+  rust: { missing: TS_ONLY_TOP_LEVEL_KEYS },
+  python: { missing: TS_ONLY_TOP_LEVEL_KEYS },
+  ruby: { missing: TS_ONLY_TOP_LEVEL_KEYS },
+  java: { missing: TS_ONLY_TOP_LEVEL_KEYS },
+  zig: { missing: TS_ONLY_TOP_LEVEL_KEYS },
 };
 
 /**
@@ -294,6 +295,19 @@ describe('N-147: artifact top-level + per-method key set matches TS (7 tiers)', 
           Object.keys(tsArtifact),
           exceptions,
         );
+
+        // N-152: the constructorSlots[] element key set, modulo TS_ONLY_SLOT_KEYS.
+        const tsSlots = (tsArtifact.constructorSlots ?? []) as Array<Record<string, any>>;
+        const tierSlots = (tierArtifact.constructorSlots ?? []) as Array<Record<string, any>>;
+        expect(tierSlots.length, `${tier.id}/${c.fixture}: constructorSlots length`).toBe(tsSlots.length);
+        tsSlots.forEach((tsSlot, i) => {
+          assertKeysMatch(
+            `${tier.id}/${c.fixture}/constructorSlots[${i}]`,
+            Object.keys(tierSlots[i]!),
+            Object.keys(tsSlot),
+            { missing: TS_ONLY_SLOT_KEYS },
+          );
+        });
 
         const tsMethods = tsArtifact.abi.methods as Array<Record<string, any>>;
         const tierMethods = tierArtifact.abi.methods as Array<Record<string, any>>;
@@ -405,5 +419,57 @@ describe('N-151: rawScriptSpans values match TS (7 tiers)', () => {
         }
       });
     }
+  }
+});
+
+/**
+ * N-152 - artifact shape VALUE parity: the keys the key-set check above can
+ * only see the presence of.
+ *
+ * Proves: for the three CASES, every available tier (a) emits an `asm` string
+ * equal to TS's (spec section 3.6, Required: Yes; Java used to omit it),
+ * (b) emits a parseable `buildTimestamp` (section 3.19, Required: Yes; Zig used
+ * to omit it) and Zig stamps the SOURCE_DATE_EPOCH instant when it is set,
+ * (c) emits a non-empty `sourceMap.mappings` (Go and Java used to omit the key
+ * unless `--emit-source-map` was passed), and (d) carries no top-level `ir`
+ * debug snapshot on the default path (spec section 3.8: written only on
+ * request; Rust embedded one by default).
+ * Does not prove: that any tier's sourceMap mappings equal TS's (source paths
+ * and line attribution are checked by conformance/source-map), the `--ir`
+ * input path, or that the TS-only keys documented above are unused outside the
+ * repo.
+ */
+describe('N-152: artifact asm / buildTimestamp / sourceMap / ir (7 tiers)', () => {
+  for (const tier of available) {
+    for (const c of CASES) {
+      it(`${tier.id}: ${c.fixture} asm, buildTimestamp, sourceMap, no ir`, () => {
+        const tsArtifact = tsArtifactFor(c.fixture);
+        const a = tier.id === 'ts' ? tsArtifact : compileArtifact(tier, tsSource(c.fixture));
+        expect(typeof a.asm, `${tier.id}: asm`).toBe('string');
+        expect(a.asm, `${tier.id}: asm differs from TS`).toBe(tsArtifact.asm);
+        expect(typeof a.buildTimestamp, `${tier.id}: buildTimestamp`).toBe('string');
+        expect(Number.isNaN(Date.parse(a.buildTimestamp)), `${tier.id}: "${a.buildTimestamp}"`).toBe(false);
+        const mappings = a.sourceMap?.mappings as unknown[] | undefined;
+        expect(Array.isArray(mappings) && mappings.length > 0, `${tier.id}: sourceMap.mappings`).toBe(true);
+        expect(a.ir, `${tier.id}: default artifact carries an ir snapshot`).toBeUndefined();
+      });
+    }
+  }
+
+  // R-212 listed every tier that stamps a time and left Zig out because Zig
+  // stamped nothing. Zig now stamps, so it inherits the requirement here.
+  const zig = available.find((t) => t.id === 'zig');
+  if (zig) {
+    it('zig: buildTimestamp is the SOURCE_DATE_EPOCH instant when set', () => {
+      const a = compileArtifact(zig, tsSource('basic-p2pkh'), { SOURCE_DATE_EPOCH: '1700000000' });
+      expect(Math.floor(Date.parse(a.buildTimestamp) / 1000)).toBe(1700000000);
+    });
+
+    it('zig: two builds at the same SOURCE_DATE_EPOCH are identical', () => {
+      const env = { SOURCE_DATE_EPOCH: '1700000000' };
+      const first = compileArtifact(zig, tsSource('stateful-counter'), env);
+      const second = compileArtifact(zig, tsSource('stateful-counter'), env);
+      expect(second).toEqual(first);
+    });
   }
 });

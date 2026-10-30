@@ -420,13 +420,9 @@ public final class Cli {
      * ({@code compilers/go/compiler/compiler.go#assembleArtifact}) and are what
      * {@code packages/runar-java}'s {@code RunarArtifact.fromJson} reads.
      *
-     * <p><b>Known gaps vs. the Go assembler</b> (each degrades gracefully — the
-     * SDK treats the field as absent):
-     * <ul>
-     *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
-     *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
-     *       which therefore stays silent for Java-built artifacts.</li>
-     * </ul>
+     * <p>N-152: {@code asm} (the emitter's disassembly column, byte-for-byte the
+     * TS spelling) and {@code sourceMap} are written like every other tier writes
+     * them. Both used to be omitted.
      *
      * <p>{@code fixedArray} regrouping on both {@code stateFields} (N-086) and
      * {@code abi.constructor.params} (N-229) is handled by
@@ -565,6 +561,7 @@ public final class Cli {
             appendJoined(b, methodJson);
             b.append("]\n  },\n");
             b.append("  \"script\": ").append(jsonString(emit.scriptHex())).append(",\n");
+            b.append("  \"asm\": ").append(jsonString(emit.scriptAsm())).append(",\n");
             if (hasStateFields) {
                 b.append("  \"stateFields\": [");
                 appendJoined(b, stateFieldJson);
@@ -625,6 +622,20 @@ public final class Cli {
                 b.append("  \"rawScriptSpans\": [");
                 appendJoined(b, spans);
                 b.append("],\n");
+            }
+            // N-152: opcode-to-source mappings, omitted when empty (matches Go).
+            // sourceFile is repo-relative POSIX, as in the --emit-source-map file.
+            if (!emit.sourceMap().isEmpty()) {
+                List<String> maps = new ArrayList<>();
+                for (Emit.SourceMapping m : emit.sourceMap()) {
+                    maps.add("{\"opcodeIndex\": " + m.opcodeIndex()
+                        + ", \"sourceFile\": " + jsonString(repoRelativeFileName(m.sourceFile()))
+                        + ", \"line\": " + m.line()
+                        + ", \"column\": " + m.column() + "}");
+                }
+                b.append("  \"sourceMap\": {\"mappings\": [");
+                appendJoined(b, maps);
+                b.append("]},\n");
             }
             b.append("  \"buildTimestamp\": ").append(jsonString(buildTimestamp()));
             // Stateful artifacts always carry the ANF so the SDK can auto-compute
