@@ -2570,7 +2570,7 @@ const Parser = struct {
                 var decoded: std.ArrayListUnmanaged(u8) = .empty;
                 _ = decodeGoBody(self.allocator, tok.text, &decoded) catch break :blk null;
                 self.refuseBareLiteral(tok, decoded.items); // N-448
-                break :blk Expression{ .literal_bytes = .{ .value = decoded.items } };
+                break :blk Expression{ .literal_bytes = .{ .value = decoded.items, .location = self.tokenSourceLoc(tok) } };
             },
             .backtick_string => blk: {
                 // N-439: a bare raw literal is its text verbatim, CR discarded.
@@ -2580,7 +2580,7 @@ const Parser = struct {
                     if (b != '\r') kept.append(self.allocator, b) catch break :blk null;
                 }
                 self.refuseBareLiteral(tok, kept.items); // N-448
-                break :blk Expression{ .literal_bytes = .{ .value = kept.items } };
+                break :blk Expression{ .literal_bytes = .{ .value = kept.items, .location = self.tokenSourceLoc(tok) } };
             },
             .lparen => blk: {
                 _ = self.bump();

@@ -2018,7 +2018,7 @@ impl<'a> ZigParser<'a> {
                         zig_bare_string_literal_message(&v)
                     ));
                 }
-                return Expression::ByteStringLiteral { value: v, source_location: None };
+                return Expression::ByteStringLiteral { value: v, source_location: Some(at) };
             }
         }
 
@@ -2105,8 +2105,8 @@ impl<'a> ZigParser<'a> {
                         }
                         let arg = self.parse_expression();
                         self.expect(&Token::RParen);
-                        if let Expression::ByteStringLiteral { value, .. } = arg {
-                            return Expression::ByteStringLiteral { value, source_location: None };
+                        if let Expression::ByteStringLiteral { value, source_location } = arg {
+                            return Expression::ByteStringLiteral { value, source_location };
                         }
                         self.errors.push(
                             "runar.hexToBytes expects a string literal argument".to_string(),

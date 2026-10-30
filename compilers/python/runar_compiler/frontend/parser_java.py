@@ -1512,7 +1512,7 @@ class _JavaParser:
             self.advance()  # (
             hex_tok = self.advance()  # string
             self.advance()  # )
-            return ByteStringLiteral(value=hex_tok.value)
+            return ByteStringLiteral(value=hex_tok.value, source_location=SourceLocation(file=self.file_name, line=hex_tok.line, column=hex_tok.col))
 
         # Special-case `asm("<hex>", in_arity, out_arity)` — the asm() intrinsic
         # body is the only call position where a bare String literal is legal.
@@ -1526,7 +1526,7 @@ class _JavaParser:
         while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
             if is_asm_call and first_arg and self.peek().kind == TOK_STRING:
                 str_tok = self.advance()
-                args.append(ByteStringLiteral(value=str_tok.value))
+                args.append(ByteStringLiteral(value=str_tok.value, source_location=SourceLocation(file=self.file_name, line=str_tok.line, column=str_tok.col)))
             else:
                 args.append(self._parse_expression())
             first_arg = False

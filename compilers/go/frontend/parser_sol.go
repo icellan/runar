@@ -1637,10 +1637,10 @@ func (p *solParser) parseSolPrimary() Expression {
 		return parseSolNumber(tok.value)
 	case solTokHexString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case solTokString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case solTokIdent:
 		p.advance()
 		name := tok.value

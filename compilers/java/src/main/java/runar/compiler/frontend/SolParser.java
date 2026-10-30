@@ -1374,12 +1374,12 @@ public final class SolParser {
 
             if (tok.kind == TOK_HEXSTRING) {
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TOK_STRING) {
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TOK_IDENT) {

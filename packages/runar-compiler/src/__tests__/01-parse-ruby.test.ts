@@ -967,7 +967,12 @@ end
       const assertStmt = bar.body[0] as ExpressionStatement;
       const call = assertStmt.expression as CallExpr;
       const eq = call.args[0] as BinaryExpr;
-      expect(eq.right).toEqual({ kind: 'bytestring_literal', value: 'deadbeef' });
+      // N-449: the literal carries its opening quote's position.
+      expect(eq.right).toEqual({
+        kind: 'bytestring_literal',
+        value: 'deadbeef',
+        sourceLocation: { file: 'Foo.runar.rb', line: 10, column: 17 },
+      });
     });
   });
 

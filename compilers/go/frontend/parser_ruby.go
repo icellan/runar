@@ -2051,13 +2051,13 @@ func (p *rbParser) parsePrimary() Expression {
 	// Hex string literal (single-quoted)
 	if tok.kind == rbTokHexString {
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// String literal (double-quoted)
 	if tok.kind == rbTokString {
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// N-416: `nil` is not a Rúnar value; refused, never read as 0.

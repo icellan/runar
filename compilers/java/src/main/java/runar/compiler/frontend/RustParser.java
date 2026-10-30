@@ -1675,7 +1675,7 @@ public final class RustParser {
 
         if (tok.kind == TOK_HEX_STRING) {
             s.advance();
-            return new ByteStringLiteral(tok.value);
+            return new ByteStringLiteral(tok.value, new SourceLocation(s.filename, tok.line, tok.col));
         }
 
         if (tok.kind == TOK_TRUE) {

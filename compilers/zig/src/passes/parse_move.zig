@@ -2207,7 +2207,7 @@ const Parser = struct {
             },
             .string_literal => blk: {
                 const tok = self.bump();
-                break :blk Expression{ .literal_bytes = .{ .value = tok.text } };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = self.tokenSourceLoc(tok) } };
             },
             .lparen => blk: {
                 _ = self.bump();
@@ -2410,8 +2410,7 @@ const Parser = struct {
     fn numberLiteral(self: *Parser, tok: Token) ?Expression {
         // A lowercase `0x` spells a ByteString on this surface (any length;
         // an odd one is refused downstream, as in the TS reference).
-        if (std.mem.startsWith(u8, tok.raw, "0x")) return Expression{ .literal_bytes = .{ .value = tok.raw[2..] } };
-        _ = self;
+        if (std.mem.startsWith(u8, tok.raw, "0x")) return Expression{ .literal_bytes = .{ .value = tok.raw[2..], .location = self.tokenSourceLoc(tok) } };
         if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
         return Expression{ .literal_bigint = tok.text };
     }

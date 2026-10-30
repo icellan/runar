@@ -1922,12 +1922,12 @@ class _RbParser:
         # Hex string literal (single-quoted)
         if kind == TOK_HEXSTRING:
             self._advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # Double-quoted string literal
         if kind == TOK_STRING:
             self._advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # N-416: ``nil`` is not a Rúnar value; refused, never read as 0.
         if kind == TOK_NIL:

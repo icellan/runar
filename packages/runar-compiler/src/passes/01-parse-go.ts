@@ -1411,7 +1411,7 @@ class GoParser extends ParserCore<GoToken> {
     // Hex string literal
     if (t.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // String literal. N-448: a bare non-empty literal is REFUSED — natively it
@@ -1426,7 +1426,7 @@ class GoParser extends ParserCore<GoToken> {
       if (value !== '' && !this.bareLiteralOk.has(t)) {
         this.errors.push(makeDiagnostic(goBareStringLiteralMessage(value), 'error', { file: this.file, line: t.line, column: t.column }));
       }
-      return { kind: 'bytestring_literal', value };
+      return { kind: 'bytestring_literal', value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Boolean literals
@@ -1546,7 +1546,7 @@ class GoParser extends ParserCore<GoToken> {
             this.advance(); // '('
             this.advance(); // literal
             this.advance(); // ')'
-            return { kind: 'bytestring_literal', value: argTok.type === 'backtick' ? argTok.value.replace(/\r/g, '') : argTok.value };
+            return { kind: 'bytestring_literal', value: argTok.type === 'backtick' ? argTok.value.replace(/\r/g, '') : argTok.value, sourceLocation: { file: this.file, line: argTok.line, column: argTok.column } };
           }
           this.errors.push(makeDiagnostic(
             'runar.HexToBytes expects a single string literal argument',

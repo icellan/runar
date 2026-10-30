@@ -1667,7 +1667,7 @@ func (p *zigParser) parsePrimary() Expression {
 			loc := SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}
 			p.errors = append(p.errors, MakeDiagnostic(ZigBareStringLiteralMsg(tok.value), SeverityError, &loc))
 		}
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// Boolean literals
@@ -1748,7 +1748,7 @@ func (p *zigParser) parsePrimary() Expression {
 				arg := p.parseExpression()
 				p.expect(zigTokRParen)
 				if lit, ok := arg.(ByteStringLiteral); ok {
-					return ByteStringLiteral{Value: lit.Value}
+					return ByteStringLiteral{Value: lit.Value, SourceLocation: lit.SourceLocation}
 				}
 				p.addError(fmt.Sprintf("line %d: runar.hexToBytes expects a string literal argument", tok.line))
 				return ByteStringLiteral{Value: ""}

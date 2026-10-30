@@ -1577,7 +1577,7 @@ func (p *rustMacroParser) parsePrimary() Expression {
 
 	case rustTokHexString:
 		p.advance()
-		return ByteStringLiteral{Value: t.value}
+		return ByteStringLiteral{Value: t.value, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}}
 
 	case rustTokTrue:
 		p.advance()

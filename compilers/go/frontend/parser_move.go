@@ -1829,7 +1829,7 @@ func (p *moveParser) parseMovePrimary() Expression {
 		return parseMoveNumber(tok.value)
 	case moveTokString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case moveTokIdent:
 		p.advance()
 		name := tok.value

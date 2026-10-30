@@ -952,7 +952,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 				loc := p.locAt(pos)
 				p.errors = append(p.errors, MakeDiagnostic(GoBareStringLiteralMsg(s), SeverityError, &loc))
 			}
-			return ByteStringLiteral{Value: s}
+			return ByteStringLiteral{Value: s, SourceLocation: p.locAt(p.fset.Position(e.Pos()))}
 		}
 
 	case *ast.Ident:
@@ -1004,7 +1004,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 					if len(e.Args) == 1 {
 						if lit, ok := e.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
 							raw, _ := strconv.Unquote(lit.Value)
-							return ByteStringLiteral{Value: raw}
+							return ByteStringLiteral{Value: raw, SourceLocation: p.locAt(p.fset.Position(lit.Pos()))}
 						}
 					}
 					pos := p.fset.Position(e.Pos())

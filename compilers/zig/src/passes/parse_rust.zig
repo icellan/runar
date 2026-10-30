@@ -1883,7 +1883,7 @@ const Parser = struct {
             },
             .hex_string => blk: {
                 const tok = self.bump();
-                break :blk Expression{ .literal_bytes = .{ .value = tok.text } };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = self.tokenSourceLoc(tok) } };
             },
             .lparen => blk: {
                 _ = self.bump();

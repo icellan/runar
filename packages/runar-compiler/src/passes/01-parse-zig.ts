@@ -1178,7 +1178,7 @@ class ZigParser extends ParserCore<ZigToken> {
       if (token.value !== '' && !this.bareLiteralOk.has(token)) {
         this.errors.push(makeDiagnostic(zigBareStringLiteralMessage(token.value), 'error', { file: this.file, line: token.line, column: token.column }));
       }
-      return { kind: 'bytestring_literal', value: token.value };
+      return { kind: 'bytestring_literal', value: token.value, sourceLocation: { file: this.file, line: token.line, column: token.column } };
     }
 
     if (token.type === 'true') {
@@ -1332,7 +1332,7 @@ class ZigParser extends ParserCore<ZigToken> {
           const arg = this.parseExpression();
           this.expect(')');
           if (arg.kind === 'bytestring_literal') {
-            return { kind: 'bytestring_literal', value: arg.value };
+            return { kind: 'bytestring_literal', value: arg.value, sourceLocation: arg.sourceLocation };
           }
           this.errors.push(makeDiagnostic(
             "runar.hexToBytes expects a string literal argument",

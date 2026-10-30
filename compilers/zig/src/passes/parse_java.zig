@@ -2182,7 +2182,7 @@ const Parser = struct {
                 // Bare string literals are only meaningful in ByteString.fromHex("hex"),
                 // which is rewritten in parsePostfix. Keep the raw payload here so
                 // the postfix can reinterpret it as hex.
-                break :blk Expression{ .literal_bytes = .{ .value = tok.text } };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = self.tokenSourceLoc(tok) } };
             },
             .lparen => blk: {
                 _ = self.bump();

@@ -926,7 +926,7 @@ public final class JavaParser {
             && mi.getArguments().size() == 1
             && mi.getArguments().get(0) instanceof LiteralTree hex
             && hex.getValue() instanceof String hs) {
-            return new ByteStringLiteral(hs);
+            return new ByteStringLiteral(hs, locationOf(hex, cu, filename));
         }
         // Recognise asm("<hex>", in_arity, out_arity) — the asm() intrinsic
         // body is the only call position where a bare String literal is legal.

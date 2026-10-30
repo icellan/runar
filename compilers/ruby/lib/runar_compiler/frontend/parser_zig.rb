@@ -1541,7 +1541,7 @@ module RunarCompiler
           if !tok.value.empty? && !@bare_literal_ok.include?(idx)
             @errors << Frontend.lex_error(Frontend.zig_bare_string_literal_message(tok.value), @file_name, tok.line, tok.col)
           end
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Boolean literals
@@ -1689,7 +1689,7 @@ module RunarCompiler
               @bare_literal_ok << @pos if check(TOK_STRING) # N-448: the explicit hex spelling
               arg = parse_expression
               expect(TOK_RPAREN)
-              return ByteStringLiteral.new(value: arg.value) if arg.is_a?(ByteStringLiteral)
+              return ByteStringLiteral.new(value: arg.value, source_location: arg.source_location) if arg.is_a?(ByteStringLiteral)
 
               add_error("line #{tok.line}: runar.hexToBytes expects a string literal argument")
               return ByteStringLiteral.new(value: "")

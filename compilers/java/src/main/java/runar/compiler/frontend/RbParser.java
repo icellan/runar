@@ -1758,8 +1758,8 @@ public final class RbParser {
                 }
                 case TRUE -> { advance(); return new BoolLiteral(true); }
                 case FALSE -> { advance(); return new BoolLiteral(false); }
-                case HEXSTRING -> { advance(); return new ByteStringLiteral(t.value); }
-                case STRING -> { advance(); return new ByteStringLiteral(t.value); }
+                case HEXSTRING -> { advance(); return new ByteStringLiteral(t.value, new SourceLocation(file, t.line, t.col)); }
+                case STRING -> { advance(); return new ByteStringLiteral(t.value, new SourceLocation(file, t.line, t.col)); }
                 case NIL -> {
                     // N-416: `nil` is not a Rúnar value; refused, never read as 0.
                     errors.add(file + ":" + t.line + ":" + t.col

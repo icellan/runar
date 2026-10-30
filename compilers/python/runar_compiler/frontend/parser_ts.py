@@ -1745,7 +1745,7 @@ class _TsParser:
             if key == "body":
                 if self.check(TOK_STRING):
                     str_tok = self.advance()
-                    body_expr = ByteStringLiteral(value=str_tok.value)
+                    body_expr = ByteStringLiteral(value=str_tok.value, source_location=SourceLocation(file=self.file_name, line=str_tok.line, column=str_tok.col))
                 elif self.check(TOK_LBRACKET):
                     body_expr = ByteStringLiteral(value=self._encode_asm_array_body())
                 else:

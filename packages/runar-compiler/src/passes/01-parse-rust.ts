@@ -1325,13 +1325,13 @@ class RustParser extends ParserCore<RustToken> {
     // Hex string literal
     if (t.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // String literal — used for hex-encoded ByteString values
     if (t.type === 'string') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Boolean literals

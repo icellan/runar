@@ -975,7 +975,7 @@ class SolParser {
     }
     if (t.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
     if (t.type === 'true') {
       this.advance();

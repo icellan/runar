@@ -1912,7 +1912,7 @@ class _GoParser:
                 self.errors.append(Diagnostic(
                     message=go_bare_string_literal_message(value), severity=Severity.ERROR,
                     loc=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)))
-            return ByteStringLiteral(value=value)
+            return ByteStringLiteral(value=value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         # Identifier
         if tok.kind == TOK_IDENT:
@@ -1963,7 +1963,8 @@ class _GoParser:
                         self.advance()  # literal
                         self.advance()  # ')'
                         return ByteStringLiteral(
-                            value=nxt.value if nxt.kind == TOK_STRING else nxt.value.replace("\r", ""))
+                            value=nxt.value if nxt.kind == TOK_STRING else nxt.value.replace("\r", ""),
+                            source_location=SourceLocation(file=self.file_name, line=nxt.line, column=nxt.col))
                     self.errors.append(Diagnostic(
                         message="runar.HexToBytes expects a single string literal argument",
                         severity=Severity.ERROR,

@@ -1963,7 +1963,7 @@ public final class GoParser {
                 if (!value.isEmpty() && !bareLiteralOk.contains(idx)) {
                     addError(LexDiag.at(fileName, tok.line, tok.col, LexDiag.goBareStringLiteral(value)));
                 }
-                return new ByteStringLiteral(value);
+                return new ByteStringLiteral(value, new SourceLocation(fileName, tok.line, tok.col));
             }
             if (tok.kind == Tok.IDENT) {
                 advance();
@@ -2003,7 +2003,8 @@ public final class GoParser {
                             advance(); // literal
                             advance(); // ')'
                             return new ByteStringLiteral(argTok.kind == Tok.STRING
-                                ? argTok.value : argTok.value.replace("\r", ""));
+                                ? argTok.value : argTok.value.replace("\r", ""),
+                                new SourceLocation(fileName, argTok.line, argTok.col));
                         }
                         addError(LexDiag.at(fileName, tok.line, tok.col,
                             "runar.HexToBytes expects a single string literal argument"));

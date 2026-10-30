@@ -1385,8 +1385,9 @@ impl RustDslParser {
                 Expression::BigIntLiteral { value: n }
             }
             TokenType::HexString(val) => {
+                let lit_loc = self.loc();
                 self.advance_clone();
-                Expression::ByteStringLiteral { value: val, source_location: None }
+                Expression::ByteStringLiteral { value: val, source_location: Some(lit_loc) }
             }
             TokenType::True => { self.advance_clone(); Expression::BoolLiteral { value: true } }
             TokenType::False => { self.advance_clone(); Expression::BoolLiteral { value: false } }

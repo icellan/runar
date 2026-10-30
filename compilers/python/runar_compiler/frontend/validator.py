@@ -1221,18 +1221,23 @@ class _ValidationContext:
             if len(val) > 0:
                 # N-436: TS counts UTF-16 code units; len(val) counts code points.
                 units = len(val.encode("utf-16-le", "surrogatepass")) // 2
+                # N-449: located at the literal itself, never at the enclosing
+                # statement -- so these bypass `_add_error`'s R-149 fallback.
+                # A literal without a location prints bare, as in TS.
                 if units % 2 != 0:
-                    self._add_error(
-                        f"ByteString literal '{val}' has odd length ({units}) "
+                    self.errors.append(Diagnostic(
+                        message=f"ByteString literal '{val}' has odd length ({units}) "
                         f"\u2014 hex strings must have an even number of characters",
-                        expr.source_location,
-                    )
+                        severity=Severity.ERROR,
+                        loc=expr.source_location,
+                    ))
                 elif not re.fullmatch(r'[0-9a-fA-F]*', val):
-                    self._add_error(
-                        f"ByteString literal '{val}' contains non-hex characters "
+                    self.errors.append(Diagnostic(
+                        message=f"ByteString literal '{val}' contains non-hex characters "
                         f"\u2014 only 0-9, a-f, A-F are allowed",
-                        expr.source_location,
-                    )
+                        severity=Severity.ERROR,
+                        loc=expr.source_location,
+                    ))
 
     # -------------------------------------------------------------------
     # Recursion detection

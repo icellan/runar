@@ -1467,7 +1467,7 @@ public final class MoveParser {
 
             if (tok.kind() == Kind.STRING) {
                 advance();
-                return new ByteStringLiteral(tok.value());
+                return new ByteStringLiteral(tok.value(), new SourceLocation(filename, tok.line(), tok.column()));
             }
 
             if (tok.kind() == Kind.IDENT) {

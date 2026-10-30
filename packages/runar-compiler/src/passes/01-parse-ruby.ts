@@ -2001,13 +2001,13 @@ class RbParser {
     // Hex string literal (single-quoted)
     if (tok.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // String literal (double-quoted)
     if (tok.type === 'string') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // N-416: `nil` is not a Rúnar value; refused, never read as 0.

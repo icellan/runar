@@ -1911,13 +1911,13 @@ class PyParser {
     // Hex string literal (already parsed by tokenizer)
     if (tok.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // String literal
     if (tok.type === 'string') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // Array literal: [expr, expr, ...]
@@ -1942,7 +1942,7 @@ class PyParser {
         this.expect('(');
         const strTok = this.advance(); // string literal
         this.expect(')');
-        return { kind: 'bytestring_literal', value: strTok.value };
+        return { kind: 'bytestring_literal', value: strTok.value, sourceLocation: { file: this.file, line: strTok.line, column: strTok.column } };
       }
     }
 

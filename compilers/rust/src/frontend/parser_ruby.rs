@@ -2548,6 +2548,7 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        let lit_loc = self.loc(); // N-449: the literal's position, before it is consumed
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
@@ -2557,8 +2558,8 @@ impl<'a> RbParser<'a> {
                 self.errors.push("'nil' is not a Rúnar value (use a number, true, false or a hex string)".to_string());
                 Expression::BigIntLiteral { value: BigInt::from(0) }
             }
-            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
+            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
             Token::Ivar(name) => {
                 // @var -> property access
                 let prop_name = snake_to_camel(&name);

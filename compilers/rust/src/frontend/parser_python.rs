@@ -2630,13 +2630,14 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        let lit_loc = self.loc(); // N-449: the literal's position, before it is consumed
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
             Token::NoneLit => Expression::BigIntLiteral { value: BigInt::from(0) },
-            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: None },
+            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
             Token::SelfKw => {
                 // self -> this
                 Expression::Identifier {
@@ -2651,6 +2652,7 @@ impl<'a> PyParser<'a> {
                             self.advance(); // '.'
                             self.advance(); // 'fromhex'
                             self.expect(&Token::LParen);
+                            let str_loc = self.loc();
                             let val = match self.advance() {
                                 Token::StringLit(s) => s,
                                 _ => {
@@ -2660,7 +2662,7 @@ impl<'a> PyParser<'a> {
                                 }
                             };
                             self.expect(&Token::RParen);
-                            return Expression::ByteStringLiteral { value: val, source_location: None };
+                            return Expression::ByteStringLiteral { value: val, source_location: Some(str_loc) };
                         }
                     }
                 }

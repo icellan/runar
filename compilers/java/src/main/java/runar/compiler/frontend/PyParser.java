@@ -1901,7 +1901,7 @@ public final class PyParser {
 
             if (tok.kind == TokKind.STRING) {
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TokKind.IDENT) {
@@ -1949,7 +1949,7 @@ public final class PyParser {
                 expect(TokKind.LPAREN);
                 Token strTok = expect(TokKind.STRING);
                 expect(TokKind.RPAREN);
-                return new ByteStringLiteral(strTok.value);
+                return new ByteStringLiteral(strTok.value, new SourceLocation(fileName, strTok.line, strTok.col));
             }
             if (check(TokKind.LPAREN)) {
                 List<Expression> args = parseCallArgs();

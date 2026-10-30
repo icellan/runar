@@ -2012,13 +2012,13 @@ module RunarCompiler
         # Hex string literal (single-quoted)
         if kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file, line: tok.line, column: tok.col))
         end
 
         # Double-quoted string literal
         if kind == TOK_STRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file, line: tok.line, column: tok.col))
         end
 
         # N-416: +nil+ is not a Rúnar value; refused, never read as 0.

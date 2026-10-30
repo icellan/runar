@@ -1070,7 +1070,7 @@ class MoveParser {
   private parsePrimary(): Expression {
     const t = this.current();
     if (t.type === 'number') { this.advance(); return { kind: 'bigint_literal', value: BigInt(t.value) }; }
-    if (t.type === 'hexstring') { this.advance(); return { kind: 'bytestring_literal', value: t.value }; }
+    if (t.type === 'hexstring') { this.advance(); return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } }; }
     if (t.type === 'true') { this.advance(); return { kind: 'bool_literal', value: true }; }
     if (t.type === 'false') { this.advance(); return { kind: 'bool_literal', value: false }; }
     if (t.type === '(') {

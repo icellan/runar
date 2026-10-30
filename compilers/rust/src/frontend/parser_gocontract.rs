@@ -2461,8 +2461,9 @@ impl<'a> GoParser<'a> {
                     };
                     self.errors.push(Diagnostic::error(go_bare_string_literal_message(&s), Some(loc)));
                 }
+                let lit_loc = self.loc();
                 self.advance();
-                Some(Expression::ByteStringLiteral { value: s, source_location: None })
+                Some(Expression::ByteStringLiteral { value: s, source_location: Some(lit_loc) })
             }
 
             TokenType::LParen => {
@@ -2607,9 +2608,10 @@ impl<'a> GoParser<'a> {
                             self.tokens.get(self.pos + 2).map(|t| t.typ.clone()),
                         ) {
                             self.advance(); // '('
+                            let lit_loc = self.loc();
                             self.advance(); // literal
                             self.advance(); // ')'
-                            return Some(Expression::ByteStringLiteral { value: s, source_location: None });
+                            return Some(Expression::ByteStringLiteral { value: s, source_location: Some(lit_loc) });
                         }
                         let loc = SourceLocation {
                             file: self.file.clone(),

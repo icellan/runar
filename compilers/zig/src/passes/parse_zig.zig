@@ -1650,7 +1650,7 @@ const Parser = struct {
             },
             .kw_true => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = true }; },
             .kw_false => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = false }; },
-            .string_literal => blk: { const tok = self.bump(); self.refuseBareLiteral(tok, tok.text); break :blk Expression{ .literal_bytes = .{ .value = tok.text } }; },
+            .string_literal => blk: { const tok = self.bump(); self.refuseBareLiteral(tok, tok.text); break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = .{ .file = self.file_name, .line = tok.line, .column = tok.col } } }; },
             .kw_self => blk: { _ = self.bump(); break :blk Expression{ .identifier = "self" }; },
             .ident => blk: { const tok = self.bump();
                 if (self.current.kind == .lparen) { _ = self.bump(); const args = self.parseArgList();

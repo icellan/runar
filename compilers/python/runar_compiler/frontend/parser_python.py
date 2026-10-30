@@ -1674,7 +1674,7 @@ class _PyParser:
 
         if tok.kind == TOK_STRING:
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_IDENT:
             self.advance()
@@ -1723,7 +1723,7 @@ class _PyParser:
             self.expect(TOK_LPAREN)
             str_tok = self.expect(TOK_STRING)
             self.expect(TOK_RPAREN)
-            return ByteStringLiteral(value=str_tok.value)
+            return ByteStringLiteral(value=str_tok.value, source_location=SourceLocation(file=self.file_name, line=str_tok.line, column=str_tok.col))
         if self.check(TOK_LPAREN):
             args = self._parse_call_args()
             return CallExpr(

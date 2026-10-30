@@ -1633,7 +1633,7 @@ module RunarCompiler
         # Hex string literal
         if tok.kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # String literal -- used for hex-encoded ByteString values in Go contracts.
@@ -1654,7 +1654,7 @@ module RunarCompiler
           if !value.empty? && !@bare_literal_ok.include?(idx)
             @errors << Frontend.lex_error(Frontend.go_bare_string_literal_message(value), @file_name, tok.line, tok.col)
           end
-          return ByteStringLiteral.new(value: value)
+          return ByteStringLiteral.new(value: value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Boolean literals
@@ -1764,7 +1764,7 @@ module RunarCompiler
                         else
                           arg_tok.value.delete("\r")
                         end
-                return ByteStringLiteral.new(value: value)
+                return ByteStringLiteral.new(value: value, source_location: SourceLocation.new(file: @file_name, line: arg_tok.line, column: arg_tok.col))
               end
               @errors << Frontend.lex_error("runar.HexToBytes expects a single string literal argument", @file_name, tok.line, tok.col)
             end

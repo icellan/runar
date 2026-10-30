@@ -2129,7 +2129,7 @@ func (p *pyParser) parsePyPrimary() Expression {
 		return parsePyNumber(tok.value)
 	case pyTokString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case pyTokIdent:
 		p.advance()
 		name := tok.value
@@ -2199,7 +2199,7 @@ func (p *pyParser) parsePyBytesMethod() Expression {
 		p.expect(pyTokLParen)
 		strTok := p.expect(pyTokString)
 		p.expect(pyTokRParen)
-		return ByteStringLiteral{Value: strTok.value}
+		return ByteStringLiteral{Value: strTok.value, SourceLocation: SourceLocation{File: p.fileName, Line: strTok.line, Column: strTok.col}}
 	}
 	// Unknown bytes method — return as a member call
 	if p.check(pyTokLParen) {

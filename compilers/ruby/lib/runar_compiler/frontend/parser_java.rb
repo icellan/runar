@@ -1646,7 +1646,7 @@ module RunarCompiler
         if method_name == "fromHex" && args.length == 1
           arg = args[0]
           if arg.is_a?(ByteStringLiteral)
-            return ByteStringLiteral.new(value: arg.value)
+            return ByteStringLiteral.new(value: arg.value, source_location: arg.source_location)
           end
           # fromHex with a non-literal string is not supported here; fall
           # through to a regular call expression.
@@ -1770,7 +1770,7 @@ module RunarCompiler
           # so that the common fromHex use-case works byte-for-byte with
           # the authoritative Java parser.
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Character literal -- rejected.

@@ -1538,7 +1538,7 @@ class _ZigParser:
                     f"{self._file}:{tok.line}:{tok.col}: "
                     + zig_bare_string_literal_message(tok.value)
                 )
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # Boolean literals
         if tok.kind == TOK_TRUE:
@@ -1673,7 +1673,7 @@ class _ZigParser:
                     arg = self._parse_expression()
                     self._expect(TOK_RPAREN, ")")
                     if isinstance(arg, ByteStringLiteral):
-                        return ByteStringLiteral(value=arg.value)
+                        return ByteStringLiteral(value=arg.value, source_location=arg.source_location)
                     self._errors.append(
                         f"{self._file}:{tok.line}:{tok.col}: "
                         "runar.hexToBytes expects a string literal argument"

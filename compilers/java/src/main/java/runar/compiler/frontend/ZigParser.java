@@ -1489,7 +1489,7 @@ public final class ZigParser {
                 if (!tok.value.isEmpty() && !bareLiteralOk.contains(idx)) {
                     errors.add(LexDiag.at(file, tok.line, tok.col, LexDiag.zigBareStringLiteral(tok.value)));
                 }
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(file, tok.line, tok.col));
             }
             if (tok.kind == Kind.TRUE) {
                 advance();
@@ -1612,7 +1612,7 @@ public final class ZigParser {
                         Expression arg = parseExpression();
                         expect(Kind.RPAREN, ")");
                         if (arg instanceof ByteStringLiteral lit) {
-                            return new ByteStringLiteral(lit.value());
+                            return new ByteStringLiteral(lit.value(), lit.sourceLocation());
                         }
                         errors.add(file + ":" + tok.line + ":" + tok.col
                             + ": runar.hexToBytes expects a string literal argument");

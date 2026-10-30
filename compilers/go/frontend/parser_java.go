@@ -1913,7 +1913,7 @@ func (p *javaParser) parsePostfix() Expression {
 func (p *javaParser) recogniseLiteralCall(callee Expression, args []Expression) Expression {
 	if me, ok := callee.(MemberExpr); ok && me.Property == "fromHex" && len(args) == 1 {
 		if bs, ok := args[0].(ByteStringLiteral); ok {
-			return ByteStringLiteral{Value: bs.Value}
+			return ByteStringLiteral{Value: bs.Value, SourceLocation: bs.SourceLocation}
 		}
 	}
 	// BigInteger.valueOf(<intlit>) / Bigint.of(<intlit>) → BigIntLiteral.
@@ -2125,7 +2125,7 @@ func (p *javaParser) parsePrimary() Expression {
 
 	case javaTokString:
 		p.advance()
-		return ByteStringLiteral{Value: t.value}
+		return ByteStringLiteral{Value: t.value, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}}
 
 	case javaTokTrue:
 		p.advance()

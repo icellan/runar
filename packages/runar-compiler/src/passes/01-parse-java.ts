@@ -1345,7 +1345,7 @@ class JavaParser {
         // it (bytestring in a non-ByteString context fails typecheck) and
         // we emit an error below for immediate diagnostic clarity.
         this.advance();
-        return { kind: 'bytestring_literal', value: t.value };
+        return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
       case 'this':
         this.advance();
         return { kind: 'identifier', name: 'this' };
