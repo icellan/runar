@@ -41,6 +41,9 @@ module RunarCompiler
       "EC_G"    => "Point",
     }.freeze
 
+    # N-459: emitted by anf_lower itself; never callable from source.
+    COMPILER_INTERNAL_BUILTINS = %w[computeStateOutput].freeze
+
     # All built-in Runar function signatures.
     BUILTIN_FUNCTIONS = {
       "sha256"            => FuncSig.new(params: ["ByteString"], return_type: "Sha256"),
@@ -1260,7 +1263,10 @@ module RunarCompiler
         # Direct builtin call
         if expr.callee.is_a?(Identifier)
           name = expr.callee.name
-          if BUILTIN_FUNCTIONS.key?(name)
+          # N-459: compiler-internal builtins sit in BUILTIN_FUNCTIONS for the IR
+          # loader and anf_lower, but a source call to one is not part of the
+          # language; refuse it here like the other six tiers.
+          if BUILTIN_FUNCTIONS.key?(name) && !COMPILER_INTERNAL_BUILTINS.include?(name)
             return check_call_args(name, BUILTIN_FUNCTIONS[name], expr.args, env)
           end
           # Check if it's a known contract method
