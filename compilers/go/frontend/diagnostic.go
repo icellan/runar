@@ -38,6 +38,21 @@ func (d Diagnostic) FormatMessage() string {
 	return d.Message
 }
 
+// GoBareStringLiteralMsg / ZigBareStringLiteralMsg are N-448's refusal (user
+// decision R174) of a bare, non-empty string literal used as a ByteString
+// value on .runar.go / .runar.zig: natively the literal is ASCII text but the
+// compiler reads it as hex. Every tier's parser for the surface emits the text
+// verbatim, at the literal's opening quote.
+func GoBareStringLiteralMsg(lit string) string {
+	return `bare string literal "` + lit + `" is ambiguous in .runar.go source: natively it is ASCII text but the compiler reads it as hex — ` +
+		`write runar.HexToBytes("` + lit + `") for hex bytes or runar.ByteString("` + lit + `") for the text`
+}
+
+func ZigBareStringLiteralMsg(lit string) string {
+	return `bare string literal "` + lit + `" is ambiguous in .runar.zig source: natively it is ASCII text but the compiler reads it as hex — ` +
+		`write runar.hexToBytes("` + lit + `") for hex bytes`
+}
+
 // UnterminatedStringLiteralMsg is F-011's shared diagnostic (the TS
 // reference's UNTERMINATED_STRING_LITERAL): every hand-written tokenizer emits
 // it, at the opening quote, for a quoted literal that reaches a line break or

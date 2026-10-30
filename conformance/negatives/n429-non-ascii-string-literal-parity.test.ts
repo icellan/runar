@@ -99,7 +99,7 @@ pub const ${name} = struct {
     }
 
     pub fn unlock(self: *const ${name}, sig: runar.Sig) void {
-        const s = "${lit}";
+        const s = runar.hexToBytes("${lit}");
         _ = s;
         runar.assert(runar.checkSig(sig, self.pk));
     }

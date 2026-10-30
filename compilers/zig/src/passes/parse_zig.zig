@@ -281,6 +281,8 @@ const Tokenizer = struct {
 // Parser
 // ============================================================================
 
+const BarePending = struct { ptr: [*]const u8, len: usize, err_idx: usize };
+
 const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
@@ -289,6 +291,9 @@ const Parser = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
     nest_error: ?[]const u8 = null,
+    /// N-448: bare string literals refused so far, withdrawable by
+    /// `exemptBareLiteral` (matched by the literal's bytes pointer).
+    bare_pending: std.ArrayListUnmanaged(BarePending) = .empty,
 
     const ParsedFieldType = struct {
         type_node: TypeNode,
@@ -391,6 +396,39 @@ const Parser = struct {
         return spec;
     }
 
+    /// N-448: a bare non-empty string literal used as a ByteString value is
+    /// refused. Natively it is ASCII text; the compiler reads it as hex. The
+    /// error is recorded now and withdrawn by `exemptBareLiteral` when the
+    /// literal turns out to be the argument of the explicit hex helper or the
+    /// body of an `asm` call (both parse their arguments as ordinary
+    /// expressions first). Exempt outright: the empty string.
+    fn refuseBareLiteral(self: *Parser, tok: Token, value: []const u8) void {
+        if (value.len == 0) return;
+        const msg = std.fmt.allocPrint(self.allocator, lex_diag.ZIG_BARE_STRING_LITERAL_FMT, .{ value, value }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch return;
+        // A speculative re-parse of the same tokens must not repeat the refusal.
+        for (self.errors.items) |e| if (std.mem.eql(u8, e, f)) return;
+        self.errors.append(self.allocator, f) catch return;
+        self.bare_pending.append(self.allocator, .{ .ptr = value.ptr, .len = value.len, .err_idx = self.errors.items.len - 1 }) catch {};
+    }
+
+    fn exemptBareLiteral(self: *Parser, e: Expression) void {
+        if (e != .literal_bytes) return;
+        const v = e.literal_bytes.value;
+        var i: usize = 0;
+        while (i < self.bare_pending.items.len) : (i += 1) {
+            const it = self.bare_pending.items[i];
+            if (it.ptr == v.ptr and it.len == v.len) {
+                _ = self.errors.orderedRemove(it.err_idx);
+                _ = self.bare_pending.orderedRemove(i);
+                for (self.bare_pending.items) |*o| {
+                    if (o.err_idx > it.err_idx) o.err_idx -= 1;
+                }
+                return;
+            }
+        }
+    }
+
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
@@ -458,7 +496,10 @@ const Parser = struct {
         // an 8-byte ASCII string. Allows the Zig DSL source to also compile
         // as a native Zig file, where runar.hexToBytes is a comptime helper
         // returning `*const [N]u8` (which coerces to ByteString).
+        // N-448: the argument of the explicit hex spelling is a legal literal.
+        if (std.mem.eql(u8, member, "asm") and args.len > 0) self.exemptBareLiteral(args[0]);
         if (std.mem.eql(u8, member, "hexToBytes")) {
+            if (args.len == 1) self.exemptBareLiteral(args[0]);
             if (args.len != 1) {
                 self.addError("runar.hexToBytes expects exactly 1 argument");
                 return null;
@@ -1609,7 +1650,7 @@ const Parser = struct {
             },
             .kw_true => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = true }; },
             .kw_false => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = false }; },
-            .string_literal => blk: { const tok = self.bump(); break :blk Expression{ .literal_bytes = .{ .value = tok.text } }; },
+            .string_literal => blk: { const tok = self.bump(); self.refuseBareLiteral(tok, tok.text); break :blk Expression{ .literal_bytes = .{ .value = tok.text } }; },
             .kw_self => blk: { _ = self.bump(); break :blk Expression{ .identifier = "self" }; },
             .ident => blk: { const tok = self.bump();
                 if (self.current.kind == .lparen) { _ = self.bump(); const args = self.parseArgList();

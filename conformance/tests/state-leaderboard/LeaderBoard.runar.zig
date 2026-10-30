@@ -5,7 +5,7 @@ const runar = @import("runar");
 pub const LeaderBoard = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    leader: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    leader: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     topScore: i64 = 0,
 
     pub fn init(leader: runar.PubKey, topScore: i64) LeaderBoard {

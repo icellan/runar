@@ -3,7 +3,7 @@ const runar = @import("runar");
 pub const FungibleToken = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    owner: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    owner: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     balance: i64 = 0,
     mergeBalance: i64 = 0,
     tokenId: runar.ByteString,

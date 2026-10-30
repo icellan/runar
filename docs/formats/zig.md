@@ -66,6 +66,26 @@ pub const Counter = struct {
 - Use `runar.Readonly(T)` to mark a stateful field readonly explicitly, with or without a default initializer.
 - Fields without defaults still become constructor parameters unless `init` assigns them explicitly.
 
+### ByteString literals
+
+A bare string literal used as a ByteString value is **refused**. Natively (`zig
+build test`) `"006a"` is four ASCII bytes, while the compiler used to read it as
+the two hex bytes `00 6a`, so one source meant two different programs. Spell the
+hex form with the comptime helper, which the native `runar` module also provides:
+
+```zig
+owner: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
+// not   owner: runar.PubKey = "0000...";
+runar.assert(runar.bytesEq(runar.hexToBytes("006a"), self.expected));
+```
+
+The refusal covers `ByteString` and every subtype (`PubKey`, `Sig`, `Addr`,
+`Ripemd160`, `Sha256`, `Point`, ...). Every tier prints the same diagnostic,
+`file:line:col: bare string literal "006a" is ambiguous in .runar.zig source:
+...`, at the literal's opening quote. Still legal: the empty string `""` (zero
+bytes either way) and the opcode body of `runar.asm("51", 0, 1)`, which is not a
+ByteString value.
+
 ### Constructor
 
 ```zig

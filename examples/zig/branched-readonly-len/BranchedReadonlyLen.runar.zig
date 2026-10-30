@@ -16,7 +16,7 @@ pub const BranchedReadonlyLen = struct {
             self.tag = scratch;
         } else {
             self.count = self.count - 1;
-            self.tag = "3030";
+            self.tag = runar.hexToBytes("3030");
         }
         ctx.addOutput(1000, .{ self.count, self.tag });
     }

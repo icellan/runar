@@ -99,12 +99,12 @@ const FIXTURES: Fixture[] = [
   { file: 'N54-py-docstring-unterminated.runar.py', line: 19, open: 'follows.\n', closed: 'follows."""\n', controlCompiles: true },
   { file: 'N55-sol-string-unterminated.runar.sol', line: 13, open: '"cafe\n', closed: '"cafe";\n', controlCompiles: false },
   { file: 'N56-move-string-unterminated.runar.move', line: 12, open: '"cafe\n', closed: '"cafe";\n', controlCompiles: false },
-  { file: 'N57-zig-string-unterminated.runar.zig', line: 12, open: '"cafe\n', closed: '"cafe";\n', controlCompiles: true },
+  { file: 'N57-zig-string-unterminated.runar.zig', line: 12, open: '"cafe\n', closed: 'runar.hexToBytes("cafe");\n', controlCompiles: true }, // N-448: a bare "cafe" is refused
   { file: 'N58-rs-string-unterminated.runar.rs', line: 13, open: '"cafe;\n', closed: '"cafe";\n', controlCompiles: true },
   { file: 'N59-java-string-unterminated.runar.java', line: 22, open: '"cafe\n', closed: '"cafe");\n', controlCompiles: true },
   { file: 'N61-rb-single-quote-unterminated.runar.rb', line: 10, open: "'cafe\n", closed: "'cafe'\n", controlCompiles: true },
   { file: 'N62-rb-double-quote-unterminated.runar.rb', line: 9, open: '"cafe\n', closed: '"cafe"\n', controlCompiles: true },
-  { file: 'N63-go-string-unterminated.runar.go', line: 18, open: '"cafe\n', closed: '"cafe"\n', controlCompiles: true },
+  { file: 'N63-go-string-unterminated.runar.go', line: 18, open: '"cafe\n', closed: 'runar.HexToBytes("cafe")\n', controlCompiles: true }, // N-448: a bare "cafe" is refused
   { file: 'N64-ts-string-unterminated.runar.ts', line: 14, open: '"cafe;\n', closed: '"cafe";\n', controlCompiles: true },
 ];
 

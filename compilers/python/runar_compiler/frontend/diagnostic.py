@@ -60,6 +60,25 @@ PY_BYTES_NON_ASCII = "bytes can only contain ASCII literal characters"
 
 # F-026: a .runar.zig call argument list or array literal whose elements are
 # not separated by commas (the TS reference's ZIG_LIST_COMMA).
+# N-448 (user decision R174): a bare, non-empty string literal used as a
+# ByteString value on .runar.go / .runar.zig is refused -- natively it is ASCII
+# text but the compiler reads it as hex. Every tier emits these verbatim, at
+# the literal's opening quote.
+def go_bare_string_literal_message(lit: str) -> str:
+    return (
+        f'bare string literal "{lit}" is ambiguous in .runar.go source: natively it is ASCII text '
+        f'but the compiler reads it as hex \u2014 write runar.HexToBytes("{lit}") for hex bytes '
+        f'or runar.ByteString("{lit}") for the text'
+    )
+
+
+def zig_bare_string_literal_message(lit: str) -> str:
+    return (
+        f'bare string literal "{lit}" is ambiguous in .runar.zig source: natively it is ASCII text '
+        f'but the compiler reads it as hex \u2014 write runar.hexToBytes("{lit}") for hex bytes'
+    )
+
+
 ZIG_LIST_COMMA = "expected ',' between list elements"
 
 # F-026: a second .runar.py statement on the same line (the TS reference's

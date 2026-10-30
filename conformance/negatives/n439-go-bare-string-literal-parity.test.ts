@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { buildSourceTiers, compileHex, judge } from './tier-harness.js';
 
 /**
- * N-439: a BARE string literal on the `.runar.go` surface (one that is not the
- * sole argument of `runar.ByteString(...)`, which N-437 settled) is a
+ * N-439: a string literal that is the sole argument of `runar.HexToBytes(...)`
+ * on the `.runar.go` surface (N-448: a BARE literal, not inside
+ * `runar.ByteString(...)` (N-437) or `runar.HexToBytes(...)`, is now refused;
+ * this test used to spell the literal bare) is a
  * ByteString HEX literal (N-429). Every tier first decodes it with Go's
  * string-literal rules (https://go.dev/ref/spec#String_literals) -- the Go tier
  * is `strconv.Unquote` -- and only then checks and uses the decoded text as hex:
@@ -42,7 +44,7 @@ type ${name} struct {
 }
 
 func (c *${name}) Check() {
-	x := ${lit}
+	x := runar.HexToBytes(${lit})
 	runar.Assert(x == c.Expected)
 }
 `;

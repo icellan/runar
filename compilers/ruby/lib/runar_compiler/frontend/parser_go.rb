@@ -642,6 +642,7 @@ module RunarCompiler
         @self_names = Set.new
         @contract_name = ""
         @go_atoms = {}.compare_by_identity # N-056: expression operands
+        @bare_literal_ok = Set.new # N-448: token indexes of legal bare literals
       end
 
       attr_accessor :tokens, :pos, :errors
@@ -1640,13 +1641,20 @@ module RunarCompiler
         # tokenizer has already refused an invalid escape), then the decoded
         # text goes through the hex check; a raw (backtick) literal is its
         # text verbatim, carriage returns discarded.
-        if tok.kind == TOK_STRING
+        # N-448: a bare non-empty literal is refused (natively ASCII text, to the
+        # compiler hex). Exempt: "" and a runar.Asm body.
+        if tok.kind == TOK_STRING || tok.kind == TOK_BACKTICK
+          idx = @pos
           advance
-          return ByteStringLiteral.new(value: Frontend.go_decode_string_escapes(tok.value).force_encoding("UTF-8").scrub)
-        end
-        if tok.kind == TOK_BACKTICK
-          advance
-          return ByteStringLiteral.new(value: tok.value.delete("\r"))
+          value = if tok.kind == TOK_STRING
+                    Frontend.go_decode_string_escapes(tok.value).force_encoding("UTF-8").scrub
+                  else
+                    tok.value.delete("\r")
+                  end
+          if !value.empty? && !@bare_literal_ok.include?(idx)
+            @errors << Frontend.lex_error(Frontend.go_bare_string_literal_message(value), @file_name, tok.line, tok.col)
+          end
+          return ByteStringLiteral.new(value: value)
         end
 
         # Boolean literals
@@ -1742,6 +1750,28 @@ module RunarCompiler
                           end
               hex_str = str_bytes.bytes.map { |b| format("%02x", b) }.join
               return ByteStringLiteral.new(value: hex_str)
+            end
+
+            # N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+            if member_name == "HexToBytes" && check(TOK_LPAREN)
+              arg_tok = @tokens[@pos + 1]
+              if [TOK_STRING, TOK_BACKTICK].include?(arg_tok&.kind) && @tokens[@pos + 2]&.kind == TOK_RPAREN
+                advance # '('
+                advance # literal
+                advance # ')'
+                value = if arg_tok.kind == TOK_STRING
+                          Frontend.go_decode_string_escapes(arg_tok.value).force_encoding("UTF-8").scrub
+                        else
+                          arg_tok.value.delete("\r")
+                        end
+                return ByteStringLiteral.new(value: value)
+              end
+              @errors << Frontend.lex_error("runar.HexToBytes expects a single string literal argument", @file_name, tok.line, tok.col)
+            end
+
+            # N-448: the first argument of runar.Asm(...) is an opcode body.
+            if member_name == "Asm" && check(TOK_LPAREN) && [TOK_STRING, TOK_BACKTICK].include?(@tokens[@pos + 1]&.kind)
+              @bare_literal_ok << (@pos + 1)
             end
 
             # Check for type cast: runar.Bigint(expr), runar.Bool(expr), etc.

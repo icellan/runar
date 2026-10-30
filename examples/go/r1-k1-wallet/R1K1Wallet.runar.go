@@ -16,7 +16,7 @@ type R1K1Wallet struct {
 func (c *R1K1Wallet) SpendR1(r1Sig runar.ByteString, r1PubKey runar.ByteString, r1Salt runar.ByteString, txPreimage runar.SigHashPreimage) {
 	runar.Assert(runar.Len(r1Salt) == 32)
 	runar.Assert(runar.Hash160(runar.Cat(r1PubKey, r1Salt)) == c.R1SaltedPubKeyHash)
-	runar.Assert(runar.Substr(txPreimage, runar.Len(txPreimage)-4, 4) == "41000000")
+	runar.Assert(runar.Substr(txPreimage, runar.Len(txPreimage)-4, 4) == runar.HexToBytes("41000000"))
 	runar.Assert(runar.CheckPreimage(txPreimage))
 	runar.Assert(runar.VerifyECDSAP256(runar.Sha256Hash(txPreimage), r1Sig, r1PubKey))
 }

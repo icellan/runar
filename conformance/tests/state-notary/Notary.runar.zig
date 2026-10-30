@@ -5,7 +5,7 @@ const runar = @import("runar");
 pub const Notary = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    signer: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    signer: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     note: runar.ByteString = "",
     seq: i64 = 0,
 

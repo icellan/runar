@@ -816,6 +816,8 @@ public final class GoParser {
         final List<Token> tokens;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-448: token indexes of string literals whose bare use is legal (a runar.Asm body). */
+        final Set<Integer> bareLiteralOk = new java.util.HashSet<>();
         /** F-213 measure (A): parse nesting. */
         final SourceNesting.Counter nest = new SourceNesting.Counter();
         /** N-056: expression operands (primaries, calls, parenthesised groups). */
@@ -1950,15 +1952,18 @@ public final class GoParser {
                 advance();
                 return parseNumberLiteral(tok.value);
             }
-            if (tok.kind == Tok.STRING) {
+            // N-448: a bare non-empty literal is refused (natively ASCII text, to
+            // the compiler hex). Exempt: "" and a runar.Asm body.
+            // N-439: a raw (backtick) literal is its text verbatim with carriage
+            // returns discarded (Go spec), then goes through the hex check.
+            if (tok.kind == Tok.STRING || tok.kind == Tok.BACKTICK_STRING) {
+                int idx = pos;
                 advance();
-                return new ByteStringLiteral(tok.value);
-            }
-            // N-439: a bare raw (backtick) literal is its text verbatim with
-            // carriage returns discarded (Go spec), then goes through the hex check.
-            if (tok.kind == Tok.BACKTICK_STRING) {
-                advance();
-                return new ByteStringLiteral(tok.value.replace("\r", ""));
+                String value = tok.kind == Tok.STRING ? tok.value : tok.value.replace("\r", "");
+                if (!value.isEmpty() && !bareLiteralOk.contains(idx)) {
+                    addError(LexDiag.at(fileName, tok.line, tok.col, LexDiag.goBareStringLiteral(value)));
+                }
+                return new ByteStringLiteral(value);
             }
             if (tok.kind == Tok.IDENT) {
                 advance();
@@ -1986,6 +1991,28 @@ public final class GoParser {
                         if (args.size() == 2) {
                             return new BinaryExpr(bigOp, args.get(0), args.get(1));
                         }
+                    }
+
+                    // N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+                    if ("HexToBytes".equals(selName) && check(Tok.LPAREN)) {
+                        Token argTok = pos + 1 < tokens.size() ? tokens.get(pos + 1) : null;
+                        Token closeTok = pos + 2 < tokens.size() ? tokens.get(pos + 2) : null;
+                        if (argTok != null && (argTok.kind == Tok.STRING || argTok.kind == Tok.BACKTICK_STRING)
+                            && closeTok != null && closeTok.kind == Tok.RPAREN) {
+                            advance(); // '('
+                            advance(); // literal
+                            advance(); // ')'
+                            return new ByteStringLiteral(argTok.kind == Tok.STRING
+                                ? argTok.value : argTok.value.replace("\r", ""));
+                        }
+                        addError(LexDiag.at(fileName, tok.line, tok.col,
+                            "runar.HexToBytes expects a single string literal argument"));
+                    }
+
+                    // N-448: the first argument of runar.Asm(...) is an opcode body.
+                    if ("Asm".equals(selName) && check(Tok.LPAREN) && pos + 1 < tokens.size()
+                        && (tokens.get(pos + 1).kind == Tok.STRING || tokens.get(pos + 1).kind == Tok.BACKTICK_STRING)) {
+                        bareLiteralOk.add(pos + 1);
                     }
 
                     if ("ByteString".equals(selName) && check(Tok.LPAREN)) {

@@ -44,9 +44,9 @@ type TicTacToe struct {
 }
 
 func (c *TicTacToe) init() {
-	c.P2pkhPrefix = "1976a914"
-	c.P2pkhSuffix = "88ac"
-	c.PlayerO = "000000000000000000000000000000000000000000000000000000000000000000"
+	c.P2pkhPrefix = runar.HexToBytes("1976a914")
+	c.P2pkhSuffix = runar.HexToBytes("88ac")
+	c.PlayerO = runar.HexToBytes("000000000000000000000000000000000000000000000000000000000000000000")
 	c.C0 = 0
 	c.C1 = 0
 	c.C2 = 0

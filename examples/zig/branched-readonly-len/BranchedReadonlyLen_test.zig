@@ -32,14 +32,15 @@ fn expectBytes(value: runar.OutputValue, expected: []const u8) !void {
 
 // Proves: the real contract struct runs natively. spend() branches on
 // len(scratch): a non-empty scratch takes the increment arm and stores the
-// scratch as the tag, an empty scratch takes the decrement arm and stores the
-// literal "3030"; the recorded output carries the post-branch (count, tag), and
+// scratch as the tag, an empty scratch takes the decrement arm and stores
+// runar.hexToBytes("3030"); the recorded output carries the post-branch (count, tag), and
 // the struct's own fields track it. Swapping the arms or the +1/-1 changes
 // every assertion below.
 // Does not prove: the compiled script (conformance fixture branched-readonly-len),
-// or that "3030" is hex-decoded: natively it is the four ASCII bytes, in the
-// compiler it is the two bytes 0x30 0x30. The contract has no assert, so there
-// is no rejecting input to feed it.
+// that natively and in the compiler hexToBytes("3030") are the same two bytes
+// 0x30 0x30 (N-448: the bare literal "3030" that used to be here was four ASCII
+// bytes natively and two bytes in the compiler, and is now refused). The
+// contract has no assert, so there is no rejecting input to feed it.
 fn runSpend(scratch: []const u8, expect_count: i64, expect_tag: []const u8) !void {
     var runtime = runar.StatefulSmartContract.init(std.testing.allocator);
     defer runtime.deinit();
@@ -61,5 +62,5 @@ test "spend with a non-empty scratch increments and adopts the scratch as tag" {
 }
 
 test "spend with an empty scratch decrements and resets the tag" {
-    try runSpend("", 4, "3030");
+    try runSpend("", 4, runar.hexToBytes("3030"));
 }

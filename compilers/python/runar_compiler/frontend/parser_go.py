@@ -24,6 +24,7 @@ from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_num
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
+    go_bare_string_literal_message,
     invalid_escape_sequence_message,
     lex_error,
     with_lex_errors,
@@ -648,6 +649,9 @@ class _GoParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # N-448: token indexes of string literals whose bare use is legal (the
+        # opcode body of runar.Asm).
+        self.bare_literal_ok: set[int] = set()
         self.receiver_name: str = ""
         # F-017: (source spelling, Rúnar name) of every declared identifier.
         self.declared: list[tuple[str, str]] = []
@@ -1896,16 +1900,19 @@ class _GoParser:
             self.advance()
             return _parse_number(tok.value)
 
-        # String literal
-        if tok.kind == TOK_STRING:
+        # String literal. N-448: a bare non-empty literal is refused (natively
+        # ASCII text, to the compiler hex). Exempt: "" and a runar.Asm body.
+        # N-439: a raw (backtick) literal is its text verbatim with carriage
+        # returns discarded (Go spec), then goes through the hex check.
+        if tok.kind == TOK_STRING or tok.kind == TOK_BACKTICK_STRING:
+            idx = self.pos
             self.advance()
-            return ByteStringLiteral(value=tok.value)
-
-        # N-439: a bare raw (backtick) literal is its text verbatim with
-        # carriage returns discarded (Go spec), then goes through the hex check.
-        if tok.kind == TOK_BACKTICK_STRING:
-            self.advance()
-            return ByteStringLiteral(value=tok.value.replace("\r", ""))
+            value = tok.value if tok.kind == TOK_STRING else tok.value.replace("\r", "")
+            if value != "" and idx not in self.bare_literal_ok:
+                self.errors.append(Diagnostic(
+                    message=go_bare_string_literal_message(value), severity=Severity.ERROR,
+                    loc=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)))
+            return ByteStringLiteral(value=value)
 
         # Identifier
         if tok.kind == TOK_IDENT:
@@ -1945,6 +1952,28 @@ class _GoParser:
                             left=args[0],
                             right=args[1],
                         )
+
+                # N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+                if sel_name == "HexToBytes" and self.check(TOK_LPAREN):
+                    nxt = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
+                    nxt2 = self.tokens[self.pos + 2] if self.pos + 2 < len(self.tokens) else None
+                    if (nxt is not None and nxt.kind in (TOK_STRING, TOK_BACKTICK_STRING)
+                            and nxt2 is not None and nxt2.kind == TOK_RPAREN):
+                        self.advance()  # '('
+                        self.advance()  # literal
+                        self.advance()  # ')'
+                        return ByteStringLiteral(
+                            value=nxt.value if nxt.kind == TOK_STRING else nxt.value.replace("\r", ""))
+                    self.errors.append(Diagnostic(
+                        message="runar.HexToBytes expects a single string literal argument",
+                        severity=Severity.ERROR,
+                        loc=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)))
+
+                # N-448: the first argument of runar.Asm(...) is an opcode body.
+                if sel_name == "Asm" and self.check(TOK_LPAREN):
+                    nxt = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
+                    if nxt is not None and nxt.kind in (TOK_STRING, TOK_BACKTICK_STRING):
+                        self.bare_literal_ok.add(self.pos + 1)
 
                 # runar.ByteString("literal") -> ByteStringLiteral (hex-encoded bytes);
                 # runar.ByteString(variable) -> unwrap (type conversion no-op).

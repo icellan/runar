@@ -40,6 +40,7 @@ func parseZigSurface(source []byte, fileName string) *ParseResult {
 		fileName:             fileName,
 		selfNames:            make(map[string]bool),
 		statefulContextNames: make(map[string]bool),
+		bareLiteralOK:        make(map[int]bool),
 	}
 
 	tokens := p.tokenize(string(source))
@@ -148,6 +149,9 @@ type zigParser struct {
 
 	// nest is F-213 measure (A): parse nesting.
 	nest nestingCounter
+
+	// N-448: token indexes of string literals whose bare use is legal.
+	bareLiteralOK map[int]bool
 }
 
 func (p *zigParser) addError(msg string) {
@@ -1654,7 +1658,15 @@ func (p *zigParser) parsePrimary() Expression {
 
 	// String literal -> ByteStringLiteral
 	if tok.kind == zigTokString {
+		idx := p.pos
 		p.advance()
+		// N-448: a bare non-empty literal is refused (natively ASCII text, to
+		// the compiler hex). Exempt: "", the argument of runar.hexToBytes and
+		// the body of runar.asm.
+		if tok.value != "" && !p.bareLiteralOK[idx] {
+			loc := SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}
+			p.errors = append(p.errors, MakeDiagnostic(ZigBareStringLiteralMsg(tok.value), SeverityError, &loc))
+		}
 		return ByteStringLiteral{Value: tok.value}
 	}
 
@@ -1730,6 +1742,9 @@ func (p *zigParser) parsePrimary() Expression {
 			// Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
 			if builtin == "hexToBytes" && p.check(zigTokLParen) {
 				p.advance() // '('
+				if p.check(zigTokString) {
+					p.bareLiteralOK[p.pos] = true // N-448: the explicit hex spelling
+				}
 				arg := p.parseExpression()
 				p.expect(zigTokRParen)
 				if lit, ok := arg.(ByteStringLiteral); ok {
@@ -1737,6 +1752,11 @@ func (p *zigParser) parsePrimary() Expression {
 				}
 				p.addError(fmt.Sprintf("line %d: runar.hexToBytes expects a string literal argument", tok.line))
 				return ByteStringLiteral{Value: ""}
+			}
+
+			// N-448: the first argument of runar.asm(...) is an opcode body.
+			if builtin == "asm" && p.check(zigTokLParen) && p.peekAt(1).kind == zigTokString {
+				p.bareLiteralOK[p.pos+1] = true
 			}
 
 			return Identifier{Name: builtin}

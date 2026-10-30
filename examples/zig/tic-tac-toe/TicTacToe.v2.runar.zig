@@ -18,9 +18,9 @@ pub const TicTacToe = struct {
 
     playerX: runar.PubKey,
     betAmount: i64,
-    p2pkhPrefix: runar.Readonly(runar.ByteString) = "1976a914",
-    p2pkhSuffix: runar.Readonly(runar.ByteString) = "88ac",
-    playerO: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    p2pkhPrefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+    p2pkhSuffix: runar.Readonly(runar.ByteString) = runar.hexToBytes("88ac"),
+    playerO: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     board: [9]i64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     turn: i64 = 0,
     status: i64 = 0,

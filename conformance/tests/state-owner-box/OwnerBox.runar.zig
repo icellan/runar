@@ -4,7 +4,7 @@ const runar = @import("runar");
 pub const OwnerBox = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    owner: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    owner: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
 
     pub fn init(owner: runar.PubKey) OwnerBox {
         return .{ .owner = owner };

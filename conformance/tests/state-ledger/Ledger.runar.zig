@@ -5,7 +5,7 @@ const runar = @import("runar");
 pub const Ledger = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    holder: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    holder: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     balance: i64 = 0,
     nonce: i64 = 0,
 

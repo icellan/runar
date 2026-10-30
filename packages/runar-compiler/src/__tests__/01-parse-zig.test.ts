@@ -71,7 +71,7 @@ describe('parseZigSource readonly stateful fields', () => {
       pub const Counter = struct {
         pub const Contract = runar.StatefulSmartContract;
 
-        prefix: runar.Readonly(runar.ByteString) = "abc",
+        prefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("abc"),
         count: i64 = 0,
       };
     `;

@@ -904,6 +904,8 @@ fn goSpelling(op: BinOperator) []const u8 {
 const go_ambiguous_precedence_fmt = "ambiguous operator precedence in .runar.go: `a {s} b {s} c` groups differently " ++
     "under Go precedence than in Rúnar's other surfaces; add parentheses";
 
+const BarePending = struct { ptr: [*]const u8, len: usize, err_idx: usize };
+
 const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
@@ -915,6 +917,9 @@ const Parser = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
     nest_error: ?[]const u8 = null,
+    /// N-448: bare string literals refused so far, withdrawable by
+    /// `exemptBareLiteral` (matched by the literal's bytes pointer).
+    bare_pending: std.ArrayListUnmanaged(BarePending) = .empty,
     /// N-093: every `//runar:` directive in the file, in source order.
     directives: []GoDirective = &.{},
     receiver_name: []const u8, // current method's receiver variable name (e.g. "c", "m", "self")
@@ -1019,6 +1024,39 @@ const Parser = struct {
     fn addError(self: *Parser, msg: []const u8) void {
         const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-448: a bare non-empty string literal used as a ByteString value is
+    /// refused. Natively it is ASCII text; the compiler reads it as hex. The
+    /// error is recorded now and withdrawn by `exemptBareLiteral` when the
+    /// literal turns out to be the argument of the explicit hex helper or the
+    /// body of an `asm` call (both parse their arguments as ordinary
+    /// expressions first). Exempt outright: the empty string.
+    fn refuseBareLiteral(self: *Parser, tok: Token, value: []const u8) void {
+        if (value.len == 0) return;
+        const msg = std.fmt.allocPrint(self.allocator, lex_diag.GO_BARE_STRING_LITERAL_FMT, .{ value, value, value }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch return;
+        // A speculative re-parse of the same tokens must not repeat the refusal.
+        for (self.errors.items) |e| if (std.mem.eql(u8, e, f)) return;
+        self.errors.append(self.allocator, f) catch return;
+        self.bare_pending.append(self.allocator, .{ .ptr = value.ptr, .len = value.len, .err_idx = self.errors.items.len - 1 }) catch {};
+    }
+
+    fn exemptBareLiteral(self: *Parser, e: Expression) void {
+        if (e != .literal_bytes) return;
+        const v = e.literal_bytes.value;
+        var i: usize = 0;
+        while (i < self.bare_pending.items.len) : (i += 1) {
+            const it = self.bare_pending.items[i];
+            if (it.ptr == v.ptr and it.len == v.len) {
+                _ = self.errors.orderedRemove(it.err_idx);
+                _ = self.bare_pending.orderedRemove(i);
+                for (self.bare_pending.items) |*o| {
+                    if (o.err_idx > it.err_idx) o.err_idx -= 1;
+                }
+                return;
+            }
+        }
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
@@ -2426,6 +2464,18 @@ const Parser = struct {
                         .identifier => |id| {
                             // runar.FuncName(args) -> check for type conversion or builtin call
                             if (std.mem.eql(u8, id, "runar")) {
+                                // N-448: a runar.Asm body is an opcode string, not a ByteString value.
+                                if (std.mem.eql(u8, member, "Asm") and args.len > 0) self.exemptBareLiteral(args[0]);
+                                // N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+                                if (std.mem.eql(u8, member, "HexToBytes")) {
+                                    if (args.len == 1 and args[0] == .literal_bytes) {
+                                        self.exemptBareLiteral(args[0]);
+                                        expr = args[0];
+                                        continue;
+                                    }
+                                    self.addError("runar.HexToBytes expects a single string literal argument");
+                                    return null;
+                                }
                                 // Check for type conversions: runar.Int(0), runar.Bigint(x), runar.BigintBig(x), runar.Bool(true)
                                 if (isTypeConversion(member) and args.len == 1) {
                                     expr = args[0];
@@ -2519,6 +2569,7 @@ const Parser = struct {
                 const tok = self.bump();
                 var decoded: std.ArrayListUnmanaged(u8) = .empty;
                 _ = decodeGoBody(self.allocator, tok.text, &decoded) catch break :blk null;
+                self.refuseBareLiteral(tok, decoded.items); // N-448
                 break :blk Expression{ .literal_bytes = .{ .value = decoded.items } };
             },
             .backtick_string => blk: {
@@ -2528,6 +2579,7 @@ const Parser = struct {
                 for (tok.text) |b| {
                     if (b != '\r') kept.append(self.allocator, b) catch break :blk null;
                 }
+                self.refuseBareLiteral(tok, kept.items); // N-448
                 break :blk Expression{ .literal_bytes = .{ .value = kept.items } };
             },
             .lparen => blk: {

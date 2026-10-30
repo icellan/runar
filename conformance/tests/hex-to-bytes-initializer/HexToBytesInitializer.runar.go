@@ -10,8 +10,8 @@ type HexToBytesInitializer struct {
 }
 
 func (c *HexToBytesInitializer) init() {
-	c.P2pkhPrefix = "1976a914"
-	c.P2pkhSuffix = "88ac"
+	c.P2pkhPrefix = runar.HexToBytes("1976a914")
+	c.P2pkhSuffix = runar.HexToBytes("88ac")
 }
 
 func (c *HexToBytesInitializer) Unlock(sig runar.Sig, pubKey runar.PubKey, script runar.ByteString) {

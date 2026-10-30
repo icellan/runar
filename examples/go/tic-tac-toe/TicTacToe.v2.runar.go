@@ -24,9 +24,9 @@ type TicTacToeV2 struct {
 }
 
 func (c *TicTacToeV2) init() {
-	c.P2pkhPrefix = "1976a914"
-	c.P2pkhSuffix = "88ac"
-	c.PlayerO = "000000000000000000000000000000000000000000000000000000000000000000"
+	c.P2pkhPrefix = runar.HexToBytes("1976a914")
+	c.P2pkhSuffix = runar.HexToBytes("88ac")
+	c.PlayerO = runar.HexToBytes("000000000000000000000000000000000000000000000000000000000000000000")
 	c.Board = [9]runar.Bigint{0, 0, 0, 0, 0, 0, 0, 0, 0}
 	c.Turn = 0
 	c.Status = 0

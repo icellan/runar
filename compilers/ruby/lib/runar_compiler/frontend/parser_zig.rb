@@ -465,6 +465,7 @@ module RunarCompiler
         @tokens = []
         @pos = 0
         @errors = []
+        @bare_literal_ok = Set.new # N-448: token indexes of legal bare literals
         @contract_name = "UnnamedContract"
         @parent_class = "SmartContract"
         @properties = []
@@ -1532,7 +1533,14 @@ module RunarCompiler
 
         # String literal
         if tok.kind == TOK_STRING
+          idx = @pos
           advance
+          # N-448: a bare non-empty literal is refused (natively ASCII text, to
+          # the compiler hex). Exempt: "", the argument of runar.hexToBytes and
+          # the body of runar.asm.
+          if !tok.value.empty? && !@bare_literal_ok.include?(idx)
+            @errors << Frontend.lex_error(Frontend.zig_bare_string_literal_message(tok.value), @file_name, tok.line, tok.col)
+          end
           return ByteStringLiteral.new(value: tok.value)
         end
 
@@ -1678,12 +1686,18 @@ module RunarCompiler
             # Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
             if builtin_name == "hexToBytes" && check(TOK_LPAREN)
               advance
+              @bare_literal_ok << @pos if check(TOK_STRING) # N-448: the explicit hex spelling
               arg = parse_expression
               expect(TOK_RPAREN)
               return ByteStringLiteral.new(value: arg.value) if arg.is_a?(ByteStringLiteral)
 
               add_error("line #{tok.line}: runar.hexToBytes expects a string literal argument")
               return ByteStringLiteral.new(value: "")
+            end
+
+            # N-448: the first argument of runar.asm(...) is an opcode body.
+            if builtin_name == "asm" && check(TOK_LPAREN) && @tokens[@pos + 1]&.kind == TOK_STRING
+              @bare_literal_ok << (@pos + 1)
             end
 
             return Identifier.new(name: builtin_name)

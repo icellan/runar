@@ -282,6 +282,12 @@ const PRIMITIVE_TYPES = new Set<PrimitiveTypeName>([
 const WHILE_NO_INIT_PLACEHOLDER = ' __while_no_init';
 
 /** Map Zig-style builtin names to canonical Rúnar camelCase names. */
+/** N-448 — every tier's .runar.zig parser emits this verbatim. */
+export function zigBareStringLiteralMessage(lit: string): string {
+  return `bare string literal "${lit}" is ambiguous in .runar.zig source: natively it is ASCII text but the compiler reads it as hex — ` +
+    `write runar.hexToBytes("${lit}") for hex bytes`;
+}
+
 const ZIG_BUILTIN_MAP: Record<string, string> = {
   verifyECDSAP256: 'verifyECDSA_P256',
   verifyECDSAP384: 'verifyECDSA_P384',
@@ -311,6 +317,9 @@ interface ParsedType {
 }
 
 class ZigParser extends ParserCore<ZigToken> {
+  /** N-448: string tokens whose bare use is legal (hexToBytes / asm bodies). */
+  private bareLiteralOk = new WeakSet<ZigToken>();
+
   private contractName = 'UnnamedContract';
   private parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
   private properties: PropertyNode[] = [];
@@ -1162,6 +1171,13 @@ class ZigParser extends ParserCore<ZigToken> {
 
     if (token.type === 'string') {
       this.advance();
+      // N-448: a bare non-empty literal is REFUSED — natively it is ASCII text
+      // while the compiler reads hex. The hex spelling is
+      // runar.hexToBytes("..."); the empty string is exempt, and so is the
+      // opcode body of runar.asm(...) (see bareLiteralOk).
+      if (token.value !== '' && !this.bareLiteralOk.has(token)) {
+        this.errors.push(makeDiagnostic(zigBareStringLiteralMessage(token.value), 'error', { file: this.file, line: token.line, column: token.column }));
+      }
       return { kind: 'bytestring_literal', value: token.value };
     }
 
@@ -1310,6 +1326,9 @@ class ZigParser extends ParserCore<ZigToken> {
         // Mirrors parse_zig.zig and parse_python.zig's bytes.fromhex(...).
         if (builtin === 'hexToBytes' && this.current().type === '(') {
           this.advance();
+          // N-448: the argument is the explicit hex spelling, so a literal
+          // here is legal (it is the only place one is, besides asm bodies).
+          if (this.current().type === 'string') this.bareLiteralOk.add(this.current());
           const arg = this.parseExpression();
           this.expect(')');
           if (arg.kind === 'bytestring_literal') {
@@ -1321,6 +1340,11 @@ class ZigParser extends ParserCore<ZigToken> {
             { file: this.file, line: token.line, column: token.column },
           ));
           return { kind: 'bytestring_literal', value: '' };
+        }
+        // N-448: the first argument of runar.asm(...) is an opcode body, not a
+        // ByteString value, so a bare literal there stays legal.
+        if (builtin === 'asm' && this.current().type === '(' && this.tokens[this.pos + 1]?.type === 'string') {
+          this.bareLiteralOk.add(this.tokens[this.pos + 1]!);
         }
         return { kind: 'identifier', name: ZIG_BUILTIN_MAP[builtin] ?? builtin };
       }

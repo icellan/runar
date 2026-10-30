@@ -165,6 +165,23 @@ final class LexDiag {
         return "bare assignment to property '" + name + "' is not allowed; write `this." + name + " = ...`";
     }
 
+    /**
+     * N-448 (user decision R174): a bare, non-empty string literal used as a
+     * ByteString value on .runar.go / .runar.zig is refused -- natively it is
+     * ASCII text but the compiler reads it as hex. Every tier emits these
+     * verbatim, at the literal's opening quote.
+     */
+    static String goBareStringLiteral(String lit) {
+        return "bare string literal \"" + lit + "\" is ambiguous in .runar.go source: natively it is ASCII text "
+            + "but the compiler reads it as hex \u2014 write runar.HexToBytes(\"" + lit + "\") for hex bytes "
+            + "or runar.ByteString(\"" + lit + "\") for the text";
+    }
+
+    static String zigBareStringLiteral(String lit) {
+        return "bare string literal \"" + lit + "\" is ambiguous in .runar.zig source: natively it is ASCII text "
+            + "but the compiler reads it as hex \u2014 write runar.hexToBytes(\"" + lit + "\") for hex bytes";
+    }
+
     /** {@code file:line:col: message}. */
     static String at(String file, int line, int col, String message) {
         return file + ":" + line + ":" + col + ": " + message;

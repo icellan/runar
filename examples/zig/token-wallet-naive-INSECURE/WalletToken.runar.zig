@@ -28,7 +28,7 @@ pub const WalletToken = struct {
     pub const Contract = runar.StatefulSmartContract;
 
     supply: i64 = 0,
-    holder: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    holder: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
 
     pub fn init(supply: i64, holder: runar.PubKey) WalletToken {
         return .{ .supply = supply, .holder = holder };

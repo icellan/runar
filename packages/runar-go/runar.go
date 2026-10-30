@@ -17,6 +17,7 @@ package runar
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
@@ -77,6 +78,20 @@ type Bool = bool
 
 // ByteString is an arbitrary byte sequence.
 type ByteString string
+
+// HexToBytes returns the bytes a hex string spells. It is the explicit hex
+// spelling of a ByteString literal in a .runar.go contract: the compiler reads
+// runar.HexToBytes("006a") as the two bytes 00 6a, and so does this function,
+// whereas a bare "006a" is four ASCII bytes natively and is refused by the
+// compiler (N-448). Odd length or a non-hex digit panics, as the Zig
+// runar.hexToBytes does at compile time.
+func HexToBytes(hexStr string) ByteString {
+	b, err := hex.DecodeString(hexStr)
+	if err != nil {
+		panic("runar.HexToBytes: " + err.Error())
+	}
+	return ByteString(b)
+}
 
 // PubKey is a public key (compressed or uncompressed).
 type PubKey = ByteString

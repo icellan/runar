@@ -26,6 +26,13 @@ pub const PY_BYTES_NON_ASCII = "bytes can only contain ASCII literal characters"
 
 /// F-026: a .runar.zig call argument list or array literal whose elements are
 /// not separated by commas (the TS reference's ZIG_LIST_COMMA).
+/// N-448 (user decision R174): a bare, non-empty string literal used as a
+/// ByteString value on .runar.go / .runar.zig is refused -- natively it is
+/// ASCII text but the compiler reads it as hex. Every tier emits these
+/// verbatim, at the literal's opening quote.
+pub const GO_BARE_STRING_LITERAL_FMT = "bare string literal \"{s}\" is ambiguous in .runar.go source: natively it is ASCII text but the compiler reads it as hex \u{2014} write runar.HexToBytes(\"{s}\") for hex bytes or runar.ByteString(\"{s}\") for the text";
+pub const ZIG_BARE_STRING_LITERAL_FMT = "bare string literal \"{s}\" is ambiguous in .runar.zig source: natively it is ASCII text but the compiler reads it as hex \u{2014} write runar.hexToBytes(\"{s}\") for hex bytes";
+
 pub const ZIG_LIST_COMMA = "expected ',' between list elements";
 
 /// N-410: a .runar.zig struct-body token that is not a `pub const Contract`

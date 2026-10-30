@@ -1299,6 +1299,8 @@ class GoParser extends ParserCore<GoToken> {
 
   /** N-056: operands returned by parseUnary (parenthesised groups, calls). */
   private goAtoms = new WeakSet<Expression>();
+  /** N-448: string tokens whose bare use is legal (the opcode body of runar.Asm). */
+  private bareLiteralOk = new WeakSet<GoToken>();
 
   /**
    * N-056: ParserCore builds the C ladder; go/parser (the Go tier) builds Go
@@ -1412,17 +1414,19 @@ class GoParser extends ParserCore<GoToken> {
       return { kind: 'bytestring_literal', value: t.value };
     }
 
-    // String literal — used for hex-encoded ByteString values in Go contracts
-    if (t.type === 'string') {
+    // String literal. N-448: a bare non-empty literal is REFUSED — natively it
+    // is ASCII text while the compiler reads hex. The hex spelling is
+    // runar.HexToBytes("..."); the empty string is exempt (zero bytes either
+    // way) and so is the opcode body of runar.Asm(...) (see bareLiteralOk).
+    if (t.type === 'string' || t.type === 'backtick') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
-    }
-
-    // N-439: a bare raw (backtick) literal is its text verbatim with carriage
-    // returns discarded (Go spec), then goes through the same hex check.
-    if (t.type === 'backtick') {
-      this.advance();
-      return { kind: 'bytestring_literal', value: t.value.replace(/\r/g, '') };
+      // N-439: a raw (backtick) literal is its text verbatim with carriage
+      // returns discarded (Go spec), then goes through the same hex check.
+      const value = t.type === 'backtick' ? t.value.replace(/\r/g, '') : t.value;
+      if (value !== '' && !this.bareLiteralOk.has(t)) {
+        this.errors.push(makeDiagnostic(goBareStringLiteralMessage(value), 'error', { file: this.file, line: t.line, column: t.column }));
+      }
+      return { kind: 'bytestring_literal', value };
     }
 
     // Boolean literals
@@ -1532,6 +1536,32 @@ class GoParser extends ParserCore<GoToken> {
           return { kind: 'bytestring_literal', value: hex };
         }
 
+        // N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling of a
+        // ByteString literal (runar-go decodes it natively). The argument must
+        // be one string literal; it is read exactly as a bare literal was
+        // before (Go-decoded, then hex).
+        if (memberName === 'HexToBytes' && this.current().type === '(') {
+          const argTok = this.tokens[this.pos + 1];
+          if ((argTok?.type === 'string' || argTok?.type === 'backtick') && this.tokens[this.pos + 2]?.type === ')') {
+            this.advance(); // '('
+            this.advance(); // literal
+            this.advance(); // ')'
+            return { kind: 'bytestring_literal', value: argTok.type === 'backtick' ? argTok.value.replace(/\r/g, '') : argTok.value };
+          }
+          this.errors.push(makeDiagnostic(
+            'runar.HexToBytes expects a single string literal argument',
+            'error',
+            { file: this.file, line: t.line, column: t.column },
+          ));
+        }
+
+        // N-448: the first argument of runar.Asm(...) is an opcode body, not a
+        // ByteString value, so a bare literal there stays legal.
+        if (memberName === 'Asm' && this.current().type === '(') {
+          const bodyTok = this.tokens[this.pos + 1];
+          if (bodyTok && (bodyTok.type === 'string' || bodyTok.type === 'backtick')) this.bareLiteralOk.add(bodyTok);
+        }
+
         // Check for type cast: runar.Bigint(expr), runar.Bool(expr), etc.
         if (GO_CAST_TYPES.has(memberName) && this.current().type === '(') {
           this.advance(); // '('
@@ -1601,6 +1631,12 @@ class GoParser extends ParserCore<GoToken> {
 // ---------------------------------------------------------------------------
 // F-010 diagnostics — every tier's .runar.go parser emits these verbatim.
 // ---------------------------------------------------------------------------
+
+/** N-448 — every tier's .runar.go parser emits this verbatim. */
+export function goBareStringLiteralMessage(lit: string): string {
+  return `bare string literal "${lit}" is ambiguous in .runar.go source: natively it is ASCII text but the compiler reads it as hex — ` +
+    `write runar.HexToBytes("${lit}") for hex bytes or runar.ByteString("${lit}") for the text`;
+}
 
 export function goNoContractMessage(): string {
   return 'no Rúnar contract struct found in Go source';

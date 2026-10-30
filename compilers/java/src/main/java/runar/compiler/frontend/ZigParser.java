@@ -460,6 +460,8 @@ public final class ZigParser {
         final String file;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-448: token indexes of string literals whose bare use is legal. */
+        final Set<Integer> bareLiteralOk = new HashSet<>();
         /** F-213 measure (A): parse nesting. */
         final SourceNesting.Counter nest = new SourceNesting.Counter();
         /** N-344: the declarations read as {@code const} (the AST keeps no mutability). */
@@ -1479,7 +1481,14 @@ public final class ZigParser {
                 return new BigIntLiteral(parseLongLiteral(tok.value));
             }
             if (tok.kind == Kind.STRING) {
+                int idx = pos;
                 advance();
+                // N-448: a bare non-empty literal is refused (natively ASCII text,
+                // to the compiler hex). Exempt: "", the argument of
+                // runar.hexToBytes and the body of runar.asm.
+                if (!tok.value.isEmpty() && !bareLiteralOk.contains(idx)) {
+                    errors.add(LexDiag.at(file, tok.line, tok.col, LexDiag.zigBareStringLiteral(tok.value)));
+                }
                 return new ByteStringLiteral(tok.value);
             }
             if (tok.kind == Kind.TRUE) {
@@ -1599,6 +1608,7 @@ public final class ZigParser {
                     // Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
                     if ("hexToBytes".equals(builtin) && current().kind == Kind.LPAREN) {
                         advance();
+                        if (current().kind == Kind.STRING) bareLiteralOk.add(pos); // N-448: the explicit hex spelling
                         Expression arg = parseExpression();
                         expect(Kind.RPAREN, ")");
                         if (arg instanceof ByteStringLiteral lit) {
@@ -1607,6 +1617,11 @@ public final class ZigParser {
                         errors.add(file + ":" + tok.line + ":" + tok.col
                             + ": runar.hexToBytes expects a string literal argument");
                         return new ByteStringLiteral("");
+                    }
+                    // N-448: the first argument of runar.asm(...) is an opcode body.
+                    if ("asm".equals(builtin) && current().kind == Kind.LPAREN && pos + 1 < tokens.size()
+                        && tokens.get(pos + 1).kind == Kind.STRING) {
+                        bareLiteralOk.add(pos + 1);
                     }
                     return new Identifier(builtin);
                 }

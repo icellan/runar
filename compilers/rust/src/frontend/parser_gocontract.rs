@@ -737,6 +737,13 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>, directives: 
 // F-010 diagnostics — emitted verbatim by every tier's .runar.go parser
 // (TS reference: goNoContractMessage / goMultipleContractsMessage /
 // goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+/// N-448 -- every tier's .runar.go parser emits this verbatim.
+fn go_bare_string_literal_message(lit: &str) -> String {
+    format!(
+        "bare string literal \"{lit}\" is ambiguous in .runar.go source: natively it is ASCII text but the compiler reads it as hex \u{2014} write runar.HexToBytes(\"{lit}\") for hex bytes or runar.ByteString(\"{lit}\") for the text"
+    )
+}
+
 const GO_NO_CONTRACT_MESSAGE: &str = "no Rúnar contract struct found in Go source";
 
 fn go_multiple_contracts_message(first: &str, second: &str) -> String {
@@ -830,6 +837,9 @@ struct GoParser<'a> {
     /// starts a dimension group whose lookahead would scan the same tail and
     /// fail the same way, so it is not re-run (it made `int[][]…[]` quadratic).
     composite_miss: Option<(usize, usize)>,
+    /// N-448: token indexes of string literals whose bare use is legal (the
+    /// opcode body of `runar.Asm`).
+    bare_literal_ok: std::collections::HashSet<usize>,
 }
 
 impl<'a> GoParser<'a> {
@@ -846,6 +856,7 @@ impl<'a> GoParser<'a> {
             directives: Vec::new(),
             consumed: Vec::new(),
             composite_miss: None,
+            bare_literal_ok: std::collections::HashSet::new(),
         }
     }
 
@@ -2440,6 +2451,16 @@ impl<'a> GoParser<'a> {
             }
 
             TokenType::StringLit(s) => {
+                // N-448: a bare non-empty literal is refused (natively ASCII
+                // text, to the compiler hex). Exempt: "" and a runar.Asm body.
+                if !s.is_empty() && !self.bare_literal_ok.contains(&self.pos) {
+                    let loc = SourceLocation {
+                        file: self.file.clone(),
+                        line: self.current().line,
+                        column: self.current().col,
+                    };
+                    self.errors.push(Diagnostic::error(go_bare_string_literal_message(&s), Some(loc)));
+                }
                 self.advance();
                 Some(Expression::ByteStringLiteral { value: s, source_location: None })
             }
@@ -2575,6 +2596,36 @@ impl<'a> GoParser<'a> {
                                     right: Box::new(right),
                                 });
                             }
+                        }
+                    }
+
+                    // N-448: runar.HexToBytes("deadbeef") is the explicit hex
+                    // spelling of a ByteString literal.
+                    if member_raw == "HexToBytes" && matches!(self.current().typ, TokenType::LParen) {
+                        if let (Some(TokenType::StringLit(s)), Some(TokenType::RParen)) = (
+                            self.tokens.get(self.pos + 1).map(|t| t.typ.clone()),
+                            self.tokens.get(self.pos + 2).map(|t| t.typ.clone()),
+                        ) {
+                            self.advance(); // '('
+                            self.advance(); // literal
+                            self.advance(); // ')'
+                            return Some(Expression::ByteStringLiteral { value: s, source_location: None });
+                        }
+                        let loc = SourceLocation {
+                            file: self.file.clone(),
+                            line: self.tokens[self.pos.saturating_sub(1)].line,
+                            column: self.tokens[self.pos.saturating_sub(1)].col,
+                        };
+                        self.errors.push(Diagnostic::error(
+                            "runar.HexToBytes expects a single string literal argument".to_string(),
+                            Some(loc),
+                        ));
+                    }
+
+                    // N-448: the first argument of runar.Asm(...) is an opcode body.
+                    if member_raw == "Asm" && matches!(self.current().typ, TokenType::LParen) {
+                        if let Some(TokenType::StringLit(_)) = self.tokens.get(self.pos + 1).map(|t| t.typ.clone()) {
+                            self.bare_literal_ok.insert(self.pos + 1);
                         }
                     }
 

@@ -50,6 +50,21 @@ module RunarCompiler
     # end of file counts.
     UNTERMINATED_STRING_LITERAL = "unterminated string literal"
 
+    # N-448 (user decision R174): a bare, non-empty string literal used as a
+    # ByteString value on .runar.go / .runar.zig is refused -- natively it is
+    # ASCII text but the compiler reads it as hex. Every tier emits these
+    # verbatim, at the literal's opening quote.
+    def self.go_bare_string_literal_message(lit)
+      "bare string literal \"#{lit}\" is ambiguous in .runar.go source: natively it is ASCII text " \
+        "but the compiler reads it as hex \u2014 write runar.HexToBytes(\"#{lit}\") for hex bytes " \
+        "or runar.ByteString(\"#{lit}\") for the text"
+    end
+
+    def self.zig_bare_string_literal_message(lit)
+      "bare string literal \"#{lit}\" is ambiguous in .runar.zig source: natively it is ASCII text " \
+        "but the compiler reads it as hex \u2014 write runar.hexToBytes(\"#{lit}\") for hex bytes"
+    end
+
     # N-121 (user decision R85; the TS reference's OPTIONAL_CHAINING): a
     # .runar.ts +?.+, located at the +?+. Only the first +?.+ in a file is
     # reported.

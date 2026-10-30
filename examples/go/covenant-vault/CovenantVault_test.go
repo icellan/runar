@@ -17,13 +17,15 @@ func newVault() *CovenantVault {
 }
 
 // p2pkhOutput returns the same byte string the contract builds at runtime.
-// In Go-DSL ByteString is a string alias and the ASCII literals "1976a914" /
-// "88ac" are NOT hex-decoded — they're concatenated as their raw ASCII bytes.
-// We reproduce that exact byte layout so the happy-path hashOutputs check
-// round-trips; adversarial cases just need to produce different bytes.
+// The contract spells its P2PKH prefix and suffix runar.HexToBytes("1976a914") /
+// runar.HexToBytes("88ac"), which natively decodes the hex exactly as the
+// compiler does (N-448; a bare "1976a914" is refused, being ASCII natively and
+// hex to the compiler). We reproduce that byte layout so the happy-path
+// hashOutputs check round-trips; adversarial cases just need to produce
+// different bytes.
 func p2pkhOutput(amount int64, pkh runar.Addr) runar.ByteString {
 	amt := runar.Num2Bin(amount, 8)
-	return amt + runar.ByteString("1976a914") + runar.ByteString(pkh) + runar.ByteString("88ac")
+	return amt + runar.HexToBytes("1976a914") + runar.ByteString(pkh) + runar.HexToBytes("88ac")
 }
 
 // preimageFromOutputs builds a fake SigHashPreimage whose hashOutputs window

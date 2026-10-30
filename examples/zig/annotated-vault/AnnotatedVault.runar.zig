@@ -7,7 +7,7 @@ pub const AnnotatedVault = struct {
     pub const Contract = runar.StatefulSmartContract;
 
     memo: runar.ByteString = "",
-    owner: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    owner: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     balance: i64 = 0,
 
     pub fn init(memo: runar.ByteString, owner: runar.PubKey, balance: i64) AnnotatedVault {

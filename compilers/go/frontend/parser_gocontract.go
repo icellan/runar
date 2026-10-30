@@ -108,6 +108,8 @@ func parseGoContractSurface(source []byte, fileName string) *ParseResult {
 		fset:     fset,
 		file:     file,
 		fileName: fileName,
+
+		bareLiteralOK: map[*ast.BasicLit]bool{},
 	}
 	p.collectGoDirectives(source)
 
@@ -204,6 +206,9 @@ type goContractParser struct {
 	fileName     string
 	errors       []Diagnostic
 	receiverName string // current method's receiver name (e.g. "c", "m", "self")
+
+	// N-448: string literals whose bare use is legal (a runar.Asm body).
+	bareLiteralOK map[*ast.BasicLit]bool
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
@@ -940,6 +945,13 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 			return BigIntLiteral{Value: bi}
 		case token.STRING:
 			s, _ := strconv.Unquote(e.Value)
+			// N-448: a bare non-empty literal is refused (natively ASCII
+			// text, to the compiler hex). Exempt: "" and a runar.Asm body.
+			if s != "" && !p.bareLiteralOK[e] {
+				pos := p.fset.Position(e.Pos())
+				loc := p.locAt(pos)
+				p.errors = append(p.errors, MakeDiagnostic(GoBareStringLiteralMsg(s), SeverityError, &loc))
+			}
 			return ByteStringLiteral{Value: s}
 		}
 
@@ -986,6 +998,25 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 				typeName := sel.Sel.Name
 				if (typeName == "Int" || typeName == "Bigint" || typeName == "BigintBig" || typeName == "Bool") && len(e.Args) == 1 {
 					return p.convertExpression(e.Args[0])
+				}
+				// N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+				if typeName == "HexToBytes" {
+					if len(e.Args) == 1 {
+						if lit, ok := e.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							raw, _ := strconv.Unquote(lit.Value)
+							return ByteStringLiteral{Value: raw}
+						}
+					}
+					pos := p.fset.Position(e.Pos())
+					loc := p.locAt(pos)
+					p.errors = append(p.errors, MakeDiagnostic("runar.HexToBytes expects a single string literal argument", SeverityError, &loc))
+					return nil
+				}
+				// N-448: the first argument of runar.Asm(...) is an opcode body.
+				if typeName == "Asm" && len(e.Args) > 0 {
+					if lit, ok := e.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						p.bareLiteralOK[lit] = true
+					}
 				}
 				// runar.ByteString("literal") -> ByteStringLiteral with hex-encoded bytes
 				// runar.ByteString(variable) -> unwrap (type conversion no-op)

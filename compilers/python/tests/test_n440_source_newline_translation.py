@@ -7,7 +7,7 @@ raw-string rule discards the CR (the Go tier pushes 0x41 0x42 for
 ```41<CR>42```), but this tier saw ``41<LF>42`` and refused it as non-hex.
 
 What this proves: through the real file-reading entry point, a lone CR (or
-several) inside a bare backtick literal is discarded exactly as in the Go tier
+several) inside a backtick literal (spelled runar.HexToBytes(`...`) since N-448 refuses a bare one) is discarded exactly as in the Go tier
 (hex 4142; a CRLF keeps its LF, so it is not tested as hex), and a CRLF-ended copy of a contract compiles to the same script as
 its LF-ended copy on every surface tested here.
 What it does NOT prove: any other tier (conformance/negatives covers
@@ -32,7 +32,7 @@ GO_TEMPLATE = (
     '\tExpected runar.ByteString `runar:"readonly"`\n'
     "}\n\n"
     "func (c *Bare) Check() {\n"
-    "\tx := `%s`\n"
+    "\tx := runar.HexToBytes(`%s`)\n"
     "\trunar.Assert(x == c.Expected)\n"
     "}\n"
 )

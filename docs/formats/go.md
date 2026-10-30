@@ -264,6 +264,31 @@ port of both (N-093).
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
 
+### ByteString literals
+
+A bare string literal used as a ByteString value is **refused**. Natively
+(`go test`) `"006a"` is four ASCII bytes, while the compiler used to read it as
+the two hex bytes `00 6a`, so one source meant two different programs. Spell the
+value explicitly:
+
+| You mean | Write | Natively | Compiles to |
+|---|---|---|---|
+| the hex bytes `00 6a` | `runar.HexToBytes("006a")` | decodes hex (panics on odd length or a non-hex digit) | `OP_PUSH 00 6a` |
+| the ASCII text `hi` | `runar.ByteString("hi")` | the string's bytes | `OP_PUSH 68 69` |
+
+```go
+c.P2pkhPrefix = runar.HexToBytes("1976a914")   // not  c.P2pkhPrefix = "1976a914"
+```
+
+The refusal covers `ByteString` and every subtype (`PubKey`, `Sig`, `Addr`,
+`Ripemd160Hash`, `Sha256Digest`, `Point`, ...). Every tier prints the same
+diagnostic, `file:line:col: bare string literal "006a" is ambiguous in .runar.go
+source: ...`, at the literal's opening quote. Still legal: the empty string `""`
+(zero bytes either way) and the opcode body of `runar.Asm("51", 0, 1)`, which is
+not a ByteString value. The argument of `runar.HexToBytes` is read with Go's
+string-literal rules (escapes decoded, a backtick literal verbatim) and the
+decoded text must be hex.
+
 ### Integers wider than int64
 
 Rúnar's `bigint` is arbitrary precision and so is the Script it compiles to. The

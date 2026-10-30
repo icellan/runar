@@ -40,6 +40,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     ZIG_STRUCT_INIT_DOT,
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
+    zig_bare_string_literal_message,
     lex_error,
     static_method_message,
     unexpected_struct_body_token_message,
@@ -515,6 +516,8 @@ class _ZigParser:
         self._pos = 0
         self._file = file_name
         self._errors: list[str] = []
+        # N-448: token indexes of string literals whose bare use is legal.
+        self._bare_literal_ok: set[int] = set()
         self._contract_name = "UnnamedContract"
         self._parent_class = "SmartContract"
         self._properties: list[PropertyNode] = []
@@ -1525,7 +1528,16 @@ class _ZigParser:
 
         # String literal → ByteString
         if tok.kind == TOK_STRING:
+            idx = self._pos
             self._advance()
+            # N-448: a bare non-empty literal is refused (natively ASCII text,
+            # to the compiler hex). Exempt: "", the argument of
+            # runar.hexToBytes and the body of runar.asm.
+            if tok.value != "" and idx not in self._bare_literal_ok:
+                self._errors.append(
+                    f"{self._file}:{tok.line}:{tok.col}: "
+                    + zig_bare_string_literal_message(tok.value)
+                )
             return ByteStringLiteral(value=tok.value)
 
         # Boolean literals
@@ -1656,6 +1668,8 @@ class _ZigParser:
                 # Mirrors 01-parse-zig.ts and parse_zig.zig (F-094).
                 if builtin == "hexToBytes" and self._current().kind == TOK_LPAREN:
                     self._advance()
+                    if self._current().kind == TOK_STRING:
+                        self._bare_literal_ok.add(self._pos)  # N-448: the explicit hex spelling
                     arg = self._parse_expression()
                     self._expect(TOK_RPAREN, ")")
                     if isinstance(arg, ByteStringLiteral):
@@ -1665,6 +1679,12 @@ class _ZigParser:
                         "runar.hexToBytes expects a string literal argument"
                     )
                     return ByteStringLiteral(value="")
+
+                # N-448: the first argument of runar.asm(...) is an opcode body.
+                if (builtin == "asm" and self._current().kind == TOK_LPAREN
+                        and self._pos + 1 < len(self._tokens)
+                        and self._tokens[self._pos + 1].kind == TOK_STRING):
+                    self._bare_literal_ok.add(self._pos + 1)
 
                 return Identifier(name=builtin)
 

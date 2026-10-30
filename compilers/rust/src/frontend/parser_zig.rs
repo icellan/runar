@@ -118,6 +118,13 @@ fn parse_zig_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResul
 // Type mapping
 // ---------------------------------------------------------------------------
 
+/// N-448 -- every tier's .runar.zig parser emits this verbatim.
+fn zig_bare_string_literal_message(lit: &str) -> String {
+    format!(
+        "bare string literal \"{lit}\" is ambiguous in .runar.zig source: natively it is ASCII text but the compiler reads it as hex \u{2014} write runar.hexToBytes(\"{lit}\") for hex bytes"
+    )
+}
+
 /// Map Zig type names to Rúnar primitive type names.
 fn map_zig_type(name: &str) -> &str {
     match name {
@@ -505,6 +512,9 @@ struct ZigParser<'a> {
     stateful_context_names: HashSet<String>,
     /// F-213 measure (A): parse nesting.
     nest: NestingCounter,
+    /// N-448: token indexes of string literals whose bare use is legal (the
+    /// argument of `runar.hexToBytes`, the body of `runar.asm`).
+    bare_literal_ok: HashSet<usize>,
 }
 
 impl<'a> ZigParser<'a> {
@@ -524,6 +534,7 @@ impl<'a> ZigParser<'a> {
             self_names: HashSet::new(),
             stateful_context_names: HashSet::new(),
             nest: NestingCounter::new(),
+            bare_literal_ok: HashSet::new(),
         }
     }
 
@@ -1992,7 +2003,21 @@ impl<'a> ZigParser<'a> {
 
         // String literal (hex ByteString)
         if matches!(self.peek(), Token::StringLit(_)) {
+            // N-448: a bare non-empty literal is refused (natively ASCII text,
+            // to the compiler hex). Exempt: "", the argument of
+            // runar.hexToBytes and the body of runar.asm.
+            let ok = self.bare_literal_ok.contains(&self.pos);
+            let at = self.loc();
             if let Token::StringLit(v) = self.advance() {
+                if !v.is_empty() && !ok {
+                    self.errors.push(format!(
+                        "{}:{}:{}: {}",
+                        at.file,
+                        at.line,
+                        at.column.saturating_sub(1),
+                        zig_bare_string_literal_message(&v)
+                    ));
+                }
                 return Expression::ByteStringLiteral { value: v, source_location: None };
             }
         }
@@ -2075,6 +2100,9 @@ impl<'a> ZigParser<'a> {
                     // Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
                     if builtin == "hexToBytes" && *self.peek() == Token::LParen {
                         self.advance(); // (
+                        if matches!(self.peek(), Token::StringLit(_)) {
+                            self.bare_literal_ok.insert(self.pos); // N-448: the explicit hex spelling
+                        }
                         let arg = self.parse_expression();
                         self.expect(&Token::RParen);
                         if let Expression::ByteStringLiteral { value, .. } = arg {
@@ -2084,6 +2112,14 @@ impl<'a> ZigParser<'a> {
                             "runar.hexToBytes expects a string literal argument".to_string(),
                         );
                         return Expression::ByteStringLiteral { value: String::new(), source_location: None };
+                    }
+
+                    // N-448: the first argument of runar.asm(...) is an opcode body.
+                    if builtin == "asm"
+                        && *self.peek() == Token::LParen
+                        && matches!(self.peek_at(1), Token::StringLit(_))
+                    {
+                        self.bare_literal_ok.insert(self.pos + 1);
                     }
 
                     return Expression::Identifier { name: builtin };

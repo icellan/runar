@@ -25,7 +25,7 @@ pub const Auction = struct {
     pub const Contract = runar.StatefulSmartContract;
 
     auctioneer: runar.PubKey,
-    highestBidder: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    highestBidder: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     highestBid: i64 = 0,
     deadline: i64,
 
