@@ -62,10 +62,10 @@ describe('N-300: every tier gives one diagnostic for a //runar:sighash that is n
     }, 900_000);
   }
 
-  it('N300-go-sighash-public-method.runar.go (the control) is accepted by every tier', () => {
+  it('go-sighash-public-method-control.runar.go (the control) is accepted by every tier', () => {
     const got: Record<string, string> = {};
     for (const tier of TIERS) {
-      const r = judge(tier, join(DIR, 'N300-go-sighash-public-method.runar.go'));
+      const r = judge(tier, join(DIR, 'go-sighash-public-method-control.runar.go'));
       got[tier.id] = r.verdict === 'accepted' ? 'accepted' : `rejected: ${r.diag.trim().slice(0, 300)}`;
     }
     expect(got).toEqual(Object.fromEntries(TIERS.map((t) => [t.id, 'accepted'])));
