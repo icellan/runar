@@ -91,6 +91,22 @@ pub fn builtin_allowed_arity(name: &str) -> Option<Vec<usize>> {
     builtin_functions().get(name).map(|sig| vec![sig.params.len()])
 }
 
+/// Does the builtin `name` return a ByteString-family value?
+///
+/// N-347: `anf_lower.rs` answers "is `f(x)` a byte string?" from this, i.e.
+/// from the `return_type` column of `builtin_functions()`, instead of keeping
+/// its own hand-written list. That list drifted twice (N-054, N-345) and was
+/// still missing merkleRootSha256 / merkleRootHash256 / bn254G1Add /
+/// bn254G1Negate / bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to
+/// OP_NUMEQUAL. The table is built once: this runs for every call operand.
+pub(crate) fn builtin_returns_bytes(name: &str) -> bool {
+    static TABLE: std::sync::OnceLock<HashMap<&'static str, FuncSig>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(builtin_functions)
+        .get(name)
+        .is_some_and(|sig| is_bytestring_subtype(sig.return_type))
+}
+
 fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     let mut m = HashMap::new();
 

@@ -55,76 +55,18 @@ func isByteType(typeName string) bool {
 	return byteStringSubtypes[typeName]
 }
 
-// Preimage field extractors that return BYTES (ByteString / Sha256).
+// isByteReturningBuiltin reports whether the builtin `name` returns a
+// ByteString-family value.
 //
-// N-054: this list is a transcription of the returnType the type checker
-// already records for these builtins in typecheck.go, and the stack lowerer
-// agrees with it byte for byte: lowerExtractor ends the split sequence with
-// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
-// none of the ones that are.
-//
-// So an extractor listed here leaves a byte string on the stack and must be
-// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-// leaves a minimally-encoded script NUMBER and must be compared with
-// OP_NUMEQUAL and added with OP_ADD.
-//
-// Getting it backwards is a correctness defect in both directions. OP_EQUAL
-// on a number is over-strict -- it rejects a witness that encodes the same
-// value with different bytes (0400 for 4), i.e. it refuses a valid spend.
-// OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing high-order
-// zero bytes and negative zero compare equal to values they are not
-// byte-equal to, i.e. a covenant bypass.
-//
-// This replaces a strings.HasPrefix(name, "extract") test that swept the six
-// numeric extractors in with the byte ones.
-var byteReturningExtractors = map[string]bool{
-	"extractHashPrevouts":     true,
-	"extractHashSequence":     true,
-	"extractOutpoint":         true,
-	"extractScriptCode":       true,
-	"extractOutputHash":       true,
-	"extractOutputs":          true,
-	"extractPrevOutputScript": true,
-}
-
-var byteReturningFunctions = map[string]bool{
-	"sha256":               true,
-	"ripemd160":            true,
-	"hash160":              true,
-	"hash256":              true,
-	"cat":                  true,
-	"substr":               true,
-	"num2bin":              true,
-	"reverseBytes":         true,
-	"left":                 true,
-	"right":                true,
-	"int2str":              true,
-	"toByteString":         true,
-	"pack":                 true,
-	// N-345: these return ByteString too; missing here, `===` on their
-	// results compiled to OP_NUMEQUAL, which equates 0100 with 01.
-	"split":                true,
-	"buildChangeOutput":    true,
-	"ecAdd":                true,
-	"ecMul":                true,
-	"ecMulGen":             true,
-	"ecNegate":             true,
-	"ecMakePoint":          true,
-	"ecEncodeCompressed":   true,
-	"p256Add":              true,
-	"p256Mul":              true,
-	"p256MulGen":           true,
-	"p256Negate":           true,
-	"p256EncodeCompressed": true,
-	"p384Add":              true,
-	"p384Mul":              true,
-	"p384MulGen":           true,
-	"p384Negate":           true,
-	"p384EncodeCompressed": true,
-	"sha256Compress":       true,
-	"sha256Finalize":       true,
-	"blake3Compress":       true,
-	"blake3Hash":           true,
+// N-347: this is read off the returnType column of typecheck.go's
+// builtinFunctions, not a second hand-written list. Two such lists lived here
+// and drifted: N-054 (a name-prefix test swept the six numeric extractors in)
+// and N-345 / N-347 (byte-returning builtins left out — merkleRootSha256,
+// merkleRootHash256, bn254G1Add, bn254G1Negate, bn254G1ScalarMul — so `===`
+// on two of their results compiled to OP_NUMEQUAL). Do not reintroduce one.
+func isByteReturningBuiltin(name string) bool {
+	sig, ok := builtinFunctions[name]
+	return ok && isByteType(sig.returnType)
 }
 
 func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
@@ -169,10 +111,7 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 			if id.Name == "asm" {
 				return e.AsmReturnType == "ByteString"
 			}
-			if byteReturningFunctions[id.Name] {
-				return true
-			}
-			if byteReturningExtractors[id.Name] {
+			if isByteReturningBuiltin(id.Name) {
 				return true
 			}
 		}

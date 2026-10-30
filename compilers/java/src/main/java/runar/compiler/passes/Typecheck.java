@@ -123,6 +123,22 @@ public final class Typecheck {
         return BYTESTRING_SUBTYPES.contains(typeName);
     }
 
+    /**
+     * Whether the builtin {@code name} returns a ByteString-family value.
+     *
+     * <p>N-347: {@code AnfLower} answers "is {@code f(x)} a byte string?" from
+     * this, i.e. from the return type {@link BuiltinRegistry} records for the
+     * builtin, instead of keeping its own hand-written list. That list drifted
+     * twice (N-054, N-345) and was still missing merkleRootSha256 /
+     * merkleRootHash256 / bn254G1Add / bn254G1Negate / bn254G1ScalarMul, so
+     * {@code f(a) === f(b)} on them was not annotated {@code bytes}.
+     */
+    static boolean isByteReturningBuiltin(String name) {
+        return BuiltinRegistry.lookup(name)
+            .map(sig -> isByteStringFamily(sig.returnType()))
+            .orElse(false);
+    }
+
     private static final Set<String> BIGINT_SUBTYPES = Set.of(
         "bigint", "RabinSig", "RabinPubKey"
     );

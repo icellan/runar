@@ -36,7 +36,7 @@ import { computeSideEffectSummary, continuationShape } from './side-effect-summa
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
 import { emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
-import { isByteStringFamilyType } from './03-typecheck.js';
+import { isByteReturningBuiltin, isByteStringFamilyType } from './03-typecheck.js';
 import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
@@ -3013,51 +3013,6 @@ function lowerDecrementExpr(
  */
 
 /**
- * Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
- *
- * N-054: this list is the ONLY correct one, and it is not a judgement call —
- * it is a transcription of the `returnType` the type checker already records
- * for these builtins in `03-typecheck.ts`, and the stack lowerer agrees with
- * it byte for byte: `lowerExtractor` ends the split sequence with OP_BIN2NUM
- * for exactly the SIX extractors that are NOT in this set, and for none of
- * the ones that are.
- *
- * So an extractor in this set leaves a byte string on the stack and must be
- * compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
- * leaves a minimally-encoded script NUMBER and must be compared with
- * OP_NUMEQUAL and added with OP_ADD.
- *
- * Getting it backwards is a correctness defect in both directions. OP_EQUAL
- * on a number is over-strict — it rejects a witness that encodes the same
- * value with different bytes (`0400` for 4), i.e. it refuses a valid spend.
- * OP_NUMEQUAL on a hash or a scriptCode is under-strict — trailing high-order
- * zero bytes and negative zero compare equal to values they are not
- * byte-equal to, i.e. a covenant bypass.
- *
- * Do NOT re-derive this from a `name.startsWith('extract')` prefix test: five
- * tiers did exactly that and swept the six numeric extractors in with it.
- */
-const BYTE_RETURNING_EXTRACTORS = [
-  'extractHashPrevouts', 'extractHashSequence', 'extractOutpoint',
-  'extractScriptCode', 'extractOutputHash', 'extractOutputs',
-  'extractPrevOutputScript',
-] as const;
-
-/** Builtin functions that return byte-typed values. */
-const BYTE_RETURNING_FUNCTIONS = new Set<string>([
-  'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
-  'reverseBytes', 'substr', 'left', 'right',
-  // N-345: these return ByteString too; missing here, `===` on their results
-  // compiled to OP_NUMEQUAL (and `+` to OP_ADD), which equates 0100 with 01.
-  'toByteString', 'pack', 'split', 'buildChangeOutput', 'sha256Compress', 'sha256Finalize',
-  'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
-  'p256Add', 'p256Mul', 'p256MulGen', 'p256Negate', 'p256EncodeCompressed',
-  'p384Add', 'p384Mul', 'p384MulGen', 'p384Negate', 'p384EncodeCompressed',
-  ...BYTE_RETURNING_EXTRACTORS,
-  'blake3Compress', 'blake3Hash',
-]);
-
-/**
  * Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
  * This is a best-effort heuristic used to annotate equality operators.
  */
@@ -3097,8 +3052,12 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
     }
 
     case 'call_expr': {
-      // sha256(x), hash160(x), etc.
-      if (expr.callee.kind === 'identifier' && BYTE_RETURNING_FUNCTIONS.has(expr.callee.name)) {
+      // sha256(x), hash160(x), extractOutputHash(p), etc. N-347: decided by
+      // the type checker's return table, NOT a second hand-written list here
+      // (two such lists drifted: N-054 swept numeric extractors in, N-345 and
+      // N-347 left byte-returning builtins out, so `===` on them compiled to
+      // OP_NUMEQUAL). Do not reintroduce one.
+      if (expr.callee.kind === 'identifier' && isByteReturningBuiltin(expr.callee.name)) {
         return true;
       }
       return false;

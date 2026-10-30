@@ -275,6 +275,18 @@ pub fn isByteFamily(t: RunarType) bool {
     };
 }
 
+/// Does the builtin `name` return a ByteString-family value?
+///
+/// N-347: `anf_lower.zig` answers "is `f(x)` a byte string?" from this, i.e.
+/// from the return type column of `builtin_functions`, instead of keeping its
+/// own hand-written list. That list drifted twice (N-054, N-345) and was still
+/// missing merkleRootSha256 / merkleRootHash256 / bn254G1Add / bn254G1Negate /
+/// bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to OP_NUMEQUAL.
+pub fn builtinReturnsBytes(name: []const u8) bool {
+    const func_sig = builtin_functions.get(name) orelse return false;
+    return isByteFamily(func_sig.return_type);
+}
+
 /// BigInt-family types: all are subtypes of bigint.
 ///
 /// `pub` for the same reason as `isByteFamily` above: expand_fixed_arrays.zig

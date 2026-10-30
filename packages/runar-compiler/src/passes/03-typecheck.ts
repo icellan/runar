@@ -317,6 +317,20 @@ export function isBigintFamilyType(t: string): boolean {
   return BIGINT_SUBTYPES.has(t as TType);
 }
 
+/**
+ * Does the builtin `name` return a ByteString-family value?
+ *
+ * N-347: `04-anf-lower.ts` answers "is `f(x)` a byte string?" from this, i.e.
+ * from the `returnType` column of BUILTIN_FUNCTIONS, instead of keeping its own
+ * hand-written list. That list drifted twice (N-054, N-345) and was still
+ * missing merkleRootSha256 / merkleRootHash256 / bn254G1Add / bn254G1Negate /
+ * bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to OP_NUMEQUAL.
+ */
+export function isByteReturningBuiltin(name: string): boolean {
+  const sig = BUILTIN_FUNCTIONS.get(name);
+  return sig !== undefined && BYTESTRING_SUBTYPES.has(sig.returnType);
+}
+
 function isSubtype(actual: TType, expected: TType): boolean {
   if (actual === expected) return true;
 

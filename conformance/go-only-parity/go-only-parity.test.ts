@@ -716,3 +716,111 @@ describe('F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend',
     });
   }
 });
+
+/**
+ * N-347 — pass 4 must take byte-typedness of a builtin call from the type
+ * checker's return table, not from a hand-written list.
+ *
+ * Every tier's ANF lowerer used to decide "is `f(x)` a byte string?" from its
+ * own BYTE_RETURNING_FUNCTIONS / BYTE_RETURNING_EXTRACTORS lists. Those lists
+ * had drifted from the type checker twice (N-054, N-345), and were still
+ * narrower than it: merkleRootSha256 / merkleRootHash256 (ByteString) and
+ * bn254G1Add / bn254G1Negate / bn254G1ScalarMul (Point) were typed as byte
+ * strings by the checker and missing from all seven lists. So `f(a) === f(b)`
+ * — two results, neither side a parameter or property — got no
+ * `result_type: "bytes"` and lowered to OP_NUMEQUAL, measured in ts, go, rust,
+ * python, zig and ruby (Java refuses these families at emit, after ANF).
+ *
+ * What this proves: for each probe, every tier that compiles it ends the
+ * terminal assert with OP_EQUAL (0x87/0x88), found by a pushdata-aware opcode
+ * walk, and every native tier's `--emit-ir` annotates the `===` with
+ * `result_type: "bytes"` — the pass-4 property itself, which is how the Java
+ * tier is covered. The two controls show the walk discriminates: sha256 (always
+ * listed) must give OP_EQUAL, len (bigint) must give OP_NUMEQUAL.
+ * What it does not prove: `+` (OP_CAT vs OP_ADD) and the bitwise operators on
+ * these results, which the same predicate now decides but are not probed here;
+ * nor anything about the TS tier's ANF, which its CLI does not print (its hex
+ * leg covers it); nor that the builtins compute correct values.
+ */
+describe('N-347: byte-returning builtin results compare with OP_EQUAL in every tier', () => {
+  /** Opcodes of a script, pushdata payloads skipped. */
+  function opcodes(hex: string): number[] {
+    const b = Buffer.from(hex, 'hex');
+    const ops: number[] = [];
+    let i = 0;
+    while (i < b.length) {
+      const op = b[i++]!;
+      if (op >= 0x01 && op <= 0x4b) i += op;
+      else if (op === 0x4c) i += 1 + b[i]!;
+      else if (op === 0x4d) i += 2 + b.readUInt16LE(i);
+      else if (op === 0x4e) i += 4 + b.readUInt32LE(i);
+      if (i > b.length) throw new Error(`truncated push in ${hex.slice(0, 40)}...`);
+      ops.push(op);
+    }
+    return ops;
+  }
+  const EQUAL = [0x87, 0x88]; // OP_EQUAL, OP_EQUALVERIFY
+  const NUMEQUAL = [0x9c, 0x9d]; // OP_NUMEQUAL, OP_NUMEQUALVERIFY
+  /** The comparison the terminal assert compiled to: the last (NUM)EQUAL(VERIFY). */
+  const finalComparison = (hex: string): number | undefined =>
+    opcodes(hex).filter((o) => EQUAL.includes(o) || NUMEQUAL.includes(o)).at(-1);
+
+  const PROBES = [
+    { file: 'N347MerkleSha256Eq.runar.ts', builtin: 'merkleRootSha256', bytes: true },
+    { file: 'N347MerkleHash256Eq.runar.ts', builtin: 'merkleRootHash256', bytes: true },
+    { file: 'N347Bn254G1AddEq.runar.ts', builtin: 'bn254G1Add', bytes: true },
+    { file: 'N347Bn254G1NegateEq.runar.ts', builtin: 'bn254G1Negate', bytes: true },
+    { file: 'N347Bn254G1ScalarMulEq.runar.ts', builtin: 'bn254G1ScalarMul', bytes: true },
+    { file: 'N347ControlSha256Eq.runar.ts', builtin: 'sha256', bytes: true },
+    { file: 'N347ControlLenEq.runar.ts', builtin: 'len', bytes: false },
+  ] as const;
+
+  for (const { file, builtin, bytes } of PROBES) {
+    const src = join(DIR, file);
+    describe(`${builtin}(…) === ${builtin}(…)`, () => {
+      for (const tier of available) {
+        it(`${tier.id}: script compares with ${bytes ? 'OP_EQUAL' : 'OP_NUMEQUAL'}`, () => {
+          const v = verdict(tier, src);
+          if (!v.ok) {
+            // Only the Java tier may refuse, and only the Go-scoped families.
+            expect(tier.id, `${tier.id} refused ${file}:\n${v.diag.slice(0, 600)}`).toBe('java');
+            expect(v.diag, 'the refusal must name the builtin').toContain(builtin);
+            return;
+          }
+          const op = finalComparison(v.hex);
+          expect(op, `${tier.id}: no comparison opcode in the script`).toBeDefined();
+          expect(
+            (bytes ? EQUAL : NUMEQUAL).includes(op!),
+            `${tier.id}: ${builtin}(…) === ${builtin}(…) compiled to 0x${op!.toString(16)}; ` +
+              `expected ${bytes ? 'OP_EQUAL — OP_NUMEQUAL on byte strings is the N-347 miscompile' : 'OP_NUMEQUAL'}`,
+          ).toBe(true);
+        });
+
+        if (tier.id === 'ts') continue; // the TS CLI has no stdout IR flag; the hex leg covers it
+        it(`${tier.id}: --emit-ir ${bytes ? 'annotates' : 'does not annotate'} the === as bytes`, () => {
+          const res = spawnSync(tier.cmd!, [...tier.prefix, '--source', src, '--emit-ir'], {
+            cwd: tier.cwd,
+            encoding: 'utf-8',
+            timeout: tier.timeoutMs,
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          expect(res.status, `${tier.id} --emit-ir failed:\n${res.stderr}`).toBe(0);
+          const eqs: Array<Record<string, unknown>> = [];
+          const visit = (n: unknown): void => {
+            if (Array.isArray(n)) n.forEach(visit);
+            else if (n && typeof n === 'object') {
+              const o = n as Record<string, unknown>;
+              if (o.kind === 'bin_op' && o.op === '===') eqs.push(o);
+              Object.values(o).forEach(visit);
+            }
+          };
+          visit(JSON.parse(res.stdout));
+          expect(eqs.length, `${tier.id}: expected exactly one === in the IR`).toBe(1);
+          expect(eqs[0]!.result_type, `${tier.id}: result_type of ${builtin}(…) === ${builtin}(…)`).toBe(
+            bytes ? 'bytes' : undefined,
+          );
+        });
+      }
+    });
+  }
+});

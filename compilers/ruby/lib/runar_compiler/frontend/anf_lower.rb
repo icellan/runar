@@ -72,44 +72,22 @@ module RunarCompiler
     BYTE_TYPES = BYTESTRING_SUBTYPES
     private_constant :BYTE_TYPES
 
-    BYTE_RETURNING_FUNCTIONS = %w[
-      sha256 ripemd160 hash160 hash256 cat substr num2bin reverseBytes
-      left right int2str toByteString pack ecAdd ecMul ecMulGen ecNegate
-      split buildChangeOutput sha256Compress sha256Finalize
-      ecMakePoint ecEncodeCompressed blake3Compress blake3Hash
-      p256Add p256Mul p256MulGen p256Negate p256EncodeCompressed
-      p384Add p384Mul p384MulGen p384Negate p384EncodeCompressed
-    ].to_set.freeze
-    private_constant :BYTE_RETURNING_FUNCTIONS
-
-    # Preimage field extractors that return BYTES (ByteString / Sha256).
+    # Does the builtin +name+ return a ByteString-family value?
     #
-    # N-054: this list is a transcription of the return_type the type checker
-    # already records for these builtins in typecheck.rb, and the stack lowerer
-    # agrees with it byte for byte: _lower_extractor ends the split sequence
-    # with OP_BIN2NUM for exactly the SIX extractors that are NOT listed here,
-    # and for none of the ones that are.
+    # N-347: read off the return_type column of typecheck.rb's
+    # BUILTIN_FUNCTIONS, not a second hand-written list. Two such lists lived
+    # here and drifted: N-054 (a name-prefix test swept the six numeric
+    # extractors in) and N-345 / N-347 (byte-returning builtins left out --
+    # merkleRootSha256, merkleRootHash256, bn254G1Add, bn254G1Negate,
+    # bn254G1ScalarMul -- so `===` on two of their results compiled to
+    # OP_NUMEQUAL). Do not reintroduce one.
     #
-    # So an extractor listed here leaves a byte string on the stack and must be
-    # compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-    # leaves a minimally-encoded script NUMBER and must be compared with
-    # OP_NUMEQUAL and added with OP_ADD.
-    #
-    # Getting it backwards is a correctness defect in both directions. OP_EQUAL
-    # on a number is over-strict -- it rejects a witness that encodes the same
-    # value with different bytes (0400 for 4), i.e. it refuses a valid spend.
-    # OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing
-    # high-order zero bytes and negative zero compare equal to values they are
-    # not byte-equal to, i.e. a covenant bypass.
-    #
-    # This replaces a name[0, 7] == "extract" prefix test that swept the six
-    # numeric extractors in with the byte ones.
-    BYTE_RETURNING_EXTRACTORS = %w[
-      extractHashPrevouts extractHashSequence extractOutpoint
-      extractScriptCode extractOutputHash extractOutputs
-      extractPrevOutputScript
-    ].to_set.freeze
-    private_constant :BYTE_RETURNING_EXTRACTORS
+    # @param name [String]
+    # @return [Boolean]
+    def self._byte_returning_builtin?(name)
+      sig = BUILTIN_FUNCTIONS[name]
+      !sig.nil? && BYTE_TYPES.include?(sig.return_type)
+    end
 
     # @param expr [Expression, nil]
     # @param ctx [LoweringContext]
@@ -150,8 +128,7 @@ module RunarCompiler
         if expr.callee.is_a?(Identifier)
           # Expression-form asm<ByteString>({...}) yields a byte value.
           return expr.asm_return_type == "ByteString" if expr.callee.name == "asm"
-          return true if BYTE_RETURNING_FUNCTIONS.include?(expr.callee.name)
-          return true if BYTE_RETURNING_EXTRACTORS.include?(expr.callee.name)
+          return true if _byte_returning_builtin?(expr.callee.name)
         end
         return false
       end

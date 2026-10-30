@@ -3511,45 +3511,6 @@ fn is_byte_type(type_name: &str) -> bool {
     super::typecheck::is_bytestring_subtype(type_name)
 }
 
-/// Builtin functions that return byte-typed values.
-const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
-    "sha256", "ripemd160", "hash160", "hash256", "cat", "num2bin", "int2str",
-    "reverseBytes", "substr", "left", "right",
-    // N-345: these return ByteString too; missing here, `===` on their results
-    // compiled to OP_NUMEQUAL (and `+` to OP_ADD), which equates 0100 with 01.
-    "toByteString", "pack", "split", "buildChangeOutput",
-    "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
-    "sha256Compress", "sha256Finalize", "blake3Compress", "blake3Hash",
-    "p256Add", "p256Mul", "p256MulGen", "p256Negate", "p256EncodeCompressed",
-    "p384Add", "p384Mul", "p384MulGen", "p384Negate", "p384EncodeCompressed",
-];
-
-/// Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
-///
-/// N-054: this list is a transcription of the `return_type` the type checker
-/// already records for these builtins in `typecheck.rs`, and the stack lowerer
-/// agrees with it byte for byte: `lower_extractor` ends the split sequence with
-/// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
-/// none of the ones that are.
-///
-/// So an extractor listed here leaves a byte string on the stack and must be
-/// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-/// leaves a minimally-encoded script NUMBER and must be compared with
-/// OP_NUMEQUAL and added with OP_ADD.
-///
-/// Getting it backwards is a correctness defect in both directions. OP_EQUAL
-/// on a number is over-strict — it rejects a witness that encodes the same
-/// value with different bytes (`0400` for 4), i.e. it refuses a valid spend.
-/// OP_NUMEQUAL on a hash or a scriptCode is under-strict — trailing high-order
-/// zero bytes and negative zero compare equal to values they are not
-/// byte-equal to, i.e. a covenant bypass. This tier had NO extractor entry at
-/// all, so every byte extractor compared numerically.
-const BYTE_RETURNING_EXTRACTORS: &[&str] = &[
-    "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
-    "extractScriptCode", "extractOutputHash", "extractOutputs",
-    "extractPrevOutputScript",
-];
-
 /// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
 /// This is a best-effort heuristic used to annotate equality operators.
 fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
@@ -3611,10 +3572,11 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
                 if name == "asm" {
                     return asm_return_type.as_deref() == Some("ByteString");
                 }
-                if BYTE_RETURNING_FUNCTIONS.contains(&name.as_str()) {
-                    return true;
-                }
-                if BYTE_RETURNING_EXTRACTORS.contains(&name.as_str()) {
+                // N-347: the type checker's return table decides, NOT a second
+                // hand-written list here (two such lists drifted: N-054 swept
+                // numeric extractors in, N-345 / N-347 left byte-returning
+                // builtins out, so `===` on them compiled to OP_NUMEQUAL).
+                if super::typecheck::builtin_returns_bytes(name) {
                     return true;
                 }
             }
