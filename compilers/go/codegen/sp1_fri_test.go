@@ -2127,8 +2127,8 @@ func TestSp1FriVerifier_ReducedOpeningMatchesReference(t *testing.T) {
 }
 
 // loadEvmGuestProofBlob reads the production-scale evm-guest fixture bytes.
-// Returns nil + skip-marker error if the fixture is missing (it lives outside
-// git LFS and is regenerated via `tests/vectors/sp1/fri/evm-guest/regen/`).
+// Fails the test if the fixture is missing or empty (it is committed to git;
+// regenerate via `tests/vectors/sp1/fri/evm-guest/regen/`).
 func loadEvmGuestProofBlob(t *testing.T) []byte {
 	t.Helper()
 	_, thisFile, _, _ := runtime.Caller(0)
@@ -2136,11 +2136,14 @@ func loadEvmGuestProofBlob(t *testing.T) []byte {
 		"tests", "vectors", "sp1", "fri", "evm-guest", "proof.postcard")
 	bs, err := os.ReadFile(path)
 	if err != nil {
-		t.Skipf("evm-guest fixture missing (%v); regenerate with "+
-			"tests/vectors/sp1/fri/evm-guest/regen/", err)
+		// The fixture is committed to git; absence is a repo defect, not an
+		// environment condition, so it must fail rather than skip (N-479).
+		t.Fatalf("evm-guest fixture missing (%v); it is committed at "+
+			"tests/vectors/sp1/fri/evm-guest/proof.postcard (regen: "+
+			"tests/vectors/sp1/fri/evm-guest/regen/)", err)
 	}
 	if len(bs) == 0 {
-		t.Skip("evm-guest fixture empty")
+		t.Fatal("evm-guest fixture empty")
 	}
 	return bs
 }
