@@ -1368,11 +1368,11 @@ public final class AnfLower {
             // GAP-002: pick up the statement's source location so every
             // AnfBinding emitted during the lowering of this statement
             // carries it forward.
-            runar.compiler.ir.ast.SourceLocation prevLoc = currentSourceLoc;
+            // N-471: as 04-anf-lower.ts lowerStatement, the location is set
+            // unconditionally (a statement with none clears the inherited
+            // one) and cleared, not restored, once the statement is done.
             try {
-                if (stmt.sourceLocation() != null) {
-                    currentSourceLoc = stmt.sourceLocation();
-                }
+                currentSourceLoc = stmt.sourceLocation();
                 // R-144: the same position, published for the error path. The
                 // field above only reaches bindings that are successfully
                 // emitted; a refusal emits none.
@@ -1399,7 +1399,7 @@ public final class AnfLower {
                     }
                 }
             } finally {
-                currentSourceLoc = prevLoc;
+                currentSourceLoc = null;
             }
         }
 
