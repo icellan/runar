@@ -1879,16 +1879,17 @@ const Parser = struct {
     }
 
     fn parsePyReturn(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'return'
 
         if (self.current.kind == .newline or self.current.kind == .dedent or self.current.kind == .eof) {
             self.skipNewlines();
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
 
         const expr = self.parseExpression();
         self.skipNewlines();
-        return .{ .return_stmt = .{ .value = expr } };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parsePyExprOrAssign(self: *Parser) ?Statement {

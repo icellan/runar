@@ -1141,6 +1141,7 @@ const Parser = struct {
         }
 
         // F-213 measure (B), before the recursive pass below walks the bodies.
+        if (self.nest_error == null and !self.nest.exceeded) self.nest_error = input_limits.membersNestingError(self.allocator, self.file_name, properties.items, methods.items);
         if (self.nest.exceeded or input_limits.membersTooDeep(properties.items, methods.items)) {
             self.refuseNesting();
             return null;
@@ -1167,7 +1168,7 @@ const Parser = struct {
                 const last = &m.body[m.body.len - 1];
                 switch (last.*) {
                     .expr_stmt => |e| {
-                        last.* = .{ .return_stmt = .{ .value = e.expr } };
+                        last.* = .{ .return_stmt = .{ .value = e.expr, .source_loc = e.source_loc } };
                     },
                     else => {},
                 }
@@ -1924,12 +1925,13 @@ const Parser = struct {
     }
 
     fn parseReturnStatement(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump(); // 'return'
         if (self.check(.newline) or self.check(.kw_end) or self.check(.eof)) {
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
         const expr = self.parseExpression();
-        return .{ .return_stmt = .{ .value = expr } };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parseSuperCall(self: *Parser) ?Statement {

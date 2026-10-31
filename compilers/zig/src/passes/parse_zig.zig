@@ -644,6 +644,7 @@ const Parser = struct {
         }
 
         // F-213 measure (B), before the recursive pass below walks the bodies.
+        if (self.nest_error == null and !self.nest.exceeded) self.nest_error = input_limits.membersNestingError(self.allocator, self.file_name, properties.items, methods.items);
         if (self.nest.exceeded or input_limits.membersTooDeep(properties.items, methods.items)) {
             self.refuseNesting();
             return null;
@@ -1376,16 +1377,17 @@ const Parser = struct {
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump();
-        if (self.current.kind == .semicolon) { _ = self.bump(); return Statement{ .return_stmt = .{ .value = null } }; }
+        if (self.current.kind == .semicolon) { _ = self.bump(); return Statement{ .return_stmt = .{ .value = null, .source_loc = loc } }; }
         if (self.current.kind == .dot) {
             _ = self.bump();
-            if (self.current.kind == .lbrace) { self.skipStructLiteral(); _ = self.expect(.semicolon); return Statement{ .return_stmt = .{ .value = null } }; }
+            if (self.current.kind == .lbrace) { self.skipStructLiteral(); _ = self.expect(.semicolon); return Statement{ .return_stmt = .{ .value = null, .source_loc = loc } }; }
         }
         const expr = self.parseExpression();
         _ = self.expect(.semicolon);
-        if (expr) |e| return Statement{ .return_stmt = .{ .value = e } };
-        return Statement{ .return_stmt = .{ .value = null } };
+        if (expr) |e| return Statement{ .return_stmt = .{ .value = e, .source_loc = loc } };
+        return Statement{ .return_stmt = .{ .value = null, .source_loc = loc } };
     }
 
     fn skipStructLiteral(self: *Parser) void {

@@ -2104,16 +2104,17 @@ const Parser = struct {
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'return'
 
         // If the next token is } or eof (or, N-154, a `;` separator), it's a
         // bare return
         if (self.current.kind == .rbrace or self.current.kind == .eof or self.current.kind == .semicolon) {
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
 
         const expr = self.parseExpression();
-        return .{ .return_stmt = .{ .value = expr } };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parseExpressionStatement(self: *Parser) ?Statement {

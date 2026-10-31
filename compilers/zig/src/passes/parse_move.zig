@@ -1314,7 +1314,7 @@ const Parser = struct {
             const last = &body[body.len - 1];
             switch (last.*) {
                 .expr_stmt => |e| {
-                    last.* = .{ .return_stmt = .{ .value = e.expr } };
+                    last.* = .{ .return_stmt = .{ .value = e.expr, .source_loc = e.source_loc } };
                 },
                 else => {},
             }
@@ -1809,19 +1809,20 @@ const Parser = struct {
     }
 
     fn parseMoveReturn(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'return'
 
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
         if (self.current.kind == .rbrace or self.current.kind == .eof) {
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
 
         const expr = self.parseExpression();
         self.skipSemicolons();
-        return .{ .return_stmt = .{ .value = expr } };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parseMoveExprStatement(self: *Parser) ?Statement {

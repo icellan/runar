@@ -650,6 +650,7 @@ const Parser = struct {
         // the whole contract — and therefore the complete property list — has
         // been parsed. See `solResolveBarePropsStmts`.
         // F-213 measure (B), before that recursive pass walks the bodies.
+        if (self.nest_error == null and !self.nest.exceeded) self.nest_error = input_limits.membersNestingError(self.allocator, self.file_name, properties.items, methods.items);
         if (self.nest.exceeded or input_limits.membersTooDeep(properties.items, methods.items)) {
             self.refuseNesting();
             return null;
@@ -1000,7 +1001,7 @@ const Parser = struct {
             },
             .return_stmt => |maybe_r| {
                 const maybe = maybe_r.value;
-                if (maybe) |e| return .{ .return_stmt = .{ .value = self.solRenameUnderscoreIdents(e, params) } };
+                if (maybe) |e| return .{ .return_stmt = .{ .value = self.solRenameUnderscoreIdents(e, params), .source_loc = maybe_r.source_loc } };
                 return stmt;
             },
         }
@@ -1648,19 +1649,20 @@ const Parser = struct {
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'return'
 
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
         if (self.current.kind == .rbrace or self.current.kind == .eof) {
-            return .{ .return_stmt = .{ .value = null } };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
 
         const expr = self.parseExpression();
         _ = self.match(.semicolon);
-        return .{ .return_stmt = .{ .value = expr } };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parseSolVarDecl(self: *Parser) ?Statement {

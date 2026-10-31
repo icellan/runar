@@ -280,7 +280,7 @@ fn stmtLoc(st: types.Statement) ?types.SourceLocation {
         .for_stmt => |f| f.source_loc,
         .expr_stmt => |e| e.source_loc,
         .assert_stmt => |a| a.source_loc,
-        .return_stmt => null,
+        .return_stmt => |r| r.source_loc,
     };
 }
 
@@ -343,6 +343,33 @@ pub fn membersTooDeep(properties: []const types.PropertyNode, methods: []const t
     for (properties) |p| if (propertyTooDeep(p)) return true;
     for (methods) |m| if (stmtsTooDeep(m.body, 1) != null) return true;
     return false;
+}
+
+/// The shared diagnostic for the first over-deep member (a property initializer,
+/// else a method body, in declaration order) anchored where the TS reference
+/// anchors it -- the offending statement, else the method -- or null when
+/// nothing is over-deep or the offending node carries no location. For the
+/// parsers whose early `membersTooDeep` guard would otherwise anchor at the
+/// token the parser stopped on.
+pub fn membersNestingError(
+    allocator: std.mem.Allocator,
+    file_name: []const u8,
+    properties: []const types.PropertyNode,
+    methods: []const types.MethodNode,
+) ?[]const u8 {
+    for (properties) |p| {
+        if (propertyTooDeep(p)) {
+            const l = p.source_loc orelse return null;
+            return nestingErrorAt(allocator, file_name, l.line, l.column);
+        }
+    }
+    for (methods) |m| {
+        if (bodyNestingViolation(m.body, m.source_loc)) |v| {
+            const l = v.loc orelse return null;
+            return nestingErrorAt(allocator, file_name, l.line, l.column);
+        }
+    }
+    return null;
 }
 
 /// Measure (B) over a whole contract: property initializers, the constructor
