@@ -1921,9 +1921,9 @@ public final class PyParser {
                 String converted = pyConvertName(name);
                 if (check(TokKind.LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(converted), args);
+                    return new CallExpr(new Identifier(converted, new SourceLocation(fileName, tok.line, tok.col)), args);
                 }
-                return new Identifier(converted);
+                return new Identifier(converted, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TokKind.LPAREN) {

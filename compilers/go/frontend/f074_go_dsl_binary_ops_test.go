@@ -77,7 +77,9 @@ func TestF074_GoDSL_AndNotLowersToAndOfComplement(t *testing.T) {
 	want := BinaryExpr{
 		Op:    "&",
 		Left:  PropertyAccessExpr{Property: "count"},
-		Right: UnaryExpr{Op: "~", Operand: Identifier{Name: "k"}},
+		// N-464: an identifier carries its token's position on every surface
+		// (line 11 is `\tc.Count = c.Count &^ k`; `k` is at column 22).
+		Right: UnaryExpr{Op: "~", Operand: Identifier{Name: "k", SourceLocation: SourceLocation{File: "OpProbe.runar.go", Line: 11, Column: 22}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("c.Count &^ k lowered to %#v, want %#v (the reference's c.Count & ~k)", got, want)

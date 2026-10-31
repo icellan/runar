@@ -2106,10 +2106,11 @@ function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
         e.args.length >= 4 &&
         !isTrusted(e.args[3]!, scope, new Set())
       ) {
+        // N-464 (user decision R186): anchored at the 4th argument itself.
         ctx.errors.push(makeDiagnostic(
           RABIN_PUBKEY_PROVENANCE_MESSAGE,
           'error',
-          e.sourceLocation ?? scope.method.sourceLocation,
+          e.args[3]!.sourceLocation ?? e.sourceLocation ?? scope.method.sourceLocation,
         ));
       }
     });

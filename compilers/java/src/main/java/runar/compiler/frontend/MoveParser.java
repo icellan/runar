@@ -1502,10 +1502,10 @@ public final class MoveParser {
                         && (id.name().equals("contract") || id.name().equals("self"))) {
                         args = new ArrayList<>(args.subList(1, args.size()));
                     }
-                    return new CallExpr(new Identifier(mappedName), args);
+                    return new CallExpr(new Identifier(mappedName, new SourceLocation(filename, tok.line(), tok.column())), args);
                 }
 
-                return new Identifier(mappedName);
+                return new Identifier(mappedName, new SourceLocation(filename, tok.line(), tok.column()));
             }
 
             if (tok.kind() == Kind.LPAREN) {

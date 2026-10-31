@@ -1341,10 +1341,10 @@ module RunarCompiler
           # Function call
           if check(TOK_LPAREN)
             args = parse_call_args
-            return CallExpr.new(callee: Identifier.new(name: name), args: args)
+            return CallExpr.new(callee: Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col)), args: args)
           end
 
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         if tok.kind == TOK_LPAREN

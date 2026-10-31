@@ -1516,7 +1516,7 @@ class _RustParser:
         if tok.kind == TOK_IDENT:
             self.advance()
             mapped = _map_rust_builtin(tok.value)
-            return Identifier(name=mapped)
+            return Identifier(name=mapped, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         self.add_error(
             f"unsupported token {tok.value!r} (kind {tok.kind}) "

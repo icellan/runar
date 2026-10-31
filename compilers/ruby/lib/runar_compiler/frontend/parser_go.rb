@@ -1821,7 +1821,7 @@ module RunarCompiler
           end
 
           # Non-receiver identifiers get camelCase conversion
-          return Identifier.new(name: Frontend.go_to_camel(tok.value))
+          return Identifier.new(name: Frontend.go_to_camel(tok.value), source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Fallback

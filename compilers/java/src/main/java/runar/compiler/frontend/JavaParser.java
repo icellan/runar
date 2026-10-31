@@ -725,7 +725,7 @@ public final class JavaParser {
             return convertLiteral(lt, filename, cu);
         }
         if (e instanceof IdentifierTree id) {
-            return new Identifier(id.getName().toString());
+            return new Identifier(id.getName().toString(), locationOf(id, cu, filename));
         }
         if (e instanceof MemberSelectTree ms) {
             // Special-case BigInteger.ZERO/ONE/TWO/TEN → literal. The Bigint

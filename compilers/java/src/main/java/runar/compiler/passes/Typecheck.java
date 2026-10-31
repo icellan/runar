@@ -63,6 +63,11 @@ public final class Typecheck {
 
     private Typecheck() {}
 
+    /** N-464: the N-463 expression position rule, for the validator's anchors. */
+    static SourceLocation exprLoc(Expression e) {
+        return Checker.exprLoc(e);
+    }
+
     // ------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------

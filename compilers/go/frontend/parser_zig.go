@@ -1762,7 +1762,7 @@ func (p *zigParser) parsePrimary() Expression {
 			return Identifier{Name: builtin}
 		}
 
-		return Identifier{Name: tok.value}
+		return Identifier{Name: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// Fallback

@@ -1604,7 +1604,7 @@ func (p *rustMacroParser) parsePrimary() Expression {
 	case rustTokIdent:
 		p.advance()
 		mapped := rustMapBuiltin(t.value)
-		return Identifier{Name: mapped}
+		return Identifier{Name: mapped, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}}
 
 	default:
 		p.advance()

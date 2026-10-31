@@ -1593,7 +1593,7 @@ class GoParser extends ParserCore<GoToken> {
       if (this.selfNames.has(t.value)) {
         return { kind: 'identifier', name: t.value };
       }
-      return { kind: 'identifier', name: goToCamel(t.value) };
+      return { kind: 'identifier', name: goToCamel(t.value), sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Go surface syntax can start an expression with this

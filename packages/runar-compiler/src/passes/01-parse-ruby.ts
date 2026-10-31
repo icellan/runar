@@ -2053,7 +2053,7 @@ class RbParser {
       this.advance();
       const rawName = tok.value;
       const name = mapBuiltinName(rawName);
-      return { kind: 'identifier', name };
+      return { kind: 'identifier', name, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // super keyword (as expression, e.g., in super.method)

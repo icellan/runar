@@ -1906,7 +1906,7 @@ module RunarCompiler
         # Identifier
         if tok.kind == TOK_IDENT
           advance
-          return Identifier.new(name: tok.value)
+          return Identifier.new(name: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Fallback: consume to avoid infinite loop, surface as zero.

@@ -287,6 +287,11 @@ const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
     current: Token,
+    /// N-464: the argument locations of the list `parseArgList` returned
+    /// last; `makeCall` / `makeMethodCall` copy them onto the node, as
+    /// parse_ts.zig does (N-463). Both are only ever handed a list
+    /// `parseArgList` just returned.
+    last_arg_locs: []const ?types.SourceLocation = &.{},
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
@@ -472,13 +477,15 @@ const Parser = struct {
 
     fn makeCall(self: *Parser, callee: []const u8, args: []Expression) ?Expression {
         const c = self.allocator.create(CallExpr) catch return null;
-        c.* = .{ .callee = callee, .args = args };
+        const arg_locs: []const ?types.SourceLocation = if (self.last_arg_locs.len == args.len) self.last_arg_locs else &.{};
+        c.* = .{ .callee = callee, .args = args, .arg_locs = arg_locs };
         return Expression{ .call = c };
     }
 
     fn makeMethodCall(self: *Parser, object: []const u8, method: []const u8, args: []Expression) ?Expression {
         const mc = self.allocator.create(MethodCall) catch return null;
-        mc.* = .{ .object = object, .method = method, .args = args };
+        const arg_locs: []const ?types.SourceLocation = if (self.last_arg_locs.len == args.len) self.last_arg_locs else &.{};
+        mc.* = .{ .object = object, .method = method, .args = args, .arg_locs = arg_locs };
         return Expression{ .method_call = mc };
     }
 
@@ -1721,11 +1728,25 @@ const Parser = struct {
         return false;
     }
 
+    /// N-464: the first token of the argument about to be parsed, as
+    /// parse_ts.zig's `operandLoc` (null on `(`, whose inner expression
+    /// this one-token view cannot see).
+    fn argLoc(self: *const Parser) ?types.SourceLocation {
+        if (self.current.kind == .lparen) return null;
+        return self.currentSourceLoc();
+    }
+
     fn parseArgList(self: *Parser) []Expression {
         var args: std.ArrayListUnmanaged(Expression) = .empty;
+        // N-464: published only once the whole list is parsed, so a call
+        // nested inside an argument cannot clobber it.
+        var locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty;
+        defer self.last_arg_locs = if (locs.items.len == args.items.len) locs.items else &.{};
         while (self.current.kind != .rparen and self.current.kind != .eof) {
+            const arg_loc = self.argLoc();
             const arg = self.parseExpression() orelse break;
             args.append(self.allocator, arg) catch {};
+            locs.append(self.allocator, arg_loc) catch {};
             if (self.current.kind == .comma) {
                 _ = self.bump();
                 continue;

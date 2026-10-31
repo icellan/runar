@@ -2083,6 +2083,7 @@ impl<'a> ZigParser<'a> {
 
         // Identifier (including `runar.xxx` stripping)
         if matches!(self.peek(), Token::Ident(_)) {
+            let ident_loc = self.loc();
             if let Token::Ident(name) = self.advance() {
                 // `runar.xxx` -> strip prefix
                 if name == "runar" && *self.peek() == Token::Dot {
@@ -2132,7 +2133,7 @@ impl<'a> ZigParser<'a> {
                     return Expression::Identifier { name: builtin, source_location: None };
                 }
 
-                return Expression::Identifier { name, source_location: None };
+                return Expression::Identifier { name, source_location: Some(ident_loc) };
             }
         }
 

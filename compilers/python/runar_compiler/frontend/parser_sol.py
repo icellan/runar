@@ -1198,9 +1198,9 @@ class _SolParser:
             # Function call
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
-                return CallExpr(callee=Identifier(name=name), args=args)
+                return CallExpr(callee=Identifier(name=name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=name)
+            return Identifier(name=name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_LPAREN:
             self.advance()

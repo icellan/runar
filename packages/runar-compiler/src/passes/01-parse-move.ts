@@ -1106,7 +1106,7 @@ class MoveParser {
       };
       const anchored = preserved[t.value];
       if (anchored !== undefined) {
-        return { kind: 'identifier', name: anchored };
+        return { kind: 'identifier', name: anchored, sourceLocation: { file: this.file, line: t.line, column: t.column } };
       }
       const name = snakeToCamel(t.value);
       // Map Move builtins to Rúnar builtins.
@@ -1171,7 +1171,7 @@ class MoveParser {
         // Merkle proof verification
         merkleRootSha256: 'merkleRootSha256', merkleRootHash256: 'merkleRootHash256',
       };
-      return { kind: 'identifier', name: builtinMap[name] || name };
+      return { kind: 'identifier', name: builtinMap[name] || name, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Move surface syntax can start an expression with this

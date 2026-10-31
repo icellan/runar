@@ -1706,7 +1706,7 @@ public final class RustParser {
 
         if (tok.kind == TOK_IDENT) {
             s.advance();
-            return new Identifier(mapBuiltinName(tok.value));
+            return new Identifier(mapBuiltinName(tok.value), new SourceLocation(s.filename, tok.line, tok.col));
         }
 
         s.addError("unsupported token \"" + tok.value + "\" (kind " + tok.kind

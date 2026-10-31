@@ -1579,11 +1579,11 @@ module RunarCompiler
           # normalisation matches the other six tiers, they have to be
           # anchored explicitly.
           anchored = MOVE_ANCHORED_NAMES[tok.value]
-          return Identifier.new(name: anchored) if anchored
+          return Identifier.new(name: anchored, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col)) if anchored
 
           name = Frontend.move_snake_to_camel(tok.value)
           mapped = Frontend.move_map_builtin(name)
-          return Identifier.new(name: mapped)
+          return Identifier.new(name: mapped, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Fallback

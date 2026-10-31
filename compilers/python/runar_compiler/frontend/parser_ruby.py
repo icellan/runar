@@ -1966,7 +1966,7 @@ class _RbParser:
             self._advance()
             raw_name = tok.value
             name = _map_builtin_name(raw_name)
-            return Identifier(name=name)
+            return Identifier(name=name, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # ``super`` as expression
         if kind == TOK_SUPER:

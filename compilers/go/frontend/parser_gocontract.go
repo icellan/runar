@@ -963,7 +963,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		if name == "false" {
 			return BoolLiteral{Value: false}
 		}
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: p.locAt(p.fset.Position(e.Pos()))}
 
 	case *ast.SelectorExpr:
 		// runar.FuncName -> function call identifier

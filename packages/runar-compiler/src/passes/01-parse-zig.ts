@@ -1355,7 +1355,7 @@ class ZigParser extends ParserCore<ZigToken> {
         return { kind: 'identifier', name: ZIG_BUILTIN_MAP[builtin] ?? builtin };
       }
 
-      return { kind: 'identifier', name: token.value };
+      return { kind: 'identifier', name: token.value, sourceLocation: { file: this.file, line: token.line, column: token.column } };
     }
 
     // Nothing in the Zig surface syntax can start an expression with this

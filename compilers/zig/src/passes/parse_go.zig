@@ -910,6 +910,10 @@ const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
     current: Token,
+    /// N-464: the argument locations of the list `parseArgList` returned
+    /// last; the caller copies them onto the call node it builds, as
+    /// parse_ts.zig does (N-463).
+    last_arg_locs: []const ?types.SourceLocation = &.{},
     /// N-154: the token `bump` consumed last (null before the first), so a
     /// `;` can tell whether it ends a statement on the same line.
     prev: ?Token = null,
@@ -2484,6 +2488,7 @@ const Parser = struct {
                 if (self.current.kind == .lparen) {
                     _ = self.bump(); // consume '('
                     const args = self.parseArgList();
+                    const arg_locs = self.last_arg_locs;
 
                     switch (expr) {
                         .identifier => |id| {
@@ -2515,25 +2520,25 @@ const Parser = struct {
                                     // Builtin call: runar.CheckSig(sig, pk) -> checkSig(sig, pk)
                                     const builtin_name = mapGoBuiltinCamel(self.allocator, member);
                                     const call = self.allocator.create(CallExpr) catch return null;
-                                    call.* = .{ .callee = builtin_name, .args = args };
+                                    call.* = .{ .callee = builtin_name, .args = args, .arg_locs = arg_locs };
                                     expr = .{ .call = call };
                                 }
                             } else if (self.isReceiver(id)) {
                                 // c.MethodName(args) -> this.methodName(args)
                                 const camel_member = goToCamelCase(self.allocator, member);
                                 const mc = self.allocator.create(MethodCall) catch return null;
-                                mc.* = .{ .object = "this", .method = camel_member, .args = args };
+                                mc.* = .{ .object = "this", .method = camel_member, .args = args, .arg_locs = arg_locs };
                                 expr = .{ .method_call = mc };
                             } else {
                                 // Other: obj.method(args)
                                 const mc = self.allocator.create(MethodCall) catch return null;
-                                mc.* = .{ .object = id, .method = goToCamelCase(self.allocator, member), .args = args };
+                                mc.* = .{ .object = id, .method = goToCamelCase(self.allocator, member), .args = args, .arg_locs = arg_locs };
                                 expr = .{ .method_call = mc };
                             }
                         },
                         else => {
                             const mc = self.allocator.create(MethodCall) catch return null;
-                            mc.* = .{ .object = "unknown", .method = goToCamelCase(self.allocator, member), .args = args };
+                            mc.* = .{ .object = "unknown", .method = goToCamelCase(self.allocator, member), .args = args, .arg_locs = arg_locs };
                             expr = .{ .method_call = mc };
                         },
                     }
@@ -2570,8 +2575,9 @@ const Parser = struct {
                     .identifier => |id| {
                         _ = self.bump();
                         const args = self.parseArgList();
+                        const arg_locs = self.last_arg_locs;
                         const call = self.allocator.create(CallExpr) catch return null;
-                        call.* = .{ .callee = id, .args = args };
+                        call.* = .{ .callee = id, .args = args, .arg_locs = arg_locs };
                         expr = .{ .call = call };
                     },
                     else => break,
@@ -2636,11 +2642,25 @@ const Parser = struct {
         };
     }
 
+    /// N-464: the first token of the argument about to be parsed, as
+    /// parse_ts.zig's `operandLoc` (null on `(`, whose inner expression
+    /// this one-token view cannot see).
+    fn argLoc(self: *const Parser) ?types.SourceLocation {
+        if (self.current.kind == .lparen) return null;
+        return self.tokenSourceLoc(self.current);
+    }
+
     fn parseArgList(self: *Parser) []Expression {
         var args: std.ArrayListUnmanaged(Expression) = .empty;
+        // N-464: published only once the whole list is parsed, so a call
+        // nested inside an argument cannot clobber it.
+        var locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty;
+        defer self.last_arg_locs = if (locs.items.len == args.items.len) locs.items else &.{};
         while (self.current.kind != .rparen and self.current.kind != .eof) {
+            const arg_loc = self.argLoc();
             const arg = self.parseExpression() orelse break;
             args.append(self.allocator, arg) catch {};
+            locs.append(self.allocator, arg_loc) catch {};
             if (self.current.kind == .comma) {
                 _ = self.bump();
             } else break;

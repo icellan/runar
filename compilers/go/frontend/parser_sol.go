@@ -1659,10 +1659,10 @@ func (p *solParser) parseSolPrimary() Expression {
 		// Function call
 		if p.check(solTokLParen) {
 			args := p.parseSolCallArgs()
-			return CallExpr{Callee: Identifier{Name: name}, Args: args}
+			return CallExpr{Callee: Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case solTokLParen:
 		p.advance()
 		expr := p.parseSolExpression()

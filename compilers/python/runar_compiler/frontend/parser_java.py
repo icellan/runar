@@ -1670,7 +1670,7 @@ class _JavaParser:
         # over.
         if tok.kind == TOK_IDENT:
             self.advance()
-            return Identifier(name=tok.value)
+            return Identifier(name=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         raise _JavaParseError(
             f"line {tok.line}:{tok.col}: unexpected token {tok.value!r}"

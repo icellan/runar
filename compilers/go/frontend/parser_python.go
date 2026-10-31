@@ -2168,10 +2168,10 @@ func (p *pyParser) parsePyPrimary() Expression {
 		// Function call
 		if p.check(pyTokLParen) {
 			args := p.parsePyCallArgs()
-			return CallExpr{Callee: Identifier{Name: converted}, Args: args}
+			return CallExpr{Callee: Identifier{Name: converted, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: converted}
+		return Identifier{Name: converted, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 
 	case pyTokLParen:
 		p.advance()

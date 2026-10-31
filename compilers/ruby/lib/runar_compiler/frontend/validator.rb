@@ -581,7 +581,12 @@ module RunarCompiler
                         e.args.length >= 4
             next if rabin_trusted?(e.args[3], scope, Set.new, property_names, trusted_params)
 
-            add_error(RABIN_PUBKEY_PROVENANCE_MESSAGE, loc: scope[:method].source_location)
+            # N-464 (user decision R186): anchored at the 4th argument itself;
+            # the method only when the argument has no location.
+            add_error(
+              RABIN_PUBKEY_PROVENANCE_MESSAGE,
+              loc: TypeChecker.expr_loc(e.args[3]) || scope[:method].source_location
+            )
           })
         end
 

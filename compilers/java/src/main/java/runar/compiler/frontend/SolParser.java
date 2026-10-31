@@ -1396,9 +1396,9 @@ public final class SolParser {
                 }
                 if (check(TOK_LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(name), args);
+                    return new CallExpr(new Identifier(name, new SourceLocation(fileName, tok.line, tok.col)), args);
                 }
-                return new Identifier(name);
+                return new Identifier(name, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TOK_LPAREN) {

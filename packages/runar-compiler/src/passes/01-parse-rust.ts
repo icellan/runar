@@ -1375,7 +1375,7 @@ class RustParser extends ParserCore<RustToken> {
       this.advance();
       const camelName = snakeToCamel(t.value);
       const name = mapRustBuiltin(camelName);
-      return { kind: 'identifier', name };
+      return { kind: 'identifier', name, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Rust surface syntax can start an expression with this

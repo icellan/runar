@@ -2570,6 +2570,7 @@ impl<'a> GoParser<'a> {
             }
 
             TokenType::Ident(name) => {
+                let ident_loc = self.loc();
                 self.advance();
 
                 // `runar.Something` — could be type conversion or builtin call
@@ -2724,7 +2725,7 @@ impl<'a> GoParser<'a> {
 
                 // Regular identifier
                 let camel = go_to_camel(&name);
-                Some(Expression::Identifier { name: camel, source_location: None })
+                Some(Expression::Identifier { name: camel, source_location: Some(ident_loc) })
             }
 
             _ => None,

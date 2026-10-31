@@ -1699,9 +1699,9 @@ class _PyParser:
 
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
-                return CallExpr(callee=Identifier(name=converted), args=args)
+                return CallExpr(callee=Identifier(name=converted, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=converted)
+            return Identifier(name=converted, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_LPAREN:
             self.advance()

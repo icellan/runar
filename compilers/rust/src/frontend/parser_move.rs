@@ -2075,7 +2075,7 @@ impl<'a> MoveParser<'a> {
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
             Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
-            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name), source_location: None },
+            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name), source_location: Some(lit_loc) },
             Token::LParen => {
                 let expr = self.parse_expression();
                 self.expect(&Token::RParen);

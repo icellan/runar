@@ -1420,9 +1420,10 @@ impl RustDslParser {
                 Expression::ArrayLiteral { elements }
             }
             TokenType::Ident(name) => {
+                let ident_loc = self.loc();
                 self.advance_clone();
                 let mapped = map_rust_builtin(&name);
-                Expression::Identifier { name: mapped, source_location: None }
+                Expression::Identifier { name: mapped, source_location: Some(ident_loc) }
             }
             _ => {
                 let tok = self.current().clone();

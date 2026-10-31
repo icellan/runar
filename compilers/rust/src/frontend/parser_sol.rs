@@ -1831,7 +1831,7 @@ impl<'a> SolParser<'a> {
                         source_location: None,
                     }
                 } else {
-                    Expression::Identifier { name, source_location: None }
+                    Expression::Identifier { name, source_location: Some(lit_loc) }
                 }
             }
             Token::Require => {
@@ -1959,14 +1959,14 @@ fn sol_rename_identifiers_in_expr(
     rename_map: &std::collections::HashMap<String, String>,
 ) -> Expression {
     match expr {
-        Expression::Identifier { name, .. } => {
+        Expression::Identifier { name, source_location } => {
             if let Some(new_name) = rename_map.get(&name) {
                 Expression::Identifier {
                     name: new_name.clone(),
                     source_location: None,
                 }
             } else {
-                Expression::Identifier { name, source_location: None }
+                Expression::Identifier { name, source_location }
             }
         }
         Expression::CallExpr { callee, args, .. } => Expression::CallExpr {
@@ -2053,11 +2053,11 @@ fn sol_rewrite_expr_bare_props(
     method_names: &std::collections::HashSet<String>,
 ) -> Expression {
     match expr {
-        Expression::Identifier { name, .. } => {
+        Expression::Identifier { name, source_location } => {
             if prop_names.contains(&name) && !locals.contains(&name) {
                 Expression::PropertyAccess { property: name, source_location: None }
             } else {
-                Expression::Identifier { name, source_location: None }
+                Expression::Identifier { name, source_location }
             }
         }
         Expression::CallExpr { callee, args, .. } => {

@@ -1003,7 +1003,7 @@ class SolParser {
     }
     if (t.type === 'ident') {
       this.advance();
-      return { kind: 'identifier', name: t.value };
+      return { kind: 'identifier', name: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Solidity-like surface syntax can start an expression with

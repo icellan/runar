@@ -1703,7 +1703,7 @@ module RunarCompiler
             return Identifier.new(name: builtin_name)
           end
 
-          return Identifier.new(name: tok.value)
+          return Identifier.new(name: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         advance

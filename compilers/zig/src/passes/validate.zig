@@ -2681,9 +2681,12 @@ fn checkRabinPubKeyProvenance(
             const c = expr.call;
             if (!std.mem.eql(u8, c.callee, "verifyRabinSig") or c.args.len < 4) return;
             if (try rabinIsTrusted(self.a, self.contract, self.trusted, c.args[3], self.scope)) return;
+            // N-464 (user decision R186): anchored at the 4th argument itself;
+            // the statement only when the parser recorded no location for it.
+            const arg_loc: ?SourceLocation = if (c.arg_locs.len == c.args.len) c.arg_locs[3] else null;
             try self.errs.append(self.gpa, .{
                 .message = RABIN_PUBKEY_PROVENANCE_MESSAGE,
-                .location = loc orelse self.scope.loc,
+                .location = arg_loc orelse loc orelse self.scope.loc,
                 .severity = .@"error",
             });
         }

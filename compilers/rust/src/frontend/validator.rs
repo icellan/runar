@@ -2509,7 +2509,9 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
     }
 
     for scope in &scopes {
-        let mut bad = 0usize;
+        // N-464 (user decision R186): each refusal is anchored at the 4th
+        // argument itself; the method only when the argument has no location.
+        let mut bad: Vec<SourceLocation> = Vec::new();
         walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
             if let Expression::CallExpr { callee, args, .. } = e {
                 if let Expression::Identifier { name, .. } = callee.as_ref() {
@@ -2517,16 +2519,17 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
                         && args.len() >= 4
                         && !rabin_is_trusted(&args[3], scope, &property_names, &trusted_params, &mut HashSet::new())
                     {
-                        bad += 1;
+                        bad.push(
+                            crate::frontend::typecheck::expr_loc(&args[3])
+                                .unwrap_or(&scope.method.source_location)
+                                .clone(),
+                        );
                     }
                 }
             }
         });
-        for _ in 0..bad {
-            errors.push(Diagnostic::error(
-                RABIN_PUBKEY_PROVENANCE_MESSAGE,
-                Some(scope.method.source_location.clone()),
-            ));
+        for loc in bad {
+            errors.push(Diagnostic::error(RABIN_PUBKEY_PROVENANCE_MESSAGE, Some(loc)));
         }
     }
 

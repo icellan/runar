@@ -1872,10 +1872,10 @@ func (p *moveParser) parseMovePrimary() Expression {
 					args = args[1:]
 				}
 			}
-			return CallExpr{Callee: Identifier{Name: mappedName}, Args: args}
+			return CallExpr{Callee: Identifier{Name: mappedName, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: mappedName}
+		return Identifier{Name: mappedName, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 
 	case moveTokLParen:
 		p.advance()

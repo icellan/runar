@@ -43,6 +43,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.input_limits import MAX_CALL_DEPTH, call_depth_message
+from runar_compiler.frontend.typecheck import _expr_loc
 
 
 # ---------------------------------------------------------------------------
@@ -1998,7 +1999,12 @@ def _check_rabin_pubkey_provenance(ctx: "_ValidationContext") -> None:
                 and len(e.args) >= 4
                 and not is_trusted(e.args[3], scope, set())
             ):
-                ctx._add_error(RABIN_PUBKEY_PROVENANCE_MESSAGE, scope.method.source_location)
+                # N-464 (user decision R186): anchored at the 4th argument
+                # itself; the method only when the argument has no location.
+                ctx._add_error(
+                    RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                    _expr_loc(e.args[3]) or scope.method.source_location,
+                )
         _walk_expressions_in_body_deep(scope.method.body, check)
 
     # N-205 (a): a MUTABLE property used as the key is state the previous spend

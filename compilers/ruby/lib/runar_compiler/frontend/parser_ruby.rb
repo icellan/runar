@@ -2060,7 +2060,7 @@ module RunarCompiler
           advance
           raw_name = tok.value
           name = Frontend.map_builtin_name(raw_name)
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file, line: tok.line, column: tok.col))
         end
 
         # +super+ as expression

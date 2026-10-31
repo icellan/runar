@@ -836,8 +836,13 @@ module RunarCompiler
       # record a position, and only on .runar.ts. A composite expression
       # starts where its leftmost child starts, which is the position TS
       # reports for it (a parenthesised leftmost child is the exception: TS
-      # points at the `(`).
+      # points at the `(`). A class method too, so the validator's N-464
+      # anchor uses the same rule.
       def expr_loc(expr)
+        self.class.expr_loc(expr)
+      end
+
+      def self.expr_loc(expr)
         loop do
           case expr
           when Identifier, PropertyAccessExpr, ByteStringLiteral then return expr.source_location

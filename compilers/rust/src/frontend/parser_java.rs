@@ -2139,6 +2139,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::ArrayLiteral { elements })
             }
             TokenType::Ident(name) => {
+                let ident_loc = self.loc();
                 self.advance();
                 // `BigInteger.ZERO/ONE/TWO/TEN` or `Bigint.ZERO/ONE/TWO/TEN`
                 // → BigIntLiteral. The Bigint wrapper re-exports the same
@@ -2183,7 +2184,7 @@ impl<'a> JavaParser<'a> {
                         }
                     }
                 }
-                Some(Expression::Identifier { name, source_location: None })
+                Some(Expression::Identifier { name, source_location: Some(ident_loc) })
             }
             _ => {
                 self.error(format!(

@@ -1945,7 +1945,7 @@ module RunarCompiler
           advance
           raw_name = tok.value
           name = Frontend.py_convert_name(raw_name)
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         add_error("line #{tok.line}: unexpected token #{tok.value.inspect}")

@@ -2117,10 +2117,10 @@ func (p *rbParser) parsePrimary() Expression {
 		// Function call
 		if p.check(rbTokLParen) {
 			args := p.parseCallArgs()
-			return CallExpr{Callee: Identifier{Name: name}, Args: args}
+			return CallExpr{Callee: Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	p.addError(fmt.Sprintf("line %d: unexpected token %q", tok.line, tok.value))

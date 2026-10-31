@@ -332,7 +332,11 @@ public final class Validate {
                         && "verifyRabinSig".equals(id.name())
                         && c.args().size() >= 4
                         && !isTrusted(c.args().get(3), scope, new HashSet<>())) {
-                        ctx.error(RABIN_PUBKEY_PROVENANCE_MESSAGE, scope.method.sourceLocation());
+                        // N-464 (user decision R186): anchored at the 4th
+                        // argument itself; the method only when it has no location.
+                        var argLoc = Typecheck.exprLoc(c.args().get(3));
+                        ctx.error(RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                            argLoc != null ? argLoc : scope.method.sourceLocation());
                     }
                 });
             }

@@ -1790,7 +1790,7 @@ public final class RbParser {
                 case IDENT, ASSERT -> {
                     advance();
                     String raw = t.value;
-                    return new Identifier(mapBuiltinName(raw));
+                    return new Identifier(mapBuiltinName(raw), new SourceLocation(file, t.line, t.col));
                 }
                 case SUPER -> { advance(); return new Identifier("super"); }
                 default -> {

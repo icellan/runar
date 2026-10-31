@@ -1426,9 +1426,9 @@ class _MoveParser:
                 # sites too.
                 if args and isinstance(args[0], Identifier) and args[0].name in ("contract", "self"):
                     args = args[1:]
-                return CallExpr(callee=Identifier(name=mapped_name), args=args)
+                return CallExpr(callee=Identifier(name=mapped_name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=mapped_name)
+            return Identifier(name=mapped_name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_LPAREN:
             self.advance()

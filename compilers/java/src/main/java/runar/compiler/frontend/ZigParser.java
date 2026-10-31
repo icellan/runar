@@ -1625,7 +1625,7 @@ public final class ZigParser {
                     }
                     return new Identifier(builtin);
                 }
-                return new Identifier(tok.value);
+                return new Identifier(tok.value, new SourceLocation(file, tok.line, tok.col));
             }
             // Fallback: emit an Identifier placeholder.
             advance();

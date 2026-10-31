@@ -135,8 +135,9 @@ describe('parseZigSource bytes equality lowering', () => {
         expect(ret.value).toEqual({
           kind: 'binary_expr',
           op: '===',
-          left: { kind: 'identifier', name: 'a' },
-          right: { kind: 'identifier', name: 'b' },
+          // N-464: an identifier carries its token's position on every surface.
+          left: { kind: 'identifier', name: 'a', sourceLocation: { file: 'Contract.runar.zig', line: 9, column: 31 } },
+          right: { kind: 'identifier', name: 'b', sourceLocation: { file: 'Contract.runar.zig', line: 9, column: 34 } },
         });
       }
     }

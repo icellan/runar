@@ -1716,7 +1716,7 @@ module RunarCompiler
           # If the special builtin map didn't match, use the camel version
           name = RUST_BUILTIN_MAP[camel_name] || camel_name if name == camel_name && name != raw_name
 
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # N-153: nothing in the .rs surface can start an expression with this

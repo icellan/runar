@@ -1362,7 +1362,7 @@ class JavaParser {
         return this.parseNewExpression();
       case 'ident': {
         this.advance();
-        return { kind: 'identifier', name: t.value };
+        return { kind: 'identifier', name: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
       }
       default:
         this.errorAt(t, `unexpected token '${t.value || t.type}' in expression`);

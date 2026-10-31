@@ -30,17 +30,26 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * full text because the tiers word these four messages slightly differently
  * (`Left`/`left`, Java's `'X' vs 'Y'`), which this item does not change.
  *
- * Still divergent — the ANCHOR_PENDING row below: a decision on the anchor is
- * needed because TS itself is inconsistent across surfaces (N220-N228: the
- * verifyRabinSig public-key refusal is at the call on `.runar.ts` but at the
- * method header on seven other surfaces). It is pinned as divergent so that
- * converging it fails here until its row moves into CASES.
+ * Converged by N-464 — the verifyRabinSig public-key refusal N220-N228, one
+ * fixture per surface. User decision R186: the anchor is the 4th argument
+ * itself, on all nine surfaces in all seven tiers. Before N-464 TS put it at
+ * the call on `.runar.ts`, at the call's `(` on `.runar.rs` and at the method
+ * header on the other seven surfaces, and the other tiers scattered between
+ * statement, method and parameter. Every surface parser in every tier now
+ * records an identifier's token as its location (Zig: the call's per-argument
+ * locations), and every validator anchors the refusal there, falling back to
+ * the old anchor when the argument carries none.
+ *
+ * ANCHOR_PENDING (now empty) is where a row goes when a decision on the
+ * anchor is needed; such a row is pinned as divergent so that converging it
+ * fails here until it moves into CASES.
  *
  * What this proves: for every CASES row every tier is present, refuses, and
  * prints the row's message at `<file>:<line>:<column of the anchor text>`.
- * What it does NOT prove: node parity for any other diagnostic, or for these
- * diagnostics on the eight non-`.runar.ts` surfaces (their parsers leave the
- * new expression locations empty and keep the old anchors); that a tier's
+ * What it does NOT prove: node parity for any other diagnostic, or for the
+ * N-463 diagnostics on the eight non-`.runar.ts` surfaces; the verifyRabinSig
+ * anchor when the 4th argument is a composite (arithmetic, ternary, call) or
+ * the refusal comes from a private helper's parameter; that a tier's
  * follow-on diagnostics (Go's "unsupported Go statement") agree; anchor
  * agreement for an ambiguous edge nested under a non-ambiguous parent, where
  * Go precedence and the C ladder pick different parent nodes; the other
@@ -51,6 +60,7 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
 const TIERS = buildSourceTiers();
 const PRECEDENCE = 'ambiguous operator precedence in .runar.go';
 const AFFINE = "affine value 'sig' has already been consumed";
+const RABIN = 'verifyRabinSig public key (4th argument) must be a contract property or a literal';
 
 /**
  * [fixture, 1-based line, anchor text whose first character is the position,
@@ -79,12 +89,24 @@ const CASES: Array<[string, number, string, string]> = [
   // arm (the first statement it reaches) is the second consumption.
   ['N208-ts-affine-sig-if-else-in-repeating-loop.runar.ts', 20, 'sig,', AFFINE],
   ['N209-ts-affine-sig-if-condition-and-arm.runar.ts', 21, 'sig,', AFFINE],
+  // N-464 (user decision R186): the verifyRabinSig public-key refusal is
+  // anchored at the 4th argument itself, on all nine surfaces. Here that
+  // argument is the method parameter `n`. On `.runar.rs` it is written `&n`;
+  // every tier's Rust-DSL parser drops the `&` and the argument node is the
+  // identifier `n`, so the anchor is `n`, not `&`.
+  ['N220-ts-rabin-pubkey-param.runar.ts', 17, 'n)', RABIN],
+  ['N221-sol-rabin-pubkey-param.runar.sol', 16, 'n)', RABIN],
+  ['N222-move-rabin-pubkey-param.runar.move', 15, 'n)', RABIN],
+  ['N223-go-rabin-pubkey-param.runar.go', 16, 'n)', RABIN],
+  ['N224-rs-rabin-pubkey-param.runar.rs', 16, 'n)', RABIN],
+  ['N225-py-rabin-pubkey-param.runar.py', 18, 'n)', RABIN],
+  ['N226-zig-rabin-pubkey-param.runar.zig', 18, 'n)', RABIN],
+  ['N227-rb-rabin-pubkey-param.runar.rb', 18, 'n)', RABIN],
+  ['N228-java-rabin-pubkey-param.runar.java', 28, 'n)', RABIN],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */
-const ANCHOR_PENDING: Array<[string, string]> = [
-  ['N220-ts-rabin-pubkey-param.runar.ts', 'verifyRabinSig public key'],
-];
+const ANCHOR_PENDING: Array<[string, string]> = [];
 
 function expectedColumn(fixture: string, line: number, anchor: string): number {
   const text = readFileSync(join(REPO, 'conformance/negatives', fixture), 'utf8').split('\n')[line - 1] ?? '';

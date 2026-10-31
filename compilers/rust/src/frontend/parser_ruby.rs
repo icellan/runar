@@ -2576,7 +2576,7 @@ impl<'a> RbParser<'a> {
             }
             Token::Ident(name) => {
                 let mapped = map_builtin_name(&name);
-                Expression::Identifier { name: mapped, source_location: None }
+                Expression::Identifier { name: mapped, source_location: Some(lit_loc) }
             }
             Token::Assert => {
                 // assert used as expression (unusual but handle it)

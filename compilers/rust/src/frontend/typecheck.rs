@@ -2299,7 +2299,7 @@ fn collect_return_types(stmts: &[Statement]) -> Vec<TType> {
 /// record a position, and only on `.runar.ts`. A composite expression starts
 /// where its leftmost child starts, which is the position TS reports for it
 /// (a parenthesised leftmost child is the exception: TS points at the `(`).
-fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
+pub(crate) fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
     let mut e = expr;
     loop {
         e = match e {

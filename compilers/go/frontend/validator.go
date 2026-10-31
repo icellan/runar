@@ -2113,7 +2113,12 @@ func (ctx *validationContext) checkRabinPubKeyProvenance() {
 				return
 			}
 			if !isTrusted(call.Args[3], sc, map[string]bool{}) {
+				// N-464 (user decision R186): anchored at the 4th argument
+				// itself; the statement only when the argument has no location.
 				l := loc
+				if al := exprLoc(call.Args[3]); al != nil {
+					l = *al
+				}
 				ctx.addErrorWithLoc(RabinPubKeyProvenanceMessage, &l)
 			}
 		})

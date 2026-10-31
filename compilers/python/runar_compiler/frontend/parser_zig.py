@@ -1693,7 +1693,7 @@ class _ZigParser:
 
                 return Identifier(name=builtin)
 
-            return Identifier(name=tok.value)
+            return Identifier(name=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # Fallback
         self._advance()

@@ -2161,7 +2161,7 @@ func (p *javaParser) parsePrimary() Expression {
 		// identifier; postfix resolves `.ZERO` to a MemberExpr which we
 		// then re-interpret below.
 		name := t.value
-		expr := Expression(Identifier{Name: name})
+		expr := Expression(Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}})
 		// Peek for BigInteger.{ZERO,ONE,TWO,TEN} or Bigint.{ZERO,ONE,TWO,TEN}.
 		// The Bigint wrapper re-exports BigInteger's constants so both
 		// spellings are accepted (matches JavaParser.convertExpression).
