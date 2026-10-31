@@ -1129,7 +1129,9 @@ fn emitANFBindingJson(w: anytype, binding: types.ANFBinding) error{OutOfMemory}!
     if (binding.source_loc) |loc| {
         try w.writeAll(",\"sourceLoc\":{\"file\":");
         try writeJsonString(w, loc.file);
-        try w.print(",\"line\":{d},\"column\":{d}}}", .{ loc.line, loc.column });
+        // N-475: SourceLocation.column is the parser's 1-based column; the
+        // artifact (like the source map, see recordSourceMapping) is 0-based.
+        try w.print(",\"line\":{d},\"column\":{d}}}", .{ loc.line, if (loc.column > 0) loc.column - 1 else 0 });
     }
     try w.writeByte('}');
 }
