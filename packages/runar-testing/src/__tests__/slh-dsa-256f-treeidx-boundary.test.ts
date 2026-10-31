@@ -37,7 +37,6 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { ScriptExecutionContract } from '../script-execution.js';
 import { slhVerifyVerbose, SLH_SHA2_256f } from '../crypto/slh-dsa.js';
-import { runSlowTests } from '../test-env.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,7 +114,7 @@ describe('SLH-DSA-SHA2-256f treeIdx boundary (N-160)', () => {
   // Compiled-script acceptance on the real @bsv/sdk Spend engine. Minimal test
   // count (two `it`s, one per side of the boundary, each compiling its own
   // ~900 KB script) with generous timeouts given the interpreter cost.
-  it.skipIf(!runSlowTests)('compiled script accepts the hi (treeIdx >= 2^63) signature, rejects its tamper',
+  it('compiled script accepts the hi (treeIdx >= 2^63) signature, rejects its tamper',
     () => {
       const contract = ScriptExecutionContract.fromSource(SOURCE, { pubkey: pubkeyHex });
 
@@ -129,7 +128,7 @@ describe('SLH-DSA-SHA2-256f treeIdx boundary (N-160)', () => {
     600000,
   );
 
-  it.skipIf(!runSlowTests)('compiled script accepts the lo (treeIdx < 2^63) signature, rejects its tamper',
+  it('compiled script accepts the lo (treeIdx < 2^63) signature, rejects its tamper',
     () => {
       const contract = ScriptExecutionContract.fromSource(SOURCE, { pubkey: pubkeyHex });
 

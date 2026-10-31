@@ -1790,6 +1790,16 @@ jobs:
       - name: TypeScript integration tests
         run: cd integration/ts && npx vitest run
 
+      - name: TypeScript SDK regtest test (assembleMultiContractCall)
+        # N-474: this file lives in packages/runar-sdk, so the only other step
+        # that reaches it is ts-compiler's `pnpm run test` — which has no node,
+        # so its two on-chain cases skipped on every run. Run it here, after
+        # the node is up. RUNAR_INTEGRATION_STRICT=1 makes an unreachable node
+        # a failure instead of a skip (see the file's strict-mode case).
+        env:
+          RUNAR_INTEGRATION_STRICT: '1'
+        run: cd packages/runar-sdk && npx vitest run src/__tests__/multi-contract-call.regtest.test.ts
+
       - name: Rust integration tests
         run: cd integration/rust && cargo test --release -- --include-ignored
         timeout-minutes: 10

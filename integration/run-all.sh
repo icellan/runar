@@ -43,6 +43,17 @@ else
 fi
 
 echo ""
+echo "=== TypeScript SDK regtest test (assembleMultiContractCall) ==="
+# Mirrors the CI integration step of the same name (N-474). Under
+# RUNAR_INTEGRATION_STRICT=1 an unreachable node fails instead of skipping.
+if (cd ../packages/runar-sdk && npx vitest run src/__tests__/multi-contract-call.regtest.test.ts); then
+  echo "--- TypeScript SDK regtest: PASSED ---"
+else
+  echo "--- TypeScript SDK regtest: FAILED ---"
+  FAILED=$((FAILED + 1))
+fi
+
+echo ""
 echo "=== Rust integration tests ==="
 if (cd rust && cargo test --release -- --include-ignored); then
   echo "--- Rust: PASSED ---"
