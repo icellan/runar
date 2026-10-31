@@ -61,8 +61,19 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * crafted negative per shape (fixtures N488-*): an identifier and a composite
  * argument anchor at that argument, a literal falls back to the statement.
  *
- * ANCHOR_PENDING (now empty) is where a row goes when a decision on the
- * anchor is needed; such a row is pinned as divergent so that converging it
+ * Converged by N-489 — the `.runar.ts` shapes N-472 left out (fixtures
+ * N489-ts-*): `!` and unary `-` on an identifier, identifier operands of
+ * `&&` / `||`, a parenthesised composite, and composites led by a literal, a
+ * parenthesised call or a parenthesised ternary. Measured on the other eight
+ * surfaces, TS's own parsers disagree with each other for the same shape
+ * (NOT pinned, nor changed here; for the dispatcher): `.runar.sol`, `.move`,
+ * `.py`, `.rb` and `.java` locate only identifier operands of `&&` / `||` and
+ * print no location for a unary operator or any composite, `.runar.go` and
+ * `.zig` additionally locate literal-led / paren-led composites but not a
+ * unary, and only `.runar.rs` locates every shape.
+ *
+ * ANCHOR_PENDING is where a row goes when a decision on the
+ * anchor is needed or the work is not done yet; such a row is pinned as divergent so that converging it
  * fails here until it moves into CASES.
  *
  * What this proves: for every CASES row every tier is present, refuses, and
@@ -167,10 +178,38 @@ const CASES: Array<[string, number, string | null, string]> = [
   ['N488-ts-add-output-state-identifier.runar.ts', 16, 'flag)', ADD_OUTPUT_STATE],
   ['N488-ts-add-output-state-composite.runar.ts', 16, 'x > 0n)', ADD_OUTPUT_STATE],
   ['N488-ts-add-output-state-literal.runar.ts', 16, 'this.addOutput', ADD_OUTPUT_STATE],
+  // N-489: shapes N-472 did not pin, all on `.runar.ts`. A unary `!` / `-`
+  // anchors at the operator; a bigint literal never carries a location of its
+  // own, but a composite that STARTS with one anchors at that literal, and a
+  // composite that starts with a parenthesised call or ternary anchors at the
+  // `(` (while a parenthesis wrapping the whole operand is unwrapped to the
+  // expression inside); identifier operands of `&&` / `||` anchor at themselves.
+  ['N489-ts-not-bigint.runar.ts', 15, '!x', "perand of '!' must be boolean"],
+  ['N489-ts-neg-bool.runar.ts', 15, '-flag', "perand of unary '-' must be bigint"],
+  ['N489-ts-and-right.runar.ts', 15, 'x)', "ight operand of '&&' must be boolean"],
+  ['N489-ts-or-left.runar.ts', 15, 'x ||', "eft operand of '||' must be boolean"],
+  ['N489-ts-paren-left.runar.ts', 15, 'x + 1n)', "eft operand of '&&' must be boolean"],
+  ['N489-ts-lit-led.runar.ts', 15, '5n + 1n', "eft operand of '&&' must be boolean"],
+  ['N489-ts-paren-call.runar.ts', 15, '(abs(x)) + 1n', "eft operand of '&&' must be boolean"],
+  ['N489-ts-paren-ternary.runar.ts', 15, '(flag ? x : x) + 1n', "eft operand of '&&' must be boolean"],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */
-const ANCHOR_PENDING: Array<[string, string]> = [];
+const ANCHOR_PENDING: Array<[string, string]> = [
+  // N-489: TS locates these on the named surface exactly where it does on
+  // `.runar.ts` (so the surface is not the open question), but other tiers do
+  // not yet: every non-`.ts` Zig parser records no operand location at all
+  // (`sol-and-right`; same on move/py/rb/java/go/rs/zig), and the go / python /
+  // ruby / java / rust / zig tiers fall back to the statement on `.runar.go`,
+  // `.runar.rs` and `.runar.zig` for a literal-led or paren-call-led composite
+  // and (`.runar.rs`) a unary `!`. Move a row to CASES when its tiers converge.
+  ['N489-sol-and-right.runar.sol', "ight operand of '&&' must be boolean"],
+  ['N489-go-lit-led.runar.go', "eft operand of '&&' must be boolean"],
+  ['N489-go-paren-call.runar.go', "eft operand of '&&' must be boolean"],
+  ['N489-rs-not-bigint.runar.rs', "perand of '!' must be boolean"],
+  ['N489-rs-paren-call.runar.rs', "eft operand of '&&' must be boolean"],
+  ['N489-zig-lit-led.runar.zig', "eft operand of '&&' must be boolean"],
+];
 
 function expectedColumn(fixture: string, line: number, anchor: string): number {
   const text = readFileSync(join(REPO, 'conformance/negatives', fixture), 'utf8').split('\n')[line - 1] ?? '';
