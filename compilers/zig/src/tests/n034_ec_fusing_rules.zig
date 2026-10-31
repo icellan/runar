@@ -230,11 +230,14 @@ test "N-034 A: fused small-scalar hex matches the six-tier reference" {
     // itself.
     // N-376 re-stamp: the ROT ROT ROT -> [] peephole rule deletes 4644 identity
     // OP_ROTs (TS and Go agree). Was 2554314 / 7214cad88783e09e….
+    // N-113 re-stamp: the two inner ecMulGen(<const>) calls the fusion orphans
+    // are no longer kept (they cannot abort); TS and Go agree. Was 2545026 /
+    // 87a45fc5c08da42f….
     try expectHexDigest(
         SRC_SMALL,
         "ECLinear.runar.ts",
-        2545026,
-        "87a45fc5c08da42fa2422a778d43119296752a4b7363dcc313b44a565fcc7fbf",
+        849418,
+        "389db2b9d4a17bda5d7606ce913de744ebcaeabdf9cd915cf69ed74c1521b09c",
     );
 }
 
@@ -271,8 +274,10 @@ test "N-034 B: fused oversize-scalar hex matches the six-tier reference" {
         "ECBig.runar.ts",
         // N-376 re-stamp: ROT ROT ROT -> [] deletes 4644 identity OP_ROTs
         // (TS and Go agree). Was 2554512 / 77534176f810b6bc….
-        2545224,
-        "592ef3167c0ac555819d1375ddde5fb2c80459b709b1c4d26e8611f874ff7ee4",
+        // N-113 re-stamp: the two dead inner ecMulGen(<const>) calls go (TS
+        // and Go agree). Was 2545224 / 592ef3167c0ac555….
+        849484,
+        "272dc7efdc31b788d85b4e71bb6474fc4d77ea51877b094dd6eb65c0e7096b7e",
     );
 }
 

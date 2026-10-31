@@ -15,6 +15,8 @@
  * Single pass, TS stopped at the middle column and emitted a runtime EC
  * multiplication for a compile-time constant; 10 -> 5 alone was a 1,276,385-byte
  * script against the other tiers' 851,001 bytes.
+ * (N-113 has since removed the two dead inner `ecMulGen` calls of the 10 -> 5
+ * and 10 -> 6 chains in every tier: 10 -> 5 is now a 67-byte script.)
  *
  * WHAT IT PROVES: TS reaches the same fully reduced ANF (names, kinds, operands,
  * order) for each chain, and every native tier compiles the same probe ANF
@@ -157,20 +159,16 @@ const MUL_GATE_ON_P = [
   't_gate = assert t_ok',
 ];
 
-// The superseded inner calls survive DCE (calls are conservatively effectful);
-// the fused scalar `t_k` does not, because the second rewrite stops reading it.
+// The superseded inner ecMul calls survive DCE (calls are conservatively
+// effectful, and after the second rewrite no surviving ecMul on p performs
+// their operand gate); the fused scalar `t_k` does not, because the second
+// rewrite stops reading it. N-113: the superseded inner `ecMulGen(<const>)`
+// calls of the two R10 chains DO go — they cannot abort — and their scalars
+// with them.
 const EXPECTED: Record<Chain, string[]> = {
   // `p` is unread in the two ecMulGen chains, so DCE drops it there.
-  '10->5': [
-    `k1 = const ${CURVE_N - 7n}`, 'g1 = call ecMulGen k1',
-    'k2 = const 7', 'g2 = call ecMulGen k2',
-    't = const INFINITY', ...TAIL,
-  ],
-  '10->6': [
-    `k1 = const ${CURVE_N - 6n}`, 'g1 = call ecMulGen k1',
-    'k2 = const 7', 'g2 = call ecMulGen k2',
-    't = const G', ...TAIL,
-  ],
+  '10->5': ['t = const INFINITY', ...TAIL],
+  '10->6': ['t = const G', ...TAIL],
   '11->4': [
     'p = load_param pt',
     'k1 = const 3', 'm1 = call ecMul p k1',

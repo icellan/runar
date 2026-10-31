@@ -14,8 +14,9 @@ import type { Point } from 'runar-lang';
  * The scalar is n - 7 written out in decimal (115792...494330) because the
  * Go/Rust/Move/Zig/Java surfaces read `0x...` as a ByteString, and a constant
  * expression like `n - 7` only folds to a literal with constant folding ON.
- * The two inner `ecMulGen` calls stay in the script (calls are never
- * dead-code eliminated), so the deployed script is ~851 KB.
+ * The two inner `ecMulGen` calls the fusion orphans are removed too (N-113:
+ * `ecMulGen` of a constant scalar cannot abort), so the deployed script is
+ * 67 bytes -- it used to be ~848 KB.
  */
 class EcChainedRewrite extends SmartContract {
   constructor() {

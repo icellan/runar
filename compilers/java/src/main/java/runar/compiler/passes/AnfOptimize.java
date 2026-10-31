@@ -123,9 +123,135 @@ public final class AnfOptimize {
             // only names the method referenced before this pass ran.
             Set<String> candidates = new HashSet<>();
             for (AnfBinding b : program.methods().get(i).body()) Dce.collectRefs(b.value(), candidates);
-            cleaned.add(dced.withBody(Dce.eliminateDeadAmong(dced, candidates)));
+            AnfMethod pruned = dced.withBody(Dce.eliminateDeadAmong(dced, candidates));
+            // N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned
+            // whose abort is still performed, then prune what that orphans.
+            for (;;) {
+                List<AnfBinding> next = removeGateSubsumedEcCalls(pruned, candidates);
+                if (next == null) break;
+                AnfMethod m2 = pruned.withBody(next);
+                pruned = m2.withBody(Dce.eliminateDeadAmong(m2, candidates));
+            }
+            cleaned.add(pruned);
         }
         return program.withMethods(cleaned);
+    }
+
+    /**
+     * N-113 (the TS reference's anf-ec.ts {@code removeGateSubsumedEcCalls}):
+     * remove dead scalar multiplications whose only effect, a possible abort,
+     * is provably still performed. Returns the new body, or {@code null} when
+     * nothing was removed.
+     *
+     * <ul>
+     *   <li>{@code ecMulGen(<const k>)} cannot abort: its point is the fixed
+     *       generator, which passes ecMul's operand gate, and the ladder
+     *       reduces any k.</li>
+     *   <li>{@code ecMul(q, <const k>)} aborts exactly when its operand gate
+     *       {@code q === O || ecOnCurve(q)} fails (R-157). It may go when a
+     *       WITNESS performs the same gate: another {@code ecMul(q', _)}, q'
+     *       the same binding as q (F-269), not itself removable, in the same
+     *       scope or an ENCLOSING one — never a nested one, which runs only
+     *       on some paths.</li>
+     *   <li>{@code ecNegate} is never removed: R7, R8 and R8r rely on it as a
+     *       gate.</li>
+     * </ul>
+     *
+     * <p>Only a removal candidate goes (a name referenced before the EC pass
+     * ran — the inner call a fusion orphaned), referenced nowhere in the
+     * method now, not a private method's return value (F-108) and not one of
+     * its if's results.
+     */
+    private static List<AnfBinding> removeGateSubsumedEcCalls(AnfMethod method, Set<String> candidates) {
+        ValueMap vm = new ValueMap(collectReboundNames(method));
+        Set<String> refs = new HashSet<>();
+        indexForRemoval(orEmpty(method.body()), vm, refs);
+        boolean keepLast = !"constructor".equals(method.name()) && !method.isPublic();
+        return filterSubsumed(orEmpty(method.body()), List.of(), Set.of(), true, keepLast, vm, refs, candidates);
+    }
+
+    private static void indexForRemoval(List<AnfBinding> bindings, ValueMap vm, Set<String> refs) {
+        for (AnfBinding b : bindings) {
+            vm.put(b.name(), b.value());
+            Dce.collectRefs(b.value(), refs);
+            if (b.value() instanceof If ifv) {
+                indexForRemoval(orEmpty(ifv.thenBranch()), vm, refs);
+                indexForRemoval(orEmpty(ifv.elseBranch()), vm, refs);
+            } else if (b.value() instanceof Loop lp) {
+                indexForRemoval(orEmpty(lp.body()), vm, refs);
+            }
+        }
+    }
+
+    private static boolean removableEcCall(AnfBinding b, Set<String> protect, boolean isReturn,
+                                           ValueMap vm, Set<String> refs, Set<String> candidates) {
+        if (!(b.value() instanceof Call c) || isReturn || !candidates.contains(b.name())
+            || refs.contains(b.name()) || protect.contains(b.name())) {
+            return false;
+        }
+        List<String> args = orEmpty(c.args());
+        if ("ecMulGen".equals(c.func())) {
+            return args.size() == 1 && getConstInt(args.get(0), vm) != null;
+        }
+        if ("ecMul".equals(c.func())) {
+            return args.size() == 2 && getConstInt(args.get(1), vm) != null && stable(args.get(0), vm);
+        }
+        return false;
+    }
+
+    private static List<AnfBinding> filterSubsumed(List<AnfBinding> bindings, List<String> outer,
+                                                   Set<String> protect, boolean topLevel, boolean keepLast,
+                                                   ValueMap vm, Set<String> refs, Set<String> candidates) {
+        int n = bindings.size();
+        boolean[] isCand = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            isCand[i] = removableEcCall(bindings.get(i), protect, topLevel && keepLast && i == n - 1,
+                vm, refs, candidates);
+        }
+        List<String> witnesses = new ArrayList<>(outer);
+        for (int i = 0; i < n; i++) {
+            if (!isCand[i] && bindings.get(i).value() instanceof Call c && "ecMul".equals(c.func())
+                && orEmpty(c.args()).size() == 2) {
+                String w = canonical(c.args().get(0), vm);
+                if (w != null) witnesses.add(w);
+            }
+        }
+        boolean changed = false;
+        List<AnfBinding> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            AnfBinding b = bindings.get(i);
+            AnfValue v = b.value();
+            if (isCand[i] && v instanceof Call c
+                && ("ecMulGen".equals(c.func()) || witnesses.contains(canonical(c.args().get(0), vm)))) {
+                changed = true;
+                continue;
+            }
+            if (v instanceof If ifv) {
+                Set<String> results = ifv.results() == null ? Set.of() : new HashSet<>(ifv.results());
+                List<AnfBinding> t = filterSubsumed(orEmpty(ifv.thenBranch()), witnesses, results, false,
+                    keepLast, vm, refs, candidates);
+                List<AnfBinding> e = filterSubsumed(orEmpty(ifv.elseBranch()), witnesses, results, false,
+                    keepLast, vm, refs, candidates);
+                if (t != null || e != null) {
+                    changed = true;
+                    out.add(new AnfBinding(b.name(), new If(ifv.cond(),
+                        t != null ? t : ifv.thenBranch(), e != null ? e : ifv.elseBranch(), ifv.results()),
+                        b.sourceLoc()));
+                    continue;
+                }
+            } else if (v instanceof Loop lp) {
+                List<AnfBinding> body = filterSubsumed(orEmpty(lp.body()), witnesses, Set.of(), false,
+                    keepLast, vm, refs, candidates);
+                if (body != null) {
+                    changed = true;
+                    out.add(new AnfBinding(b.name(),
+                        new Loop(lp.count(), body, lp.iterVar(), lp.start(), lp.step()), b.sourceLoc()));
+                    continue;
+                }
+            }
+            out.add(b);
+        }
+        return changed ? out : null;
     }
 
     // ===================================================================

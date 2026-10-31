@@ -75,9 +75,116 @@ module RunarCompiler
           # orphan left in an arm unbalances the arms (the N-446 hazard).
           # Same candidate rule as the constant folder's prune.
           DCE.eliminate_dead_bindings(method, candidates[i])
+          # N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned whose
+          # abort is still performed, then prune what that orphans.
+          while remove_gate_subsumed_ec_calls(method, candidates[i])
+            DCE.eliminate_dead_bindings(method, candidates[i])
+          end
         end
         result
       end
+
+      # N-113 (the TS reference's anf-ec.ts removeGateSubsumedEcCalls): remove
+      # dead scalar multiplications whose only effect, a possible abort, is
+      # provably still performed. Mutates +method+; true when anything went.
+      #
+      # - ecMulGen(<const k>) cannot abort: its point is the fixed generator,
+      #   which passes ecMul's operand gate, and the ladder reduces any k.
+      # - ecMul(q, <const k>) aborts exactly when its operand gate
+      #   `q === O || ecOnCurve(q)` fails (R-157). It may go when a WITNESS
+      #   performs the same gate: another ecMul(q', _), q' the same binding as
+      #   q (F-269), not itself removable, in the same scope or an ENCLOSING
+      #   one -- never a nested one, which runs only on some paths.
+      # - ecNegate is never removed: R7, R8 and R8r rely on it as a gate.
+      #
+      # Only a removal candidate goes (a name referenced before the EC pass
+      # ran -- the inner call a fusion orphaned), referenced nowhere in the
+      # method now, not a private method's return value (F-108) and not one of
+      # its if's results.
+      def self.remove_gate_subsumed_ec_calls(method, candidates)
+        vm = ValueMap.new(collect_rebound_names(method))
+        refs = Set.new
+        index = lambda do |bindings|
+          (bindings || []).each do |b|
+            vm[b.name] = b.value
+            DCE.collect_refs(b.value, refs)
+            case b.value.kind
+            when "if"
+              index.call(b.value.then)
+              index.call(b.value.else_)
+            when "loop"
+              index.call(b.value.body)
+            end
+          end
+        end
+        index.call(method.body)
+        keep_last = method.name != "constructor" && !method.is_public
+
+        removable = lambda do |b, protect, is_return|
+          v = b.value
+          next false if v.kind != "call" || is_return || !candidates.include?(b.name) ||
+                        refs.include?(b.name) || protect.include?(b.name)
+          args = v.args || []
+          case v.func
+          when "ecMulGen"
+            args.length == 1 && !get_const_int(args[0], vm).nil?
+          when "ecMul"
+            args.length == 2 && !get_const_int(args[1], vm).nil? && stable?(args[0], vm)
+          else
+            false
+          end
+        end
+
+        filter_scope = nil
+        filter_scope = lambda do |bindings, outer, protect, top_level|
+          bindings ||= []
+          n = bindings.length
+          is_cand = bindings.each_with_index.map do |b, i|
+            removable.call(b, protect, top_level && keep_last && i == n - 1)
+          end
+          witnesses = outer.dup
+          bindings.each_with_index do |b, i|
+            v = b.value
+            next unless !is_cand[i] && v.kind == "call" && v.func == "ecMul" && (v.args || []).length == 2
+            c = canonical(v.args[0], vm)
+            witnesses << c unless c.nil?
+          end
+          changed = false
+          out = []
+          bindings.each_with_index do |b, i|
+            v = b.value
+            if is_cand[i] && (v.func == "ecMulGen" || witnesses.include?(canonical(v.args[0], vm)))
+              changed = true
+              next
+            end
+            case v.kind
+            when "if"
+              results = Set.new(v.results || [])
+              then_b = filter_scope.call(v.then, witnesses, results, false)
+              else_b = filter_scope.call(v.else_, witnesses, results, false)
+              unless then_b.nil? && else_b.nil?
+                changed = true
+                v.then = then_b unless then_b.nil?
+                v.else_ = else_b unless else_b.nil?
+              end
+            when "loop"
+              body_b = filter_scope.call(v.body, witnesses, Set.new, false)
+              unless body_b.nil?
+                changed = true
+                v.body = body_b
+              end
+            end
+            out << b
+          end
+          changed ? out : nil
+        end
+
+        body = filter_scope.call(method.body, [], Set.new, true)
+        return false if body.nil?
+        method.body = body
+        true
+      end
+      private_class_method :remove_gate_subsumed_ec_calls
 
       # -----------------------------------------------------------------
       # Deep copy helpers

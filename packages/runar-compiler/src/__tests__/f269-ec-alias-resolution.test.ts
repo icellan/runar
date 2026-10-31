@@ -256,17 +256,17 @@ const EXPECTED_TS: Record<string, string[]> = {
   ],
   'R9 through an aliased inner ecMul and aliased scalars': [
     'x = load_param pt',
-    'k1 = const 2', 'ka = ref k1', 'm = call ecMul x ka',
+    // N-113: the orphaned inner `m = ecMul(x, ka)` goes, with its scalars:
+    // the fused `t = ecMul(x, t_k)` performs the same operand gate on x.
     't_k = const 6',
     't = call ecMul x t_k',
     ...TAIL,
   ],
   'R11 with an aliased shared point': [
     'x = load_param pt',
-    'y = ref x',
-    'k1 = const 2', 'k2 = const 3',
-    // Every call is kept by DCE (it may abort); only the ecAdd is replaced.
-    'm1 = call ecMul x k1', 'm2 = call ecMul y k2',
+    // N-113: the orphaned inner `m1 = ecMul(x, k1)` and `m2 = ecMul(y, k2)`
+    // go (y is x through the alias): the fused `t = ecMul(x, t_k)` performs
+    // the same operand gate. The alias and the scalars go with them.
     't_k = const 5',
     't = call ecMul x t_k',
     ...TAIL,

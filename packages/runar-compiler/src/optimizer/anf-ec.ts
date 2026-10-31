@@ -684,5 +684,131 @@ export function optimizeEC(program: ANFProgram): ANFProgram {
     for (const bnd of m.body) collectRefsFromValue(bnd.value, refs);
     return refs;
   });
-  return eliminateDeadBindingsAmong(pruned, candidates);
+  let out = eliminateDeadBindingsAmong(pruned, candidates);
+
+  // N-113: a fusing rewrite (R9/R10/R11) orphans the inner ecMul/ecMulGen
+  // calls it read, and DCE keeps every call. Drop the ones whose only effect
+  // (a possible abort) is provably still performed, then prune what that
+  // orphans in turn. A program with none is returned unchanged.
+  for (;;) {
+    const next = removeGateSubsumedEcCalls(out, candidates);
+    if (next === out) return out;
+    out = eliminateDeadBindingsAmong(next, candidates);
+  }
+}
+
+/**
+ * N-113 — remove dead scalar multiplications whose abort is still performed.
+ *
+ * DCE never removes a `call`: a builtin can abort the script. For the two
+ * scalar-multiplication builtins with a CONSTANT scalar the abort channel is
+ * exactly known, so a dead one can go when the abort survives elsewhere:
+ *
+ *  - `ecMulGen(<const k>)` cannot abort. Its point is the fixed generator,
+ *    which passes ecMul's operand gate, and the ladder reduces any k
+ *    (emitScalarReduce); nothing else in the ladder verifies.
+ *  - `ecMul(q, <const k>)` aborts exactly when its operand gate
+ *    `q === O || ecOnCurve(q)` fails (R-157 — the ladder has no other
+ *    OP_VERIFY). It may go when a WITNESS performs the same gate: another
+ *    `ecMul(q', _)` with q' the same binding as q (`sameBinding`, F-269), that
+ *    is not itself removable, in the same scope or an ENCLOSING one. Position
+ *    within a scope does not matter (an abort fails the whole script), but a
+ *    nested witness would not: it runs only on some paths.
+ *  - `ecNegate` is never removed: R7, R8 and R8r rely on it surviving as a
+ *    width/canonicity gate (see emitNegCancelGate).
+ *
+ * Only a removal CANDIDATE goes — a name referenced before this pass ran (the
+ * inner call a fusion orphaned) — so a dead EC call the source wrote itself is
+ * kept, and programs no rewrite touched cannot move. It must also be
+ * referenced nowhere in the method now, not be a private method's return
+ * value (its last binding, F-108), and not be one of its `if`'s `results`.
+ */
+function removeGateSubsumedEcCalls(
+  program: ANFProgram,
+  candidates: ReadonlyArray<ReadonlySet<string>>,
+): ANFProgram {
+  let anyChanged = false;
+  const methods = program.methods.map((method, mi) => {
+    const cands = candidates[mi]!;
+    const valueMap = new ValueMap(collectReboundNames(method));
+    const refs = new Set<string>();
+    const index = (bindings: readonly ANFBinding[]): void => {
+      for (const b of bindings) {
+        valueMap.set(b.name, b.value);
+        collectRefsFromValue(b.value, refs);
+        if (b.value.kind === 'if') { index(b.value.then); index(b.value.else); }
+        if (b.value.kind === 'loop') index(b.value.body);
+      }
+    };
+    index(method.body);
+    const keepLast = method.name !== 'constructor' && !method.isPublic;
+
+    const isConstScalar = (name: string): boolean => {
+      const v = resolveArg(name, valueMap);
+      return v !== undefined && getConstInt(v) !== undefined;
+    };
+    const removable = (b: ANFBinding, protect: ReadonlySet<string>, isReturn: boolean): boolean => {
+      const v = b.value;
+      if (v.kind !== 'call' || isReturn || !cands.has(b.name) || refs.has(b.name) || protect.has(b.name)) {
+        return false;
+      }
+      if (v.func === 'ecMulGen') return v.args.length === 1 && isConstScalar(v.args[0]!);
+      if (v.func === 'ecMul') return v.args.length === 2 && isConstScalar(v.args[1]!) && isStable(v.args[0]!, valueMap);
+      return false;
+    };
+
+    const filter = (
+      bindings: readonly ANFBinding[],
+      outerWitnesses: readonly string[],
+      protect: ReadonlySet<string>,
+      topLevel: boolean,
+    ): readonly ANFBinding[] => {
+      const isCand = bindings.map((b, i) =>
+        removable(b, protect, topLevel && keepLast && i === bindings.length - 1));
+      // Canonical point names gated by an ecMul that stays, here or outside.
+      const witnesses = [...outerWitnesses];
+      bindings.forEach((b, i) => {
+        const v = b.value;
+        if (!isCand[i] && v.kind === 'call' && v.func === 'ecMul' && v.args.length === 2) {
+          const c = canonicalName(v.args[0]!, valueMap);
+          if (c !== null) witnesses.push(c);
+        }
+      });
+      let changed = false;
+      const out: ANFBinding[] = [];
+      bindings.forEach((b, i) => {
+        const v = b.value;
+        if (isCand[i] && v.kind === 'call') {
+          const gated = v.func === 'ecMulGen'
+            || witnesses.includes(canonicalName(v.args[0]!, valueMap)!);
+          if (gated) { changed = true; return; }
+        }
+        if (v.kind === 'if') {
+          const results = new Set(v.results ?? []);
+          const thenB = filter(v.then, witnesses, results, false);
+          const elseB = filter(v.else, witnesses, results, false);
+          if (thenB !== v.then || elseB !== v.else) {
+            changed = true;
+            out.push({ ...b, value: { ...v, then: [...thenB], else: [...elseB] } });
+            return;
+          }
+        } else if (v.kind === 'loop') {
+          const body = filter(v.body, witnesses, new Set(), false);
+          if (body !== v.body) {
+            changed = true;
+            out.push({ ...b, value: { ...v, body: [...body] } });
+            return;
+          }
+        }
+        out.push(b);
+      });
+      return changed ? out : bindings;
+    };
+
+    const body = filter(method.body, [], new Set(), true);
+    if (body === method.body) return method;
+    anyChanged = true;
+    return { ...method, body: [...body] };
+  });
+  return anyChanged ? { ...program, methods } : program;
 }

@@ -89,6 +89,13 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
             const pruned = try dce.eliminateDeadBindingsAmongInMethod(allocator, method.*, &candidates);
             allocator.free(method.body);
             method.body = pruned;
+            // N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned
+            // whose abort is still performed, then prune what that orphans.
+            while (try removeGateSubsumedEcCalls(allocator, method, &candidates)) {
+                const again = try dce.eliminateDeadBindingsAmongInMethod(allocator, method.*, &candidates);
+                allocator.free(method.body);
+                method.body = again;
+            }
         }
     }
 
@@ -100,6 +107,197 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
         .methods = new_methods,
     };
 }
+
+// ============================================================================
+// N-113: dead scalar multiplications whose abort is still performed
+// ============================================================================
+
+/// N-113 (the TS reference's anf-ec.ts `removeGateSubsumedEcCalls`): remove
+/// dead scalar multiplications whose only effect, a possible abort, is
+/// provably still performed. Replaces `method.body` and returns true when
+/// anything went.
+///
+/// - `ecMulGen(<const k>)` cannot abort: its point is the fixed generator,
+///   which passes ecMul's operand gate, and the ladder reduces any k.
+/// - `ecMul(q, <const k>)` aborts exactly when its operand gate
+///   `q === O || ecOnCurve(q)` fails (R-157). It may go when a WITNESS
+///   performs the same gate: another `ecMul(q', _)`, q' the same binding as q
+///   (F-269), not itself removable, in the same scope or an ENCLOSING one --
+///   never a nested one, which runs only on some paths.
+/// - `ecNegate` is never removed: R7, R8 and R8r rely on it as a gate.
+///
+/// Only a removal candidate goes (a name referenced before the EC pass ran --
+/// the inner call a fusion orphaned), referenced nowhere in the method now,
+/// not a private method's return value (F-108) and not one of its if's
+/// `results`. A changed `if` / `loop` node is re-allocated, never edited in
+/// place, and replaced nested slices are not freed (dce.pruneScope's rule).
+fn removeGateSubsumedEcCalls(
+    allocator: Allocator,
+    method: *types.ANFMethod,
+    candidates: *const std.StringHashMap(void),
+) !bool {
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+    var rebound = std.StringHashMap(void).init(allocator);
+    defer rebound.deinit();
+    try collectReboundNames(&seen, &rebound, method.body);
+    var vm = ValueMap{ .map = std.StringHashMap(types.ANFValue).init(allocator), .rebound = &rebound };
+    defer vm.map.deinit();
+    var refs = std.StringHashMap(void).init(allocator);
+    defer refs.deinit();
+    try indexForRemoval(&vm, &refs, method.body);
+
+    const ctx = RemovalCtx{
+        .allocator = allocator,
+        .vm = &vm,
+        .refs = &refs,
+        .candidates = candidates,
+        .keep_last = !method.is_public and !std.mem.eql(u8, method.name, "constructor"),
+    };
+    var body = method.body;
+    if (!try ctx.filter(&body, &.{}, &.{}, true)) return false;
+    allocator.free(method.body);
+    method.body = body;
+    return true;
+}
+
+fn indexForRemoval(
+    vm: *ValueMap,
+    refs: *std.StringHashMap(void),
+    bindings: []const types.ANFBinding,
+) !void {
+    for (bindings) |b| {
+        try vm.put(b.name, b.value);
+        try dce.collectRefs(b.value, refs);
+        switch (b.value) {
+            .@"if" => |iv| {
+                try indexForRemoval(vm, refs, iv.then);
+                try indexForRemoval(vm, refs, iv.@"else");
+            },
+            .loop => |lv| try indexForRemoval(vm, refs, lv.body),
+            else => {},
+        }
+    }
+}
+
+const RemovalCtx = struct {
+    allocator: Allocator,
+    vm: *ValueMap,
+    refs: *const std.StringHashMap(void),
+    candidates: *const std.StringHashMap(void),
+    keep_last: bool,
+
+    fn isConstScalar(self: RemovalCtx, name: []const u8) bool {
+        var v = getConstBig(self.allocator, name, self.vm) orelse return false;
+        v.deinit();
+        return true;
+    }
+
+    fn removable(self: RemovalCtx, b: types.ANFBinding, protect: []const []const u8, is_return: bool) bool {
+        const call = switch (b.value) {
+            .call => |c| c,
+            else => return false,
+        };
+        if (is_return or !self.candidates.contains(b.name) or self.refs.contains(b.name)) return false;
+        for (protect) |r| {
+            if (eql(r, b.name)) return false;
+        }
+        if (eql(call.func, "ecMulGen")) {
+            return call.args.len == 1 and self.isConstScalar(call.args[0]);
+        }
+        if (eql(call.func, "ecMul")) {
+            return call.args.len == 2 and self.isConstScalar(call.args[1]) and self.vm.stable(call.args[0]);
+        }
+        return false;
+    }
+
+    /// Filters one scope in place (`scope.*` replaced by a fresh slice when
+    /// anything changed, the old one left alone); true when it changed.
+    fn filter(
+        self: RemovalCtx,
+        scope: *[]types.ANFBinding,
+        outer: []const []const u8,
+        protect: []const []const u8,
+        top_level: bool,
+    ) !bool {
+        const bindings = scope.*;
+        const n = bindings.len;
+        const is_cand = try self.allocator.alloc(bool, n);
+        defer self.allocator.free(is_cand);
+        for (bindings, 0..) |b, i| {
+            is_cand[i] = self.removable(b, protect, top_level and self.keep_last and i + 1 == n);
+        }
+        var witnesses = std.ArrayListUnmanaged([]const u8).empty;
+        defer witnesses.deinit(self.allocator);
+        try witnesses.appendSlice(self.allocator, outer);
+        for (bindings, 0..) |b, i| {
+            switch (b.value) {
+                .call => |c| if (!is_cand[i] and eql(c.func, "ecMul") and c.args.len == 2) {
+                    if (self.vm.canonical(c.args[0])) |w| try witnesses.append(self.allocator, w);
+                },
+                else => {},
+            }
+        }
+        var changed = false;
+        var out = std.ArrayListUnmanaged(types.ANFBinding).empty;
+        errdefer out.deinit(self.allocator);
+        for (bindings, 0..) |b, i| {
+            switch (b.value) {
+                .call => |c| if (is_cand[i]) {
+                    var gated = eql(c.func, "ecMulGen");
+                    if (!gated) {
+                        const q = self.vm.canonical(c.args[0]).?;
+                        for (witnesses.items) |w| {
+                            if (eql(w, q)) gated = true;
+                        }
+                    }
+                    if (gated) {
+                        changed = true;
+                        continue;
+                    }
+                },
+                .@"if" => |if_val| {
+                    var then_b = if_val.then;
+                    var else_b = if_val.@"else";
+                    const t = try self.filter(&then_b, witnesses.items, if_val.results, false);
+                    const e = try self.filter(&else_b, witnesses.items, if_val.results, false);
+                    if (t or e) {
+                        const nv = try self.allocator.create(types.ANFIf);
+                        nv.* = if_val.*;
+                        nv.then = then_b;
+                        nv.@"else" = else_b;
+                        var nb = b;
+                        nb.value = .{ .@"if" = nv };
+                        try out.append(self.allocator, nb);
+                        changed = true;
+                        continue;
+                    }
+                },
+                .loop => |loop_val| {
+                    var body_b = loop_val.body;
+                    if (try self.filter(&body_b, witnesses.items, &.{}, false)) {
+                        const nv = try self.allocator.create(types.ANFLoop);
+                        nv.* = loop_val.*;
+                        nv.body = body_b;
+                        var nb = b;
+                        nb.value = .{ .loop = nv };
+                        try out.append(self.allocator, nb);
+                        changed = true;
+                        continue;
+                    }
+                },
+                else => {},
+            }
+            try out.append(self.allocator, b);
+        }
+        if (!changed) {
+            out.deinit(self.allocator);
+            return false;
+        }
+        scope.* = try out.toOwnedSlice(self.allocator);
+        return true;
+    }
+};
 
 // ============================================================================
 // Per-method optimization

@@ -70,9 +70,142 @@ func OptimizeEC(program *ir.ANFProgram) *ir.ANFProgram {
 			// an orphan left in an arm unbalances the arms (the N-446
 			// hazard). Same candidate rule as the constant folder's prune.
 			EliminateDeadBindingsAmong(method, refs)
+			// N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned
+			// whose abort is still performed, then prune what that orphans.
+			for removeGateSubsumedEcCalls(method, refs) {
+				EliminateDeadBindingsAmong(method, refs)
+			}
 		}
 	}
 	return program
+}
+
+// removeGateSubsumedEcCalls is N-113 (the TS reference's anf-ec.ts function of
+// the same name): it removes dead scalar multiplications whose only effect, a
+// possible abort, is provably still performed, and reports whether it removed
+// any.
+//
+//   - `ecMulGen(<const k>)` cannot abort: its point is the fixed generator,
+//     which passes ecMul's operand gate, and the ladder reduces any k.
+//   - `ecMul(q, <const k>)` aborts exactly when its operand gate
+//     `q === O || ecOnCurve(q)` fails (R-157). It may go when a WITNESS
+//     performs the same gate: another `ecMul(q', _)`, q' the same binding as q
+//     (canonicalName, F-269), not itself removable, in the same scope or an
+//     ENCLOSING one — never a nested one, which runs only on some paths.
+//   - `ecNegate` is never removed: R7, R8 and R8r rely on it as a gate.
+//
+// Only a removal candidate goes (a name referenced before the EC pass ran —
+// the inner call a fusion orphaned), referenced nowhere in the method now, not
+// a private method's return value (F-108) and not one of its if's Results.
+func removeGateSubsumedEcCalls(method *ir.ANFMethod, candidates map[string]bool) bool {
+	rebound := collectReboundNames(method)
+	lookup := make(map[string]*ir.ANFValue)
+	refs := make(map[string]bool)
+	var index func(bindings []ir.ANFBinding)
+	index = func(bindings []ir.ANFBinding) {
+		for i := range bindings {
+			b := &bindings[i]
+			lookup[b.Name] = &b.Value
+			collectValueRefs(&b.Value, refs)
+			switch b.Value.Kind {
+			case "if":
+				index(b.Value.Then)
+				index(b.Value.Else)
+			case "loop":
+				index(b.Value.Body)
+			}
+		}
+	}
+	index(method.Body)
+	keepLast := returnsLastBinding(method)
+
+	isConstScalar := func(name string) bool {
+		return resolveConstBigInt(name, lookup, rebound) != nil
+	}
+	removable := func(b *ir.ANFBinding, protect map[string]bool, isReturn bool) bool {
+		v := &b.Value
+		if v.Kind != "call" || isReturn || !candidates[b.Name] || refs[b.Name] || protect[b.Name] {
+			return false
+		}
+		switch v.Func {
+		case "ecMulGen":
+			return len(v.Args) == 1 && isConstScalar(v.Args[0])
+		case "ecMul":
+			if len(v.Args) != 2 || !isConstScalar(v.Args[1]) {
+				return false
+			}
+			_, ok := canonicalName(v.Args[0], lookup, rebound)
+			return ok
+		}
+		return false
+	}
+
+	var filter func(bindings []ir.ANFBinding, outer []string, protect map[string]bool, topLevel bool) ([]ir.ANFBinding, bool)
+	filter = func(bindings []ir.ANFBinding, outer []string, protect map[string]bool, topLevel bool) ([]ir.ANFBinding, bool) {
+		isCand := make([]bool, len(bindings))
+		witnesses := append([]string(nil), outer...)
+		for i := range bindings {
+			isCand[i] = removable(&bindings[i], protect, topLevel && keepLast && i == len(bindings)-1)
+		}
+		for i := range bindings {
+			v := &bindings[i].Value
+			if !isCand[i] && v.Kind == "call" && v.Func == "ecMul" && len(v.Args) == 2 {
+				if c, ok := canonicalName(v.Args[0], lookup, rebound); ok {
+					witnesses = append(witnesses, c)
+				}
+			}
+		}
+		hasWitness := func(name string) bool {
+			c, _ := canonicalName(name, lookup, rebound)
+			for _, w := range witnesses {
+				if w == c {
+					return true
+				}
+			}
+			return false
+		}
+		changed := false
+		out := make([]ir.ANFBinding, 0, len(bindings))
+		for i := range bindings {
+			b := bindings[i]
+			v := &b.Value
+			if isCand[i] && (v.Func == "ecMulGen" || hasWitness(v.Args[0])) {
+				changed = true
+				continue
+			}
+			switch v.Kind {
+			case "if":
+				results := make(map[string]bool, len(v.Results))
+				for _, r := range v.Results {
+					results[r] = true
+				}
+				thenB, thenChanged := filter(v.Then, witnesses, results, false)
+				elseB, elseChanged := filter(v.Else, witnesses, results, false)
+				if thenChanged || elseChanged {
+					v.Then = thenB
+					v.Else = elseB
+					changed = true
+				}
+			case "loop":
+				bodyB, bodyChanged := filter(v.Body, witnesses, map[string]bool{}, false)
+				if bodyChanged {
+					v.Body = bodyB
+					changed = true
+				}
+			}
+			out = append(out, b)
+		}
+		if !changed {
+			return bindings, false
+		}
+		return out, true
+	}
+
+	body, changed := filter(method.Body, nil, map[string]bool{}, true)
+	if changed {
+		method.Body = body
+	}
+	return changed
 }
 
 // optimizeMethodEC applies the EC rewrite rules to one method's bindings —

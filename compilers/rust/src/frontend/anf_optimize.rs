@@ -867,7 +867,15 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         .iter()
         .map(eliminate_dead_bindings_method)
         .zip(candidates.iter())
-        .map(|(m, refs)| super::dce::eliminate_dead_bindings_among(&m, refs))
+        .map(|(m, refs)| {
+            let mut m = super::dce::eliminate_dead_bindings_among(&m, refs);
+            // N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned
+            // whose abort is still performed, then prune what that orphans.
+            while let Some(next) = remove_gate_subsumed_ec_calls(&m, refs) {
+                m = super::dce::eliminate_dead_bindings_among(&next, refs);
+            }
+            m
+        })
         .collect();
 
     ANFProgram {
@@ -876,6 +884,147 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         methods: cleaned_methods,
         parent_class: program.parent_class,
     }
+}
+
+/// N-113 (the TS reference's anf-ec.ts `removeGateSubsumedEcCalls`): remove
+/// dead scalar multiplications whose only effect, a possible abort, is
+/// provably still performed. `None` when nothing was removed.
+///
+/// - `ecMulGen(<const k>)` cannot abort: its point is the fixed generator,
+///   which passes ecMul's operand gate, and the ladder reduces any k.
+/// - `ecMul(q, <const k>)` aborts exactly when its operand gate
+///   `q === O || ecOnCurve(q)` fails (R-157). It may go when a WITNESS
+///   performs the same gate: another `ecMul(q', _)`, q' the same binding as q
+///   (F-269), not itself removable, in the same scope or an ENCLOSING one —
+///   never a nested one, which runs only on some paths.
+/// - `ecNegate` is never removed: R7, R8 and R8r rely on it as a gate.
+///
+/// Only a removal candidate goes (a name referenced before the EC pass ran —
+/// the inner call a fusion orphaned), referenced nowhere in the method now,
+/// not a private method's return value (F-108) and not one of its if's
+/// `results`.
+fn remove_gate_subsumed_ec_calls(method: &ANFMethod, candidates: &HashSet<String>) -> Option<ANFMethod> {
+    let mut value_map = ValueMap::new(collect_rebound_names(method));
+    let mut refs: HashSet<String> = HashSet::new();
+    fn index(bindings: &[ANFBinding], vm: &mut ValueMap, refs: &mut HashSet<String>) {
+        for b in bindings {
+            vm.insert(b.name.clone(), b.value.clone());
+            super::dce::collect_refs_from_value(&b.value, refs);
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    index(then, vm, refs);
+                    index(else_branch, vm, refs);
+                }
+                ANFValue::Loop { body, .. } => index(body, vm, refs),
+                _ => {}
+            }
+        }
+    }
+    index(&method.body, &mut value_map, &mut refs);
+    let keep_last = method.name != "constructor" && !method.is_public;
+
+    struct Ctx<'a> {
+        vm: ValueMap,
+        refs: HashSet<String>,
+        cands: &'a HashSet<String>,
+    }
+    impl Ctx<'_> {
+        fn is_const_scalar(&self, name: &str) -> bool {
+            self.vm.get(name).and_then(get_const_int).is_some()
+        }
+        fn removable(&self, b: &ANFBinding, protect: &HashSet<String>, is_return: bool) -> bool {
+            if is_return || !self.cands.contains(&b.name) || self.refs.contains(&b.name) || protect.contains(&b.name) {
+                return false;
+            }
+            match &b.value {
+                ANFValue::Call { func, args } if func == "ecMulGen" => {
+                    args.len() == 1 && self.is_const_scalar(&args[0])
+                }
+                ANFValue::Call { func, args } if func == "ecMul" => {
+                    args.len() == 2 && self.is_const_scalar(&args[1]) && self.vm.stable(&args[0])
+                }
+                _ => false,
+            }
+        }
+        fn filter(
+            &self,
+            bindings: &[ANFBinding],
+            outer: &[String],
+            protect: &HashSet<String>,
+            top_level: bool,
+            keep_last: bool,
+        ) -> Option<Vec<ANFBinding>> {
+            let n = bindings.len();
+            let is_cand: Vec<bool> = bindings
+                .iter()
+                .enumerate()
+                .map(|(i, b)| self.removable(b, protect, top_level && keep_last && i + 1 == n))
+                .collect();
+            let mut witnesses: Vec<String> = outer.to_vec();
+            for (i, b) in bindings.iter().enumerate() {
+                if let ANFValue::Call { func, args } = &b.value {
+                    if !is_cand[i] && func == "ecMul" && args.len() == 2 {
+                        if let Some(c) = self.vm.canonical(&args[0]) {
+                            witnesses.push(c);
+                        }
+                    }
+                }
+            }
+            let mut changed = false;
+            let mut out: Vec<ANFBinding> = Vec::with_capacity(n);
+            for (i, b) in bindings.iter().enumerate() {
+                if is_cand[i] {
+                    if let ANFValue::Call { func, args } = &b.value {
+                        let gated = func == "ecMulGen"
+                            || self.vm.canonical(&args[0]).is_some_and(|c| witnesses.contains(&c));
+                        if gated {
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+                match &b.value {
+                    ANFValue::If { cond, then, else_branch, results } => {
+                        let rs: HashSet<String> = results.iter().cloned().collect();
+                        let t = self.filter(then, &witnesses, &rs, false, keep_last);
+                        let e = self.filter(else_branch, &witnesses, &rs, false, keep_last);
+                        if t.is_some() || e.is_some() {
+                            changed = true;
+                            let mut nb = b.clone();
+                            nb.value = ANFValue::If {
+                                cond: cond.clone(),
+                                then: t.unwrap_or_else(|| then.clone()),
+                                else_branch: e.unwrap_or_else(|| else_branch.clone()),
+                                results: results.clone(),
+                            };
+                            out.push(nb);
+                            continue;
+                        }
+                    }
+                    ANFValue::Loop { body, .. } => {
+                        if let Some(nbody) = self.filter(body, &witnesses, &HashSet::new(), false, keep_last) {
+                            changed = true;
+                            let mut nb = b.clone();
+                            if let ANFValue::Loop { body: ref mut bb, .. } = nb.value {
+                                *bb = nbody;
+                            }
+                            out.push(nb);
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                out.push(b.clone());
+            }
+            if changed { Some(out) } else { None }
+        }
+    }
+
+    let ctx = Ctx { vm: value_map, refs, cands: candidates };
+    let body = ctx.filter(&method.body, &[], &HashSet::new(), true, keep_last)?;
+    let mut m = method.clone();
+    m.body = body;
+    Some(m)
 }
 
 // ---------------------------------------------------------------------------

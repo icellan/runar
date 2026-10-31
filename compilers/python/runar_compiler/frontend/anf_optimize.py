@@ -87,7 +87,104 @@ def optimize_ec(program: ANFProgram) -> ANFProgram:
         # orphan left in an arm unbalances the arms (the N-446 hazard). Same
         # candidate rule as the constant folder's prune.
         _eliminate_dead_bindings(method, refs)
+        # N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned whose
+        # abort is still performed, then prune what that orphans.
+        while _remove_gate_subsumed_ec_calls(method, refs):
+            _eliminate_dead_bindings(method, refs)
     return result
+
+
+def _remove_gate_subsumed_ec_calls(method: ANFMethod, candidates: set[str]) -> bool:
+    """N-113 (the TS reference's anf-ec.ts removeGateSubsumedEcCalls): remove
+    dead scalar multiplications whose only effect, a possible abort, is
+    provably still performed. Mutates ``method``; True when anything went.
+
+    - ``ecMulGen(<const k>)`` cannot abort: its point is the fixed generator,
+      which passes ecMul's operand gate, and the ladder reduces any k.
+    - ``ecMul(q, <const k>)`` aborts exactly when its operand gate
+      ``q === O || ecOnCurve(q)`` fails (R-157). It may go when a WITNESS
+      performs the same gate: another ``ecMul(q', _)``, q' the same binding as
+      q (F-269), not itself removable, in the same scope or an ENCLOSING one --
+      never a nested one, which runs only on some paths.
+    - ``ecNegate`` is never removed: R7, R8 and R8r rely on it as a gate.
+
+    Only a removal candidate goes (a name referenced before the EC pass ran --
+    the inner call a fusion orphaned), referenced nowhere in the method now,
+    not a private method's return value (F-108) and not one of its if's
+    ``results``.
+    """
+    vm = _ValueMap(_collect_rebound_names(method))
+    refs: set[str] = set()
+
+    def index(bindings) -> None:
+        for b in bindings or ():
+            vm[b.name] = b.value
+            _collect_refs(b.value, refs)
+            if b.value.kind == "if":
+                index(b.value.then)
+                index(b.value.else_)
+            elif b.value.kind == "loop":
+                index(b.value.body)
+
+    index(method.body)
+    keep_last = method.name != "constructor" and not method.is_public
+
+    def removable(b: ANFBinding, protect: set[str], is_return: bool) -> bool:
+        v = b.value
+        if (v.kind != "call" or is_return or b.name not in candidates
+                or b.name in refs or b.name in protect):
+            return False
+        args = v.args or []
+        if v.func == "ecMulGen":
+            return len(args) == 1 and _get_const_int(args[0], vm) is not None
+        if v.func == "ecMul":
+            return (len(args) == 2 and _get_const_int(args[1], vm) is not None
+                    and _stable(args[0], vm))
+        return False
+
+    def filter_scope(bindings, outer: list[str], protect: set[str], top_level: bool):
+        bindings = bindings or []
+        n = len(bindings)
+        is_cand = [removable(b, protect, top_level and keep_last and i == n - 1)
+                   for i, b in enumerate(bindings)]
+        witnesses = list(outer)
+        for i, b in enumerate(bindings):
+            v = b.value
+            if (not is_cand[i] and v.kind == "call" and v.func == "ecMul"
+                    and len(v.args or []) == 2):
+                c = _canonical(v.args[0], vm)
+                if c is not None:
+                    witnesses.append(c)
+        changed = False
+        out = []
+        for i, b in enumerate(bindings):
+            v = b.value
+            if is_cand[i] and (v.func == "ecMulGen" or _canonical(v.args[0], vm) in witnesses):
+                changed = True
+                continue
+            if v.kind == "if":
+                results = set(v.results or [])
+                then_b = filter_scope(v.then, witnesses, results, False)
+                else_b = filter_scope(v.else_, witnesses, results, False)
+                if then_b is not None or else_b is not None:
+                    changed = True
+                    if then_b is not None:
+                        v.then = then_b
+                    if else_b is not None:
+                        v.else_ = else_b
+            elif v.kind == "loop":
+                body_b = filter_scope(v.body, witnesses, set(), False)
+                if body_b is not None:
+                    changed = True
+                    v.body = body_b
+            out.append(b)
+        return out if changed else None
+
+    body = filter_scope(method.body, [], set(), True)
+    if body is None:
+        return False
+    method.body = body
+    return True
 
 
 def _has_ec_calls(method: ANFMethod) -> bool:
