@@ -1247,6 +1247,7 @@ const Parser = struct {
             .params = ctor_params,
             .super_args = super_args,
             .assignments = assignments,
+            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
         };
 
         if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};

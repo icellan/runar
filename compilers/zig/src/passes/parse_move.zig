@@ -2355,6 +2355,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
         };
     }
 

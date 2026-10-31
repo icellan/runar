@@ -29,6 +29,7 @@ const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
 const REFERENCE = @embedFile("n475_ts_anf_sourceloc_reference.json");
+const REFERENCE_N487 = @embedFile("n487_ts_anf_sourceloc_reference.json");
 
 fn walk(a: std.mem.Allocator, want_file: []const u8, bindings: []const std.json.Value, acc: *std.ArrayListUnmanaged(?[2]i64)) !void {
     for (bindings) |b| {
@@ -48,8 +49,29 @@ fn walk(a: std.mem.Allocator, want_file: []const u8, bindings: []const std.json.
 }
 
 test "N-475: Zig artifact anf sourceLoc equals the pinned TS reference per binding" {
+    try checkAgainstReference(REFERENCE);
+}
+
+// N-487: the same comparison for the .runar.sol/.move/.go/.rs/.zig surfaces of
+// the same five contracts, whose Zig parsers synthesize the constructor's
+// super(...) call (and, with no constructor body, its property writes) with no
+// source statement. TS locates them at the constructor token (.sol with an
+// explicit constructor) or at the 1:0 placeholder every tier uses for a
+// synthesized constructor (.sol without one, .move, .go, .rs, .zig; the Go
+// tier agrees with TS on this, so it is a cross-tier convention rather than a
+// TS-only quirk).
+//
+// What this proves: for those 25 files every ANF binding's sourceLoc
+// line/column equals the pinned TS value, constructor bindings included.
+// What this does not prove: fold-on artifacts, or that 1:0 is a meaningful
+// location (it is a placeholder); the TS values are pinned, not recomputed.
+test "N-487: Zig artifact anf sourceLoc equals TS for the non-TS surfaces" {
+    try checkAgainstReference(REFERENCE_N487);
+}
+
+fn checkAgainstReference(reference: []const u8) !void {
     const a = std.testing.allocator;
-    const ref = try std.json.parseFromSlice(std.json.Value, a, REFERENCE, .{});
+    const ref = try std.json.parseFromSlice(std.json.Value, a, reference, .{});
     defer ref.deinit();
 
     var failures: usize = 0;

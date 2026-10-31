@@ -904,10 +904,14 @@ const Parser = struct {
             }
         }
 
+        // N-487: the struct-return writes have no statement of their own; TS
+        // locates them (and the super call) at the 1:0 placeholder.
+        const placeholder_loc = types.SourceLocation{ .file = self.file_name, .line = 1, .column = 1 };
         for (assignments.items) |assign| {
             ctor_body.append(self.allocator, .{ .assign = .{
                 .target = assign.target,
                 .value = assign.value,
+                .source_loc = placeholder_loc,
                 .target_is_property = true,
             } }) catch {};
         }
@@ -924,6 +928,7 @@ const Parser = struct {
             .super_args = super_args.items,
             .assignments = assignments.items,
             .body = ctor_body.items,
+            .super_loc = placeholder_loc,
         };
     }
 

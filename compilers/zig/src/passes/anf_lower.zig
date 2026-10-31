@@ -694,6 +694,8 @@ fn lowerConstructorBody(ctx: *LowerCtx, ctor: ConstructorNode) LowerError!void {
 
     // Synthesized constructor (no source body): lower the assignments the
     // parser derived from the property list. `this.x = param`.
+    // N-487: they carry the constructor's location, as in TS.
+    ctx.current_source_loc = ctor.super_loc orelse ctx.current_source_loc;
     for (ctor.assignments) |assign| {
         const value_ref = try lowerExprToRef(ctx, assign.value);
         _ = try ctx.emit(.{ .update_prop = .{

@@ -202,7 +202,10 @@ pub const ConstructorNode = struct {
     /// N-481: the location of the source `super(...)` statement, when the
     /// surface has one. ANF lowering stamps the `super` call binding (and the
     /// `load_prop` bindings of its arguments) with it, as the TS reference
-    /// does. Null for synthesized constructors, which have no such statement.
+    /// does. N-487: a surface with no `super` statement records the
+    /// constructor token (.sol) or, for a constructor synthesized from the
+    /// property list, the same 1:0 placeholder the TS parsers use (the
+    /// column is 1-based here, like every Zig-tier location).
     super_loc: ?SourceLocation = null,
     /// R-040: the constructor's FULL statement body, in source order, minus
     /// the `super(...)` call (ANF lowering emits that from `super_args`,

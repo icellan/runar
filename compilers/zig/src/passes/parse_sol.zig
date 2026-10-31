@@ -879,7 +879,7 @@ const Parser = struct {
     // ---- Constructor: constructor(Type _name, ...) { ... } ----
 
     fn parseSolConstructor(self: *Parser, properties: []const PropertyNode) ConstructorNode {
-        _ = self.bump(); // consume 'constructor'
+        const ctor_loc = self.tokenSourceLoc(self.bump()); // consume 'constructor'
         const params = self.parseSolParams(true);
         const body = self.parseBlock();
         // F-213 measure (B), before the recursive underscore rename below.
@@ -951,6 +951,7 @@ const Parser = struct {
             .super_args = super_args.items,
             .assignments = assignments.items,
             .body = ctor_body.items,
+            .super_loc = ctor_loc,
         };
     }
 
@@ -1245,6 +1246,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
         };
     }
 
