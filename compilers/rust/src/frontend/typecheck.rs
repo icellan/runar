@@ -586,6 +586,10 @@ struct TypeChecker<'a> {
     /// bound below the innermost index happens once per iteration.
     repeating_loop_scopes: Vec<i64>,
     current_method_loc: Option<SourceLocation>,
+    /// N-462: location of the statement being checked (the TS reference's
+    /// `currentStmtLoc`); an error with no finer anchor reports it in
+    /// preference to the method's location.
+    current_stmt_loc: Option<SourceLocation>,
     /// Lazily computed side-effect summary (F-075).
     side_effects: Option<SideEffectSummary>,
     /// N-109: for every contract method, the indices of the parameters it
@@ -633,6 +637,7 @@ impl<'a> TypeChecker<'a> {
             affine_aliases: HashMap::new(),
             repeating_loop_scopes: Vec::new(),
             current_method_loc: None,
+            current_stmt_loc: None,
             side_effects: None,
             consumed_params: None,
         }
@@ -652,7 +657,8 @@ impl<'a> TypeChecker<'a> {
             msg.truncate(cut);
             msg.push_str(&format!("...({} more bytes elided)", elided));
         }
-        self.errors.push(Diagnostic::error(msg, self.current_method_loc.clone()));
+        let loc = self.current_stmt_loc.clone().or_else(|| self.current_method_loc.clone());
+        self.errors.push(Diagnostic::error(msg, loc));
     }
 
     /// N-463: `add_error` anchored at `at`, as the TS reference anchors an
@@ -661,9 +667,9 @@ impl<'a> TypeChecker<'a> {
     fn add_error_at(&mut self, msg: impl Into<String>, at: &Expression) {
         match expr_loc(at) {
             Some(loc) => {
-                let saved = self.current_method_loc.replace(loc.clone());
+                let saved = self.current_stmt_loc.replace(loc.clone());
                 self.add_error(msg);
-                self.current_method_loc = saved;
+                self.current_stmt_loc = saved;
             }
             None => self.add_error(msg),
         }
@@ -833,6 +839,18 @@ terminal (no state mutation)",
     }
 
     fn check_statement(&mut self, stmt: &Statement, env: &mut TypeEnv) {
+        // N-462: a statement with a real position anchors the errors raised
+        // inside it; the enclosing statement's anchor is restored on exit.
+        let loc = stmt.source_location();
+        let prev = self.current_stmt_loc.clone();
+        if loc.line > 0 {
+            self.current_stmt_loc = Some(loc.clone());
+        }
+        self.check_statement_inner(stmt, env);
+        self.current_stmt_loc = prev;
+    }
+
+    fn check_statement_inner(&mut self, stmt: &Statement, env: &mut TypeEnv) {
         match stmt {
             Statement::VariableDecl {
                 name,
