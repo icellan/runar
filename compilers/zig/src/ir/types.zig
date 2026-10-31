@@ -199,6 +199,11 @@ pub const ConstructorNode = struct {
     params: []ParamNode,
     super_args: []Expression,
     assignments: []AssignmentNode,
+    /// N-481: the location of the source `super(...)` statement, when the
+    /// surface has one. ANF lowering stamps the `super` call binding (and the
+    /// `load_prop` bindings of its arguments) with it, as the TS reference
+    /// does. Null for synthesized constructors, which have no such statement.
+    super_loc: ?SourceLocation = null,
     /// R-040: the constructor's FULL statement body, in source order, minus
     /// the `super(...)` call (ANF lowering emits that from `super_args`,
     /// because several surfaces have no `super` for the author to write).

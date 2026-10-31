@@ -10,28 +10,30 @@
 //! compiler's, pinned in n475_ts_anf_sourceloc_reference.json (null = the
 //! binding carries no sourceLoc).
 //!
+//! N-481 extends it to the synthetic `constructor` method (TS gives its
+//! `super(...)` call bindings the super statement's sourceLoc) and to the
+//! `file` field.
+//!
 //! What this proves: for these 5 contracts the Zig artifact's anf sourceLoc
-//! line/column equals TS for every binding, including which bindings have
-//! none. The `file` field is not compared (TS and Zig both emit the file
-//! name they were given; the basename is checked to be non-empty only).
+//! line/column equals TS for every binding of every method (constructor
+//! included), including which bindings have none, and every sourceLoc `file`
+//! equals the file name the source was compiled under (which is what TS
+//! emits).
 //!
-//! The synthetic `constructor` method is skipped: TS gives its `super(...)`
-//! call bindings the super statement's sourceLoc, Zig emits none (the parsers
-//! do not record it). That is a separate divergence, outside N-475.
-//!
-//! What this does not prove: the constructor method's sourceLocs; fold-on artifacts; surfaces other than
-//! .runar.ts; the TS values are pinned, not recomputed, so a TS-side change
-//! needs a re-pin.
+//! What this does not prove: fold-on artifacts; surfaces other than
+//! .runar.ts (the other parsers record the super location by the same
+//! mechanism but are not pinned here); the TS values are pinned, not
+//! recomputed, so a TS-side change needs a re-pin.
 
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
 const REFERENCE = @embedFile("n475_ts_anf_sourceloc_reference.json");
 
-fn walk(a: std.mem.Allocator, bindings: []const std.json.Value, acc: *std.ArrayListUnmanaged(?[2]i64)) !void {
+fn walk(a: std.mem.Allocator, want_file: []const u8, bindings: []const std.json.Value, acc: *std.ArrayListUnmanaged(?[2]i64)) !void {
     for (bindings) |b| {
         if (b.object.get("sourceLoc")) |sl| {
-            if (sl.object.get("file").?.string.len == 0) return error.EmptyFile;
+            if (!std.mem.eql(u8, sl.object.get("file").?.string, want_file)) return error.WrongFile;
             try acc.append(a, .{ sl.object.get("line").?.integer, sl.object.get("column").?.integer });
         } else {
             try acc.append(a, null);
@@ -39,7 +41,7 @@ fn walk(a: std.mem.Allocator, bindings: []const std.json.Value, acc: *std.ArrayL
         const v = b.object.get("value").?.object;
         inline for (.{ "then", "else", "body" }) |k| {
             if (v.get(k)) |arr| {
-                if (arr == .array) try walk(a, arr.array.items, acc);
+                if (arr == .array) try walk(a, want_file, arr.array.items, acc);
             }
         }
     }
@@ -70,8 +72,7 @@ test "N-475: Zig artifact anf sourceLoc equals the pinned TS reference per bindi
         var got: std.ArrayListUnmanaged(?[2]i64) = .empty;
         defer got.deinit(a);
         for (anf.object.get("methods").?.array.items) |m| {
-            if (std.mem.eql(u8, m.object.get("name").?.string, "constructor")) continue;
-            try walk(a, m.object.get("body").?.array.items, &got);
+            try walk(a, std.fs.path.basename(rel), m.object.get("body").?.array.items, &got);
         }
 
         var first_bad: ?usize = null;

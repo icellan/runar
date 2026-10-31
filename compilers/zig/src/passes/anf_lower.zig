@@ -666,6 +666,11 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
 fn lowerConstructorBody(ctx: *LowerCtx, ctor: ConstructorNode) LowerError!void {
     // Always lower super() call — even with zero args, the call must appear in the
     // constructor body to match the TypeScript reference compiler output.
+    // N-481: the super arguments' load_prop bindings and the call itself carry
+    // the super statement's location, as in TS.
+    const prev_loc = ctx.current_source_loc;
+    defer ctx.current_source_loc = prev_loc;
+    ctx.current_source_loc = ctor.super_loc orelse ctx.current_source_loc;
     var arg_refs: std.ArrayListUnmanaged([]const u8) = .empty;
     for (ctor.super_args) |arg| {
         const ref = try lowerExprToRef(ctx, arg);
@@ -675,6 +680,7 @@ fn lowerConstructorBody(ctx: *LowerCtx, ctor: ConstructorNode) LowerError!void {
         .func = "super",
         .args = try arg_refs.toOwnedSlice(ctx.allocator),
     } });
+    ctx.current_source_loc = prev_loc;
 
     // R-040: a surface with an explicit constructor body hands us the whole
     // thing (super call already stripped), so lower it statement by statement

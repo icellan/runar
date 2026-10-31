@@ -1527,6 +1527,7 @@ const Parser = struct {
         // R-040: see parse_ts.methodToConstructor — the full body minus the
         // `super(...)` call, so nothing is silently discarded.
         var body: std.ArrayListUnmanaged(Statement) = .empty;
+        var super_loc: ?types.SourceLocation = null;
 
         for (m.body) |stmt| {
             switch (stmt) {
@@ -1535,6 +1536,7 @@ const Parser = struct {
                     switch (expr.expr) {
                         .call => |call| {
                             if (std.mem.eql(u8, call.callee, "super")) {
+                                super_loc = expr.source_loc;
                                 for (call.args) |arg| super_args.append(self.allocator, arg) catch {};
                                 continue;
                             }
@@ -1556,6 +1558,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .super_loc = super_loc,
             .body = body.items,
         };
     }

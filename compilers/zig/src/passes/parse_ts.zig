@@ -1030,6 +1030,7 @@ const Parser = struct {
         // (an `assert` on an argument, a local declaration) is no longer
         // dropped on the floor.
         var body: std.ArrayListUnmanaged(Statement) = .empty;
+        var super_loc: ?types.SourceLocation = null;
 
         for (m.body) |stmt| {
             switch (stmt) {
@@ -1037,6 +1038,7 @@ const Parser = struct {
                     // super(...) call
                     const expr = stmt_expr.expr;
                     if (self.isSuperCall(expr)) {
+                        super_loc = stmt_expr.source_loc;
                         if (self.extractSuperArgs(expr)) |args| {
                             for (args) |arg| super_args.append(self.allocator, arg) catch {};
                         }
@@ -1057,6 +1059,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .super_loc = super_loc,
             .body = body.items,
         };
     }
