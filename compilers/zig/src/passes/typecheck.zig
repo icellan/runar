@@ -1681,7 +1681,10 @@ const TypeChecker = struct {
                 // rather than guessed.
                 if (slot.type_info == .unknown) continue;
                 if (!isSubtype(arg_type, slot.type_info) and arg_type != .unknown) {
-                    self.addError(
+                    // The tuple form's elements carry no recorded positions.
+                    const state_is_tail = args.len != 2 or args[1] != .array_literal;
+                    self.addErrorAt(
+                        if (state_is_tail) self.argErrorLoc(arg_locs, args, i + 1) else self.current_stmt_loc,
                         "addOutput() argument {d} ({s}) must be '{s}', got '{s}'",
                         .{
                             i + 2,

@@ -1242,8 +1242,8 @@ public final class Typecheck {
                 StateSlot slot = mutableProps.get(i - 1);
                 String propType = typeToString(slot.type());
                 if (!isSubtype(argType, propType)) {
-                    error("addOutput() argument " + (i + 1) + " (" + slot.name() + ") must be '"
-                        + propType + "', got '" + argType + "'");
+                    errorAt("addOutput() argument " + (i + 1) + " (" + slot.name() + ") must be '"
+                        + propType + "', got '" + argType + "'", normalized.get(i));
                 }
             }
             return "void";

@@ -1600,13 +1600,16 @@ terminal (no state mutation)",
                 let arg_type = self.infer_expr_type(&normalized[i + 1], env);
                 let prop_type = type_node_to_ttype(&mutable_props[i].1);
                 if !is_subtype(&arg_type, &prop_type) && arg_type != "<unknown>" {
-                    self.add_error(format!(
-                        "addOutput() argument {} ({}) must be '{}', got '{}'",
-                        i + 2,
-                        mutable_props[i].0,
-                        prop_type,
-                        arg_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "addOutput() argument {} ({}) must be '{}', got '{}'",
+                            i + 2,
+                            mutable_props[i].0,
+                            prop_type,
+                            arg_type
+                        ),
+                        &normalized[i + 1],
+                    );
                 }
                 i += 1;
             }

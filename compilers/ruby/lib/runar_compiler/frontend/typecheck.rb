@@ -779,7 +779,8 @@ module RunarCompiler
           next if Frontend.subtype?(arg_type, prop_type)
 
           add_error(
-            "addOutput() argument #{i + 2} (#{slot[0]}) must be '#{prop_type}', got '#{arg_type}'"
+            "addOutput() argument #{i + 2} (#{slot[0]}) must be '#{prop_type}', got '#{arg_type}'",
+            arg
           )
         end
         "void"

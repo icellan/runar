@@ -1371,7 +1371,8 @@ class _TypeChecker:
                 if not is_subtype(arg_type, prop_type) and arg_type != "<unknown>":
                     self._add_error(
                         f"addOutput() argument {i + 2} ({mutable_props[i][0]}) "
-                        f"must be '{prop_type}', got '{arg_type}'"
+                        f"must be '{prop_type}', got '{arg_type}'",
+                        normalized[i + 1],
                     )
                 i += 1
             # Surplus arguments are still inferred, so a type error inside one

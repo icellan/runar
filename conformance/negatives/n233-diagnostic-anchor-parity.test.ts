@@ -57,6 +57,10 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * argument list. A `null` anchor below means "the message line carries no
  * location at all".
  *
+ * Converged by N-488 — the addOutput state-value argument type error, one
+ * crafted negative per shape (fixtures N488-*): an identifier and a composite
+ * argument anchor at that argument, a literal falls back to the statement.
+ *
  * ANCHOR_PENDING (now empty) is where a row goes when a decision on the
  * anchor is needed; such a row is pinned as divergent so that converging it
  * fails here until it moves into CASES.
@@ -85,6 +89,7 @@ const RAW_SATS = 'addRawOutput() first argument (satoshis) must be bigint';
 const RAW_SCRIPT = 'addRawOutput() second argument (scriptBytes) must be ByteString';
 const DATA_SATS = 'addDataOutput() first argument (satoshis) must be bigint';
 const DATA_SCRIPT = 'addDataOutput() second argument (scriptBytes) must be ByteString';
+const ADD_OUTPUT_STATE = "addOutput() argument 2 (count) must be 'bigint'";
 const RABIN = 'verifyRabinSig public key (4th argument) must be a contract property or a literal';
 
 /**
@@ -157,6 +162,11 @@ const CASES: Array<[string, number, string | null, string]> = [
   // `self.check(ctx, sig)`: Zig drops the `ctx` argument, and the location of
   // the argument that remains must keep its index.
   ['N472-zig-ctx-helper-affine-arg.runar.zig', 26, 'sig);', AFFINE],
+  // N-488: a mistyped addOutput state value anchors at the argument, else the
+  // statement (a literal has no location in TS).
+  ['N488-ts-add-output-state-identifier.runar.ts', 16, 'flag)', ADD_OUTPUT_STATE],
+  ['N488-ts-add-output-state-composite.runar.ts', 16, 'x > 0n)', ADD_OUTPUT_STATE],
+  ['N488-ts-add-output-state-literal.runar.ts', 16, 'this.addOutput', ADD_OUTPUT_STATE],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */

@@ -1329,9 +1329,9 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 			argType := tc.inferExprType(normalized[i+1], env)
 			propType := typeNodeToString(mutableProps[i].Type)
 			if !isSubtype(argType, propType) && argType != "<unknown>" {
-				tc.addError(fmt.Sprintf(
+				tc.addErrorAt(fmt.Sprintf(
 					"addOutput() argument %d (%s) must be '%s', got '%s'",
-					i+2, mutableProps[i].Name, propType, argType))
+					i+2, mutableProps[i].Name, propType, argType), normalized[i+1])
 			}
 		}
 		// Surplus arguments are still inferred, so a type error inside one
