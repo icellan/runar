@@ -332,12 +332,45 @@ class _FusionScope:
     with (_count_referrers), and not updated as the sweep rewrites. A rewrite
     only adds a reference to a name its own binding, or the inner binding it
     lifts from, already read, so a stale count is never too low. Every tier
-    computes it the same way, because which rules fire decides the bytes."""
+    computes it the same way, because which rules fire decides the bytes.
 
-    def __init__(self, referrers: dict[str, int], local: frozenset, frame: frozenset):
+    N-465: R9 alone (``shared``) also accepts a name whose every referrer is
+    one of ``mul_readers``: a binding of the current scope ``ecMul(<name>, k)``
+    with k a constant other than 0 and 1 (R3/R4 would rewrite it first and
+    keep reading the name). Each such reader fires R9 in this same sweep --
+    everything R9 checks besides k is a property of the shared inner, the same
+    for all of them -- so the inner loses every reader, and the fused calls,
+    ``ecMul``s on its point in its own scope, are its witness. R10/R11 never
+    use this: an ecAdd reader beside R9 readers is not one of them, so the two
+    would decide differently and the inner would stay."""
+
+    def __init__(self, referrers: dict[str, int], local: frozenset, frame: frozenset,
+                 mul_readers: dict[str, int]):
         self.referrers = referrers
         self.local = local
         self.frame = frame
+        self.mul_readers = mul_readers
+
+
+def _count_mul_readers(body, outer: "_ValueMap", hidden: Optional[str]) -> dict[str, int]:
+    """N-465: per name, the bindings of this scope (``body``, not its arms or
+    loop bodies) that are ``ecMul(<name>, k)`` with k resolving to a constant
+    other than 0 and 1 -- resolved as R9 will resolve it at that binding,
+    against the bindings before it. Taken from the body the sweep starts with:
+    a rewrite never turns a binding into an integer constant, so k resolves
+    the same way after the rewrites ahead of it."""
+    vm = outer.nested_scope(hidden)
+    counts: dict[str, int] = {}
+    for b in body or ():
+        v = b.value
+        vm[b.name] = v
+        if v.kind != "call" or v.func != "ecMul" or not v.args or len(v.args) != 2:
+            continue
+        k = _get_const_int(v.args[1], vm)
+        if k is None or k == 0 or k == 1:
+            continue
+        counts[v.args[0]] = counts.get(v.args[0], 0) + 1
+    return counts
 
 
 def _count_referrers(body, method: ANFMethod) -> dict[str, int]:
@@ -373,7 +406,8 @@ def _count_referrers(body, method: ANFMethod) -> dict[str, int]:
     return counts
 
 
-def _fusion_eliminates(operands: list[str], vm: dict[str, ANFValue], scope: _FusionScope) -> bool:
+def _fusion_eliminates(operands: list[str], vm: dict[str, ANFValue], scope: _FusionScope,
+                       shared: bool = False) -> bool:
     """N-460: does fusing these inner operands let at least one inner call go?"""
     for operand in operands:
         c = _canonical(operand, vm)
@@ -383,7 +417,8 @@ def _fusion_eliminates(operands: list[str], vm: dict[str, ANFValue], scope: _Fus
         cur = operand
         single = True
         while True:
-            if scope.referrers.get(cur, 0) != 1:
+            n = scope.referrers.get(cur, 0)
+            if n != 1 and not (shared and n > 1 and n == scope.mul_readers.get(cur, 0)):
                 single = False
                 break
             if cur == c:
@@ -410,7 +445,7 @@ def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
     value_map = outer.nested_scope(hidden)
     # N-460: an ``if`` arm sees its enclosing frame, a loop body starts a new one.
     local = frozenset(b.name for b in body or ())
-    scope = _FusionScope(referrers, local, outer_frame | local)
+    scope = _FusionScope(referrers, local, outer_frame | local, _count_mul_readers(body, outer, hidden))
     new_body: list[ANFBinding] = []
     changed = False
     for binding in body or []:
@@ -548,7 +583,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
         if (inner is not None and k2 is not None and inner.kind == "call" and inner.func == "ecMul" and inner.args
                 and len(inner.args) == 2 and _stable(inner.args[0], vm)):
             k1 = _get_const_int(inner.args[1], vm)
-            if k1 is not None and _fusion_eliminates([args[0]], vm, scope):
+            if k1 is not None and _fusion_eliminates([args[0]], vm, scope, True):
                 combined = (k1 * k2) % CURVE_N
                 return _make_call("ecMul", [inner.args[0], _fresh_const_name(name, combined, vm, prelude, used_names)])
 

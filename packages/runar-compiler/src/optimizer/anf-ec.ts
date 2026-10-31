@@ -373,11 +373,45 @@ function emitNegCancelGate(base: string, q: string, out: ANFBinding[], usedNames
  * adds a reference to a name its own binding, or the inner binding it lifts
  * from, already read, so a stale count is never too low. Every tier computes
  * it the same way, because which rules fire decides the bytes.
+ *
+ * N-465: R9 alone (`shared`) also accepts a name whose every referrer is one
+ * of `mulReaders`: a binding of the current scope `ecMul(<name>, k)` with k a
+ * constant other than 0 and 1 (R3/R4 would rewrite it first and keep reading
+ * the name). Each such reader fires R9 in this same sweep — everything R9
+ * checks besides k is a property of the shared inner, the same for all of
+ * them — so the inner loses every reader, and the fused calls, `ecMul`s on
+ * its point in its own scope, are its witness. R10/R11 never use this: an
+ * ecAdd reader beside R9 readers is not one of them, so the two would decide
+ * differently and the inner would stay.
  */
 interface FusionScope {
   readonly referrers: ReadonlyMap<string, number>;
   readonly local: ReadonlySet<string>;
   readonly frame: ReadonlySet<string>;
+  readonly mulReaders: ReadonlyMap<string, number>;
+}
+
+/**
+ * N-465: per name, the bindings of this scope (`body`, not its arms or loop
+ * bodies) that are `ecMul(<name>, k)` with k resolving to a constant other
+ * than 0 and 1 — resolved as R9 will resolve it at that binding, against the
+ * bindings before it. Taken from the body the sweep starts with: a rewrite
+ * never turns a binding into an integer constant, so k resolves the same way
+ * after the rewrites ahead of it.
+ */
+function countMulReaders(body: readonly ANFBinding[], outer: ValueMap, hidden?: string): Map<string, number> {
+  const valueMap = outer.nestedScope(hidden);
+  const counts = new Map<string, number>();
+  for (const b of body) {
+    valueMap.set(b.name, b.value);
+    const v = b.value;
+    if (v.kind !== 'call' || v.func !== 'ecMul' || v.args.length !== 2) continue;
+    const kv = resolveArg(v.args[1]!, valueMap);
+    const k = kv ? getConstInt(kv) : undefined;
+    if (k === undefined || k === 0n || k === 1n) continue;
+    counts.set(v.args[0]!, (counts.get(v.args[0]!) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /**
@@ -413,14 +447,20 @@ function countReferrers(body: readonly ANFBinding[], method: ANFMethod): Map<str
 }
 
 /** N-460: does fusing these inner operands let at least one inner call go? */
-function fusionEliminates(operands: readonly string[], valueMap: ValueMap, scope: FusionScope): boolean {
+function fusionEliminates(
+  operands: readonly string[],
+  valueMap: ValueMap,
+  scope: FusionScope,
+  shared = false,
+): boolean {
   return operands.some((operand) => {
     const c = canonicalName(operand, valueMap);
     if (c === null) return false;
     // canonicalName already walked this chain, so every hop is an `@ref:`.
     let cur = operand;
     for (;;) {
-      if ((scope.referrers.get(cur) ?? 0) !== 1) return false;
+      const n = scope.referrers.get(cur) ?? 0;
+      if (n !== 1 && !(shared && n > 1 && n === (scope.mulReaders.get(cur) ?? 0))) return false;
       if (cur === c) break;
       cur = ((valueMap.get(cur) as LoadConst).value as string).slice(5);
     }
@@ -501,7 +541,7 @@ function tryRewrite(
         const k2Val = scalarVal;
         const k1 = k1Val ? getConstInt(k1Val) : undefined;
         const k2 = getConstInt(k2Val);
-        if (k1 !== undefined && k2 !== undefined && fusionEliminates([pointArg], valueMap, scope)) {
+        if (k1 !== undefined && k2 !== undefined && fusionEliminates([pointArg], valueMap, scope, true)) {
           // Normalise into [0, CURVE_N). JavaScript's `%` is truncated, so a
           // negative constant scalar would otherwise fuse to a negative value
           // while every other tier (Go/Rust/Python/Zig/Ruby/Java) reduces
@@ -653,7 +693,9 @@ function optimizeBodyOnce(
   const valueMap = outer.nestedScope(hidden);
   // N-460: an `if` arm sees its enclosing frame, a loop body starts a new one.
   const local = new Set(body.map((b) => b.name));
-  const scope: FusionScope = { referrers, local, frame: new Set([...outerFrame, ...local]) };
+  const scope: FusionScope = {
+    referrers, local, frame: new Set([...outerFrame, ...local]), mulReaders: countMulReaders(body, outer, hidden),
+  };
   const result: ANFBinding[] = [];
   let changed = false;
 

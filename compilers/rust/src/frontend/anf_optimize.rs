@@ -452,10 +452,48 @@ fn emit_neg_cancel_gate(base: &str, q: &str, out: &mut Vec<ANFBinding>, used_nam
 /// adds a reference to a name its own binding, or the inner binding it lifts
 /// from, already read, so a stale count is never too low. Every tier computes
 /// it the same way, because which rules fire decides the bytes.
+///
+/// N-465: R9 alone (`shared`) also accepts a name whose every referrer is one
+/// of `mul_readers`: a binding of the current scope `ecMul(<name>, k)` with k a
+/// constant other than 0 and 1 (R3/R4 would rewrite it first and keep reading
+/// the name). Each such reader fires R9 in this same sweep — everything R9
+/// checks besides k is a property of the shared inner, the same for all of
+/// them — so the inner loses every reader, and the fused calls, `ecMul`s on
+/// its point in its own scope, are its witness. R10/R11 never use this: an
+/// ecAdd reader beside R9 readers is not one of them, so the two would decide
+/// differently and the inner would stay.
 struct FusionScope<'a> {
     referrers: &'a HashMap<String, usize>,
     local: HashSet<String>,
     frame: HashSet<String>,
+    mul_readers: HashMap<String, usize>,
+}
+
+/// N-465: per name, the bindings of this scope (`body`, not its arms or loop
+/// bodies) that are `ecMul(<name>, k)` with k resolving to a constant other
+/// than 0 and 1 — resolved as R9 will resolve it at that binding, against the
+/// bindings before it. Taken from the body the sweep starts with: a rewrite
+/// never turns a binding into an integer constant, so k resolves the same way
+/// after the rewrites ahead of it.
+fn count_mul_readers(body: &[ANFBinding], outer: &ValueMap, hidden: Option<&str>) -> HashMap<String, usize> {
+    let mut value_map = outer.nested_scope(hidden);
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for b in body {
+        value_map.insert(b.name.clone(), b.value.clone());
+        let args = match is_call_to(&b.value, "ecMul") {
+            Some(args) if args.len() == 2 => args,
+            _ => continue,
+        };
+        let k = match value_map.get(args[1].as_str()).and_then(get_const_int) {
+            Some(k) => k,
+            None => continue,
+        };
+        if k == BigInt::from(0) || k == BigInt::from(1) {
+            continue;
+        }
+        *counts.entry(args[0].clone()).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// N-460: referrer count per name — the bindings, at any depth, whose value
@@ -501,7 +539,7 @@ fn count_referrers(body: &[ANFBinding], method: &ANFMethod) -> HashMap<String, u
 }
 
 /// N-460: does fusing these inner operands let at least one inner call go?
-fn fusion_eliminates(operands: &[&String], value_map: &ValueMap, scope: &FusionScope) -> bool {
+fn fusion_eliminates(operands: &[&String], value_map: &ValueMap, scope: &FusionScope, shared: bool) -> bool {
     operands.iter().any(|operand| {
         let c = match value_map.canonical(operand) {
             Some(c) => c,
@@ -510,7 +548,8 @@ fn fusion_eliminates(operands: &[&String], value_map: &ValueMap, scope: &FusionS
         // `canonical` already walked this chain, so every hop is an `@ref:`.
         let mut cur = operand.to_string();
         loop {
-            if scope.referrers.get(&cur).copied().unwrap_or(0) != 1 {
+            let n = scope.referrers.get(&cur).copied().unwrap_or(0);
+            if n != 1 && !(shared && n > 1 && n == scope.mul_readers.get(&cur).copied().unwrap_or(0)) {
                 return false;
             }
             if cur == c {
@@ -603,7 +642,7 @@ fn try_rewrite(
                             let k1 = get_const_int(inner_scalar_val);
                             let k2 = get_const_int(scalar_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if !fusion_eliminates(&[point_arg], value_map, scope) {
+                                if !fusion_eliminates(&[point_arg], value_map, scope, true) {
                                     return None;
                                 }
                                 let product = reduce_mod_n(k1 * k2);
@@ -696,7 +735,7 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope) {
+                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope, false) {
                                     return None;
                                 }
                                 let sum = reduce_mod_n(k1 + k2);
@@ -733,7 +772,7 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope) {
+                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope, false) {
                                     return None;
                                 }
                                 let sum = reduce_mod_n(k1 + k2);
@@ -872,7 +911,8 @@ fn optimize_method_ec_once(
     let local: HashSet<String> = body.iter().map(|b| b.name.clone()).collect();
     let mut frame = outer_frame.clone();
     frame.extend(local.iter().cloned());
-    let scope = FusionScope { referrers, local, frame };
+    let mul_readers = count_mul_readers(body, outer, hidden);
+    let scope = FusionScope { referrers, local, frame, mul_readers };
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 

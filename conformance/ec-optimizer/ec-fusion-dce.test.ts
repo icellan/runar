@@ -39,8 +39,9 @@ import { isCiEnv } from '../env.js';
  * even on the path that never reaches the fusion (the outer ecMul survived).
  *
  * What it does not prove: shapes where an orphaned inner call is still read
- * elsewhere (it then stays, and R10/R11 remain net-negative — a liveness guard
- * at the rule's fire site would be needed), loops, or stateful contracts.
+ * elsewhere (it then stays; N-460's guard at the rule's fire site now refuses
+ * those fusions, pinned by ec-fusion-liveness.test.ts), loops, or stateful
+ * contracts.
  */
 
 const FIXTURE = join(__dirname, 'EcFusionDce.runar.ts');

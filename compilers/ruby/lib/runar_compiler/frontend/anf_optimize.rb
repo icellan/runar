@@ -388,7 +388,7 @@ module RunarCompiler
         value_map = outer.nested_scope(hidden)
         # N-460: an if arm sees its enclosing frame, a loop body starts a new one.
         local = Set.new((body || []).map(&:name))
-        scope = FusionScope.new(referrers, local, outer_frame | local)
+        scope = FusionScope.new(referrers, local, outer_frame | local, count_mul_readers(body, outer, hidden))
         new_body = []
         changed = false
         (body || []).each do |binding|
@@ -470,7 +470,38 @@ module RunarCompiler
       # binding it lifts from, already read, so a stale count is never too
       # low. Every tier computes it the same way, because which rules fire
       # decides the bytes.
-      FusionScope = Struct.new(:referrers, :local, :frame)
+      #
+      # N-465: R9 alone (shared) also accepts a name whose every referrer is
+      # one of mul_readers: a binding of the current scope ecMul(<name>, k)
+      # with k a constant other than 0 and 1 (R3/R4 would rewrite it first and
+      # keep reading the name). Each such reader fires R9 in this same sweep —
+      # everything R9 checks besides k is a property of the shared inner, the
+      # same for all of them — so the inner loses every reader, and the fused
+      # calls, ecMuls on its point in its own scope, are its witness. R10/R11
+      # never use this: an ecAdd reader beside R9 readers is not one of them,
+      # so the two would decide differently and the inner would stay.
+      FusionScope = Struct.new(:referrers, :local, :frame, :mul_readers)
+
+      # N-465: per name, the bindings of this scope (body, not its arms or loop
+      # bodies) that are ecMul(<name>, k) with k resolving to a constant other
+      # than 0 and 1 — resolved as R9 will resolve it at that binding, against
+      # the bindings before it. Taken from the body the sweep starts with: a
+      # rewrite never turns a binding into an integer constant, so k resolves
+      # the same way after the rewrites ahead of it.
+      def self.count_mul_readers(body, outer, hidden)
+        vm = outer.nested_scope(hidden)
+        counts = Hash.new(0)
+        (body || []).each do |b|
+          v = b.value
+          vm[b.name] = v
+          next unless v.kind == "call" && v.func == "ecMul" && v.args && v.args.length == 2
+          k = get_const_int(v.args[1], vm)
+          next if k.nil? || k == 0 || k == 1
+          counts[v.args[0]] += 1
+        end
+        counts
+      end
+      private_class_method :count_mul_readers
 
       # N-460: referrer count per name -- the bindings, at any depth, whose
       # value reads it (once per binding, however many operands name it; an
@@ -506,7 +537,7 @@ module RunarCompiler
       private_class_method :count_referrers
 
       # N-460: does fusing these inner operands let at least one inner call go?
-      def self.fusion_eliminates?(operands, vm, scope)
+      def self.fusion_eliminates?(operands, vm, scope, shared = false)
         operands.any? do |operand|
           c = canonical(operand, vm)
           next false if c.nil?
@@ -514,7 +545,8 @@ module RunarCompiler
           cur = operand
           single = true
           loop do
-            if scope.referrers[cur] != 1
+            n = scope.referrers[cur]
+            if n != 1 && !(shared && n > 1 && n == scope.mul_readers[cur])
               single = false
               break
             end
@@ -625,7 +657,7 @@ module RunarCompiler
           if inner && k2 && inner.kind == "call" && inner.func == "ecMul" && inner.args && inner.args.size == 2 &&
              stable?(inner.args[0], vm)
             k1 = get_const_int(inner.args[1], vm)
-            if k1 && fusion_eliminates?([args[0]], vm, scope)
+            if k1 && fusion_eliminates?([args[0]], vm, scope, true)
               combined = (k1 * k2) % CURVE_N
               return make_call("ecMul", [inner.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
             end

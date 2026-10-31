@@ -375,7 +375,7 @@ public final class AnfOptimize {
         for (AnfBinding b : body) local.add(b.name());
         Set<String> frame = new HashSet<>(outerFrame);
         frame.addAll(local);
-        FusionScope scope = new FusionScope(referrers, local, frame);
+        FusionScope scope = new FusionScope(referrers, local, frame, countMulReaders(body, outer, hidden));
         List<AnfBinding> next = new ArrayList<>(body.size());
         boolean changed = false;
         for (AnfBinding b : body) {
@@ -561,8 +561,44 @@ public final class AnfOptimize {
      * binding, or the inner binding it lifts from, already read, so a stale
      * count is never too low. Every tier computes it the same way, because
      * which rules fire decides the bytes.
+     *
+     * <p>N-465: R9 alone ({@code shared}) also accepts a name whose every
+     * referrer is one of {@code mulReaders}: a binding of the current scope
+     * {@code ecMul(<name>, k)} with k a constant other than 0 and 1 (R3/R4
+     * would rewrite it first and keep reading the name). Each such reader
+     * fires R9 in this same sweep — everything R9 checks besides k is a
+     * property of the shared inner, the same for all of them — so the inner
+     * loses every reader, and the fused calls, {@code ecMul}s on its point in
+     * its own scope, are its witness. R10/R11 never use this: an ecAdd reader
+     * beside R9 readers is not one of them, so the two would decide
+     * differently and the inner would stay.
      */
-    private record FusionScope(Map<String, Integer> referrers, Set<String> local, Set<String> frame) {}
+    private record FusionScope(Map<String, Integer> referrers, Set<String> local, Set<String> frame,
+                               Map<String, Integer> mulReaders) {}
+
+    /**
+     * N-465: per name, the bindings of this scope ({@code body}, not its arms
+     * or loop bodies) that are {@code ecMul(<name>, k)} with k resolving to a
+     * constant other than 0 and 1 — resolved as R9 will resolve it at that
+     * binding, against the bindings before it. Taken from the body the sweep
+     * starts with: a rewrite never turns a binding into an integer constant,
+     * so k resolves the same way after the rewrites ahead of it.
+     */
+    private static Map<String, Integer> countMulReaders(List<AnfBinding> body, ValueMap outer, String hidden) {
+        ValueMap vm = outer.nestedScope(hidden);
+        Map<String, Integer> counts = new HashMap<>();
+        for (AnfBinding b : body) {
+            vm.put(b.name(), b.value());
+            if (!(b.value() instanceof Call call) || !"ecMul".equals(call.func()) || call.args() == null
+                || call.args().size() != 2) {
+                continue;
+            }
+            BigInteger k = getConstInt(call.args().get(1), vm);
+            if (k == null || k.signum() == 0 || k.equals(BigInteger.ONE)) continue;
+            counts.merge(call.args().get(0), 1, Integer::sum);
+        }
+        return counts;
+    }
 
     /**
      * N-460: referrer count per name — the bindings, at any depth, whose
@@ -601,7 +637,8 @@ public final class AnfOptimize {
     }
 
     /** N-460: does fusing these inner operands let at least one inner call go? */
-    private static boolean fusionEliminates(List<String> operands, Map<String, AnfValue> vm, FusionScope scope) {
+    private static boolean fusionEliminates(List<String> operands, Map<String, AnfValue> vm, FusionScope scope,
+                                            boolean shared) {
         for (String operand : operands) {
             String c = canonical(operand, vm);
             if (c == null) continue;
@@ -609,7 +646,8 @@ public final class AnfOptimize {
             String cur = operand;
             boolean single = true;
             while (true) {
-                if (scope.referrers().getOrDefault(cur, 0) != 1) {
+                int n = scope.referrers().getOrDefault(cur, 0);
+                if (n != 1 && !(shared && n > 1 && n == scope.mulReaders().getOrDefault(cur, 0))) {
                     single = false;
                     break;
                 }
@@ -711,7 +749,7 @@ public final class AnfOptimize {
                     && ic.args() != null && ic.args().size() == 2 && k2 != null
                     && stable(ic.args().get(0), vm)) {
                 BigInteger k1 = getConstInt(ic.args().get(1), vm);
-                if (k1 != null && fusionEliminates(List.of(args.get(0)), vm, scope)) {
+                if (k1 != null && fusionEliminates(List.of(args.get(0)), vm, scope, true)) {
                     BigInteger combined = k1.multiply(k2).mod(CURVE_N);
                     String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(ic.args().get(0), fresh));
@@ -726,7 +764,7 @@ public final class AnfOptimize {
                     && right instanceof Call rc && "ecMulGen".equals(rc.func()) && rc.args() != null && rc.args().size() == 1) {
                 BigInteger k1 = getConstInt(lc.args().get(0), vm);
                 BigInteger k2 = getConstInt(rc.args().get(0), vm);
-                if (k1 != null && k2 != null && fusionEliminates(args, vm, scope)) {
+                if (k1 != null && k2 != null && fusionEliminates(args, vm, scope, false)) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
                     String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMulGen", List.of(fresh));
@@ -742,7 +780,7 @@ public final class AnfOptimize {
                     && sameBinding(lc.args().get(0), rc.args().get(0), vm)) {
                 BigInteger k1 = getConstInt(lc.args().get(1), vm);
                 BigInteger k2 = getConstInt(rc.args().get(1), vm);
-                if (k1 != null && k2 != null && fusionEliminates(args, vm, scope)) {
+                if (k1 != null && k2 != null && fusionEliminates(args, vm, scope, false)) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
                     String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(lc.args().get(0), fresh));

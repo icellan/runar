@@ -519,7 +519,10 @@ fn optimizeBody(
         try local.put(b.name, {});
         try frame.put(b.name, {});
     }
-    const scope = FusionScope{ .referrers = referrers, .local = &local, .frame = &frame };
+    var mul_readers = std.StringHashMap(u32).init(allocator);
+    defer mul_readers.deinit();
+    try countMulReaders(allocator, &mul_readers, body, outer, hidden);
+    const scope = FusionScope{ .referrers = referrers, .local = &local, .frame = &frame, .mul_readers = &mul_readers };
 
     var new_body = std.ArrayListUnmanaged(types.ANFBinding).empty;
     defer new_body.deinit(allocator);
@@ -622,11 +625,52 @@ fn hasEcCalls(body: []const types.ANFBinding) bool {
 /// adds a reference to a name its own binding, or the inner binding it lifts
 /// from, already read, so a stale count is never too low. Every tier computes
 /// it the same way, because which rules fire decides the bytes.
+///
+/// N-465: R9 alone (`shared`) also accepts a name whose every referrer is one
+/// of `mul_readers`: a binding of the current scope `ecMul(<name>, k)` with k a
+/// constant other than 0 and 1 (R3/R4 would rewrite it first and keep reading
+/// the name). Each such reader fires R9 in this same sweep -- everything R9
+/// checks besides k is a property of the shared inner, the same for all of
+/// them -- so the inner loses every reader, and the fused calls, `ecMul`s on
+/// its point in its own scope, are its witness. R10/R11 never use this: an
+/// ecAdd reader beside R9 readers is not one of them, so the two would decide
+/// differently and the inner would stay.
 const FusionScope = struct {
     referrers: *const std.StringHashMap(u32),
     local: *const std.StringHashMap(void),
     frame: *const std.StringHashMap(void),
+    mul_readers: *const std.StringHashMap(u32),
 };
+
+/// N-465: per name, the bindings of this scope (`body`, not its arms or loop
+/// bodies) that are `ecMul(<name>, k)` with k resolving to a constant other
+/// than 0 and 1 -- resolved as R9 will resolve it at that binding, against the
+/// bindings before it. Taken from the body the sweep starts with: a rewrite
+/// never turns a binding into an integer constant, so k resolves the same way
+/// after the rewrites ahead of it.
+fn countMulReaders(
+    allocator: Allocator,
+    counts: *std.StringHashMap(u32),
+    body: []const types.ANFBinding,
+    outer: *ValueMap,
+    hidden: ?[]const u8,
+) !void {
+    var vm = try outer.nestedScope(hidden);
+    defer vm.map.deinit();
+    for (body) |b| {
+        try vm.put(b.name, b.value);
+        const call = switch (b.value) {
+            .call => |c| c,
+            else => continue,
+        };
+        if (!eql(call.func, "ecMul") or call.args.len != 2) continue;
+        var k = getConstBig(allocator, call.args[1], &vm) orelse continue;
+        k.deinit();
+        if (isConstInt(allocator, call.args[1], 0, &vm) or isConstInt(allocator, call.args[1], 1, &vm)) continue;
+        const gop = try counts.getOrPut(call.args[0]);
+        gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+    }
+}
 
 /// N-460: referrer count per name -- the bindings, at any depth, whose value
 /// reads it (once per binding, however many operands name it; an if reads its
@@ -662,13 +706,14 @@ fn countReferrers(allocator: Allocator, counts: *std.StringHashMap(u32), binding
 }
 
 /// N-460: does fusing these inner operands let at least one inner call go?
-fn fusionEliminates(operands: []const []const u8, vm: *ValueMap, scope: FusionScope) bool {
+fn fusionEliminates(operands: []const []const u8, vm: *ValueMap, scope: FusionScope, shared: bool) bool {
     for (operands) |operand| {
         const c = vm.canonical(operand) orelse continue;
         // `canonical` already walked this chain, so every hop is an `@ref:`.
         var cur = operand;
         const single = while (true) {
-            if ((scope.referrers.get(cur) orelse 0) != 1) break false;
+            const n = scope.referrers.get(cur) orelse 0;
+            if (n != 1 and !(shared and n > 1 and n == (scope.mul_readers.get(cur) orelse 0))) break false;
             if (eql(cur, c)) break true;
             cur = vm.map.get(cur).?.load_const.value.string[5..];
         };
@@ -788,7 +833,7 @@ fn tryOptimize(
                     if (getConstBig(allocator, ic.args[1], vm)) |k1_loaded| {
                         var k1 = k1_loaded;
                         defer k1.deinit();
-                        if (!fusionEliminates(&.{args[0]}, vm, scope)) return null;
+                        if (!fusionEliminates(&.{args[0]}, vm, scope, true)) return null;
                         const combined = combineModN(allocator, k1, k2, .mul) catch return null;
                         const fresh = freshConstName(allocator, name, combined, vm, used, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ ic.args[0], fresh });
@@ -810,7 +855,7 @@ fn tryOptimize(
                 defer if (k1) |*m| m.deinit();
                 var k2 = getConstBig(allocator, rc.?.args[0], vm);
                 defer if (k2) |*m| m.deinit();
-                if (k1 != null and k2 != null and fusionEliminates(args, vm, scope)) {
+                if (k1 != null and k2 != null and fusionEliminates(args, vm, scope, false)) {
                     const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
                     const fresh = freshConstName(allocator, name, combined, vm, used, prelude) orelse return null;
                     return makeCall(allocator, "ecMulGen", &.{fresh});
@@ -832,7 +877,7 @@ fn tryOptimize(
                     defer if (k1) |*m| m.deinit();
                     var k2 = getConstBig(allocator, rc.?.args[1], vm);
                     defer if (k2) |*m| m.deinit();
-                    if (k1 != null and k2 != null and fusionEliminates(args, vm, scope)) {
+                    if (k1 != null and k2 != null and fusionEliminates(args, vm, scope, false)) {
                         const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
                         const fresh = freshConstName(allocator, name, combined, vm, used, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ lc.?.args[0], fresh });

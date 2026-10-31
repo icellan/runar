@@ -270,6 +270,15 @@ func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden 
 		scope.local[body[i].Name] = true
 		scope.frame[body[i].Name] = true
 	}
+	// N-465: counted on first use, like referrers; outer is not touched
+	// while this scope is swept.
+	var mulReaders map[string]int
+	scope.mulReaders = func() map[string]int {
+		if mulReaders == nil {
+			mulReaders = countMulReaders(body, outer, hidden, rebound)
+		}
+		return mulReaders
+	}
 	lookup := make(map[string]*ir.ANFValue, len(outer)+len(body))
 	for k, v := range outer {
 		lookup[k] = v

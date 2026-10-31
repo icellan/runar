@@ -42,14 +42,19 @@ import { isCiEnv } from '../env.js';
  * fire/skip decision; (4) the pinned scripts execute with the source's
  * semantics on @bsv/sdk (ScriptVM), expected points from OpenSSL's secp256k1.
  *
+ * N-465: R9 readers that share one inner `ecMul` (each `ecMul(g, k)`, k a
+ * constant other than 0 and 1, in g's own scope) no longer count each other:
+ * they all fuse in one sweep and g goes. Two R9 readers of one `ecMul` are
+ * back at 848,169 bytes and `g = ecMul(q, 7n); ecAdd(ecMul(g, 2n),
+ * ecMul(g, 3n))` at 424,655 (SHARED_INNER, EcFusionLiveness4).
+ *
  * What it does not prove: that the optimizer finds every saving. The guard
  * is local and conservative, and it gives up wins the unguarded rules had,
- * each now equal to the unoptimized size rather than below it: fusions that
- * share an inner call each see the other as a reader, so `ecAdd(a, b)` twice
- * skips both (848,296 -> 897,530 bytes), two R9 readers of one `ecMul`
- * (848,169 -> 1,272,003), and `g = ecMul(q, 7n); ecAdd(ecMul(g, 2n),
- * ecMul(g, 3n))` keeps g (424,655 -> 848,481, still below 1,296,934 off).
- * An inner read through a second alias counts as read elsewhere, and an
+ * each now equal to the unoptimized size rather than below it: R10/R11
+ * fusions that share an inner call each see the other as a reader, so
+ * `ecAdd(a, b)` twice skips both (848,296 -> 897,530 bytes); R9 readers of
+ * one inner through different aliases, or beside any other reader, still
+ * count each other. An inner read through a second alias counts as read elsewhere, and an
  * `ecMulGen` outside a loop blocks the fusion even at two iterations, where
  * it would have shrunk. Nor stateful contracts or private methods.
  */
@@ -62,6 +67,7 @@ const FIXTURES = [
   { file: 'EcFusionLiveness1.runar.ts', sha256: 'b2e314e53a718e00325e9add08cfe46ea670f0c5878c385c445add7c5b8bf371', bytes: 2569268 },
   { file: 'EcFusionLiveness2.runar.ts', sha256: '03901e252c07f6e1d8d8f78d4ca8b2284f0b1039ada16b25b4956526de6587af', bytes: 2741959 },
   { file: 'EcFusionLiveness3.runar.ts', sha256: 'd4c81a4c814dbb799b9998f1d5ed413d3b6e197cd10dd568db851364be8d75fc', bytes: 3865980 },
+  { file: 'EcFusionLiveness4.runar.ts', sha256: 'bde66f26a8d63942d54054ae5ef701e3000717016b4d5af0fac111c28f7be21a', bytes: 1272263 },
 ].map((f) => ({ ...f, path: join(__dirname, f.file) }));
 
 type FoldMode = 'fold-on' | 'fold-off';
@@ -110,6 +116,37 @@ const MUST_SHRINK: Record<string, string> = {
   'R10 in an if arm, ecMulGen outside it':
     'const a: Point = ecMulGen(2n); const b: Point = ecMulGen(3n); let r: Point = q; if (flag === 1n) { r = ecAdd(a, b); } assert(ecPointX(r) === ex);',
 };
+
+/**
+ * N-465: R9 readers sharing one inner `ecMul`, at the sizes they had before
+ * N-460's guard (which counted each reader as keeping the inner alive). The
+ * shapes and source are N-460's measurements (`sharedInnerSource`), so the
+ * byte counts are the pre-N-460 ones exactly; with the optimizer off they are
+ * 1,296,934 and 1,272,003.
+ */
+const SHARED_INNER: Record<string, { body: string; bytes: number }> = {
+  'R9 twice on one inner, then R11 (the n112 shape)': {
+    body: 'const g: Point = ecMul(q, 7n); assert(ecOnCurve(ecAdd(ecMul(g, 2n), ecMul(g, 3n))));',
+    bytes: 424655,
+  },
+  'R9 twice on one inner, both read': {
+    body: 'const g: Point = ecMul(q, 7n); const r: Point = ecMul(g, 2n); const s: Point = ecMul(g, 3n); assert(ecPointX(r) === ex && ecPointX(s) === ey);',
+    bytes: 848169,
+  },
+};
+
+function sharedInnerSource(body: string): string {
+  return `import { SmartContract, assert, ecAdd, ecMul, ecMulGen, ecNegate, ecPointX, ecPointY, ecOnCurve } from 'runar-lang';
+import type { Point } from 'runar-lang';
+export class S extends SmartContract {
+  constructor() { super(); }
+  public m(p: Point, k: bigint, ex: bigint, ey: bigint) {
+    const q: Point = p;
+    ${body}
+  }
+}
+`;
+}
 
 function shapeSource(body: string): string {
   return `import { SmartContract, assert, ecAdd, ecMul, ecMulGen, ecPointX, ecPointY } from 'runar-lang';
@@ -256,6 +293,7 @@ const M = {
   r10BothLiveAlias: [1, 0], r10OuterLoop: [1, 1], r11BothLive: [1, 2],
   r11OuterBothNested: [2, 0], r11OuterANestedBLive: [2, 1],
   r10LeftLive: [2, 2], r11LeftLive: [2, 3], r10OuterNested: [2, 4],
+  r9SharedThenR11: [3, 0], r9SharedTwoReaders: [3, 1],
 } as const;
 
 function unlock(method: readonly [number, number], args: Arg[]): { fx: number; bytes: Uint8Array } {
@@ -273,6 +311,9 @@ const P3 = mulG(3n);
 const P5 = mulG(5n);
 const P6 = mulG(6n);
 const P16 = mulG(16n);
+const P14 = mulG(14n);
+const P21 = mulG(21n);
+const P35 = mulG(35n);
 
 const SPENDS: Array<{ what: string; unlock: { fx: number; bytes: Uint8Array }; ok: boolean }> = [
   { what: 'r9InnerLive q = G -> 6G, t = 2G', unlock: unlock(M.r9InnerLive, [bs(G_POINT), i(P6.x), i(P2.y)]), ok: true },
@@ -305,6 +346,12 @@ const SPENDS: Array<{ what: string; unlock: { fx: number; bytes: Uint8Array }; o
   { what: 'r10OuterNested then -> 5G', unlock: unlock(M.r10OuterNested, [bs(G_POINT), i(1n), i(P5.x)]), ok: true },
   { what: 'r10OuterNested skip -> q', unlock: unlock(M.r10OuterNested, [bs(G_POINT), i(0n), i(G.x)]), ok: true },
   { what: 'r10OuterNested then, wrong x', unlock: unlock(M.r10OuterNested, [bs(G_POINT), i(1n), i(G.x)]), ok: false },
+  { what: 'r9SharedThenR11 q = G -> 35G', unlock: unlock(M.r9SharedThenR11, [bs(G_POINT), i(P35.x)]), ok: true },
+  { what: 'r9SharedThenR11 wrong x (14G)', unlock: unlock(M.r9SharedThenR11, [bs(G_POINT), i(P14.x)]), ok: false },
+  { what: 'r9SharedThenR11 off-curve q', unlock: unlock(M.r9SharedThenR11, [bs(OFF_CURVE), i(P35.x)]), ok: false },
+  { what: 'r9SharedTwoReaders q = G -> 14G, 21G', unlock: unlock(M.r9SharedTwoReaders, [bs(G_POINT), i(P14.x), i(P21.x)]), ok: true },
+  { what: 'r9SharedTwoReaders swapped x', unlock: unlock(M.r9SharedTwoReaders, [bs(G_POINT), i(P21.x), i(P14.x)]), ok: false },
+  { what: 'r9SharedTwoReaders off-curve q', unlock: unlock(M.r9SharedTwoReaders, [bs(OFF_CURVE), i(P14.x), i(P21.x)]), ok: false },
 ];
 
 describe('N-460: an EC fusing rule fires only when it removes a multiplication, in all seven tiers', () => {
@@ -338,6 +385,14 @@ describe('N-460: an EC fusing rule fires only when it removes a multiplication, 
     });
   }
 
+  for (const [shape, { body, bytes }] of Object.entries(SHARED_INNER)) {
+    it(`ts: ${shape} fuses every reader and drops the inner (${bytes} bytes)`, () => {
+      const src = sharedInnerSource(body);
+      expect(tsBytes(src, false)).toBe(bytes);
+      expect(tsBytes(src, false)).toBeLessThan(tsBytes(src, true));
+    });
+  }
+
   it('ts: only the positive controls fuse (ecMul/ecMulGen and ecAdd calls per method)', () => {
     for (const fold of FOLD_MODES) {
       const calls = Object.assign({}, ...FIXTURES.map((_, fx) => ecCalls(tsAnf(fx, fold))));
@@ -353,6 +408,8 @@ describe('N-460: an EC fusing rule fires only when it removes a multiplication, 
         r10LeftLive: { mul: 2, add: 0 },
         r11LeftLive: { mul: 2, add: 0 },
         r10OuterNested: { mul: 1, add: 0 },
+        r9SharedThenR11: { mul: 1, add: 0 },
+        r9SharedTwoReaders: { mul: 2, add: 0 },
       });
     }
   });

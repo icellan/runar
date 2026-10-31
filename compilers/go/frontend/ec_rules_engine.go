@@ -680,7 +680,8 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[str
 			continue
 		}
 		// N-460: a fusing rule fires only when it lets an inner call go.
-		if len(rule.Fuses) > 0 && scope != nil && !fusionEliminates(rule.Fuses, b, lookup, rebound, scope) {
+		// N-465: R9 (ec-mul-associative) alone discounts its sibling readers.
+		if len(rule.Fuses) > 0 && scope != nil && !fusionEliminates(rule.Fuses, b, lookup, rebound, scope, rule.Name == "ec-mul-associative") {
 			continue
 		}
 		var gate []ir.ANFBinding
@@ -723,10 +724,52 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[str
 // a reference to a name its own binding, or the inner binding it lifts from,
 // already read, so a stale count is never too low. Every tier computes it the
 // same way, because which rules fire decides the bytes.
+//
+// N-465: R9 alone (shared) also accepts a name whose every referrer is one of
+// mulReaders: a binding of the current scope ecMul(<name>, k) with k a
+// constant other than 0 and 1 (ec-mul-one/ec-mul-zero would rewrite it first
+// and keep reading the name). Each such reader fires R9 in this same sweep —
+// everything R9 checks besides k is a property of the shared inner, the same
+// for all of them — so the inner loses every reader, and the fused calls,
+// ecMuls on its point in its own scope, are its witness. R10/R11 never use
+// this: an ecAdd reader beside R9 readers is not one of them, so the two
+// would decide differently and the inner would stay.
 type fusionScope struct {
-	referrers func() map[string]int
-	local     map[string]bool
-	frame     map[string]bool
+	referrers  func() map[string]int
+	local      map[string]bool
+	frame      map[string]bool
+	mulReaders func() map[string]int
+}
+
+// countMulReaders is N-465's per-name count of the bindings of this scope
+// (body, not its arms or loop bodies) that are ecMul(<name>, k) with k
+// resolving to a constant other than 0 and 1 — resolved as R9 will resolve it
+// at that binding, against the bindings before it (outer is the enclosing
+// lookup, hidden a loop's iteration variable). Taken from the body the sweep
+// starts with: a rewrite never turns a binding into an integer constant, so k
+// resolves the same way after the rewrites ahead of it.
+func countMulReaders(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden string, rebound map[string]bool) map[string]int {
+	lookup := make(map[string]*ir.ANFValue, len(outer)+len(body))
+	for k, v := range outer {
+		lookup[k] = v
+	}
+	if hidden != "" {
+		delete(lookup, hidden)
+	}
+	counts := make(map[string]int)
+	for i := range body {
+		v := &body[i].Value
+		lookup[body[i].Name] = v
+		if v.Kind != "call" || v.Func != "ecMul" || len(v.Args) != 2 {
+			continue
+		}
+		k := resolveConstBigInt(v.Args[1], lookup, rebound)
+		if k == nil || k.Sign() == 0 || k.Cmp(big.NewInt(1)) == 0 {
+			continue
+		}
+		counts[v.Args[0]]++
+	}
+	return counts
 }
 
 // countReferrers is the N-460 referrer count per name: the bindings, at any
@@ -772,7 +815,7 @@ func countReferrers(body []ir.ANFBinding, method *ir.ANFMethod) map[string]int {
 
 // fusionEliminates reports whether fusing the inner operands at positions
 // `fuses` of b's call lets at least one inner call go (N-460).
-func fusionEliminates(fuses []int, b *ir.ANFBinding, lookup map[string]*ir.ANFValue, rebound map[string]bool, scope *fusionScope) bool {
+func fusionEliminates(fuses []int, b *ir.ANFBinding, lookup map[string]*ir.ANFValue, rebound map[string]bool, scope *fusionScope, shared bool) bool {
 	for _, pos := range fuses {
 		if pos >= len(b.Value.Args) {
 			continue
@@ -785,7 +828,7 @@ func fusionEliminates(fuses []int, b *ir.ANFBinding, lookup map[string]*ir.ANFVa
 		// canonicalName already walked this chain, so every hop is an @ref:.
 		single := true
 		for cur := operand; ; {
-			if scope.referrers()[cur] != 1 {
+			if n := scope.referrers()[cur]; n != 1 && !(shared && n > 1 && n == scope.mulReaders()[cur]) {
 				single = false
 				break
 			}
