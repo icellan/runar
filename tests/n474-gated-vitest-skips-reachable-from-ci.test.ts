@@ -71,19 +71,60 @@ function trackedVitestFiles(): string[] {
     .sort();
 }
 
+/**
+ * `src` with comments and the bodies of string / template literals blanked to
+ * spaces (same length, newlines kept), so text that merely MENTIONS
+ * `.skipIf(` — this file's own prose and fixtures — is not mistaken for a call.
+ */
+function maskNonCode(src: string): string {
+  const out = src.split('');
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' ';
+  };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === '/' && src[i + 1] === '/') {
+      let j = i;
+      while (j < src.length && src[j] !== '\n') j++;
+      blank(i, j);
+      i = j;
+    } else if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const j = end < 0 ? src.length : end + 2;
+      blank(i, j);
+      i = j;
+    } else if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) {
+        if (src[j] === '\\') j++;
+        else if (c !== '`' && src[j] === '\n') break;
+        j++;
+      }
+      blank(i + 1, j);
+      i = j + 1;
+    } else {
+      i++;
+    }
+  }
+  return out.join('');
+}
+
 /** The text between the parens of every `.skipIf(` / `.runIf(` call. */
 function gatePredicates(src: string): string[] {
+  const code = maskNonCode(src);
   const out: string[] = [];
   const re = /\.(skipIf|runIf)\(/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
+  while ((m = re.exec(code)) !== null) {
     let depth = 1;
     let i = m.index + m[0].length;
     const start = i;
-    for (; i < src.length && depth > 0; i++) {
-      if (src[i] === '(') depth++;
-      else if (src[i] === ')') depth--;
+    for (; i < code.length && depth > 0; i++) {
+      if (code[i] === '(') depth++;
+      else if (code[i] === ')') depth--;
     }
+    // Slice the ORIGINAL text: the predicate's own string literals matter to classify().
     out.push(src.slice(start, i - 1).trim());
   }
   return out;
@@ -345,5 +386,30 @@ describe('N-474: every env-gated vitest skip is executed by CI with its gate set
   it('the external-service-gated set is exactly the pinned one (no CI provision exists)', () => {
     expect([...(byClass.get('external') ?? [])].sort()).toEqual([...EXTERNAL_SERVICE_GATED].sort());
     for (const f of EXTERNAL_SERVICE_GATED) expect(existsSync(join(ROOT, f))).toBe(true);
+  });
+
+  // Proves: the scanner reads call syntax, not prose — a `.skipIf(` inside a comment or
+  // string/template literal is ignored (so this file does not flag itself once tracked), while
+  // a real unclassified `.skipIf(process.env.X)` is still reported and a real classified one
+  // still classifies. Does not prove: handling of regex literals or `${}` expressions inside
+  // templates; the in-memory sources below stand in for tracked files (no decoy files exist).
+  it('gatePredicates ignores prose and literals but still reports genuine gates', () => {
+    // Built with call() so this file's own text never contains a literal gate call (the
+    // skip-inventory audit scans text, exactly like the scanner under test).
+    const call = (kind: string, pred: string) => `.${kind}(${pred})`;
+    const prose = [
+      `// it${call('skipIf', 'process.env.X')}('a', () => {})`,
+      `/* describe${call('runIf', 'foo')}("b", () => {}) */`,
+      `const a = 'x${call('skipIf', 'process.env.Y')}';`,
+      'const b = `y' + call('runIf', '${pred}') + '`;',
+    ].join('\n');
+    expect(gatePredicates(prose)).toEqual([]);
+
+    const real = `describe${call('skipIf', "process.env.UNKNOWN_GATE !== '1'")}('c', () => {});`;
+    expect(gatePredicates(real)).toEqual(["process.env.UNKNOWN_GATE !== '1'"]);
+    expect(classify(gatePredicates(real)[0]!)).toBeNull();
+
+    const gated = `it${call('skipIf', '!nodeUp')}('d', () => {}); // it${call('skipIf', 'foo')}`;
+    expect(gatePredicates(gated).map(classify)).toEqual(['regtest']);
   });
 });
