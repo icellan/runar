@@ -785,6 +785,10 @@ const LowerCtx = struct {
     renamed_params: std.StringHashMapUnmanaged([]const u8),
     /// Current ANF binding's source location — set before processing each binding.
     current_source_loc: ?types.SourceLocation = null,
+    /// N-467: nesting depth of the open `openIfOp` blocks, and the location
+    /// the outermost one suspended.
+    if_op_depth: u32 = 0,
+    if_op_loc: ?types.SourceLocation = null,
     /// R-010, contract-level: true when ANY public method of this contract
     /// authenticates a `_codePart` witness, so the emitter puts ONE
     /// OP_CODESEPARATOR at offset 1 of the locking script and
@@ -862,6 +866,25 @@ const LowerCtx = struct {
 
     fn emitOp(self: *LowerCtx, op: Opcode) !void {
         try self.emit(.{ .op = op });
+    }
+
+    /// N-467: OP_IF of what TS builds as an `if` StackOp (not a raw OP_IF
+    /// opcode). Only the OP_IF carries the binding's location; the arm ops
+    /// and OP_ELSE / OP_ENDIF carry none, as in TS, and the emitter lets an
+    /// arm's first op inherit the if's. Pair with `closeIfOp`.
+    fn openIfOp(self: *LowerCtx) !void {
+        try self.emitOp(.op_if);
+        if (self.if_op_depth == 0) {
+            self.if_op_loc = self.current_source_loc;
+            self.current_source_loc = null;
+        }
+        self.if_op_depth += 1;
+    }
+
+    fn closeIfOp(self: *LowerCtx) !void {
+        try self.emitOp(.op_endif);
+        self.if_op_depth -= 1;
+        if (self.if_op_depth == 0) self.current_source_loc = self.if_op_loc;
     }
 
     fn emitPushInt(self: *LowerCtx, n: i64) !void {
@@ -2723,7 +2746,13 @@ const LowerCtx = struct {
             switch (inst) {
                 .op_name => |name| {
                     const opcode = opcodes.byName(name) orelse return LowerError.InvalidBuiltin;
-                    try self.emitOp(opcode);
+                    // N-467: the one OP_IF these emitters write (ecEncodeCompressed)
+                    // is an `if` StackOp in TS (ec-codegen.ts).
+                    switch (opcode) {
+                        .op_if => try self.openIfOp(),
+                        .op_endif => try self.closeIfOp(),
+                        else => try self.emitOp(opcode),
+                    }
                 },
                 .push_int => |n| try self.emitPushInt(n),
                 .push_data => |data| try self.emitPushData(data),
@@ -2825,7 +2854,13 @@ const LowerCtx = struct {
             switch (inst) {
                 .op_name => |name| {
                     const opcode = opcodes.byName(name) orelse return LowerError.InvalidBuiltin;
-                    try self.emitOp(opcode);
+                    // N-467: every OP_IF the WOTS / SLH-DSA emitters write is
+                    // an `if` StackOp in TS (wots-codegen.ts, slh-dsa-codegen.ts).
+                    switch (opcode) {
+                        .op_if => try self.openIfOp(),
+                        .op_endif => try self.closeIfOp(),
+                        else => try self.emitOp(opcode),
+                    }
                 },
                 .push_int => |n| try self.emitPushInt(n),
                 .push_data => |data| try self.emitPushData(data),
@@ -2868,6 +2903,12 @@ const LowerCtx = struct {
             },
             .@"if" => |stack_if| {
                 try self.emitOp(.op_if);
+                // N-467: as in TS, only the if-op itself carries the binding's
+                // location. Its arm ops and OP_ELSE / OP_ENDIF carry none (the
+                // emitter lets the arm's first op inherit the if's).
+                const if_loc = self.current_source_loc;
+                self.current_source_loc = null;
+                defer self.current_source_loc = if_loc;
                 for (stack_if.then) |then_op| {
                     try self.emitEcStackOp(then_op);
                 }
@@ -3472,14 +3513,14 @@ const LowerCtx = struct {
             try self.emitOp(.op_dup);
             try self.emitOp(.op_size);
             try self.emitOp(.op_nip);
-            try self.emitOp(.op_if);
+            try self.openIfOp();
             try self.emitPushInt(1);
             try self.emitOp(.op_split);
             try self.emitOp(.op_swap);
             try self.emitOp(.op_rot);
             try self.emitOp(.op_cat);
             try self.emitOp(.op_swap);
-            try self.emitOp(.op_endif);
+            try self.closeIfOp();
         }
 
         try self.emitOp(.op_drop);
@@ -3539,10 +3580,10 @@ const LowerCtx = struct {
             try self.emitOp(.op_pick);
             try self.emitPushInt(iter);
             try self.emitOp(.op_greaterthan);
-            try self.emitOp(.op_if);
+            try self.openIfOp();
             try self.emitOp(.op_over);
             try self.emitOp(.op_mul);
-            try self.emitOp(.op_endif);
+            try self.closeIfOp();
         }
         try self.emitOp(.op_nip);
         try self.emitOp(.op_nip);
@@ -3637,7 +3678,7 @@ const LowerCtx = struct {
         try self.emitOp(.op_verify);
 
         try self.emitOp(.op_dup);
-        try self.emitOp(.op_if);
+        try self.openIfOp();
         try self.emitOp(.op_dup);
         var iter: u32 = 0;
         while (iter < 256) : (iter += 1) {
@@ -3651,7 +3692,7 @@ const LowerCtx = struct {
             try self.emitOp(.op_min);
         }
         try self.emitOp(.op_nip);
-        try self.emitOp(.op_endif);
+        try self.closeIfOp();
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
@@ -3670,10 +3711,10 @@ const LowerCtx = struct {
         while (iter < 256) : (iter += 1) {
             try self.emitOp(.op_dup);
             try self.emitOp(.op_0notequal);
-            try self.emitOp(.op_if);
+            try self.openIfOp();
             try self.emitOp(.op_tuck);
             try self.emitOp(.op_mod);
-            try self.emitOp(.op_endif);
+            try self.closeIfOp();
         }
         try self.emitOp(.op_drop);
         try self.stack.push(self.allocator, bind_name);
@@ -3788,12 +3829,12 @@ const LowerCtx = struct {
         try self.bringToTopAuto(args[0]);
         _ = self.stack.pop();
         try self.emitOp(.op_dup);
-        try self.emitOp(.op_if);
+        try self.openIfOp();
         try self.emitOp(.op_dup);
         try self.emitOp(.op_abs);
         try self.emitOp(.op_swap);
         try self.emitOp(.op_div);
-        try self.emitOp(.op_endif);
+        try self.closeIfOp();
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }

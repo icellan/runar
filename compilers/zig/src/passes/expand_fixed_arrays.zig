@@ -453,8 +453,56 @@ const Ctx = struct {
 
     fn rewriteStatements(self: *Ctx, stmts: []const Statement) ExpandError![]Statement {
         var out: std.ArrayListUnmanaged(Statement) = .empty;
-        for (stmts) |stmt| try self.rewriteStatementInto(&out, stmt);
+        for (stmts) |stmt| {
+            const start = out.items.len;
+            try self.rewriteStatementInto(&out, stmt);
+            // N-467: every statement the expansion generates (hoisted index /
+            // value, dispatch if-chain and its assignments) carries the
+            // source statement's location, as in TS (03b-expand-fixed-arrays.ts).
+            if (statementLoc(stmt)) |loc| {
+                for (out.items[start..]) |*s| fillMissingLoc(s, loc);
+            }
+        }
         return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn statementLoc(stmt: Statement) ?types.SourceLocation {
+        return switch (stmt) {
+            .const_decl => |d| d.source_loc,
+            .let_decl => |d| d.source_loc,
+            .assign => |a| a.source_loc,
+            .if_stmt => |i| i.source_loc,
+            .for_stmt => |f| f.source_loc,
+            .assert_stmt => |a| a.source_loc,
+            .expr_stmt => |e| e.source_loc,
+            .return_stmt => |r| r.source_loc,
+        };
+    }
+
+    fn fillMissingLoc(stmt: *Statement, loc: types.SourceLocation) void {
+        switch (stmt.*) {
+            .const_decl => |*d| if (d.source_loc == null) {
+                d.source_loc = loc;
+            },
+            .let_decl => |*d| if (d.source_loc == null) {
+                d.source_loc = loc;
+            },
+            .assign => |*a| if (a.source_loc == null) {
+                a.source_loc = loc;
+            },
+            .assert_stmt => |*a| if (a.source_loc == null) {
+                a.source_loc = loc;
+            },
+            .expr_stmt => |*e| if (e.source_loc == null) {
+                e.source_loc = loc;
+            },
+            .if_stmt => |*i| {
+                if (i.source_loc == null) i.source_loc = loc;
+                for (i.then_body) |*s| fillMissingLoc(s, loc);
+                if (i.else_body) |eb| for (eb) |*s| fillMissingLoc(s, loc);
+            },
+            .for_stmt, .return_stmt => {},
+        }
     }
 
     fn rewriteStatementInto(self: *Ctx, out: *std.ArrayListUnmanaged(Statement), stmt: Statement) ExpandError!void {
@@ -552,11 +600,11 @@ const Ctx = struct {
                 try out.append(self.allocator, .{ .assert_stmt = new_assert });
             },
             .return_stmt => |maybe| {
-                if (maybe) |e| {
+                if (maybe.value) |e| {
                     var prelude: std.ArrayListUnmanaged(Statement) = .empty;
                     const new_e = try self.rewriteExpression(&prelude, e);
                     try out.appendSlice(self.allocator, prelude.items);
-                    try out.append(self.allocator, .{ .return_stmt = new_e });
+                    try out.append(self.allocator, .{ .return_stmt = .{ .value = new_e, .source_loc = maybe.source_loc } });
                 } else {
                     try out.append(self.allocator, stmt);
                 }

@@ -790,7 +790,7 @@ const Parser = struct {
                 },
                 .expr_stmt => |e| w.expr(e.expr, e.source_loc orelse outer_loc),
                 .assert_stmt => |a| w.expr(a.condition, a.source_loc orelse outer_loc),
-                .return_stmt => |r| if (r) |v| w.expr(v, outer_loc),
+                .return_stmt => |r| if (r.value) |v| w.expr(v, outer_loc),
             }
         }
 
@@ -1636,11 +1636,11 @@ const Parser = struct {
         _ = self.bump(); // 'return'
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
         const expr = self.parseExpression();
         _ = self.match(.semicolon);
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr } };
     }
 
     fn parseExpressionStatement(self: *Parser) ?Statement {

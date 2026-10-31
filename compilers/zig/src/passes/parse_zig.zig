@@ -1370,15 +1370,15 @@ const Parser = struct {
 
     fn parseReturnStmt(self: *Parser) ?Statement {
         _ = self.bump();
-        if (self.current.kind == .semicolon) { _ = self.bump(); return Statement{ .return_stmt = null }; }
+        if (self.current.kind == .semicolon) { _ = self.bump(); return Statement{ .return_stmt = .{ .value = null } }; }
         if (self.current.kind == .dot) {
             _ = self.bump();
-            if (self.current.kind == .lbrace) { self.skipStructLiteral(); _ = self.expect(.semicolon); return Statement{ .return_stmt = null }; }
+            if (self.current.kind == .lbrace) { self.skipStructLiteral(); _ = self.expect(.semicolon); return Statement{ .return_stmt = .{ .value = null } }; }
         }
         const expr = self.parseExpression();
         _ = self.expect(.semicolon);
-        if (expr) |e| return Statement{ .return_stmt = e };
-        return Statement{ .return_stmt = null };
+        if (expr) |e| return Statement{ .return_stmt = .{ .value = e } };
+        return Statement{ .return_stmt = .{ .value = null } };
     }
 
     fn skipStructLiteral(self: *Parser) void {
@@ -2248,8 +2248,8 @@ test "return statement with expression" {
     const res = parseZig(arena2.allocator(), source, "R.runar.zig");
     try std.testing.expectEqual(@as(usize, 0), res.errors.len);
     const body = res.contract.?.methods[0].body;
-    try std.testing.expect(body[0].return_stmt != null);
-    switch (body[0].return_stmt.?) { .binary_op => |b| try std.testing.expectEqual(BinOperator.gt, b.op), else => return error.UnexpectedVariant }
+    try std.testing.expect(body[0].return_stmt.value != null);
+    switch (body[0].return_stmt.value.?) { .binary_op => |b| try std.testing.expectEqual(BinOperator.gt, b.op), else => return error.UnexpectedVariant }
 }
 
 test "logical or operator" {

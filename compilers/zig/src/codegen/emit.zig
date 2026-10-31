@@ -105,7 +105,9 @@ pub const EmitContext = struct {
                 .line = loc.line,
                 .column = if (loc.column > 0) loc.column - 1 else 0,
             });
-            self.pending_source_loc = null;
+            // N-467: NOT consumed here, as in TS (06-emit.ts): every opcode an
+            // instruction emits is mapped; emitMethodBody clears the location
+            // after each instruction.
         }
     }
 
@@ -516,7 +518,18 @@ fn emitMethodBody(ctx: *EmitContext, method: types.StackMethod) !void {
                 }
             }
             try emitStackInstruction(ctx, inst);
+            // N-467: TS emitOps clears the location after every leaf op and
+            // after OP_ENDIF, but not after the OP_IF / OP_ELSE of an if-op, so
+            // an arm's first op without a location of its own inherits the
+            // if's. Stack lowering leaves the arm ops of an if-op and its
+            // OP_ELSE / OP_ENDIF without a location, as TS does.
+            switch (inst) {
+                .op => |o| if (o == .op_if or o == .op_else) continue,
+                else => {},
+            }
+            ctx.pending_source_loc = null;
         }
+        ctx.pending_source_loc = null;
         return;
     }
 

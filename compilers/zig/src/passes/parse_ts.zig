@@ -1699,19 +1699,19 @@ const Parser = struct {
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
-        _ = self.bump(); // consume 'return'
+        const loc = self.tokenSourceLoc(self.bump()); // consume 'return'
 
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
         if (self.current.kind == .rbrace or self.current.kind == .eof) {
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
 
         const expr = self.parseExpression();
         if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parseExpressionStatement(self: *Parser) ?Statement {
@@ -3012,8 +3012,8 @@ test "return statement with expression (TS)" {
     try std.testing.expectEqual(@as(usize, 0), res.errors.len);
     const body = res.contract.?.methods[0].body;
     try std.testing.expectEqual(std.meta.Tag(Statement).return_stmt, std.meta.activeTag(body[0]));
-    try std.testing.expect(body[0].return_stmt != null);
-    switch (body[0].return_stmt.?) {
+    try std.testing.expect(body[0].return_stmt.value != null);
+    switch (body[0].return_stmt.value.?) {
         .binary_op => |b| try std.testing.expectEqual(BinOperator.gt, b.op),
         else => return error.UnexpectedVariant,
     }

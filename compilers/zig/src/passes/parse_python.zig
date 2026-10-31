@@ -1879,12 +1879,12 @@ const Parser = struct {
 
         if (self.current.kind == .newline or self.current.kind == .dedent or self.current.kind == .eof) {
             self.skipNewlines();
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
 
         const expr = self.parseExpression();
         self.skipNewlines();
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr } };
     }
 
     fn parsePyExprOrAssign(self: *Parser) ?Statement {

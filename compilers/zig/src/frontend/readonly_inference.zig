@@ -116,7 +116,7 @@ fn collectInStmt(allocator: Allocator, stmt: Statement, out: *NameSet) Allocator
         .let_decl => |d| if (d.value) |v| try collectInExpr(allocator, v, out),
         .expr_stmt => |e| try collectInExpr(allocator, e.expr, out),
         .assert_stmt => |a| try collectInExpr(allocator, a.condition, out),
-        .return_stmt => |maybe| if (maybe) |v| try collectInExpr(allocator, v, out),
+        .return_stmt => |maybe| if (maybe.value) |v| try collectInExpr(allocator, v, out),
         .if_stmt => |s| {
             try collectInExpr(allocator, s.condition, out);
             try collectInBody(allocator, s.then_body, out);

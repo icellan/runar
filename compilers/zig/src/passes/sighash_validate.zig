@@ -207,7 +207,8 @@ fn scanStmt(contract: ContractNode, stmt: Statement, scan: *Scan, visiting: *std
             if (i.else_body) |eb| try scanBody(contract, eb, scan, visiting, depth);
         },
         .for_stmt => |f| try scanBody(contract, f.body, scan, visiting, depth),
-        .return_stmt => |maybe| {
+        .return_stmt => |maybe_r| {
+            const maybe = maybe_r.value;
             if (maybe) |e| try scanExpr(contract, e, scan, visiting, depth);
         },
         .assert_stmt => |as| try scanExpr(contract, as.condition, scan, visiting, depth),

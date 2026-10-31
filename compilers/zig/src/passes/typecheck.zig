@@ -1111,7 +1111,8 @@ const TypeChecker = struct {
                     self.addError("assert() condition must be boolean, got '{s}'", .{types.runarTypeToString(cond_type)});
                 }
             },
-            .return_stmt => |maybe_expr| {
+            .return_stmt => |maybe_expr_r| {
+                const maybe_expr = maybe_expr_r.value;
                 if (maybe_expr) |expr| {
                     _ = self.inferExprType(expr, env);
                 }
@@ -2186,7 +2187,8 @@ fn collectReturnTypes(stmts: []const Statement) []const RunarType {
 fn collectReturnTypesInto(stmts: []const Statement, buf: *ReturnTypeBuf) void {
     for (stmts) |stmt| {
         switch (stmt) {
-            .return_stmt => |maybe_expr| {
+            .return_stmt => |maybe_expr_r| {
+                const maybe_expr = maybe_expr_r.value;
                 if (maybe_expr) |expr| buf.append(inferExprTypeStatic(expr));
             },
             .if_stmt => |if_s| {

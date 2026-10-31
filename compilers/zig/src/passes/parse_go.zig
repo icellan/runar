@@ -2105,11 +2105,11 @@ const Parser = struct {
         // If the next token is } or eof (or, N-154, a `;` separator), it's a
         // bare return
         if (self.current.kind == .rbrace or self.current.kind == .eof or self.current.kind == .semicolon) {
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
 
         const expr = self.parseExpression();
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr } };
     }
 
     fn parseExpressionStatement(self: *Parser) ?Statement {

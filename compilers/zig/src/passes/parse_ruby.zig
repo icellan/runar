@@ -1163,7 +1163,7 @@ const Parser = struct {
                 const last = &m.body[m.body.len - 1];
                 switch (last.*) {
                     .expr_stmt => |e| {
-                        last.* = .{ .return_stmt = e.expr };
+                        last.* = .{ .return_stmt = .{ .value = e.expr } };
                     },
                     else => {},
                 }
@@ -1596,7 +1596,7 @@ const Parser = struct {
                     self.rewriteExprMethodCalls(&a.condition, method_names);
                 },
                 .return_stmt => |*rs| {
-                    if (rs.*) |*v| self.rewriteExprMethodCalls(v, method_names);
+                    if (rs.value) |*v| self.rewriteExprMethodCalls(v, method_names);
                 },
                 .for_stmt => |*fs| {
                     self.rewriteBareMethodCalls(fs.body, method_names);
@@ -1922,10 +1922,10 @@ const Parser = struct {
     fn parseReturnStatement(self: *Parser) ?Statement {
         _ = self.bump(); // 'return'
         if (self.check(.newline) or self.check(.kw_end) or self.check(.eof)) {
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
         const expr = self.parseExpression();
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr } };
     }
 
     fn parseSuperCall(self: *Parser) ?Statement {

@@ -254,7 +254,11 @@ pub fn targetIsProperty(target: Expression) bool {
     return node == .property_access;
 }
 
-pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, assign: Assign, if_stmt: IfStmt, for_stmt: ForStmt, expr_stmt: ExprStmt, assert_stmt: AssertStmt, return_stmt: ?Expression };
+pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, assign: Assign, if_stmt: IfStmt, for_stmt: ForStmt, expr_stmt: ExprStmt, assert_stmt: AssertStmt, return_stmt: ReturnStmt };
+/// `source_loc` is the `return` keyword (N-467). Only the .runar.ts parser sets
+/// it, as the TS reference locates a return statement; elsewhere it is null and
+/// the return's bindings keep the enclosing location.
+pub const ReturnStmt = struct { value: ?Expression, source_loc: ?SourceLocation = null };
 // Mirrors the canonical AST's `ExpressionStatement.sourceLocation`
 // (`packages/runar-ir-schema/src/runar-ast.ts`). `source_loc` is populated by
 // every frontend parser at the statement's FIRST token, in the AST-wide

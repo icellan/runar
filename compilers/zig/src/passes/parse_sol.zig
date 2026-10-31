@@ -994,8 +994,9 @@ const Parser = struct {
                 for (out.body, 0..) |s, idx| out.body[idx] = self.solRenameStmt(s, params);
                 return .{ .for_stmt = out };
             },
-            .return_stmt => |maybe| {
-                if (maybe) |e| return .{ .return_stmt = self.solRenameUnderscoreIdents(e, params) };
+            .return_stmt => |maybe_r| {
+                const maybe = maybe_r.value;
+                if (maybe) |e| return .{ .return_stmt = .{ .value = self.solRenameUnderscoreIdents(e, params) } };
                 return stmt;
             },
         }
@@ -1191,7 +1192,7 @@ const Parser = struct {
                     self.solResolveBarePropsStmts(f.body, properties, &body_locals);
                 },
                 .return_stmt => |*maybe| {
-                    if (maybe.*) |e| maybe.* = self.solResolveBarePropsExpr(e, properties, locals);
+                    if (maybe.value) |e| maybe.value = self.solResolveBarePropsExpr(e, properties, locals);
                 },
             }
         }
@@ -1647,15 +1648,15 @@ const Parser = struct {
 
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
         if (self.current.kind == .rbrace or self.current.kind == .eof) {
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
 
         const expr = self.parseExpression();
         _ = self.match(.semicolon);
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr } };
     }
 
     fn parseSolVarDecl(self: *Parser) ?Statement {

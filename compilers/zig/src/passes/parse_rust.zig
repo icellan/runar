@@ -1499,15 +1499,15 @@ const Parser = struct {
 
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
         if (self.current.kind == .rbrace or self.current.kind == .eof) {
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null } };
         }
 
         const expr = self.parseExpression();
         _ = self.match(.semicolon);
-        return .{ .return_stmt = expr };
+        return .{ .return_stmt = .{ .value = expr } };
     }
 
     fn parseExpressionStatement(self: *Parser) ?Statement {
@@ -1539,7 +1539,7 @@ const Parser = struct {
         const had_semi = self.match(.semicolon);
         // Implicit return: expression without semicolon right before }
         if (!had_semi and self.current.kind == .rbrace) {
-            return .{ .return_stmt = expr };
+            return .{ .return_stmt = .{ .value = expr } };
         }
 
         return .{ .expr_stmt = .{ .expr = expr, .source_loc = loc } };

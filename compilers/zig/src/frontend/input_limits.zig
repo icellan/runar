@@ -305,7 +305,7 @@ pub fn stmtsTooDeep(stmts: []const types.Statement, level: u32) ?types.Statement
             },
             .expr_stmt => |e| exprTooDeep(e.expr, slot),
             .assert_stmt => |a| slot + 1 > MAX_SOURCE_NESTING or exprTooDeep(a.condition, slot + 1),
-            .return_stmt => |v| if (v) |e| exprTooDeep(e, slot) else false,
+            .return_stmt => |v| if (v.value) |e| exprTooDeep(e, slot) else false,
             .if_stmt => |i| blk: {
                 if (exprTooDeep(i.condition, slot)) break :blk true;
                 if (stmtsTooDeep(i.then_body, slot)) |inner| return inner;

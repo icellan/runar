@@ -1584,6 +1584,11 @@ fn lowerStatementsWithReads(ctx: *LowerCtx, stmts: []const Statement, reads_afte
             const has_no_else = if (if_s.else_body) |eb| eb.len == 0 else true;
             if (has_no_else and (i + 1 < stmts.len) and branchEndsWithReturn(if_s.then_body)) {
                 const remaining = stmts[i + 1 ..];
+                // N-467: the rebuilt if keeps the if statement's location, as
+                // lowerStatement would give it (TS keeps it on the rebuilt IfStmt).
+                const prev_loc = ctx.current_source_loc;
+                defer ctx.current_source_loc = prev_loc;
+                ctx.current_source_loc = if_s.source_loc orelse ctx.current_source_loc;
                 try lowerIfStatementWithElse(ctx, if_s.condition, if_s.then_body, remaining, reads_after_block);
                 return;
             }
@@ -1645,7 +1650,8 @@ fn collectStatementReads(ctx: *LowerCtx, stmt: Statement, out: *NameSet) LowerEr
         },
         .assert_stmt => |s| try collectExpressionReads(ctx, s.condition, out),
         .expr_stmt => |s| try collectExpressionReads(ctx, s.expr, out),
-        .return_stmt => |maybe_expr| {
+        .return_stmt => |maybe_expr_r| {
+            const maybe_expr = maybe_expr_r.value;
             if (maybe_expr) |e| try collectExpressionReads(ctx, e, out);
         },
     }
@@ -1674,7 +1680,7 @@ fn statementReassigns(stmt: Statement, name: []const u8) bool {
             statementsReassign(s.body, name),
         .assert_stmt => |s| expressionReassigns(s.condition, name),
         .expr_stmt => |s| expressionReassigns(s.expr, name),
-        .return_stmt => |maybe_expr| if (maybe_expr) |e| expressionReassigns(e, name) else false,
+        .return_stmt => |maybe_expr| if (maybe_expr.value) |e| expressionReassigns(e, name) else false,
     };
 }
 
@@ -1763,7 +1769,7 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
         .for_stmt => |f| f.source_loc,
         .assert_stmt => |a| a.source_loc,
         .expr_stmt => |e| e.source_loc,
-        .return_stmt => null,
+        .return_stmt => |r| r.source_loc,
     } orelse ctx.current_source_loc;
 
     switch (stmt) {
@@ -1853,7 +1859,8 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
             const cond_ref = try lowerExprToRef(ctx, assert_s.condition);
             _ = try ctx.emit(.{ .assert = .{ .value = cond_ref } });
         },
-        .return_stmt => |maybe_expr| {
+        .return_stmt => |maybe_expr_r| {
+            const maybe_expr = maybe_expr_r.value;
             if (maybe_expr) |expr| {
                 const ref = try lowerExprToRef(ctx, expr);
                 // If the returned ref is not the last emitted binding, emit explicit load
@@ -3663,7 +3670,8 @@ fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, q: *CalleeQueue)
         // `ForStmt` carries an integer init/bound, not expressions, so the
         // loop header holds nothing to walk.
         .for_stmt => |for_s| return bodyMutatesStateRec(for_s.body, contract, q),
-        .return_stmt => |maybe_expr| {
+        .return_stmt => |maybe_expr_r| {
+            const maybe_expr = maybe_expr_r.value;
             if (maybe_expr) |expr| {
                 return exprMutatesStateRec(expr, contract, q);
             }
@@ -3807,7 +3815,8 @@ fn stmtHasIntrinsicCallRec(
         // Ruby's parse_ruby promotes a private method's trailing
         // expression-statement to a return-statement for implicit-return
         // semantics. Walk the return value the same way.
-        .return_stmt => |maybe_expr| {
+        .return_stmt => |maybe_expr_r| {
+            const maybe_expr = maybe_expr_r.value;
             if (maybe_expr) |expr| {
                 return exprHasIntrinsicCallRec(expr, params, contract, names, q);
             }
@@ -3916,7 +3925,8 @@ fn stmtCallsRequireOutputP2PKHRec(stmt: Statement, contract: ContractNode, zero_
             return false;
         },
         .for_stmt => |for_s| return bodyCallsRequireOutputP2PKHRec(for_s.body, contract, zero_only, q),
-        .return_stmt => |maybe_expr| {
+        .return_stmt => |maybe_expr_r| {
+            const maybe_expr = maybe_expr_r.value;
             if (maybe_expr) |expr| return exprCallsRequireOutputP2PKHRec(expr, contract, zero_only, q);
             return false;
         },
@@ -4017,7 +4027,8 @@ fn stmtCallsExtractPrevOutputScriptRec(stmt: Statement, contract: ContractNode, 
             return false;
         },
         .for_stmt => |for_s| return bodyCallsExtractPrevOutputScriptRec(for_s.body, contract, q),
-        .return_stmt => |maybe_expr| {
+        .return_stmt => |maybe_expr_r| {
+            const maybe_expr = maybe_expr_r.value;
             if (maybe_expr) |expr| return exprCallsExtractPrevOutputScriptRec(expr, contract, q);
             return false;
         },
@@ -5401,7 +5412,7 @@ test "branchEndsWithReturn" {
     try std.testing.expect(!branchEndsWithReturn(&.{}));
 
     // Body ending with return
-    const stmts_ret = [_]Statement{.{ .return_stmt = .{ .literal_int = 1 } }};
+    const stmts_ret = [_]Statement{.{ .return_stmt = .{ .value = .{ .literal_int = 1 } } }};
     try std.testing.expect(branchEndsWithReturn(&stmts_ret));
 
     // Body ending with non-return

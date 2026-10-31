@@ -434,7 +434,8 @@ fn walkStatementForHex(
             for (fs.body) |s| try walkStatementForHex(allocator, s, errors);
         },
         .assert_stmt => |a| try walkExprForHex(allocator, a.condition, errors),
-        .return_stmt => |opt| {
+        .return_stmt => |opt_r| {
+            const opt = opt_r.value;
             if (opt) |e| try walkExprForHex(allocator, e, errors);
         },
     }
@@ -1036,7 +1037,8 @@ fn walkReadonlyWrites(
             },
             .expr_stmt => |e| try walkExprForReadonlyMutation(allocator, contract, e.expr, errors),
             .assert_stmt => |a| try walkExprForReadonlyMutation(allocator, contract, a.condition, errors),
-            .return_stmt => |v| {
+            .return_stmt => |v_r| {
+                const v = v_r.value;
                 if (v) |e| try walkExprForReadonlyMutation(allocator, contract, e, errors);
             },
             .if_stmt => |if_s| {
@@ -1181,7 +1183,8 @@ fn walkStatementForAsm(
             for (fs.body) |s| try walkStatementForAsm(allocator, s, contract, errors);
         },
         .assert_stmt => |a| try walkExprForAsm(allocator, a.condition, contract, errors),
-        .return_stmt => |opt| {
+        .return_stmt => |opt_r| {
+            const opt = opt_r.value;
             if (opt) |e| try walkExprForAsm(allocator, e, contract, errors);
         },
     }
@@ -1499,7 +1502,7 @@ fn validateNoOutputIntrinsicInTernaryArmsOfStatement(
         .let_decl => |d| if (d.value) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, d.source_loc, errors),
         .assign => |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a.value, a.source_loc, errors),
         .assert_stmt => |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a.condition, a.source_loc, errors),
-        .return_stmt => |r| if (r) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, null, errors),
+        .return_stmt => |r| if (r.value) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, null, errors),
         .if_stmt => |i| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, i.condition, i.source_loc, errors),
         .for_stmt => {},
     }
@@ -1608,7 +1611,7 @@ fn findOutputIntrinsicInStatement(
             null,
         .assign => |a| findOutputIntrinsicInExpr(allocator, contract, a.value, a.source_loc, seen),
         .assert_stmt => |a| findOutputIntrinsicInExpr(allocator, contract, a.condition, a.source_loc, seen),
-        .return_stmt => |r| if (r) |v|
+        .return_stmt => |r| if (r.value) |v|
             findOutputIntrinsicInExpr(allocator, contract, v, null, seen)
         else
             null,
@@ -2047,7 +2050,8 @@ fn walkStatementsForPreimage(
             for (fs.body) |s| try walkStatementsForPreimage(allocator, s, method_name, warnings);
         },
         .assert_stmt => |a| try walkExprForPreimage(allocator, a.condition, method_name, warnings),
-        .return_stmt => |opt_expr| {
+        .return_stmt => |opt_expr_r| {
+            const opt_expr = opt_expr_r.value;
             if (opt_expr) |expr| try walkExprForPreimage(allocator, expr, method_name, warnings);
         },
     }
@@ -2255,7 +2259,8 @@ fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool)
             for (fs.body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
         },
         .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard, true),
-        .return_stmt => |opt_expr| {
+        .return_stmt => |opt_expr_r| {
+            const opt_expr = opt_expr_r.value;
             if (opt_expr) |expr| scanExprForLocktime(expr, reads_locktime, has_guard, false);
         },
     }
@@ -2499,7 +2504,8 @@ fn collectMethodCalls(allocator: Allocator, stmt: Statement, calls: *StringSet, 
             for (fs.body) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
         },
         .assert_stmt => |a| try collectMethodCallsInExpr(allocator, a.condition, calls, self_receiver),
-        .return_stmt => |opt_expr| {
+        .return_stmt => |opt_expr_r| {
+            const opt_expr = opt_expr_r.value;
             if (opt_expr) |expr| try collectMethodCallsInExpr(allocator, expr, calls, self_receiver);
         },
     }
@@ -2950,7 +2956,7 @@ fn rabinWalkStmtsShallow(stmts: []const Statement, ctx: anytype) !void {
             .if_stmt => |i| try rabinWalkExpr(i.condition, null, ctx),
             .expr_stmt => |e| try rabinWalkExpr(e.expr, null, ctx),
             .assert_stmt => |as| try rabinWalkExpr(as.condition, null, ctx),
-            .return_stmt => |r| if (r) |v| try rabinWalkExpr(v, null, ctx),
+            .return_stmt => |r| if (r.value) |v| try rabinWalkExpr(v, null, ctx),
             .for_stmt => {},
         }
     }
@@ -3028,7 +3034,7 @@ fn rabinWalkStmts(stmts: []const Statement, fallback: ?SourceLocation, ctx: anyt
             },
             .expr_stmt => |e| try rabinWalkExpr(e.expr, e.source_loc orelse fallback, ctx),
             .assert_stmt => |as| try rabinWalkExpr(as.condition, as.source_loc orelse fallback, ctx),
-            .return_stmt => |r| if (r) |v| try rabinWalkExpr(v, fallback, ctx),
+            .return_stmt => |r| if (r.value) |v| try rabinWalkExpr(v, fallback, ctx),
         }
     }
 }
@@ -3143,7 +3149,7 @@ test "bare return in a public method is rejected" {
     var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
     var super_args = [_]Expression{.{ .identifier = "pk" }};
     var params = [_]types.ParamNode{makeParam("pk")};
-    var then_body = [_]Statement{.{ .return_stmt = null }};
+    var then_body = [_]Statement{.{ .return_stmt = .{ .value = null } }};
     var body = [_]Statement{
         .{ .if_stmt = .{ .condition = .{ .literal_bool = true }, .then_body = &then_body } },
         .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
@@ -3174,7 +3180,7 @@ test "valued return in a public method is rejected" {
     var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
     var super_args = [_]Expression{.{ .identifier = "pk" }};
     var params = [_]types.ParamNode{makeParam("pk")};
-    var then_body = [_]Statement{.{ .return_stmt = Expression{ .literal_bool = true } }};
+    var then_body = [_]Statement{.{ .return_stmt = .{ .value = Expression{ .literal_bool = true } } }};
     var body = [_]Statement{
         .{ .if_stmt = .{ .condition = .{ .literal_bool = true }, .then_body = &then_body } },
         .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
@@ -3208,7 +3214,7 @@ test "return in a private helper is allowed" {
     var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
     var super_args = [_]Expression{.{ .identifier = "pk" }};
     var params = [_]types.ParamNode{makeParam("pk")};
-    var helper_body = [_]Statement{.{ .return_stmt = Expression{ .literal_bool = true } }};
+    var helper_body = [_]Statement{.{ .return_stmt = .{ .value = Expression{ .literal_bool = true } } }};
     var public_body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
     var methods = [_]MethodNode{
         .{ .name = "helper", .is_public = false, .params = &.{}, .body = &helper_body },
