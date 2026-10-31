@@ -69,6 +69,10 @@ use std::collections::HashSet;
 /// this placeholder's start of 0 instead of the developer's real start.
 const WHILE_NO_INIT_PLACEHOLDER: &str = " __while_no_init";
 
+/// The `ctx.<member>` intrinsics a StatefulContext handle exposes.
+const ZIG_STATEFUL_CONTEXT_MEMBERS: [&str; 5] =
+    ["txPreimage", "getStateScript", "addOutput", "addRawOutput", "addDataOutput"];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -2294,8 +2298,21 @@ impl<'a> ZigParser<'a> {
             match self.peek() {
                 Token::LParen => {
                     self.advance(); // (
-                    let args = self.parse_list_elements(&Token::RParen);
+                    let mut args = self.parse_list_elements(&Token::RParen);
                     self.expect(&Token::RParen);
+                    // N-453: the StatefulContext parameter is elided from every
+                    // method's parameter list, so a `self.helper(ctx, ...)` call
+                    // drops the bare handle too and the arities agree. Anywhere
+                    // else (including the output intrinsics) a bare `ctx` stays
+                    // an identifier and is refused as an undefined variable.
+                    if let Expression::PropertyAccess { ref property } = expr {
+                        if !ZIG_STATEFUL_CONTEXT_MEMBERS.contains(&property.as_str()) {
+                            let ctx_names = &self.stateful_context_names;
+                            args.retain(|a| {
+                                !matches!(a, Expression::Identifier { name } if ctx_names.contains(name))
+                            });
+                        }
+                    }
                     let arg_refs: Vec<&Expression> = args.iter().collect();
                     if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {

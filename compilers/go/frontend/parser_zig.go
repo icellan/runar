@@ -1878,6 +1878,12 @@ func (p *zigParser) expectListSeparator(close zigTokenKind) bool {
 	return false
 }
 
+// zigStatefulContextMembers are the `ctx.<member>` intrinsics a
+// StatefulContext handle exposes.
+var zigStatefulContextMembers = map[string]bool{
+	"txPreimage": true, "getStateScript": true, "addOutput": true, "addRawOutput": true, "addDataOutput": true,
+}
+
 func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 	for {
 		// Function call: expr(args...)
@@ -1885,6 +1891,21 @@ func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 			p.advance() // '('
 			args := p.parseListElements(zigTokRParen)
 			p.expect(zigTokRParen)
+			// N-453: the StatefulContext parameter is elided from every
+			// method's parameter list, so a `self.helper(ctx, ...)` call
+			// drops the bare handle too and the arities agree. Anywhere else
+			// (including the output intrinsics) a bare `ctx` stays an
+			// identifier and is refused as an undefined variable.
+			if pa, ok := expr.(PropertyAccessExpr); ok && !zigStatefulContextMembers[pa.Property] {
+				kept := args[:0]
+				for _, a := range args {
+					if id, ok := a.(Identifier); ok && p.statefulContextNames[id.Name] {
+						continue
+					}
+					kept = append(kept, a)
+				}
+				args = kept
+			}
 			expr = CallExpr{Callee: expr, Args: args}
 			continue
 		}

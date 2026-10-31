@@ -519,6 +519,10 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
         method_ctx.diagnostic = diag;
         defer method_ctx.deinit();
         for (method.params) |param| {
+            // N-453: a StatefulContext handle is not a value and is never
+            // loaded; leaving it unregistered is what lets a call site tell a
+            // bare handle argument apart from a same-named value parameter.
+            if (isStatefulContextTypedParam(param)) continue;
             try method_ctx.addParam(param.name);
             if (isByteType(param.type_info)) try method_ctx.markByteTyped(param.name);
             // N-016: a private helper's parameter is not part of any ABI, so
@@ -567,12 +571,16 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             // the parser-owned slice unchanged to avoid an extra allocation
             // (matches the pre-Phase-13 behaviour expected by callers that
             // do not own the returned ANFProgram's params slice).
+            // N-453: a StatefulContext handle is elided here as it is on a
+            // public method (lowerStatefulPublicMethod).
             var params_out: []ParamNode = method.params;
             if (method_ctx.methodScope().auto_injected_params.items.len > 0 or
-                method_ctx.renamed_private_params.count() > 0)
+                method_ctx.renamed_private_params.count() > 0 or
+                valueParamCount(method.params) != method.params.len)
             {
                 var nonpub_params: std.ArrayListUnmanaged(ParamNode) = .empty;
                 for (method.params) |p| {
+                    if (isStatefulContextTypedParam(p)) continue;
                     var renamed = p;
                     renamed.name = method_ctx.paramSlot(p.name);
                     try nonpub_params.append(allocator, renamed);
@@ -1264,10 +1272,13 @@ const LowerCtx = struct {
     /// both the inlined and the method_call lowering path.
     fn checkPrivateCallArity(self: *LowerCtx, name: []const u8, arg_refs: []const []const u8) LowerError!void {
         const m = lookupPrivateMethod(self.contract, name) orelse return;
-        if (m.params.len == arg_refs.len) return;
+        // N-453: a StatefulContext handle is not an argument (the call site
+        // drops it, see `withoutStatefulContextArgs`).
+        const expected = valueParamCount(m.params);
+        if (expected == arg_refs.len) return;
         self.setDiagnostic(
             "private method '{s}' expects {d} argument(s), got {d}.",
-            .{ name, m.params.len, arg_refs.len },
+            .{ name, expected, arg_refs.len },
         );
         return LowerError.PrivateCallArityMismatch;
     }
@@ -2532,6 +2543,52 @@ fn lowerIdentifier(ctx: *LowerCtx, name: []const u8) LowerError![]const u8 {
     return try ctx.emit(.{ .load_param = .{ .name = name } });
 }
 
+/// N-453: a `ctx: runar.StatefulContext` parameter — a handle, not a value.
+fn isStatefulContextTypedParam(p: ParamNode) bool {
+    return std.mem.eql(u8, p.type_name, "StatefulContext");
+}
+
+/// N-453: a method's parameter count without its StatefulContext handles.
+fn valueParamCount(params: []const ParamNode) usize {
+    var n: usize = 0;
+    for (params) |p| {
+        if (!isStatefulContextTypedParam(p)) n += 1;
+    }
+    return n;
+}
+
+/// N-453: `args` of a `self.helper(...)` call without the bare identifiers
+/// that name a StatefulContext handle. The handle is elided from every
+/// method's parameter list, so the call drops it too and the arities line up
+/// (typecheck.zig refuses a bare handle anywhere else). A name bound in the
+/// current scope as a value (param, inlined-helper alias, local) is kept.
+fn withoutStatefulContextArgs(ctx: *LowerCtx, args: []const Expression) LowerError![]const Expression {
+    var drop: usize = 0;
+    for (args) |arg| {
+        if (isStatefulContextArg(ctx, arg)) drop += 1;
+    }
+    if (drop == 0) return args;
+    const out = try ctx.allocator.alloc(Expression, args.len - drop);
+    var n: usize = 0;
+    for (args) |arg| {
+        if (isStatefulContextArg(ctx, arg)) continue;
+        out[n] = arg;
+        n += 1;
+    }
+    return out;
+}
+
+fn isStatefulContextArg(ctx: *LowerCtx, arg: Expression) bool {
+    if (arg != .identifier) return false;
+    const name = arg.identifier;
+    if (!isStatefulContextParam(ctx, name)) return false;
+    if (ctx.scope_renames.get(name) != null) return false;
+    if (ctx.getParamAlias(name) != null) return false;
+    if (ctx.isParam(name)) return false;
+    if (ctx.isLocal(ctx.localTarget(name))) return false;
+    return true;
+}
+
 fn isStatefulContextParam(ctx: *const LowerCtx, name: []const u8) bool {
     for (ctx.contract.methods) |method| {
         for (method.params) |param| {
@@ -2905,7 +2962,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
 
     // this.method(...) -> method_call
     if (is_self) {
-        const arg_refs = try lowerArgs(ctx, mc.args);
+        const arg_refs = try lowerArgs(ctx, try withoutStatefulContextArgs(ctx, mc.args));
         try ctx.checkPrivateCallArity(mc.method, arg_refs);
         if (ctx.shouldInlinePrivate(mc.method)) {
             return try inlinePrivateMethodCall(ctx, mc.method, arg_refs);
@@ -2955,17 +3012,23 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     // caller's same-named variable. It is bound as a local of the helper below.
     var aliased_params: std.ArrayListUnmanaged([]const u8) = .empty;
     defer aliased_params.deinit(ctx.allocator);
-    var reassigned: std.ArrayListUnmanaged(usize) = .empty;
+    // N-453: arg refs line up with the ctx-free parameter list (a
+    // StatefulContext handle is neither a parameter nor an argument here).
+    const Rebound = struct { param: usize, arg: usize };
+    var reassigned: std.ArrayListUnmanaged(Rebound) = .empty;
     defer reassigned.deinit(ctx.allocator);
-    const n = @min(method.params.len, arg_refs.len);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const param_name = method.params[i].name;
+    var arg_i: usize = 0;
+    for (method.params, 0..) |param, pi| {
+        if (isStatefulContextTypedParam(param)) continue;
+        if (arg_i >= arg_refs.len) break;
+        const ai = arg_i;
+        arg_i += 1;
+        const param_name = param.name;
         if (statementsReassign(method.body, param_name)) {
-            try reassigned.append(ctx.allocator, i);
+            try reassigned.append(ctx.allocator, .{ .param = pi, .arg = ai });
             continue;
         }
-        try ctx.pushParamAlias(param_name, arg_refs[i]);
+        try ctx.pushParamAlias(param_name, arg_refs[ai]);
         try aliased_params.append(ctx.allocator, param_name);
     }
 
@@ -2975,13 +3038,13 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     const caller_scope = try ctx.enterInlinedScope();
     // N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
     for (reassigned.items) |k| {
-        const param = method.params[k];
+        const param = method.params[k.param];
         const binding_name = try ctx.declareLocal(param.name);
         try ctx.addLocal(binding_name);
         if (isByteType(param.type_info)) {
             try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, param.name, binding_name), {});
         }
-        try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, arg_refs[k])));
+        try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, arg_refs[k.arg])));
     }
     const start_index = ctx.bindings.items.len;
     try lowerStatements(ctx, method.body);

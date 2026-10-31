@@ -48,6 +48,11 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     with_lex_errors,
 )
 
+# The `ctx.<member>` intrinsics a StatefulContext handle exposes.
+_STATEFUL_CONTEXT_MEMBERS = frozenset(
+    ("txPreimage", "getStateScript", "addOutput", "addRawOutput", "addDataOutput")
+)
+
 
 # N-009: the `while (cond) : (upd) { ... }` desugaring's merge placeholder.
 # `_parse_while_statement` always synthesizes this name as the ForStmt's
@@ -1729,6 +1734,17 @@ class _ZigParser:
                 self._advance()
                 args = self._parse_list_elements(TOK_RPAREN)
                 self._expect(TOK_RPAREN, ")")
+                # N-453: the StatefulContext parameter is elided from every
+                # method's parameter list, so a `self.helper(ctx, ...)` call
+                # drops the bare handle too and the arities agree. Anywhere
+                # else (including the output intrinsics) a bare `ctx` stays an
+                # identifier and is refused as an undefined variable.
+                if (isinstance(expr, PropertyAccessExpr)
+                        and expr.property not in _STATEFUL_CONTEXT_MEMBERS):
+                    args = [
+                        a for a in args
+                        if not (isinstance(a, Identifier) and a.name in self._stateful_context_names)
+                    ]
                 expr = CallExpr(callee=expr, args=args)
                 continue
 

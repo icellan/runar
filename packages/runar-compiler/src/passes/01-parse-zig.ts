@@ -316,6 +316,9 @@ interface ParsedType {
   embedAlways?: boolean;
 }
 
+/** The `ctx.<member>` intrinsics a StatefulContext handle exposes. */
+const STATEFUL_CONTEXT_MEMBERS = new Set(['txPreimage', 'getStateScript', 'addOutput', 'addRawOutput', 'addDataOutput']);
+
 class ZigParser extends ParserCore<ZigToken> {
   /** N-448: string tokens whose bare use is legal (hexToBytes / asm bodies). */
   private bareLiteralOk = new WeakSet<ZigToken>();
@@ -660,10 +663,13 @@ class ZigParser extends ParserCore<ZigToken> {
       } else {
         if (parsedType.rawName === 'StatefulContext') {
           // N-304: the context is a surface artifact the compiler re-injects,
-          // not a spending parameter. Dropping it here (as the six native
-          // tiers' Zig parsers do) keeps it out of the artifact ABI, which is
-          // built from the AST param list. `ctx.txPreimage` / `ctx.addOutput`
-          // are rewritten to `this.*` via statefulContextNames.
+          // not a spending parameter. Dropping it here (as the Go, Rust,
+          // Python, Ruby and Java Zig parsers do; the Zig tier keeps it in its
+          // AST and elides it in ANF lowering) keeps it out of the artifact
+          // ABI, which is built from the AST param list. `ctx.txPreimage` /
+          // `ctx.addOutput` are rewritten to `this.*` via
+          // statefulContextNames, and N-453: a bare `ctx` passed to
+          // `self.method(...)` is dropped from the call (parsePostfixChain).
           statefulContextNames.add(paramName);
         } else {
           params.push({
@@ -1588,8 +1594,16 @@ class ZigParser extends ParserCore<ZigToken> {
     while (true) {
       if (this.current().type === '(') {
         this.advance();
-        const args = this.parseListElements(')');
+        let args = this.parseListElements(')');
         this.expect(')');
+        // N-453: the StatefulContext parameter is elided from every method's
+        // parameter list, so a `self.helper(ctx, ...)` call drops the bare
+        // handle too and the arities agree. Anywhere else (including the
+        // output intrinsics) a bare `ctx` stays an identifier and is refused
+        // as an undefined variable.
+        if (expr.kind === 'property_access' && !STATEFUL_CONTEXT_MEMBERS.has(expr.property)) {
+          args = args.filter((a) => !(a.kind === 'identifier' && this.statefulContextNames.has(a.name)));
+        }
         expr = { kind: 'call_expr', callee: expr, args };
       } else if (this.current().type === '.') {
         this.advance();

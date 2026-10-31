@@ -416,6 +416,20 @@ const MethodConsumption = struct {
 /// N-109: method name -> what that method consumes.
 const ConsumedParamSummary = std.StringHashMapUnmanaged(MethodConsumption);
 
+/// N-453: a `ctx: runar.StatefulContext` parameter — a handle, not a value.
+fn isStatefulContextParam(p: types.ParamNode) bool {
+    return std.mem.eql(u8, p.type_name, "StatefulContext");
+}
+
+/// N-453: a method's parameter count without its StatefulContext handles.
+fn valueParamCount(params: []const types.ParamNode) usize {
+    var n: usize = 0;
+    for (params) |p| {
+        if (!isStatefulContextParam(p)) n += 1;
+    }
+    return n;
+}
+
 fn freeConsumedParamSummary(allocator: Allocator, summary: *ConsumedParamSummary) void {
     var it = summary.iterator();
     while (it.next()) |entry| entry.value_ptr.deinit(allocator);
@@ -515,9 +529,18 @@ const TypeChecker = struct {
         }
 
         // Register method signatures
+        // N-453: a StatefulContext parameter is a compiler-re-injected
+        // handle, not a value: it is not part of a method's call arity (a
+        // `self.helper(ctx, ...)` call site drops the bare handle, see
+        // `withoutStatefulContextArgs`).
         for (contract.methods) |method| {
-            const params = try allocator.alloc(RunarType, method.params.len);
-            for (method.params, 0..) |p, i| params[i] = p.type_info;
+            const params = try allocator.alloc(RunarType, valueParamCount(method.params));
+            var n: usize = 0;
+            for (method.params) |p| {
+                if (isStatefulContextParam(p)) continue;
+                params[n] = p.type_info;
+                n += 1;
+            }
             const ret: RunarType = if (method.is_public) .void else inferMethodReturnType(method);
             try self.method_sigs.put(allocator, method.name, .{ .params = params, .return_type = ret });
         }
@@ -599,18 +622,27 @@ const TypeChecker = struct {
         self.affine_aliases.clearRetainingCapacity();
         self.stateful_ctx_params.clearRetainingCapacity();
         for (method.params) |param| {
-            env.define(param.name, param.type_info);
-            if (std.mem.eql(u8, param.type_name, "StatefulContext")) {
+            // N-453: the handle is not a value, so it is not bound: a bare
+            // `ctx` anywhere but a `self.helper(ctx, ...)` argument is an
+            // undefined variable.
+            if (isStatefulContextParam(param)) {
                 try self.stateful_ctx_params.put(self.allocator, param.name, {});
+                continue;
             }
+            env.define(param.name, param.type_info);
         }
         self.checkStatements(method.body, &env);
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.allocator);
-        for (method.params, 0..) |param, i| {
+        // N-453: indices into the ctx-free parameter list, which is what a
+        // call site's ctx-free argument list lines up with.
+        var i: usize = 0;
+        for (method.params) |param| {
+            if (isStatefulContextParam(param)) continue;
             if (self.consumed_values.get(param.name) orelse false) {
                 try out.append(self.allocator, @intCast(i));
             }
+            i += 1;
         }
         var props: std.ArrayListUnmanaged([]u8) = .empty;
         errdefer {
@@ -765,10 +797,12 @@ const TypeChecker = struct {
         self.stateful_ctx_params.clearRetainingCapacity();
 
         for (method.params) |param| {
-            env.define(param.name, param.type_info);
-            if (std.mem.eql(u8, param.type_name, "StatefulContext")) {
+            // N-453: not bound — see consumedParamIndices.
+            if (isStatefulContextParam(param)) {
                 self.stateful_ctx_params.put(self.allocator, param.name, {}) catch {};
+                continue;
             }
+            env.define(param.name, param.type_info);
         }
 
         self.checkStatements(method.body, &env);
@@ -1615,6 +1649,27 @@ const TypeChecker = struct {
         return .void;
     }
 
+    /// N-453: `args` without the bare identifiers that name a StatefulContext
+    /// parameter of the method being checked. The handle is elided from every
+    /// method's parameter list (method_sigs), so a `self.helper(ctx, ...)`
+    /// call drops it too and the arities line up. Returns `args` itself when
+    /// there is nothing to drop; otherwise the caller frees the result.
+    fn withoutStatefulContextArgs(self: *TypeChecker, args: []const Expression) Allocator.Error![]const Expression {
+        var drop: usize = 0;
+        for (args) |arg| {
+            if (arg == .identifier and self.stateful_ctx_params.get(arg.identifier) != null) drop += 1;
+        }
+        if (drop == 0) return args;
+        const out = try self.allocator.alloc(Expression, args.len - drop);
+        var n: usize = 0;
+        for (args) |arg| {
+            if (arg == .identifier and self.stateful_ctx_params.get(arg.identifier) != null) continue;
+            out[n] = arg;
+            n += 1;
+        }
+        return out;
+    }
+
     fn checkMethodCallExpr(self: *TypeChecker, mc: *const types.MethodCall, env: *TypeEnv) RunarType {
         const is_this = std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self");
         const is_stateful_ctx = self.stateful_ctx_params.get(mc.object) != null;
@@ -1643,6 +1698,14 @@ const TypeChecker = struct {
                 return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, env);
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {
+                if (is_this) {
+                    const args = self.withoutStatefulContextArgs(mc.args) catch {
+                        self.addError("out of memory checking call to '{s}'", .{mc.method});
+                        return .unknown;
+                    };
+                    defer if (args.ptr != mc.args.ptr) self.allocator.free(args);
+                    return self.checkCallArgs(mc.method, method_sig, args, env);
+                }
                 return self.checkCallArgs(mc.method, method_sig, mc.args, env);
             }
             self.addError("unknown method '{s}.{s}' -- only Runar built-in methods and contract methods are allowed", .{ mc.object, mc.method });

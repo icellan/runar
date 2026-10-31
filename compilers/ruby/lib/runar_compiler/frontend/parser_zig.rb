@@ -1749,6 +1749,15 @@ module RunarCompiler
             advance
             args = parse_list_elements(TOK_RPAREN)
             expect(TOK_RPAREN)
+            # N-453: the StatefulContext parameter is elided from every
+            # method's parameter list, so a `self.helper(ctx, ...)` call drops
+            # the bare handle too and the arities agree. Anywhere else
+            # (including the output intrinsics) a bare `ctx` stays an
+            # identifier and is refused as an undefined variable.
+            if expr.is_a?(PropertyAccessExpr) &&
+               !%w[txPreimage getStateScript addOutput addRawOutput addDataOutput].include?(expr.property)
+              args = args.reject { |a| a.is_a?(Identifier) && @stateful_context_names.include?(a.name) }
+            end
             expr = CallExpr.new(callee: expr, args: args)
 
           elsif check(TOK_DOT)

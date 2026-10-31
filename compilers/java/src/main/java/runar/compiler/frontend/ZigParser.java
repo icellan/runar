@@ -1671,6 +1671,21 @@ public final class ZigParser {
                     advance();
                     List<Expression> args = parseListElements(Kind.RPAREN);
                     expect(Kind.RPAREN, ")");
+                    // N-453: the StatefulContext parameter is elided from every
+                    // method's parameter list, so a `self.helper(ctx, ...)` call
+                    // drops the bare handle too and the arities agree. Anywhere
+                    // else (including the output intrinsics) a bare `ctx` stays
+                    // an identifier and is refused as an undefined variable.
+                    if (expr instanceof PropertyAccessExpr pa
+                            && !List.of("txPreimage", "getStateScript", "addOutput", "addRawOutput", "addDataOutput")
+                                .contains(pa.property())) {
+                        List<Expression> kept = new ArrayList<>();
+                        for (Expression a : args) {
+                            if (a instanceof Identifier aid && statefulContextNames.contains(aid.name())) continue;
+                            kept.add(a);
+                        }
+                        args = kept;
+                    }
                     expr = new CallExpr(expr, args);
                     continue;
                 }
