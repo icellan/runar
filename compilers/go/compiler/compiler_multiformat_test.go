@@ -282,10 +282,7 @@ func TestMultiFormat_TSCompileEndToEnd(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source, ok := conformanceSourcePath(dir)
-			if !ok {
-				t.Skipf("%s: source not found", dir)
-			}
+			source := requireConformanceSource(t, dir)
 			artifact, err := CompileFromSource(source)
 			if err != nil {
 				t.Fatalf("CompileFromSource failed: %v", err)
@@ -394,9 +391,7 @@ func TestGoContract_CompileExamples(t *testing.T) {
 	for _, ex := range examples {
 		t.Run(ex.contractName, func(t *testing.T) {
 			source := filepath.Join(examplesDir, ex.dir, ex.file)
-			if _, err := os.Stat(source); os.IsNotExist(err) {
-				t.Skipf("source not found: %s", source)
-			}
+			requireFixtureFile(t, source)
 
 			artifact, err := CompileFromSource(source)
 			if err != nil {

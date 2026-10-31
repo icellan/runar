@@ -1,7 +1,6 @@
 package compiler
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -36,9 +35,7 @@ func TestGoBinaryCompilation(t *testing.T) {
 
 	// Run against a conformance test IR
 	irPath := filepath.Join(integrationConformanceDir(), "basic-p2pkh", "expected-ir.json")
-	if _, err := os.Stat(irPath); os.IsNotExist(err) {
-		t.Skipf("conformance IR not found: %s", irPath)
-	}
+	requireFixtureFile(t, irPath)
 
 	absIRPath, err := filepath.Abs(irPath)
 	if err != nil {

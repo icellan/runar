@@ -76,9 +76,7 @@ func readPublicValuesBytes(t *testing.T, path string) ([]byte, []uint32) {
 func compilePocLockingScript(t *testing.T) *script.Script {
 	t.Helper()
 	path := sp1PocContractPath(t)
-	if _, err := os.Stat(path); err != nil {
-		t.Skipf("PoC contract not found at %s: %v", path, err)
-	}
+	requireFixtureFile(t, path)
 	res := lowerSP1FriPocBypassingRefusal(t, nil)
 	if res.ScriptHex == "" {
 		t.Fatal("lowering produced no locking script")

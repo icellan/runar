@@ -44,9 +44,7 @@ func TestTStoGoIntegration(t *testing.T) {
 			irPath := filepath.Join(integrationConformanceDir(), dir, "expected-ir.json")
 
 			// Verify the IR file exists
-			if _, err := os.Stat(irPath); os.IsNotExist(err) {
-				t.Skipf("conformance IR not found: %s", irPath)
-			}
+			requireFixtureFile(t, irPath)
 
 			// Read the IR and compile with the Go compiler
 			irData, err := os.ReadFile(irPath)

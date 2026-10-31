@@ -982,10 +982,7 @@ func TestDeterministicOutput(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSourceCompile_P2PKH(t *testing.T) {
-	source, ok := conformanceSourcePath("basic-p2pkh")
-	if !ok {
-		t.Skip("basic-p2pkh source not found")
-	}
+	source := requireConformanceSource(t, "basic-p2pkh")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1009,10 +1006,7 @@ func TestSourceCompile_P2PKH(t *testing.T) {
 }
 
 func TestSourceCompile_Arithmetic(t *testing.T) {
-	source, ok := conformanceSourcePath("arithmetic")
-	if !ok {
-		t.Skip("arithmetic source not found")
-	}
+	source := requireConformanceSource(t, "arithmetic")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1030,10 +1024,7 @@ func TestSourceCompile_Arithmetic(t *testing.T) {
 }
 
 func TestSourceCompile_BooleanLogic(t *testing.T) {
-	source, ok := conformanceSourcePath("boolean-logic")
-	if !ok {
-		t.Skip("boolean-logic source not found")
-	}
+	source := requireConformanceSource(t, "boolean-logic")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1076,10 +1067,7 @@ func TestSourceCompile_BooleanLogic(t *testing.T) {
 const booleanParamGateASM = "OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY"
 
 func TestSourceCompile_IfElse(t *testing.T) {
-	source, ok := conformanceSourcePath("if-else")
-	if !ok {
-		t.Skip("if-else source not found")
-	}
+	source := requireConformanceSource(t, "if-else")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1090,10 +1078,7 @@ func TestSourceCompile_IfElse(t *testing.T) {
 }
 
 func TestSourceCompile_BoundedLoop(t *testing.T) {
-	source, ok := conformanceSourcePath("bounded-loop")
-	if !ok {
-		t.Skip("bounded-loop source not found")
-	}
+	source := requireConformanceSource(t, "bounded-loop")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1104,10 +1089,7 @@ func TestSourceCompile_BoundedLoop(t *testing.T) {
 }
 
 func TestSourceCompile_MultiMethod(t *testing.T) {
-	source, ok := conformanceSourcePath("multi-method")
-	if !ok {
-		t.Skip("multi-method source not found")
-	}
+	source := requireConformanceSource(t, "multi-method")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1118,10 +1100,7 @@ func TestSourceCompile_MultiMethod(t *testing.T) {
 }
 
 func TestSourceCompile_Stateful(t *testing.T) {
-	source, ok := conformanceSourcePath("stateful")
-	if !ok {
-		t.Skip("stateful source not found")
-	}
+	source := requireConformanceSource(t, "stateful")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1146,10 +1125,7 @@ func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
 	testDirs := goEligibleConformanceFixtures(t)
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source, ok := conformanceSourcePath(dir)
-			if !ok {
-				t.Skipf("no .runar.ts source for %s", dir)
-			}
+			source := requireConformanceSource(t, dir)
 			// Disable constant folding to match existing golden files
 			artifact, err := CompileFromSource(source, CompileOptions{DisableConstantFolding: true})
 			if err != nil {
@@ -1224,10 +1200,7 @@ func TestSourceCompile_ExampleEscrow(t *testing.T) {
 func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 	// Compile from IR and from source, both should produce non-empty valid output
 	irPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-ir.json")
-	sourcePath, ok := conformanceSourcePath("basic-p2pkh")
-	if !ok {
-		t.Skip("basic-p2pkh source not found")
-	}
+	sourcePath := requireConformanceSource(t, "basic-p2pkh")
 
 	irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
 	if err != nil {
@@ -1297,10 +1270,7 @@ func TestCompilerParity_AllConformance(t *testing.T) {
 		t.Run(dir, func(t *testing.T) {
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 
-			sourcePath, ok := conformanceSourcePath(dir)
-			if !ok {
-				t.Skipf("no .runar.ts source for %s", dir)
-			}
+			sourcePath := requireConformanceSource(t, dir)
 
 			// Compile from source (disable constant folding to match golden files)
 			artifact, err := CompileFromSource(sourcePath, CompileOptions{DisableConstantFolding: true})
