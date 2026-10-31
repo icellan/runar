@@ -239,6 +239,10 @@ func (MemberExpr) exprMarker() {}
 // Identifier represents a variable or name reference.
 type Identifier struct {
 	Name string
+	// SourceLocation is the identifier's token (N-463). Only the .runar.ts
+	// parser sets it, as the TS reference does; elsewhere it is zero.
+	// exprLoc derives a composite expression's position from it.
+	SourceLocation SourceLocation
 }
 
 func (Identifier) exprMarker() {}
@@ -280,6 +284,8 @@ func (TernaryExpr) exprMarker() {}
 // PropertyAccessExpr represents `this.x` (property access on the contract).
 type PropertyAccessExpr struct {
 	Property string
+	// SourceLocation is the `this` token (N-463); .runar.ts parser only.
+	SourceLocation SourceLocation
 }
 
 func (PropertyAccessExpr) exprMarker() {}

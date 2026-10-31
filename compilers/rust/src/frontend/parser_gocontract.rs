@@ -1143,7 +1143,7 @@ impl<'a> GoParser<'a> {
                 // Extract property assignments as initializers
                 for stmt in &m.body {
                     if let Statement::Assignment { target, value, .. } = stmt {
-                        if let Expression::PropertyAccess { property } = target {
+                        if let Expression::PropertyAccess { property, .. } = target {
                             for prop in properties.iter_mut() {
                                 if &prop.name == property {
                                     prop.initializer = Some(value.clone());
@@ -1170,14 +1170,14 @@ impl<'a> GoParser<'a> {
         // super(...) call
         let super_args: Vec<Expression> = uninit_props
             .iter()
-            .map(|p| Expression::Identifier { name: p.name.clone() })
+            .map(|p| Expression::Identifier { name: p.name.clone(), source_location: None })
             .collect();
 
         let super_loc = Self::loc_at(&self.file, 1, 1);
         let mut constructor_body: Vec<Statement> = Vec::new();
         constructor_body.push(Statement::ExpressionStatement {
             expression: Expression::CallExpr {
-                callee: Box::new(Expression::Identifier { name: "super".to_string() }),
+                callee: Box::new(Expression::Identifier { name: "super".to_string(), source_location: None }),
                 args: super_args,
                 asm_return_type: None,
             },
@@ -1186,8 +1186,8 @@ impl<'a> GoParser<'a> {
 
         for prop in uninit_props.iter() {
             constructor_body.push(Statement::Assignment {
-                target: Expression::PropertyAccess { property: prop.name.clone() },
-                value: Expression::Identifier { name: prop.name.clone() },
+                target: Expression::PropertyAccess { property: prop.name.clone(), source_location: None },
+                value: Expression::Identifier { name: prop.name.clone(), source_location: None },
                 source_location: super_loc.clone(),
             });
         }
@@ -1877,7 +1877,7 @@ impl<'a> GoParser<'a> {
                 // name := expr
                 self.advance();
                 let rhs = self.parse_expr()?;
-                let name = if let Expression::Identifier { name } = &lhs {
+                let name = if let Expression::Identifier { name, .. } = &lhs {
                     if let TokenType::Ident(raw) = &lhs_tok {
                         self.idents.declare(raw, name.clone());
                     }
@@ -2671,7 +2671,7 @@ impl<'a> GoParser<'a> {
                         }
                         // Not exactly one arg — leave as a call expression (will error downstream).
                         return Some(Expression::CallExpr {
-                            callee: Box::new(Expression::Identifier { name: "byteString".to_string() }),
+                            callee: Box::new(Expression::Identifier { name: "byteString".to_string(), source_location: None }),
                             args,
                             asm_return_type: None,
                         });
@@ -2682,13 +2682,13 @@ impl<'a> GoParser<'a> {
                     if matches!(self.current().typ, TokenType::LParen) {
                         let args = self.parse_call_args();
                         return Some(Expression::CallExpr {
-                            callee: Box::new(Expression::Identifier { name: callee_name }),
+                            callee: Box::new(Expression::Identifier { name: callee_name, source_location: None }),
                             args,
                             asm_return_type: None,
                         });
                     }
 
-                    return Some(Expression::Identifier { name: callee_name });
+                    return Some(Expression::Identifier { name: callee_name, source_location: None });
                 }
 
                 // Receiver access: <receiver_name>.Field. N-018: this must be
@@ -2709,7 +2709,7 @@ impl<'a> GoParser<'a> {
                             let args = self.parse_call_args();
                             return Some(Expression::CallExpr {
                                 callee: Box::new(Expression::MemberExpr {
-                                    object: Box::new(Expression::Identifier { name: "this".to_string() }),
+                                    object: Box::new(Expression::Identifier { name: "this".to_string(), source_location: None }),
                                     property: prop,
                                 }),
                                 args,
@@ -2717,14 +2717,14 @@ impl<'a> GoParser<'a> {
                             });
                         }
 
-                        return Some(Expression::PropertyAccess { property: prop });
+                        return Some(Expression::PropertyAccess { property: prop, source_location: None });
                     }
                     // Receiver as value without field access — skip returning Identifier
                 }
 
                 // Regular identifier
                 let camel = go_to_camel(&name);
-                Some(Expression::Identifier { name: camel })
+                Some(Expression::Identifier { name: camel, source_location: None })
             }
 
             _ => None,
@@ -3148,13 +3148,13 @@ func (c *VarDemo) Check(data runar.ByteString) {
 
         fn has_plain_data_ident(expr: &Expression) -> bool {
             match expr {
-                Expression::Identifier { name } => name == "data",
+                Expression::Identifier { name, .. } => name == "data",
                 Expression::BinaryExpr { left, right, .. } => {
                     has_plain_data_ident(left) || has_plain_data_ident(right)
                 }
                 Expression::CallExpr { callee, args, .. } => {
                     // must not be a byteString(...) call
-                    if let Expression::Identifier { name } = &**callee {
+                    if let Expression::Identifier { name, .. } = &**callee {
                         if name == "byteString" {
                             return false;
                         }
@@ -3337,7 +3337,7 @@ func (c *VarDemo) Check(data runar.ByteString) {
                 args[0]
             );
         };
-        let Expression::Identifier { name } = object.as_ref() else {
+        let Expression::Identifier { name, .. } = object.as_ref() else {
             panic!("member.object is not an Identifier: {:?}", object);
         };
         assert_eq!(name, "c");

@@ -1657,7 +1657,7 @@ module RunarCompiler
               if expr.is_a?(Identifier) && expr.name == "this"
                 expr = CallExpr.new(
                   callee: MemberExpr.new(
-                    object: Identifier.new(name: "this"),
+                    object: Identifier.new(name: "this", source_location: expr.source_location),
                     property: prop_name
                   ),
                   args: args
@@ -1670,7 +1670,7 @@ module RunarCompiler
               end
             else
               if expr.is_a?(Identifier) && expr.name == "this"
-                expr = PropertyAccessExpr.new(property: prop_name)
+                expr = PropertyAccessExpr.new(property: prop_name, source_location: expr.source_location)
               else
                 expr = MemberExpr.new(object: expr, property: prop_name)
               end
@@ -2005,13 +2005,14 @@ module RunarCompiler
 
         # Identifier, keyword, or call
         if tok.kind == TOK_IDENT
+          ident_loc = loc
           advance
           name = tok.value
 
           return BoolLiteral.new(value: true) if name == "true"
           return BoolLiteral.new(value: false) if name == "false"
-          return Identifier.new(name: "this") if name == "this"
-          return Identifier.new(name: "super") if name == "super"
+          return Identifier.new(name: "this", source_location: ident_loc) if name == "this"
+          return Identifier.new(name: "super", source_location: ident_loc) if name == "super"
 
           # asm({ body, in_arity?, out_arity? }) compiler intrinsic --
           # normalise the object-literal argument into a CallExpr with three
@@ -2026,10 +2027,10 @@ module RunarCompiler
           # Function call: name(...)
           if check(TOK_LPAREN)
             args = parse_call_args
-            return CallExpr.new(callee: Identifier.new(name: name), args: args)
+            return CallExpr.new(callee: Identifier.new(name: name, source_location: ident_loc), args: args)
           end
 
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: ident_loc)
         end
 
         # Parenthesized expression

@@ -260,7 +260,7 @@ pub(crate) fn is_to_byte_string_literal(expr: &Expression) -> bool {
     let Expression::CallExpr { callee, args, .. } = expr else {
         return false;
     };
-    let Expression::Identifier { name } = callee.as_ref() else {
+    let Expression::Identifier { name, .. } = callee.as_ref() else {
         return false;
     };
     name == "toByteString"
@@ -324,7 +324,7 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     let mut assigned_props = HashSet::new();
     for stmt in &ctor.body {
         if let Statement::Assignment { target, .. } = stmt {
-            if let Expression::PropertyAccess { property } = target {
+            if let Expression::PropertyAccess { property, .. } = target {
                 assigned_props.insert(property.clone());
             }
         }
@@ -418,11 +418,11 @@ fn validate_constructor_slot_bijection(contract: &ContractNode, errors: &mut Vec
         let Statement::Assignment { target, value, .. } = stmt else {
             continue;
         };
-        let Expression::PropertyAccess { property } = target else {
+        let Expression::PropertyAccess { property, .. } = target else {
             continue;
         };
         match value {
-            Expression::Identifier { name } if param_index.contains_key(name.as_str()) => {
+            Expression::Identifier { name, .. } if param_index.contains_key(name.as_str()) => {
                 prop_to_params
                     .entry(property.clone())
                     .or_default()
@@ -561,7 +561,7 @@ fn validate_constructor_slot_bijection(contract: &ContractNode, errors: &mut Vec
 fn is_super_call(stmt: &Statement) -> bool {
     if let Statement::ExpressionStatement { expression, .. } = stmt {
         if let Expression::CallExpr { callee, .. } = expression {
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 return name == "super";
             }
         }
@@ -686,7 +686,7 @@ fn written_property(target: &Expression) -> Option<&str> {
         node = object.as_ref();
     }
     match node {
-        Expression::PropertyAccess { property } => Some(property.as_str()),
+        Expression::PropertyAccess { property, .. } => Some(property.as_str()),
         _ => None,
     }
 }
@@ -878,7 +878,7 @@ fn collect_return_statements(body: &[Statement], out: &mut Vec<SourceLocation>) 
 /// Reports whether `expr` is a call to the `asm` compiler intrinsic.
 fn is_asm_call(expr: &Expression) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::Identifier { name } = callee.as_ref() {
+        if let Expression::Identifier { name, .. } = callee.as_ref() {
             return name == "asm";
         }
     }
@@ -1074,7 +1074,7 @@ fn ends_with_assert(body: &[Statement]) -> bool {
 
 fn is_assert_call(expr: &Expression) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::Identifier { name } = callee.as_ref() {
+        if let Expression::Identifier { name, .. } = callee.as_ref() {
             return name == "assert";
         }
     }
@@ -1219,9 +1219,9 @@ type IntrinsicSite = (String, Option<String>, Option<SourceLocation>);
 fn callee_property(expr: &Expression) -> Option<&str> {
     match expr {
         Expression::CallExpr { callee, .. } => match callee.as_ref() {
-            Expression::PropertyAccess { property } => Some(property.as_str()),
+            Expression::PropertyAccess { property, .. } => Some(property.as_str()),
             Expression::MemberExpr { property, .. } => Some(property.as_str()),
-            Expression::Identifier { name } => Some(name.as_str()),
+            Expression::Identifier { name, .. } => Some(name.as_str()),
             _ => None,
         },
         _ => None,
@@ -1365,7 +1365,7 @@ fn validate_index_assignment_target(
         root = object.as_ref();
     }
     let is_fixed_array_prop = match root {
-        Expression::PropertyAccess { property } => contract
+        Expression::PropertyAccess { property, .. } => contract
             .properties
             .iter()
             .any(|p| &p.name == property && matches!(p.prop_type, TypeNode::FixedArray { .. })),
@@ -1503,7 +1503,7 @@ fn validate_for_condition_tests_iterator(
         _ => "",
     };
     if let Expression::BinaryExpr { left, .. } = condition {
-        if let Expression::Identifier { name } = left.as_ref() {
+        if let Expression::Identifier { name, .. } = left.as_ref() {
             if name == iter {
                 return;
             }
@@ -1573,7 +1573,7 @@ fn validate_for_update(
         allowed.push(name.as_str());
     }
     if let Expression::BinaryExpr { left, .. } = condition {
-        if let Expression::Identifier { name } = left.as_ref() {
+        if let Expression::Identifier { name, .. } = left.as_ref() {
             allowed.push(name.as_str());
         }
     }
@@ -1583,7 +1583,7 @@ fn validate_for_update(
     // advances, yet the unrolled loop would still step by one.
     let cond_tests_iter = match (init, condition) {
         (Statement::VariableDecl { name: iter, .. }, Expression::BinaryExpr { left, .. }) => {
-            matches!(left.as_ref(), Expression::Identifier { name } if name == iter)
+            matches!(left.as_ref(), Expression::Identifier { name, .. } if name == iter)
         }
         _ => false,
     };
@@ -1606,7 +1606,7 @@ fn validate_for_update(
 /// accepted: those are the side effects that used to be dropped.
 fn is_allowed_loop_var(allowed: &[&str], expr: &Expression) -> bool {
     match expr {
-        Expression::Identifier { name } => allowed.iter().any(|a| *a == name.as_str()),
+        Expression::Identifier { name, .. } => allowed.iter().any(|a| *a == name.as_str()),
         _ => false,
     }
 }
@@ -1710,7 +1710,7 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
         Expression::CallExpr { callee, args, .. } => {
             validate_expression(callee, errors);
             // assert() message (2nd arg) is a human-readable string, not hex — skip validation
-            let is_assert = matches!(callee.as_ref(), Expression::Identifier { name } if name == "assert");
+            let is_assert = matches!(callee.as_ref(), Expression::Identifier { name, .. } if name == "assert");
             for (i, arg) in args.iter().enumerate() {
                 if is_assert && i >= 1 {
                     continue;
@@ -1951,12 +1951,12 @@ fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>, 
     match expr {
         Expression::CallExpr { callee, args, .. } => {
             // Check if callee is `this.methodName` (PropertyAccess variant)
-            if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = callee.as_ref() {
                 calls.insert(property.clone());
             }
             // Also check `this.method` via MemberExpr
             if let Expression::MemberExpr { object, property } = callee.as_ref() {
-                if let Expression::Identifier { name } = object.as_ref() {
+                if let Expression::Identifier { name, .. } = object.as_ref() {
                     if name == "this" {
                         calls.insert(property.clone());
                     }
@@ -1967,7 +1967,7 @@ fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>, 
             // graph (`bare`), and only names of contract methods count there
             // (analyze_call_graph filters by method_names), so builtins are
             // unaffected.
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if bare {
                     calls.insert(name.clone());
                 }
@@ -2024,7 +2024,7 @@ fn warn_manual_preimage_usage(method: &MethodNode, warnings: &mut Vec<Diagnostic
     walk_expressions_in_body(&method.body, &mut |expr| {
         // V24: Detect manual checkPreimage(...)
         if let Expression::CallExpr { callee, .. } = expr {
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if name == "checkPreimage" {
                     warnings.push(Diagnostic::warning(format!(
                         "StatefulSmartContract auto-injects checkPreimage(); calling it manually in '{}' will cause a duplicate verification",
@@ -2033,7 +2033,7 @@ fn warn_manual_preimage_usage(method: &MethodNode, warnings: &mut Vec<Diagnostic
                 }
             }
             // V25: Detect manual this.getStateScript()
-            if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = callee.as_ref() {
                 if property == "getStateScript" {
                     warnings.push(Diagnostic::warning(format!(
                         "StatefulSmartContract auto-injects state continuation; calling getStateScript() manually in '{}' is redundant",
@@ -2055,7 +2055,7 @@ const SEQUENCE_FINAL: u64 = 0xffff_ffff;
 /// True when `expr` is a direct call to the named intrinsic, e.g. `f(...)`.
 fn is_call_to_named(expr: &Expression, name: &str) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::Identifier { name: callee_name } = callee.as_ref() {
+        if let Expression::Identifier { name: callee_name, .. } = callee.as_ref() {
             return callee_name == name;
         }
     }
@@ -2225,7 +2225,7 @@ fn rabin_scope_collect<'a>(stmts: &'a [Statement], scope: &mut RabinScope<'a>) {
     fn note_mutations(expr: &Expression, mutated: &mut HashSet<String>) {
         walk_expression(expr, &mut |e| match e {
             Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-                if let Expression::Identifier { name } = operand.as_ref() {
+                if let Expression::Identifier { name, .. } = operand.as_ref() {
                     mutated.insert(name.clone());
                 }
             }
@@ -2240,7 +2240,7 @@ fn rabin_scope_collect<'a>(stmts: &'a [Statement], scope: &mut RabinScope<'a>) {
                 note_mutations(init, &mut scope.mutated);
             }
             Statement::Assignment { target, value, .. } => {
-                if let Expression::Identifier { name } = target {
+                if let Expression::Identifier { name, .. } = target {
                     scope.bindings.entry(name.clone()).or_default().push(value);
                 }
                 note_mutations(target, &mut scope.mutated);
@@ -2295,9 +2295,9 @@ fn walk_expressions_in_body_deep(stmts: &[Statement], visitor: &mut impl FnMut(&
 fn rabin_private_callee<'a>(expr: &'a Expression, private: &HashMap<String, &MethodNode>) -> Option<(&'a str, &'a [Expression])> {
     if let Expression::CallExpr { callee, args, .. } = expr {
         let name = match callee.as_ref() {
-            Expression::PropertyAccess { property } => Some(property.as_str()),
+            Expression::PropertyAccess { property, .. } => Some(property.as_str()),
             Expression::MemberExpr { object, property } => match object.as_ref() {
-                Expression::Identifier { name } if name == "this" => Some(property.as_str()),
+                Expression::Identifier { name, .. } if name == "this" => Some(property.as_str()),
                 _ => None,
             },
             _ => None,
@@ -2393,10 +2393,10 @@ fn rabin_is_trusted(
     match expr {
         Expression::PropertyAccess { .. } => true,
         Expression::MemberExpr { object, .. } => {
-            matches!(object.as_ref(), Expression::Identifier { name } if name == "this")
+            matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "this")
         }
         Expression::BigIntLiteral { .. } => true,
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             let is_param = scope.params.contains(name);
             let locals = scope.bindings.get(name);
             if !is_param && locals.is_none() {
@@ -2512,7 +2512,7 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
         let mut bad = 0usize;
         walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
             if let Expression::CallExpr { callee, args, .. } = e {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     if name == "verifyRabinSig"
                         && args.len() >= 4
                         && !rabin_is_trusted(&args[3], scope, &property_names, &trusted_params, &mut HashSet::new())
@@ -2539,7 +2539,7 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
     for (si, scope) in scopes.iter().enumerate() {
         walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
             if let Expression::CallExpr { callee, args, .. } = e {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     if name == "verifyRabinSig" && args.len() >= 4 {
                         rabin_sources_of(&args[3], si, &ctx, &mut key_props, &mut HashSet::new());
                     }
@@ -2566,7 +2566,7 @@ fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagn
             }
             Expression::CallExpr { callee, args, .. } => {
                 let is_add_output = match callee.as_ref() {
-                    Expression::PropertyAccess { property } | Expression::MemberExpr { property, .. } => {
+                    Expression::PropertyAccess { property, .. } | Expression::MemberExpr { property, .. } => {
                         property == "addOutput"
                     }
                     _ => false,
@@ -2647,15 +2647,15 @@ fn rabin_sources_of(
     visiting: &mut HashSet<(usize, String)>,
 ) {
     match expr {
-        Expression::PropertyAccess { property } => {
+        Expression::PropertyAccess { property, .. } => {
             out.insert(property.clone());
         }
         Expression::MemberExpr { object, property } => {
-            if matches!(object.as_ref(), Expression::Identifier { name } if name == "this") {
+            if matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "this") {
                 out.insert(property.clone());
             }
         }
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             let scope = &ctx.scopes[si];
             let is_param = scope.params.contains(name);
             let locals = scope.bindings.get(name);
@@ -2693,12 +2693,12 @@ fn rabin_sources_of(
 /// N-205: the property a write target names, if any.
 fn rabin_written_prop(target: &Expression, scope: &RabinScope, property_names: &HashSet<&str>) -> Option<String> {
     match target {
-        Expression::PropertyAccess { property } => Some(property.clone()),
+        Expression::PropertyAccess { property, .. } => Some(property.clone()),
         Expression::MemberExpr { object, property } => match object.as_ref() {
-            Expression::Identifier { name } if name == "this" => Some(property.clone()),
+            Expression::Identifier { name, .. } if name == "this" => Some(property.clone()),
             _ => None,
         },
-        Expression::Identifier { name }
+        Expression::Identifier { name, .. }
             if property_names.contains(name.as_str())
                 && !scope.params.contains(name)
                 && !scope.declared.contains(name) =>
@@ -3492,7 +3492,7 @@ class BadHexInit3 extends SmartContract {
     // future loosening of those rules cannot reopen the asm gate.
     fn n012_asm_call() -> Expression {
         Expression::CallExpr {
-            callee: Box::new(Expression::Identifier { name: "asm".to_string() }),
+            callee: Box::new(Expression::Identifier { name: "asm".to_string(), source_location: None }),
             args: vec![],
             asm_return_type: None,
         }
@@ -3583,7 +3583,7 @@ class C extends SmartContract {
     // Does not prove: that any source program can reach these shapes today.
     fn n401_this_call(name: &str) -> Expression {
         Expression::CallExpr {
-            callee: Box::new(Expression::PropertyAccess { property: name.to_string() }),
+            callee: Box::new(Expression::PropertyAccess { property: name.to_string(), source_location: None }),
             args: vec![],
             asm_return_type: None,
         }

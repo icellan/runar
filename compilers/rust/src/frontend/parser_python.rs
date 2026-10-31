@@ -1068,7 +1068,7 @@ impl<'a> PyParser<'a> {
     fn bind_local(&mut self, name: String, var_type: Option<TypeNode>, init: Expression) -> Statement {
         if self.declared_locals.contains(&name) {
             return Statement::Assignment {
-                target: Expression::Identifier { name },
+                target: Expression::Identifier { name, source_location: None },
                 value: init,
                 source_location: self.loc(),
             };
@@ -1712,6 +1712,7 @@ impl<'a> PyParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1875,11 +1876,12 @@ impl<'a> PyParser<'a> {
             op: if descending { BinaryOp::Gt } else { BinaryOp::Lt },
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
+                source_location: None,
             }),
             right: Box::new(end_expr),
         };
 
-        let update_operand = Box::new(Expression::Identifier { name: var_name });
+        let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
         let update = Statement::ExpressionStatement {
             expression: if descending {
                 Expression::DecrementExpr { operand: update_operand, prefix: false }
@@ -1944,6 +1946,7 @@ impl<'a> PyParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args,
                 asm_return_type: None,
@@ -2540,6 +2543,7 @@ impl<'a> PyParser<'a> {
             return Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "pow".to_string(),
+                    source_location: None,
                 }),
                 args: vec![base, exp],
                 asm_return_type: None,
@@ -2567,11 +2571,12 @@ impl<'a> PyParser<'a> {
                         let arg_refs: Vec<&Expression> = args.iter().collect();
                         if !self.grow(&mut dt, &expr, &[]) || !self.grow(&mut dt, &expr, &arg_refs) { break; }
                         // Handle self.method(...) -> this.method(...)
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
                             expr = Expression::CallExpr {
                                 callee: Box::new(Expression::MemberExpr {
                                     object: Box::new(Expression::Identifier {
                                         name: "this".to_string(),
+                                        source_location: None,
                                     }),
                                     property: prop,
                                 }),
@@ -2590,8 +2595,8 @@ impl<'a> PyParser<'a> {
                         }
                     } else {
                         // Property access
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
-                            expr = Expression::PropertyAccess { property: prop };
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
+                            expr = Expression::PropertyAccess { property: prop, source_location: None };
                             dt = DepthTracker::new();
                         } else {
                             if !self.grow(&mut dt, &expr, &[]) { break; }
@@ -2642,6 +2647,7 @@ impl<'a> PyParser<'a> {
                 // self -> this
                 Expression::Identifier {
                     name: "this".to_string(),
+                    source_location: None,
                 }
             }
             Token::Ident(name) => {
@@ -2668,7 +2674,7 @@ impl<'a> PyParser<'a> {
                 }
 
                 let mapped = map_builtin_name(&name);
-                Expression::Identifier { name: mapped }
+                Expression::Identifier { name: mapped, source_location: None }
             }
             Token::Assert => {
                 // assert used as expression (unusual but handle it)
@@ -2676,6 +2682,7 @@ impl<'a> PyParser<'a> {
                 // If we get here, it means `assert` keyword was used as an expression callee.
                 Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }
             }
             Token::LParen => {
@@ -2749,12 +2756,14 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2771,9 +2780,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
             source_location: SourceLocation {
                 file: file.to_string(),
@@ -3027,7 +3038,7 @@ class Example(StatefulSmartContract):
         // Should be this.value = newValue (with PropertyAccess)
         if let Statement::Assignment { target, .. } = &body[0] {
             match target {
-                Expression::PropertyAccess { property } => {
+                Expression::PropertyAccess { property, .. } => {
                     assert_eq!(property, "value");
                 }
                 _ => panic!("Expected PropertyAccess, got {:?}", target),
@@ -3139,7 +3150,7 @@ class AssertTest(SmartContract):
 
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
             if let Expression::CallExpr { callee, .. } = expression {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }
             }

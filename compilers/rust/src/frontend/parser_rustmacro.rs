@@ -491,7 +491,7 @@ impl RustDslParser {
                 }
                 for stmt in &m.body {
                     if let Statement::Assignment { target, value, .. } = stmt {
-                        if let Expression::PropertyAccess { property } = target {
+                        if let Expression::PropertyAccess { property, .. } = target {
                             for p in properties.iter_mut() {
                                 if p.name == *property {
                                     p.initializer = Some(value.clone());
@@ -516,11 +516,11 @@ impl RustDslParser {
 
         // super(...) call as first statement
         let super_args: Vec<Expression> = uninit_props.iter()
-            .map(|p| Expression::Identifier { name: p.name.clone() })
+            .map(|p| Expression::Identifier { name: p.name.clone(), source_location: None })
             .collect();
         let super_call = Statement::ExpressionStatement {
             expression: Expression::CallExpr {
-                callee: Box::new(Expression::Identifier { name: "super".to_string() }),
+                callee: Box::new(Expression::Identifier { name: "super".to_string(), source_location: None }),
                 args: super_args,
                 asm_return_type: None,
             },
@@ -531,8 +531,8 @@ impl RustDslParser {
         let mut ctor_body = vec![super_call];
         for p in &uninit_props {
             ctor_body.push(Statement::Assignment {
-                target: Expression::PropertyAccess { property: p.name.clone() },
-                value: Expression::Identifier { name: p.name.clone() },
+                target: Expression::PropertyAccess { property: p.name.clone(), source_location: None },
+                value: Expression::Identifier { name: p.name.clone(), source_location: None },
                 source_location: loc.clone(),
             });
         }
@@ -835,7 +835,7 @@ impl RustDslParser {
             self.match_tok(&TokenType::Semi);
             return Some(Statement::ExpressionStatement {
                 expression: Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: vec![expr],
                     asm_return_type: None,
                 },
@@ -854,7 +854,7 @@ impl RustDslParser {
             self.match_tok(&TokenType::Semi);
             return Some(Statement::ExpressionStatement {
                 expression: Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: vec![Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
@@ -1017,10 +1017,10 @@ impl RustDslParser {
             };
             let condition = Expression::BinaryExpr {
                 op: if descending { BinaryOp::Ge } else { BinaryOp::Lt },
-                left: Box::new(Expression::Identifier { name: var_name.clone() }),
+                left: Box::new(Expression::Identifier { name: var_name.clone(), source_location: None }),
                 right: Box::new(end_expr),
             };
-            let update_operand = Box::new(Expression::Identifier { name: var_name });
+            let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
             let update = Statement::ExpressionStatement {
                 expression: if descending {
                     Expression::DecrementExpr { operand: update_operand, prefix: false }
@@ -1099,9 +1099,9 @@ impl RustDslParser {
 
     fn convert_self_access(&self, expr: Expression) -> Expression {
         if let Expression::MemberExpr { ref object, ref property } = expr {
-            if let Expression::Identifier { ref name } = **object {
+            if let Expression::Identifier { ref name, .. } = **object {
                 if name == "self" {
-                    return Expression::PropertyAccess { property: snake_to_camel(property) };
+                    return Expression::PropertyAccess { property: snake_to_camel(property), source_location: None };
                 }
             }
         }
@@ -1339,9 +1339,9 @@ impl RustDslParser {
                     "unknown".to_string()
                 };
                 // self.field -> PropertyAccess
-                if let Expression::Identifier { ref name } = expr {
+                if let Expression::Identifier { ref name, .. } = expr {
                     if name == "self" {
-                        expr = Expression::PropertyAccess { property: prop };
+                        expr = Expression::PropertyAccess { property: prop, source_location: None };
                         dt = DepthTracker::new();
                         continue;
                     }
@@ -1352,7 +1352,7 @@ impl RustDslParser {
                 self.advance_clone();
                 if let TokenType::Ident(name) = self.current().typ.clone() {
                     self.advance_clone();
-                    expr = Expression::Identifier { name: snake_to_camel(&name) };
+                    expr = Expression::Identifier { name: snake_to_camel(&name), source_location: None };
                     dt = DepthTracker::new();
                 }
             } else if matches!(self.current().typ, TokenType::LBracket) {
@@ -1393,7 +1393,7 @@ impl RustDslParser {
             TokenType::False => { self.advance_clone(); Expression::BoolLiteral { value: false } }
             TokenType::Self_ => {
                 self.advance_clone();
-                Expression::Identifier { name: "self".to_string() }
+                Expression::Identifier { name: "self".to_string(), source_location: None }
             }
             TokenType::LParen => {
                 self.advance_clone();
@@ -1422,7 +1422,7 @@ impl RustDslParser {
             TokenType::Ident(name) => {
                 self.advance_clone();
                 let mapped = map_rust_builtin(&name);
-                Expression::Identifier { name: mapped }
+                Expression::Identifier { name: mapped, source_location: None }
             }
             _ => {
                 let tok = self.current().clone();
@@ -1430,7 +1430,7 @@ impl RustDslParser {
                 self.errors.push(Diagnostic::error(format!(
                     "unsupported token '{:?}' at {}:{} — not valid in Rúnar contract",
                     tok.typ, tok.line, tok.col.saturating_sub(1)), None));
-                Expression::Identifier { name: "unknown".to_string() }
+                Expression::Identifier { name: "unknown".to_string(), source_location: None }
             }
         }
     }
@@ -1859,7 +1859,7 @@ impl Test {
         // Should be assert(self.x === v)
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
             if let Expression::CallExpr { callee, args, .. } = expression {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }
                 if let Expression::BinaryExpr { op, .. } = &args[0] {

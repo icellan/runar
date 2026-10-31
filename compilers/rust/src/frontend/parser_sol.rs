@@ -642,10 +642,11 @@ impl<'a> SolParser<'a> {
                 expression: Expression::CallExpr {
                     callee: Box::new(Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }),
                     args: uninit
                         .iter()
-                        .map(|p| Expression::Identifier { name: p.name.clone() })
+                        .map(|p| Expression::Identifier { name: p.name.clone(), source_location: None })
                         .collect(),
                     asm_return_type: None,
                 },
@@ -655,8 +656,9 @@ impl<'a> SolParser<'a> {
                 body.push(Statement::Assignment {
                     target: Expression::PropertyAccess {
                         property: p.name.clone(),
+                        source_location: None,
                     },
-                    value: Expression::Identifier { name: p.name.clone() },
+                    value: Expression::Identifier { name: p.name.clone(), source_location: None },
                     source_location: loc.clone(),
                 });
             }
@@ -873,9 +875,11 @@ impl<'a> SolParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args: params.iter().map(|p| Expression::Identifier {
                     name: p.name.clone(),
+                    source_location: None,
                 }).collect(),
                 asm_return_type: None,
             },
@@ -1284,6 +1288,7 @@ impl<'a> SolParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1743,8 +1748,8 @@ impl<'a> SolParser<'a> {
                 Token::Dot => {
                     self.advance();
                     let prop = self.expect_ident();
-                    if matches!(&expr, Expression::Identifier { name } if name == "this") {
-                        expr = Expression::PropertyAccess { property: prop };
+                    if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
+                        expr = Expression::PropertyAccess { property: prop, source_location: None };
                         dt = DepthTracker::new();
                     } else {
                         if !self.grow(&mut dt, &expr, &[]) { break; }
@@ -1818,13 +1823,15 @@ impl<'a> SolParser<'a> {
                 if name == "this" {
                     Expression::Identifier {
                         name: "this".to_string(),
+                        source_location: None,
                     }
                 } else if name == "super" {
                     Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }
                 } else {
-                    Expression::Identifier { name }
+                    Expression::Identifier { name, source_location: None }
                 }
             }
             Token::Require => {
@@ -1835,6 +1842,7 @@ impl<'a> SolParser<'a> {
                 Expression::CallExpr {
                     callee: Box::new(Expression::Identifier {
                         name: "assert".to_string(),
+                        source_location: None,
                     }),
                     args: vec![arg],
                     asm_return_type: None,
@@ -1951,13 +1959,14 @@ fn sol_rename_identifiers_in_expr(
     rename_map: &std::collections::HashMap<String, String>,
 ) -> Expression {
     match expr {
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             if let Some(new_name) = rename_map.get(&name) {
                 Expression::Identifier {
                     name: new_name.clone(),
+                    source_location: None,
                 }
             } else {
-                Expression::Identifier { name }
+                Expression::Identifier { name, source_location: None }
             }
         }
         Expression::CallExpr { callee, args, .. } => Expression::CallExpr {
@@ -2011,11 +2020,12 @@ fn sol_fix_property_assignment(
         source_location,
     } = stmt
     {
-        if let Expression::Identifier { ref name } = target {
+        if let Expression::Identifier { ref name, .. } = target {
             if prop_names.contains(name) {
                 return Statement::Assignment {
                     target: Expression::PropertyAccess {
                         property: name.clone(),
+                        source_location: None,
                     },
                     value,
                     source_location,
@@ -2043,15 +2053,15 @@ fn sol_rewrite_expr_bare_props(
     method_names: &std::collections::HashSet<String>,
 ) -> Expression {
     match expr {
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             if prop_names.contains(&name) && !locals.contains(&name) {
-                Expression::PropertyAccess { property: name }
+                Expression::PropertyAccess { property: name, source_location: None }
             } else {
-                Expression::Identifier { name }
+                Expression::Identifier { name, source_location: None }
             }
         }
         Expression::CallExpr { callee, args, .. } => {
-            if let Expression::Identifier { ref name } = *callee {
+            if let Expression::Identifier { ref name, .. } = *callee {
                 if method_names.contains(name) && !locals.contains(name) && !prop_names.contains(name) {
                     let new_args: Vec<Expression> = args
                         .into_iter()
@@ -2061,6 +2071,7 @@ fn sol_rewrite_expr_bare_props(
                         callee: Box::new(Expression::MemberExpr {
                             object: Box::new(Expression::Identifier {
                                 name: "this".to_string(),
+                                source_location: None,
                             }),
                             property: name.clone(),
                         }),

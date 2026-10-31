@@ -1760,7 +1760,7 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		if name == "false" {
 			return BoolLiteral{Value: false}
 		}
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: p.loc(node)}
 
 	case "number":
 		text := p.nodeText(node)
@@ -1810,10 +1810,10 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		return p.parseParenExpression(node)
 
 	case "this":
-		return Identifier{Name: "this"}
+		return Identifier{Name: "this", SourceLocation: p.loc(node)}
 
 	case "super":
-		return Identifier{Name: "super"}
+		return Identifier{Name: "super", SourceLocation: p.loc(node)}
 
 	case "as_expression":
 		// Type assertion: ignore type, parse expression -- except that an
@@ -2485,7 +2485,7 @@ func (p *parseContext) parseMemberExpression(node *sitter.Node) Expression {
 
 	// this.x -> PropertyAccessExpr
 	if objNode.Type() == "this" {
-		return PropertyAccessExpr{Property: propName}
+		return PropertyAccessExpr{Property: propName, SourceLocation: p.loc(objNode)}
 	}
 
 	object := p.parseExpression(objNode)

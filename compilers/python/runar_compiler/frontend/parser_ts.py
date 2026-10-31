@@ -1544,7 +1544,7 @@ class _TsParser:
                     if isinstance(expr, Identifier) and expr.name == "this":
                         expr = CallExpr(
                             callee=MemberExpr(
-                                object=Identifier(name="this"),
+                                object=Identifier(name="this", source_location=expr.source_location),
                                 property=prop_name,
                             ),
                             args=args,
@@ -1556,7 +1556,7 @@ class _TsParser:
                         )
                 else:
                     if isinstance(expr, Identifier) and expr.name == "this":
-                        expr = PropertyAccessExpr(property=prop_name)
+                        expr = PropertyAccessExpr(property=prop_name, source_location=expr.source_location)
                     else:
                         expr = MemberExpr(object=expr, property=prop_name)
 
@@ -1626,6 +1626,7 @@ class _TsParser:
 
         # Identifier, keyword, or call
         if tok.kind == TOK_IDENT:
+            ident_loc = self.loc()
             self.advance()
             name = tok.value
 
@@ -1634,9 +1635,9 @@ class _TsParser:
             if name == "false":
                 return BoolLiteral(value=False)
             if name == "this":
-                return Identifier(name="this")
+                return Identifier(name="this", source_location=ident_loc)
             if name == "super":
-                return Identifier(name="super")
+                return Identifier(name="super", source_location=ident_loc)
 
             # asm({ body, in_arity?, out_arity? }) compiler intrinsic.
             # Normalise into a CallExpr with three positional args so
@@ -1651,9 +1652,9 @@ class _TsParser:
             # Function call: name(...)
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
-                return CallExpr(callee=Identifier(name=name), args=args)
+                return CallExpr(callee=Identifier(name=name, source_location=ident_loc), args=args)
 
-            return Identifier(name=name)
+            return Identifier(name=name, source_location=ident_loc)
 
         # Parenthesized expression
         if tok.kind == TOK_LPAREN:

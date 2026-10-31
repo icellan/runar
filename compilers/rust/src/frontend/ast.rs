@@ -331,6 +331,10 @@ pub enum Expression {
     },
     Identifier {
         name: String,
+        /// The identifier's token (N-463). Only the `.runar.ts` parser sets
+        /// it, as the TS reference does; elsewhere it is `None`. The type
+        /// checker derives a composite expression's position from it.
+        source_location: Option<SourceLocation>,
     },
     BigIntLiteral {
         /// Arbitrary-precision integer literal.
@@ -359,6 +363,8 @@ pub enum Expression {
     },
     PropertyAccess {
         property: String, // this.x -> property = "x"
+        /// The `this` token (N-463); `.runar.ts` parser only.
+        source_location: Option<SourceLocation>,
     },
     IndexAccess {
         object: Box<Expression>,

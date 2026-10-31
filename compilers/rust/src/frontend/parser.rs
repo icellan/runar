@@ -1368,6 +1368,7 @@ fn parse_assign_target(
         AssignTarget::Simple(simple) => match simple {
             SimpleAssignTarget::Ident(ident) => Expression::Identifier {
                 name: ident.id.sym.to_string(),
+                source_location: None,
             },
             SimpleAssignTarget::Member(member) => {
                 parse_member_expression(member, file, errors, cm)
@@ -1376,6 +1377,7 @@ fn parse_assign_target(
                 errors.push(Diagnostic::error("Unsupported assignment target", None));
                 Expression::Identifier {
                     name: "_error".to_string(),
+                    source_location: None,
                 }
             }
         },
@@ -1383,6 +1385,7 @@ fn parse_assign_target(
             errors.push(Diagnostic::error("Destructuring assignment is not supported", None));
             Expression::Identifier {
                 name: "_error".to_string(),
+                source_location: None,
             }
         }
     }
@@ -1573,6 +1576,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>, cm: &
                 SuperProp::Ident(ident) => Expression::MemberExpr {
                     object: Box::new(Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }),
                     property: ident.sym.to_string(),
                 },
@@ -1581,6 +1585,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>, cm: &
                     errors.push(Diagnostic::error("Computed super property access not supported", None));
                     Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }
                 }
             }
@@ -1588,6 +1593,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>, cm: &
 
         Expr::Ident(ident) => Expression::Identifier {
             name: ident.sym.to_string(),
+            source_location: Some(real_loc(cm, file, ident.span.lo)),
         },
 
         Expr::Lit(Lit::BigInt(bigint)) => {
@@ -1650,8 +1656,9 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>, cm: &
 
         Expr::Paren(paren) => parse_expression(&paren.expr, file, errors, cm),
 
-        Expr::This(_) => Expression::Identifier {
+        Expr::This(this) => Expression::Identifier {
             name: "this".to_string(),
+            source_location: Some(real_loc(cm, file, this.span.lo)),
         },
 
         Expr::TsAs(as_expr) => {
@@ -1839,11 +1846,13 @@ fn parse_call_expression(
         Callee::Expr(e) => parse_expression(e, file, errors, cm),
         Callee::Super(_) => Expression::Identifier {
             name: "super".to_string(),
+            source_location: None,
         },
         Callee::Import(_) => {
             errors.push(Diagnostic::error("Dynamic import is not supported", None));
             Expression::Identifier {
                 name: "_error".to_string(),
+                source_location: None,
             }
         }
     };
@@ -1882,6 +1891,7 @@ fn parse_call_expression(
 fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> Expression {
     let callee = Box::new(Expression::Identifier {
         name: "asm".to_string(),
+        source_location: None,
     });
 
     // Capture the generic type argument asm<T>({...}) if present, BEFORE
@@ -2348,9 +2358,10 @@ fn parse_member_expression(
     };
 
     // this.x -> PropertyAccess
-    if let Expr::This(_) = &*member.obj {
+    if let Expr::This(this) = &*member.obj {
         return Expression::PropertyAccess {
             property: prop_name,
+            source_location: Some(real_loc(cm, file, this.span.lo)),
         };
     }
 

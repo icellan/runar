@@ -397,6 +397,44 @@ public final class Typecheck {
             errors.add(format(msg, loc));
         }
 
+        /**
+         * N-463: an error about an expression is anchored at that expression,
+         * as in TS, when its position is known (the {@code .runar.ts} parser
+         * records it); otherwise at the statement, then the method, as
+         * {@link #error(String)} does.
+         */
+        void errorAt(String msg, Expression at) {
+            SourceLocation loc = at == null ? null : exprLoc(at);
+            if (loc == null) {
+                error(msg);
+            } else {
+                errors.add(format(msg, loc));
+            }
+        }
+
+        /**
+         * N-463: the position of {@code e}'s first token, or null when unknown.
+         * Only identifiers ({@code this} included), {@code this.x} and
+         * ByteString literals record a position, and only on
+         * {@code .runar.ts}. A composite expression starts where its leftmost
+         * child starts, which is the position TS reports for it (a
+         * parenthesised leftmost child is the exception: TS points at the
+         * {@code (}).
+         */
+        static SourceLocation exprLoc(Expression e) {
+            while (true) {
+                if (e instanceof Identifier id) return id.sourceLocation();
+                if (e instanceof PropertyAccessExpr pa) return pa.sourceLocation();
+                if (e instanceof ByteStringLiteral bs) return bs.sourceLocation();
+                if (e instanceof BinaryExpr be) e = be.left();
+                else if (e instanceof CallExpr ce) e = ce.callee();
+                else if (e instanceof MemberExpr me) e = me.object();
+                else if (e instanceof IndexAccessExpr ie) e = ie.object();
+                else if (e instanceof TernaryExpr te) e = te.condition();
+                else return null;
+            }
+        }
+
         /** N-321: cap on a typecheck message; mirrored in every tier. */
         static final int MAX_DIAGNOSTIC_CHARS = 1024;
 
@@ -780,8 +818,9 @@ public final class Typecheck {
                     if (isSubtype(alt, cons)) return cons;
                     if (isSubtype(cons, alt)) return alt;
                     if (!"<unknown>".equals(cons) && !"<unknown>".equals(alt)) {
-                        error(
-                            "ternary branches have incompatible types: '" + cons + "' vs '" + alt + "'"
+                        errorAt(
+                            "ternary branches have incompatible types: '" + cons + "' vs '" + alt + "'",
+                            te
                         );
                     }
                 }
@@ -848,19 +887,19 @@ public final class Typecheck {
             switch (op) {
                 case ADD, SUB, MUL, DIV, MOD -> {
                     if (!isBigintFamily(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
+                        errorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
+                        errorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "bigint";
                 }
                 case LT, LE, GT, GE -> {
                     if (!isBigintFamily(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
+                        errorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
+                        errorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "boolean";
                 }
@@ -888,25 +927,27 @@ public final class Typecheck {
                 }
                 case SHL, SHR -> {
                     if (!isBigintFamily(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
+                        errorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
+                        errorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "bigint";
                 }
                 case BIT_AND, BIT_OR, BIT_XOR -> {
                     if (isByteFamily(lt) && isByteFamily(rt)) return "ByteString";
                     if (!isBigintFamily(lt)) {
-                        error(
+                        errorAt(
                             "left operand of '" + op.canonical()
-                                + "' must be bigint or ByteString, got '" + lt + "'"
+                                + "' must be bigint or ByteString, got '" + lt + "'",
+                            e.left()
                         );
                     }
                     if (!isBigintFamily(rt)) {
-                        error(
+                        errorAt(
                             "right operand of '" + op.canonical()
-                                + "' must be bigint or ByteString, got '" + rt + "'"
+                                + "' must be bigint or ByteString, got '" + rt + "'",
+                            e.right()
                         );
                     }
                     return "bigint";
@@ -1073,7 +1114,7 @@ public final class Typecheck {
         private void checkSatoshisArg(String prop, Expression arg, Env env) {
             String t = inferExpr(arg, env);
             if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
-                error(prop + "() first argument (satoshis) must be bigint, got '" + t + "'");
+                errorAt(prop + "() first argument (satoshis) must be bigint, got '" + t + "'", arg);
             }
         }
 
@@ -1526,7 +1567,7 @@ public final class Typecheck {
                 else label = origin;
 
                 if (Boolean.TRUE.equals(consumed.get(origin)) || consumedPerLoopIteration(origin, env)) {
-                    error("affine value '" + label + "' has already been consumed");
+                    errorAt("affine value '" + label + "' has already been consumed", arg);
                 } else {
                     consumed.put(origin, true);
                 }
@@ -1535,7 +1576,10 @@ public final class Typecheck {
             // N-288: the call also consumes every property the method consumes.
             for (String origin : consumedProps) {
                 if (Boolean.TRUE.equals(consumed.get(origin)) || consumedPerLoopIteration(origin, env)) {
-                    error("affine value 'this." + origin.substring("prop:".length()) + "' has already been consumed");
+                    errorAt(
+                        "affine value 'this." + origin.substring("prop:".length()) + "' has already been consumed",
+                        args.isEmpty() ? null : args.get(0)
+                    );
                 } else {
                     consumed.put(origin, true);
                 }

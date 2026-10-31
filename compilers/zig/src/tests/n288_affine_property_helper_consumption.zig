@@ -105,10 +105,8 @@ test "N-288: the helper summary frees the property keys it records" {
     ;
     const parsed = parse_ts.parseTs(arena.allocator(), src, "N288.runar.ts");
     const result = try typecheck.typeCheck(a, parsed.contract orelse return error.TestFixtureDidNotParse);
-    defer {
-        for (result.errors) |msg| a.free(msg);
-        a.free(result.errors);
-    }
+    // N-463: the result also owns `error_locations`; deinit frees it all.
+    defer result.deinit(a);
     var found = false;
     for (result.errors) |msg| {
         if (std.mem.indexOf(u8, msg, DOUBLE) != null) found = true;

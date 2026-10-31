@@ -549,7 +549,7 @@ impl<'a> ExpandContext<'a> {
         };
 
         // Statement-form dispatch for `const v = self.board[idx]`.
-        let target_expr = Expression::Identifier { name: name.clone() };
+        let target_expr = Expression::Identifier { name: name.clone(), source_location: None };
         if let Some(stmt_form) = self.try_rewrite_read_as_statements(&init, &target_expr, &loc) {
             let mut out: Vec<Statement> = Vec::new();
             out.extend(stmt_form.prelude);
@@ -603,7 +603,7 @@ impl<'a> ExpandContext<'a> {
                     let rewritten_value = self.rewrite_expression(&value, &mut prelude);
                     let mut out = prelude;
                     out.push(Statement::Assignment {
-                        target: Expression::PropertyAccess { property: name },
+                        target: Expression::PropertyAccess { property: name, source_location: None },
                         value: rewritten_value,
                         source_location: loc,
                     });
@@ -612,7 +612,7 @@ impl<'a> ExpandContext<'a> {
                 ChainResolve::None => {}
             }
 
-            if let Expression::PropertyAccess { property } = object.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = object.as_ref() {
                 if self.array_map.contains_key(property) {
                     return self.rewrite_array_write(
                         property.clone(),
@@ -1076,7 +1076,7 @@ impl<'a> ExpandContext<'a> {
             ChainResolve::Error => return Expression::BigIntLiteral { value: BigInt::from(0) },
             ChainResolve::Leaf(name) => {
                 self.order_read = true;
-                return Expression::PropertyAccess { property: name };
+                return Expression::PropertyAccess { property: name, source_location: None };
             }
             ChainResolve::None => {}
         }
@@ -1146,7 +1146,7 @@ impl<'a> ExpandContext<'a> {
                 return Expression::BigIntLiteral { value: BigInt::from(0) };
             }
             let slot = meta.slot_names[literal as usize].clone();
-            return Expression::PropertyAccess { property: slot };
+            return Expression::PropertyAccess { property: slot, source_location: None };
         }
 
         // Runtime index — rewrite sub-expressions, hoist if impure, build
@@ -1196,6 +1196,7 @@ impl<'a> ExpandContext<'a> {
         if n < 2 {
             let fallback_init = Expression::PropertyAccess {
                 property: meta.slot_names[0].clone(),
+                source_location: None,
             };
             return Some(StmtForm {
                 prelude,
@@ -1206,6 +1207,7 @@ impl<'a> ExpandContext<'a> {
 
         let fallback_init = Expression::PropertyAccess {
             property: meta.slot_names[n - 1].clone(),
+            source_location: None,
         };
 
         let mut tail_else: Option<Vec<Statement>> = None;
@@ -1221,6 +1223,7 @@ impl<'a> ExpandContext<'a> {
                 target: target.clone(),
                 value: Expression::PropertyAccess {
                     property: slot.clone(),
+                    source_location: None,
                 },
                 source_location: loc.clone(),
             };
@@ -1248,6 +1251,7 @@ impl<'a> ExpandContext<'a> {
     ) -> Expression {
         let mut chain = Expression::PropertyAccess {
             property: meta.slot_names[meta.length - 1].clone(),
+            source_location: None,
         };
         let mut i = (meta.length - 1) as isize - 1;
         while i >= 0 {
@@ -1259,6 +1263,7 @@ impl<'a> ExpandContext<'a> {
             };
             let branch = Expression::PropertyAccess {
                 property: slot.clone(),
+                source_location: None,
             };
             let ternary = Expression::TernaryExpr {
                 condition: Box::new(cond),
@@ -1315,7 +1320,7 @@ impl<'a> ExpandContext<'a> {
             let slot = meta.slot_names[literal as usize].clone();
             let mut out = prelude;
             out.push(Statement::Assignment {
-                target: Expression::PropertyAccess { property: slot },
+                target: Expression::PropertyAccess { property: slot, source_location: None },
                 value: rewritten_value,
                 source_location: loc,
             });
@@ -1356,6 +1361,7 @@ impl<'a> ExpandContext<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![Expression::BoolLiteral { value: false }],
                 asm_return_type: None,
@@ -1374,6 +1380,7 @@ impl<'a> ExpandContext<'a> {
             let branch_assign = Statement::Assignment {
                 target: Expression::PropertyAccess {
                     property: slot.clone(),
+                    source_location: None,
                 },
                 value: value_ref.clone(),
                 source_location: loc.clone(),
@@ -1413,7 +1420,7 @@ impl<'a> ExpandContext<'a> {
             }
         }
         let root_name = match cursor {
-            Expression::PropertyAccess { property } => property.clone(),
+            Expression::PropertyAccess { property, .. } => property.clone(),
             _ => return ChainResolve::None,
         };
         let root_meta = match self.array_map.get(&root_name).cloned() {
@@ -1457,7 +1464,7 @@ impl<'a> ExpandContext<'a> {
     /// or synthetic-intermediate array property, return the base name.
     fn try_resolve_array_base(&self, obj: &Expression) -> Option<String> {
         match obj {
-            Expression::PropertyAccess { property }
+            Expression::PropertyAccess { property, .. }
                 if self.array_map.contains_key(property)
                     || self.synthetic_arrays.contains_key(property) =>
             {
@@ -1491,7 +1498,7 @@ impl<'a> ExpandContext<'a> {
             source_location: loc,
         };
         prelude.push(decl);
-        Expression::Identifier { name }
+        Expression::Identifier { name, source_location: None }
     }
 }
 
@@ -1812,7 +1819,7 @@ class Init extends StatefulSmartContract {
         });
         let target = assign.expect("assignment");
         match target {
-            Expression::PropertyAccess { property } => assert_eq!(property, "board__0"),
+            Expression::PropertyAccess { property, .. } => assert_eq!(property, "board__0"),
             _ => panic!("expected property_access"),
         }
     }
@@ -1879,7 +1886,7 @@ class R extends StatefulSmartContract {
             Statement::VariableDecl { name, init, .. } => {
                 assert_eq!(name, "v");
                 match init {
-                    Expression::PropertyAccess { property } => assert_eq!(property, "board__2"),
+                    Expression::PropertyAccess { property, .. } => assert_eq!(property, "board__2"),
                     _ => panic!("expected fallback property access"),
                 }
             }

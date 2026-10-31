@@ -113,11 +113,11 @@ fn constructor_assigned_properties(contract: &ContractNode) -> HashSet<String> {
         let Statement::Assignment { target, value, .. } = stmt else {
             continue;
         };
-        let Expression::PropertyAccess { property } = target else {
+        let Expression::PropertyAccess { property, .. } = target else {
             continue;
         };
         match value {
-            Expression::Identifier { name } if params.contains(name.as_str()) => {
+            Expression::Identifier { name, .. } if params.contains(name.as_str()) => {
                 prop_to_params
                     .entry(property.clone())
                     .or_default()
@@ -1496,7 +1496,7 @@ fn statement_reassigns(stmt: &Statement, name: &str) -> bool {
     match stmt {
         Statement::VariableDecl { init, .. } => expression_reassigns(init, name),
         Statement::Assignment { target, value, .. } => {
-            matches!(target, Expression::Identifier { name: n } if n == name)
+            matches!(target, Expression::Identifier { name: n, .. } if n == name)
                 || expression_reassigns(target, name)
                 || expression_reassigns(value, name)
         }
@@ -1554,7 +1554,7 @@ fn expression_reassigns(expr: &Expression, name: &str) -> bool {
             expression_reassigns(object, name) || expression_reassigns(index, name)
         }
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            matches!(operand.as_ref(), Expression::Identifier { name: n } if n == name)
+            matches!(operand.as_ref(), Expression::Identifier { name: n, .. } if n == name)
                 || expression_reassigns(operand, name)
         }
         Expression::ArrayLiteral { elements } => elements.iter().any(|e| expression_reassigns(e, name)),
@@ -1565,7 +1565,7 @@ fn expression_reassigns(expr: &Expression, name: &str) -> bool {
 /// Collect every identifier an expression reads.
 fn collect_expression_reads(expr: &Expression, out: &mut HashSet<String>) {
     match expr {
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             out.insert(name.clone());
         }
         Expression::BinaryExpr { left, right, .. } => {
@@ -1756,7 +1756,7 @@ fn lower_assignment(target: &Expression, value: &Expression, ctx: &mut LoweringC
     let value_ref = lower_expr_to_ref(value, ctx);
 
     // this.x = expr -> update_prop
-    if let Expression::PropertyAccess { property } = target {
+    if let Expression::PropertyAccess { property, .. } = target {
         ctx.emit(ANFValue::UpdateProp {
             name: property.clone(),
             value: value_ref,
@@ -1765,7 +1765,7 @@ fn lower_assignment(target: &Expression, value: &Expression, ctx: &mut LoweringC
     }
 
     // local = expr -> re-bind (emit a new named binding with @ref)
-    if let Expression::Identifier { name } = target {
+    if let Expression::Identifier { name, .. } = target {
         let binding_name = ctx.local_target(name);
         ctx.emit_named(
             &binding_name,
@@ -2364,7 +2364,7 @@ fn extract_loop_shape(
     let left_is_iter = matches!(
         condition,
         Expression::BinaryExpr { left, .. }
-            if matches!(left.as_ref(), Expression::Identifier { name } if name == iter_name)
+            if matches!(left.as_ref(), Expression::Identifier { name, .. } if name == iter_name)
     );
     if !left_is_iter {
         panic!(
@@ -2491,9 +2491,9 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             value: serde_json::Value::String(value.clone()),
         }),
 
-        Expression::Identifier { name } => lower_identifier(name, ctx),
+        Expression::Identifier { name, .. } => lower_identifier(name, ctx),
 
-        Expression::PropertyAccess { property } => {
+        Expression::PropertyAccess { property, .. } => {
             // Explicit `this.x`: a real contract property always wins, even when
             // a method param shares the name (issue #130). Now that declared
             // params are registered, the is_param branch below must not shadow a
@@ -2627,7 +2627,7 @@ fn lower_member_expr(
     ctx: &mut LoweringContext,
 ) -> String {
     // this.x -> load_prop (or load_param for implicit params like txPreimage)
-    if let Expression::Identifier { name } = object {
+    if let Expression::Identifier { name, .. } = object {
         if name == "this" {
             // Explicit `this.x`: a real contract property always wins, even
             // when a method param shares the name (issue #130). Only fall
@@ -2652,7 +2652,7 @@ fn lower_member_expr(
     }
 
     // SigHash.ALL etc. -> load constant
-    if let Expression::Identifier { name } = object {
+    if let Expression::Identifier { name, .. } = object {
         if name == "SigHash" {
             // R-190: the match used to close with `_ => 0`, so `SigHash.All`
             // — the real member in the wrong case — lowered to `load_const 0`.
@@ -2805,7 +2805,7 @@ fn lower_call_expr(
     // production; it stays an identity-cast call node (the typechecker types it
     // ByteString -> ByteString and stack lowering already treats it as a no-op),
     // so its behaviour is unchanged.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "toByteString" && args.len() == 1 {
             if let Expression::ByteStringLiteral { .. } = &args[0] {
                 return lower_expr_to_ref(&args[0], ctx);
@@ -2814,7 +2814,7 @@ fn lower_call_expr(
     }
 
     // super(...) call
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "super" {
             let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             return ctx.emit(ANFValue::Call {
@@ -2825,7 +2825,7 @@ fn lower_call_expr(
     }
 
     // assert(expr) -> assert value
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "assert" {
             if !args.is_empty() {
                 let value_ref = lower_expr_to_ref(&args[0], ctx);
@@ -2839,7 +2839,7 @@ fn lower_call_expr(
     }
 
     // checkPreimage(preimage) -> special node
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "checkPreimage" {
             if !args.is_empty() {
                 let preimage_ref = lower_expr_to_ref(&args[0], ctx);
@@ -2867,7 +2867,7 @@ fn lower_call_expr(
     //   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
     //   pushdata tail free to vary. Required for intent-template matching
     //   (BSVM Mode 3 permissionless step-in).
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "extractPrevOutputScript" {
             if args.len() != 2 && args.len() != 3 {
                 return ctx.emit(ANFValue::LoadConst {
@@ -2963,7 +2963,7 @@ fn lower_call_expr(
     // v1 assumes all outputs in the serialised set are exactly 34 bytes
     // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
     // of output i is i*34.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "requireOutputP2PKH" {
             if args.len() != 3 {
                 return ctx.emit(ANFValue::LoadConst {
@@ -3098,7 +3098,7 @@ fn lower_call_expr(
     // StatefulSmartContract method that continues through the default
     // single-output continuation; anywhere else (private helpers, terminal
     // methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "continuationAmount" {
             if !ctx.is_param("_newAmount") {
                 panic!("{}", CONTINUATION_AMOUNT_UNAVAILABLE);
@@ -3112,7 +3112,7 @@ fn lower_call_expr(
     // currentBlockHeight() -> bigint. Pure source-level desugar to
     // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
     // methods (typecheck enforces). No new ANF kind or stack codegen needed.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "currentBlockHeight" {
             let preimage_ref = ctx.emit(ANFValue::LoadParam {
                 name: "txPreimage".to_string(),
@@ -3129,7 +3129,7 @@ fn lower_call_expr(
     // called as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface
     // form Zig / Move tuple syntax produce), unwrap the trailing array
     // literal so each element becomes an individual state value.
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "addOutput" {
             let flat_args = flatten_add_output_args(args);
             let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -3142,7 +3142,7 @@ fn lower_call_expr(
     }
     // this.addOutput(satoshis, val1, val2, ...) -> special node (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "addOutput" {
                 let flat_args = flatten_add_output_args(args);
                 let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -3156,7 +3156,7 @@ fn lower_call_expr(
     }
 
     // this.addRawOutput(satoshis, scriptBytes) -> special node (via PropertyAccess)
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "addRawOutput" {
             let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -3168,7 +3168,7 @@ fn lower_call_expr(
     }
     // this.addRawOutput(satoshis, scriptBytes) -> special node (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "addRawOutput" {
                 let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
                 let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -3184,7 +3184,7 @@ fn lower_call_expr(
     // Same wire shape as addRawOutput, but tracked separately so that the
     // continuation-hash composition can place data outputs AFTER state outputs
     // and BEFORE the change output.
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "addDataOutput" {
             let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -3196,7 +3196,7 @@ fn lower_call_expr(
     }
     // this.addDataOutput(satoshis, scriptBytes) -> special node (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "addDataOutput" {
                 let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
                 let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -3209,14 +3209,14 @@ fn lower_call_expr(
     }
 
     // this.getStateScript() -> special node (via PropertyAccess)
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "getStateScript" {
             return ctx.emit(ANFValue::GetStateScript {});
         }
     }
     // this.getStateScript() -> special node (via MemberExpr)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "getStateScript" {
                 return ctx.emit(ANFValue::GetStateScript {});
             }
@@ -3226,7 +3226,7 @@ fn lower_call_expr(
     // this.method(...) -> method_call (via PropertyAccess), or inlined
     // if the target is a private method with continuation-relevant
     // side effects.
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
         ctx.check_private_call_arity(property, &arg_refs);
         if ctx.should_inline_private(property) {
@@ -3244,7 +3244,7 @@ fn lower_call_expr(
 
     // this.method(...) -> method_call (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" {
                 let arg_refs: Vec<String> =
                     args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -3270,7 +3270,7 @@ fn lower_call_expr(
     // binding; the hex body passes through unchanged. Diagnostics for
     // malformed args were already pushed by the validator — here we
     // defensively coerce missing values to safe defaults.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "asm" {
             let mut bytes = String::new();
             let mut in_arity: usize = 0;
@@ -3293,7 +3293,7 @@ fn lower_call_expr(
     }
 
     // Direct function call: sha256(x), checkSig(sig, pk), etc.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
         // Bare identifier calls that match a private method on the contract
         // (e.g. Move's `require_owner(contract, sig)` which the parser strips
@@ -3429,7 +3429,7 @@ fn lower_increment_expr(
     });
 
     // If the operand is a named variable, update it
-    if let Expression::Identifier { name } = operand {
+    if let Expression::Identifier { name, .. } = operand {
         let binding_name = ctx.local_target(name);
         ctx.emit_named(
             &binding_name,
@@ -3438,7 +3438,7 @@ fn lower_increment_expr(
             },
         );
     }
-    if let Expression::PropertyAccess { property } = operand {
+    if let Expression::PropertyAccess { property, .. } = operand {
         ctx.emit(ANFValue::UpdateProp {
             name: property.clone(),
             value: result.clone(),
@@ -3469,7 +3469,7 @@ fn lower_decrement_expr(
     });
 
     // If the operand is a named variable, update it
-    if let Expression::Identifier { name } = operand {
+    if let Expression::Identifier { name, .. } = operand {
         let binding_name = ctx.local_target(name);
         ctx.emit_named(
             &binding_name,
@@ -3478,7 +3478,7 @@ fn lower_decrement_expr(
             },
         );
     }
-    if let Expression::PropertyAccess { property } = operand {
+    if let Expression::PropertyAccess { property, .. } = operand {
         ctx.emit(ANFValue::UpdateProp {
             name: property.clone(),
             value: result.clone(),
@@ -3517,7 +3517,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
     match expr {
         Expression::ByteStringLiteral { .. } => true,
 
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             // N-046 / N-047: a renamed (shadowing) declaration is judged by its
             // own binding, never by the parameter or property it shadows.
             if let Some(renamed) = ctx.scope_renames.get(name.as_str()) {
@@ -3540,7 +3540,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
             false
         }
 
-        Expression::PropertyAccess { property } => {
+        Expression::PropertyAccess { property, .. } => {
             if let Some(t) = get_property_type(property, ctx) {
                 if is_byte_type(&t) {
                     return true;
@@ -3550,7 +3550,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
         }
 
         Expression::MemberExpr { object, property } => {
-            if let Expression::Identifier { name } = object.as_ref() {
+            if let Expression::Identifier { name, .. } = object.as_ref() {
                 if name == "this" {
                     if let Some(t) = get_property_type(property, ctx) {
                         if is_byte_type(&t) {
@@ -3567,7 +3567,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
             asm_return_type,
             ..
         } => {
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 // Expression-form asm<ByteString>({...}) yields a byte value.
                 if name == "asm" {
                     return asm_return_type.as_deref() == Some("ByteString");

@@ -569,6 +569,57 @@ func (tc *typeChecker) addError(msg string) {
 	tc.errors = append(tc.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: loc})
 }
 
+// addErrorAt anchors an error about an expression at that expression, as the
+// TS reference does, when its position is known (the .runar.ts parser records
+// it, N-463); otherwise it falls back to addError's statement/method anchor.
+func (tc *typeChecker) addErrorAt(msg string, at Expression) {
+	if loc := exprLoc(at); loc != nil {
+		tc.addErrorWithLoc(msg, loc)
+		return
+	}
+	tc.addError(msg)
+}
+
+// exprLoc is the position of e's first token, or nil when unknown (N-463).
+// Only identifiers (`this` included), `this.x` and ByteString literals record
+// a position, and only on .runar.ts. A composite expression starts where its
+// leftmost child starts, which is the position TS reports for it (a
+// parenthesised leftmost child is the exception: TS points at the `(`).
+func exprLoc(e Expression) *SourceLocation {
+	for {
+		var loc SourceLocation
+		switch x := e.(type) {
+		case Identifier:
+			loc = x.SourceLocation
+		case PropertyAccessExpr:
+			loc = x.SourceLocation
+		case ByteStringLiteral:
+			loc = x.SourceLocation
+		case BinaryExpr:
+			e = x.Left
+			continue
+		case CallExpr:
+			e = x.Callee
+			continue
+		case MemberExpr:
+			e = x.Object
+			continue
+		case IndexAccessExpr:
+			e = x.Object
+			continue
+		case TernaryExpr:
+			e = x.Condition
+			continue
+		default:
+			return nil
+		}
+		if loc.Line == 0 {
+			return nil
+		}
+		return &loc
+	}
+}
+
 func (tc *typeChecker) addErrorWithLoc(msg string, loc *SourceLocation) {
 	msg = capDiagnostic(msg)
 	tc.errors = append(tc.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: loc})
@@ -982,8 +1033,8 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 			// `<unknown>` never reaches here: isSubtype treats it as top of the
 			// lattice, so a private helper's return type is related to
 			// everything, exactly as in TS.
-			tc.addError(fmt.Sprintf(
-				"Ternary branches have incompatible types: '%s' and '%s'", consType, altType))
+			tc.addErrorAt(fmt.Sprintf(
+				"Ternary branches have incompatible types: '%s' and '%s'", consType, altType), e)
 		}
 		return consType
 
@@ -1048,28 +1099,28 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType))
+			tc.addErrorAt(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType))
+			tc.addErrorAt(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType), e.Right)
 		}
 		return "bigint"
 
 	case "-", "*", "/", "%":
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
+			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 
 	case "<", "<=", ">", ">=":
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
+			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "boolean"
 
@@ -1099,10 +1150,10 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 
 	case "<<", ">>":
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
+			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 
@@ -1112,10 +1163,10 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType))
+			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType))
+			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 	}
@@ -1234,8 +1285,8 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		if len(normalized) >= 1 {
 			satType := tc.inferExprType(normalized[0], env)
 			if !isBigintFamily(satType) && satType != "<unknown>" {
-				tc.addError(fmt.Sprintf(
-					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType))
+				tc.addErrorAt(fmt.Sprintf(
+					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType), args[0])
 			}
 		}
 		for i := 0; i < len(mutableProps) && i+1 < len(normalized); i++ {
@@ -1263,8 +1314,8 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 	if len(args) >= 1 {
 		satType := tc.inferExprType(args[0], env)
 		if !isBigintFamily(satType) && satType != "<unknown>" {
-			tc.addError(fmt.Sprintf(
-				"%s() first argument (satoshis) must be bigint, got '%s'", name, satType))
+			tc.addErrorAt(fmt.Sprintf(
+				"%s() first argument (satoshis) must be bigint, got '%s'", name, satType), args[0])
 		}
 	}
 	if len(args) >= 2 {
@@ -1681,7 +1732,7 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 		}
 
 		if tc.consumedValues[origin] || tc.consumedPerLoopIteration(origin, env) {
-			tc.addError(fmt.Sprintf("affine value '%s' has already been consumed", label))
+			tc.addErrorAt(fmt.Sprintf("affine value '%s' has already been consumed", label), arg)
 		} else {
 			tc.consumedValues[origin] = true
 		}
@@ -1690,7 +1741,12 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 	// N-288: the call also consumes every property the method consumes.
 	for _, origin := range consumedProps {
 		if tc.consumedValues[origin] || tc.consumedPerLoopIteration(origin, env) {
-			tc.addError(fmt.Sprintf("affine value 'this.%s' has already been consumed", strings.TrimPrefix(origin, "prop:")))
+			msg := fmt.Sprintf("affine value 'this.%s' has already been consumed", strings.TrimPrefix(origin, "prop:"))
+			if len(args) > 0 {
+				tc.addErrorAt(msg, args[0])
+			} else {
+				tc.addError(msg)
+			}
 		} else {
 			tc.consumedValues[origin] = true
 		}

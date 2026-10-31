@@ -279,6 +279,15 @@ pub const Diagnostics = struct {
         add(&self.errors, allocator, prefix, message);
     }
 
+    /// N-463: a type error prints `file:line:col: ` when the checker located
+    /// it (at the offending expression, as the TS reference does).
+    fn addTypeErrors(self: *Diagnostics, allocator: std.mem.Allocator, tc: typecheck_pass.TypeCheckResult) void {
+        for (tc.errors, 0..) |message, i| {
+            const loc: ?types.SourceLocation = if (tc.error_locations.len == tc.errors.len) tc.error_locations[i] else null;
+            self.addLocatedError(allocator, "  type error: ", .{ .message = message, .location = loc });
+        }
+    }
+
     fn addWarning(self: *Diagnostics, allocator: std.mem.Allocator, message: []const u8) void {
         add(&self.warnings, allocator, "  warning: ", message);
     }
@@ -374,7 +383,7 @@ pub fn runPipeline(
         if (only_loop_start) {
             const early_tc = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
             if (early_tc.errors.len > 0) {
-                for (early_tc.errors) |message| diag.addError(work, "  type error: ", message);
+                diag.addTypeErrors(work, early_tc);
                 return error.TypeCheckFailed;
             }
         }
@@ -387,7 +396,7 @@ pub fn runPipeline(
 
     // Pass 3: Typecheck
     const tc_result = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
-    for (tc_result.errors) |message| diag.addError(work, "  type error: ", message);
+    diag.addTypeErrors(work, tc_result);
     if (tc_result.errors.len > 0) return error.TypeCheckFailed;
 
     // Pass 3b: Expand FixedArray properties into scalar siblings + dispatch

@@ -30,7 +30,7 @@ fn lookup(scopes: &[Scope], name: &str) -> Option<bool> {
 }
 
 fn check_target(target: &Expression, scopes: &[Scope], loc: &SourceLocation, out: &mut Vec<Diagnostic>) {
-    if let Expression::Identifier { name } = target {
+    if let Expression::Identifier { name, .. } = target {
         if lookup(scopes, name) == Some(false) {
             out.push(Diagnostic::error(const_reassign_message(name), Some(loc.clone())));
         }

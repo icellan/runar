@@ -2015,6 +2015,7 @@ impl<'a> JavaParser<'a> {
                             callee: Box::new(Expression::MemberExpr {
                                 object: Box::new(Expression::Identifier {
                                     name: "this".to_string(),
+                                    source_location: None,
                                 }),
                                 property: prop,
                             }),
@@ -2022,10 +2023,11 @@ impl<'a> JavaParser<'a> {
                             asm_return_type: None,
                         });
                     }
-                    return Some(Expression::PropertyAccess { property: prop });
+                    return Some(Expression::PropertyAccess { property: prop, source_location: None });
                 }
                 Some(Expression::Identifier {
                     name: "this".to_string(),
+                    source_location: None,
                 })
             }
             TokenType::Super => {
@@ -2036,6 +2038,7 @@ impl<'a> JavaParser<'a> {
                     return Some(Expression::CallExpr {
                         callee: Box::new(Expression::Identifier {
                             name: "super".to_string(),
+                            source_location: None,
                         }),
                         args,
                         asm_return_type: None,
@@ -2045,6 +2048,7 @@ impl<'a> JavaParser<'a> {
                 // by postfix handling.
                 Some(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 })
             }
             TokenType::New => {
@@ -2179,7 +2183,7 @@ impl<'a> JavaParser<'a> {
                         }
                     }
                 }
-                Some(Expression::Identifier { name })
+                Some(Expression::Identifier { name, source_location: None })
             }
             _ => {
                 self.error(format!(
@@ -2338,7 +2342,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
             }
             if args.is_empty() && property == "abs" {
                 return Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "abs".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "abs".to_string(), source_location: None }),
                     args: vec![(**object).clone()],
                     asm_return_type: None,
                 };
@@ -2357,10 +2361,10 @@ fn promote_literal_calls(expr: Expression) -> Expression {
         // Static-imported `assertThat(cond)` is a builtin alias for `assert`
         // in the canonical Java BuiltinRegistry. Peer typecheckers only know
         // `assert`, so rewrite the callee here.
-        if let Expression::Identifier { name } = callee.as_ref() {
+        if let Expression::Identifier { name, .. } = callee.as_ref() {
             if name == "assertThat" {
                 return Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: args.clone(),
                     asm_return_type: None,
                 };
@@ -2416,7 +2420,7 @@ fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
     if property != "valueOf" {
         return false;
     }
-    if let Expression::Identifier { name } = object.as_ref() {
+    if let Expression::Identifier { name, .. } = object.as_ref() {
         if name == "BigInteger" {
             return true;
         }
@@ -2426,7 +2430,7 @@ fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
         if outer_prop == "BigInteger" {
             if let Expression::MemberExpr { object: base, property: mid_prop } = outer.as_ref() {
                 if mid_prop == "math" {
-                    if let Expression::Identifier { name } = base.as_ref() {
+                    if let Expression::Identifier { name, .. } = base.as_ref() {
                         if name == "java" {
                             return true;
                         }
@@ -2442,7 +2446,7 @@ fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
 fn is_bigint_of_callee(callee: &Expression) -> bool {
     if let Expression::MemberExpr { object, property } = callee {
         if property == "of" {
-            if let Expression::Identifier { name } = object.as_ref() {
+            if let Expression::Identifier { name, .. } = object.as_ref() {
                 return name == "Bigint";
             }
         }
@@ -2529,7 +2533,7 @@ fn check_bare_property_assignments(contract: &ContractNode, errors: &mut Vec<Dia
 
     impl<'c> Walker<'c> {
         fn check_target(&mut self, e: &Expression, scope: &[HashSet<String>], loc: &SourceLocation) {
-            if let Expression::Identifier { name } = e {
+            if let Expression::Identifier { name, .. } = e {
                 if self.props.contains(name.as_str()) && !scope.iter().any(|s| s.contains(name)) {
                     self.errors.push(Diagnostic::error(
                         bare_java_property_assignment_message(name),
@@ -2645,6 +2649,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         });
         super_args.push(Expression::Identifier {
             name: prop.name.clone(),
+            source_location: None,
         });
     }
 
@@ -2652,6 +2657,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2666,9 +2672,11 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: prop.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: prop.name.clone(),
+                source_location: None,
             },
             source_location: loc.clone(),
         });
@@ -2757,12 +2765,12 @@ mod tests {
             Statement::ExpressionStatement { expression, .. } => match expression {
                 Expression::CallExpr { callee, args, .. } => {
                     match callee.as_ref() {
-                        Expression::Identifier { name } => assert_eq!(name, "super"),
+                        Expression::Identifier { name, .. } => assert_eq!(name, "super"),
                         other => panic!("expected super identifier, got {:?}", other),
                     }
                     assert_eq!(args.len(), 1);
                     match &args[0] {
-                        Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                        Expression::Identifier { name, .. } => assert_eq!(name, "pubKeyHash"),
                         other => panic!("expected identifier, got {:?}", other),
                     }
                 }
@@ -2774,13 +2782,13 @@ mod tests {
         match &ctor.body[1] {
             Statement::Assignment { target, value, .. } => {
                 match target {
-                    Expression::PropertyAccess { property } => {
+                    Expression::PropertyAccess { property, .. } => {
                         assert_eq!(property, "pubKeyHash")
                     }
                     other => panic!("expected PropertyAccess, got {:?}", other),
                 }
                 match value {
-                    Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "pubKeyHash"),
                     other => panic!("expected Identifier, got {:?}", other),
                 }
             }
@@ -2820,7 +2828,7 @@ mod tests {
         let first_call = match first {
             Expression::CallExpr { callee, args, .. } => {
                 match callee.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "assert"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "assert"),
                     other => panic!("expected assert callee, got {:?}", other),
                 }
                 assert_eq!(args.len(), 1);
@@ -2836,13 +2844,13 @@ mod tests {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match left.as_ref() {
                     Expression::CallExpr { callee: inner, .. } => match inner.as_ref() {
-                        Expression::Identifier { name } => assert_eq!(name, "hash160"),
+                        Expression::Identifier { name, .. } => assert_eq!(name, "hash160"),
                         other => panic!("expected hash160 callee, got {:?}", other),
                     },
                     other => panic!("expected hash160 call on LHS, got {:?}", other),
                 }
                 match right.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "pubKeyHash"),
                     other => panic!("expected pubKeyHash identifier, got {:?}", other),
                 }
             }
@@ -2958,7 +2966,7 @@ mod tests {
             Expression::BinaryExpr { op, left, right } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match left.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "x"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "x"),
                     other => panic!("expected identifier x, got {:?}", other),
                 }
                 match right.as_ref() {
@@ -3198,8 +3206,8 @@ mod tests {
 
     fn n134_target_name(e: &Expression) -> String {
         match e {
-            Expression::Identifier { name } => name.clone(),
-            Expression::PropertyAccess { property } => property.clone(),
+            Expression::Identifier { name, .. } => name.clone(),
+            Expression::PropertyAccess { property, .. } => property.clone(),
             other => panic!("unexpected compound target {:?}", other),
         }
     }

@@ -1251,6 +1251,7 @@ impl<'a> ZigParser<'a> {
             assignments.push(Statement::Assignment {
                 target: Expression::PropertyAccess {
                     property: field,
+                    source_location: None,
                 },
                 value,
                 source_location: self.loc(),
@@ -1270,12 +1271,14 @@ impl<'a> ZigParser<'a> {
             .iter()
             .map(|p| Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             })
             .collect();
         Statement::ExpressionStatement {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args: super_args,
                 asm_return_type: None,
@@ -2126,10 +2129,10 @@ impl<'a> ZigParser<'a> {
                         self.bare_literal_ok.insert(self.pos + 1);
                     }
 
-                    return Expression::Identifier { name: builtin };
+                    return Expression::Identifier { name: builtin, source_location: None };
                 }
 
-                return Expression::Identifier { name };
+                return Expression::Identifier { name, source_location: None };
             }
         }
 
@@ -2198,6 +2201,7 @@ impl<'a> ZigParser<'a> {
                 self.expect(&Token::RParen);
                 Expression::Identifier {
                     name: "__import".to_string(),
+                    source_location: None,
                 }
             }
             // @embedFile -> return arg
@@ -2225,6 +2229,7 @@ impl<'a> ZigParser<'a> {
                     Expression::CallExpr {
                         callee: Box::new(Expression::Identifier {
                             name: name.to_string(),
+                            source_location: None,
                         }),
                         args,
                         asm_return_type: None,
@@ -2234,6 +2239,7 @@ impl<'a> ZigParser<'a> {
                         .push(format!("Unsupported Zig builtin '@{}'", name));
                     Expression::Identifier {
                         name: name.to_string(),
+                        source_location: None,
                     }
                 }
             }
@@ -2305,11 +2311,11 @@ impl<'a> ZigParser<'a> {
                     // drops the bare handle too and the arities agree. Anywhere
                     // else (including the output intrinsics) a bare `ctx` stays
                     // an identifier and is refused as an undefined variable.
-                    if let Expression::PropertyAccess { ref property } = expr {
+                    if let Expression::PropertyAccess { ref property, .. } = expr {
                         if !ZIG_STATEFUL_CONTEXT_MEMBERS.contains(&property.as_str()) {
                             let ctx_names = &self.stateful_context_names;
                             args.retain(|a| {
-                                !matches!(a, Expression::Identifier { name } if ctx_names.contains(name))
+                                !matches!(a, Expression::Identifier { name, .. } if ctx_names.contains(name))
                             });
                         }
                     }
@@ -2326,10 +2332,11 @@ impl<'a> ZigParser<'a> {
                     let prop = self.expect_ident();
 
                     // self.property -> PropertyAccess
-                    if let Expression::Identifier { ref name } = expr {
+                    if let Expression::Identifier { ref name, .. } = expr {
                         if self.self_names.contains(name) {
                             expr = Expression::PropertyAccess {
                                 property: prop,
+                                source_location: None,
                             };
                             dt = DepthTracker::new();
                             continue;
@@ -2342,7 +2349,7 @@ impl<'a> ZigParser<'a> {
                                 || prop == "addRawOutput"
                                 || prop == "addDataOutput"
                             {
-                                expr = Expression::PropertyAccess { property: prop };
+                                expr = Expression::PropertyAccess { property: prop, source_location: None };
                                 dt = DepthTracker::new();
                                 continue;
                             }
@@ -2401,12 +2408,14 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2423,9 +2432,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
             source_location: SourceLocation {
                 file: file.to_string(),
@@ -2457,12 +2468,12 @@ fn get_loop_update_target(stmt: &Statement) -> Option<String> {
     if let Statement::ForStatement { update, .. } = stmt {
         match update.as_ref() {
             Statement::Assignment { target, .. } => {
-                if let Expression::Identifier { name } = target {
+                if let Expression::Identifier { name, .. } = target {
                     return Some(name.clone());
                 }
             }
             Statement::ExpressionStatement { expression, .. } => {
-                if let Expression::Identifier { name } = expression {
+                if let Expression::Identifier { name, .. } = expression {
                     return Some(name.clone());
                 }
             }
@@ -2490,10 +2501,11 @@ fn rewrite_expr(expr: &mut Expression, method_names: &HashSet<String>) {
             for arg in args.iter_mut() {
                 rewrite_expr(arg, method_names);
             }
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if method_names.contains(name) {
                     *callee = Box::new(Expression::PropertyAccess {
                         property: name.clone(),
+                        source_location: None,
                     });
                 }
             } else {
@@ -2589,7 +2601,7 @@ fn collect_mutated_properties(body: &[Statement], out: &mut HashSet<String>) {
 fn collect_mutated_in_stmt(stmt: &Statement, out: &mut HashSet<String>) {
     match stmt {
         Statement::Assignment { target, value, .. } => {
-            if let Expression::PropertyAccess { property } = target {
+            if let Expression::PropertyAccess { property, .. } = target {
                 out.insert(property.clone());
             }
             collect_mutated_in_expr(target, out);
@@ -2665,7 +2677,7 @@ fn collect_mutated_in_expr(expr: &Expression, out: &mut HashSet<String>) {
             collect_mutated_in_expr(index, out);
         }
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            if let Expression::PropertyAccess { property } = operand.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = operand.as_ref() {
                 out.insert(property.clone());
             }
             collect_mutated_in_expr(operand, out);
@@ -2975,7 +2987,7 @@ pub const MultiMethod = struct {
         if let Statement::VariableDecl { init, .. } = &spend_body[0] {
             if let Expression::CallExpr { callee, .. } = init {
                 assert!(
-                    matches!(callee.as_ref(), Expression::PropertyAccess { property } if property == "computeThreshold"),
+                    matches!(callee.as_ref(), Expression::PropertyAccess { property, .. } if property == "computeThreshold"),
                     "Expected computeThreshold call to be rewritten to PropertyAccess"
                 );
             } else {

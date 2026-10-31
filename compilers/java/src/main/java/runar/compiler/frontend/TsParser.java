@@ -1731,7 +1731,7 @@ public final class TsParser {
                         List<Expression> args = parseCallArgs();
                         if (expr instanceof Identifier id && id.name().equals("this")) {
                             expr = new CallExpr(
-                                new MemberExpr(new Identifier("this"), propName),
+                                new MemberExpr(new Identifier("this", id.sourceLocation()), propName),
                                 args
                             );
                         } else {
@@ -1742,7 +1742,7 @@ public final class TsParser {
                         }
                     } else {
                         if (expr instanceof Identifier id && id.name().equals("this")) {
-                            expr = new PropertyAccessExpr(propName);
+                            expr = new PropertyAccessExpr(propName, id.sourceLocation());
                         } else {
                             expr = new MemberExpr(expr, propName);
                         }
@@ -1801,6 +1801,7 @@ public final class TsParser {
             }
 
             if (tok.kind == TOK_IDENT) {
+                SourceLocation identLoc = loc();
                 advance();
                 String name = tok.value;
                 if (name.equals("true")) {
@@ -1810,10 +1811,10 @@ public final class TsParser {
                     return new BoolLiteral(false);
                 }
                 if (name.equals("this")) {
-                    return new Identifier("this");
+                    return new Identifier("this", identLoc);
                 }
                 if (name.equals("super")) {
-                    return new Identifier("super");
+                    return new Identifier("super", identLoc);
                 }
                 // asm({...}) / asm<T>({...}) compiler intrinsic — must be
                 // recognised before the generic LT lookahead in
@@ -1823,9 +1824,9 @@ public final class TsParser {
                 }
                 if (check(TOK_LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(name), args);
+                    return new CallExpr(new Identifier(name, identLoc), args);
                 }
-                return new Identifier(name);
+                return new Identifier(name, identLoc);
             }
 
             if (tok.kind == TOK_LPAREN) {

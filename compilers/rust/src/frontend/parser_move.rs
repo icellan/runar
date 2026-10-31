@@ -1358,10 +1358,11 @@ impl<'a> MoveParser<'a> {
     fn convert_self_to_this(&self, expr: Expression) -> Expression {
         match expr {
             Expression::MemberExpr { object, property } => {
-                if matches!(object.as_ref(), Expression::Identifier { name } if name == "self" || name == "contract") {
+                if matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "self" || name == "contract") {
                     // self.x or contract.x -> PropertyAccess { property: camelCase(x) }
                     Expression::PropertyAccess {
                         property: map_builtin_name(&property),
+                        source_location: None,
                     }
                 } else {
                     Expression::MemberExpr {
@@ -1417,8 +1418,9 @@ impl<'a> MoveParser<'a> {
                 prefix,
             },
             // Rename `self` identifier to `this`
-            Expression::Identifier { ref name } if name == "self" => Expression::Identifier {
+            Expression::Identifier { ref name, .. } if name == "self" => Expression::Identifier {
                 name: "this".to_string(),
+                source_location: None,
             },
             other => other,
         }
@@ -1475,6 +1477,7 @@ impl<'a> MoveParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1499,6 +1502,7 @@ impl<'a> MoveParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![Expression::BinaryExpr {
                     op: BinaryOp::StrictEq,
@@ -1995,7 +1999,7 @@ impl<'a> MoveParser<'a> {
                     self.advance();
                     let raw_name = self.expect_ident();
                     let name = map_builtin_name(&raw_name);
-                    expr = Expression::Identifier { name };
+                    expr = Expression::Identifier { name, source_location: None };
                     dt = DepthTracker::new();
                 }
                 Token::LParen => {
@@ -2016,7 +2020,7 @@ impl<'a> MoveParser<'a> {
                     // matching `contract`/`self` identifier as the first
                     // argument at call sites too.
                     if let Expression::Identifier { .. } = &expr {
-                        if let Some(Expression::Identifier { name }) = args.first() {
+                        if let Some(Expression::Identifier { name, .. }) = args.first() {
                             if name == "contract" || name == "self" {
                                 args.remove(0);
                             }
@@ -2071,7 +2075,7 @@ impl<'a> MoveParser<'a> {
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
             Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
-            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name) },
+            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name), source_location: None },
             Token::LParen => {
                 let expr = self.parse_expression();
                 self.expect(&Token::RParen);
@@ -2130,12 +2134,14 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2152,9 +2158,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
             source_location: SourceLocation {
                 file: file.to_string(),
@@ -2269,7 +2277,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
     match cond_left {
-        Expression::Identifier { name } if name == iter_name => {}
+        Expression::Identifier { name, .. } if name == iter_name => {}
         _ => return None,
     }
 
@@ -2288,7 +2296,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
     match target {
-        Expression::Identifier { name } if name == iter_name => {}
+        Expression::Identifier { name, .. } if name == iter_name => {}
         _ => return None,
     }
     let (step_op, step_left, step_right) = match value {
@@ -2301,7 +2309,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
 
-    let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name } if name == iter_name);
+    let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name, .. } if name == iter_name);
     let is_one = |e: &Expression| matches!(e, Expression::BigIntLiteral { value } if *value == BigInt::from(1));
     // Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
     let unit_step = if step_is_add {
@@ -2317,7 +2325,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         return None;
     }
 
-    let operand = Box::new(Expression::Identifier { name: iter_name.clone() });
+    let operand = Box::new(Expression::Identifier { name: iter_name.clone(), source_location: None });
     let update_expr = if ascending {
         Expression::IncrementExpr { operand, prefix: false }
     } else {
@@ -2466,7 +2474,7 @@ module test {
         // Should be assert(self.x === y)
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
             if let Expression::CallExpr { callee, args, .. } = expression {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }
                 if let Expression::BinaryExpr { op, .. } = &args[0] {
@@ -2501,7 +2509,7 @@ module example {
         // Should be this.value = newValue (with PropertyAccess)
         if let Statement::Assignment { target, .. } = &body[0] {
             match target {
-                Expression::PropertyAccess { property } => {
+                Expression::PropertyAccess { property, .. } => {
                     assert_eq!(property, "value");
                 }
                 _ => panic!("Expected PropertyAccess, got {:?}", target),

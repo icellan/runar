@@ -709,7 +709,7 @@ module RunarCompiler
         if args.length >= 1
           sat_type = infer_expr_type(args[0], env)
           unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
-            add_error("#{name}() first argument (satoshis) must be bigint, got '#{sat_type}'")
+            add_error("#{name}() first argument (satoshis) must be bigint, got '#{sat_type}'", args[0])
           end
         end
         if args.length >= 2
@@ -764,7 +764,7 @@ module RunarCompiler
         if normalized.length >= 1
           sat_type = infer_expr_type(normalized[0], env)
           unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
-            add_error("addOutput() first argument (satoshis) must be bigint, got '#{sat_type}'")
+            add_error("addOutput() first argument (satoshis) must be bigint, got '#{sat_type}'", args[0])
           end
         end
         # Every state value is inferred, surplus ones included, so a type error
@@ -819,13 +819,35 @@ module RunarCompiler
         add_error(CONTINUATION_AMOUNT_READ_ONLY)
       end
 
-      def add_error(msg)
+      def add_error(msg, at = nil)
         # N-321: a message may echo user-written type text of any length; cap it.
         if msg.length > MAX_DIAGNOSTIC_CHARS
           msg = "#{msg[0, MAX_DIAGNOSTIC_CHARS]}...(#{msg.length - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
         end
-        loc = @current_stmt_loc || @current_method_loc
+        # N-463: an error about an expression is anchored at that expression,
+        # as in TS, when its position is known (the .runar.ts parser records
+        # it); otherwise at the statement, then the method, as before.
+        loc = (at && expr_loc(at)) || @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
+      end
+
+      # N-463: the position of +expr+'s first token, or nil when unknown.
+      # Only identifiers (`this` included), `this.x` and ByteString literals
+      # record a position, and only on .runar.ts. A composite expression
+      # starts where its leftmost child starts, which is the position TS
+      # reports for it (a parenthesised leftmost child is the exception: TS
+      # points at the `(`).
+      def expr_loc(expr)
+        loop do
+          case expr
+          when Identifier, PropertyAccessExpr, ByteStringLiteral then return expr.source_location
+          when BinaryExpr then expr = expr.left
+          when CallExpr then expr = expr.callee
+          when MemberExpr, IndexAccessExpr then expr = expr.object
+          when TernaryExpr then expr = expr.condition
+          else return nil
+          end
+        end
       end
 
       def type_node_to_string(node)
@@ -1064,7 +1086,8 @@ module RunarCompiler
             # everything, exactly as in TS.
             add_error(
               "Ternary branches have incompatible types: " \
-              "'#{cons_type}' and '#{alt_type}'"
+              "'#{cons_type}' and '#{alt_type}'",
+              expr
             )
           end
           cons_type
@@ -1132,20 +1155,20 @@ module RunarCompiler
         # Arithmetic: bigint x bigint -> bigint
         if %w[+ - * / %].include?(expr.op)
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'")
+            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'")
+            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
 
         if %w[< <= > >=].include?(expr.op)
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'")
+            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'")
+            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "boolean"
         end
@@ -1179,10 +1202,10 @@ module RunarCompiler
 
         if expr.op == "<<" || expr.op == ">>"
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'")
+            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'")
+            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
@@ -1193,10 +1216,10 @@ module RunarCompiler
             return "ByteString"
           end
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint or ByteString, got '#{left_type}'")
+            add_error("left operand of '#{expr.op}' must be bigint or ByteString, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint or ByteString, got '#{right_type}'")
+            add_error("right operand of '#{expr.op}' must be bigint or ByteString, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
@@ -1596,7 +1619,7 @@ module RunarCompiler
             end
 
           if @consumed_values[origin] || consumed_per_loop_iteration?(origin, env)
-            add_error("affine value '#{label}' has already been consumed")
+            add_error("affine value '#{label}' has already been consumed", arg)
           else
             @consumed_values[origin] = true
           end
@@ -1605,7 +1628,7 @@ module RunarCompiler
         # N-288: the call also consumes every property the method consumes.
         consumed_props.each do |origin|
           if @consumed_values[origin] || consumed_per_loop_iteration?(origin, env)
-            add_error("affine value 'this.#{origin.delete_prefix('prop:')}' has already been consumed")
+            add_error("affine value 'this.#{origin.delete_prefix('prop:')}' has already been consumed", args[0])
           else
             @consumed_values[origin] = true
           end

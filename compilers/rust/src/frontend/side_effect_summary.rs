@@ -237,7 +237,7 @@ fn collect_stmt<'a>(
 ) -> Result<(), &'a MethodNode> {
     match stmt {
         Statement::Assignment { target, value, .. } => {
-            if let Expression::PropertyAccess { property } = target {
+            if let Expression::PropertyAccess { property, .. } = target {
                 if mutable_props.contains(property) {
                     into.mutates_state = true;
                 }
@@ -298,7 +298,7 @@ fn collect_expr<'a>(
 ) -> Result<(), &'a MethodNode> {
     match expr {
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            if let Expression::PropertyAccess { property } = operand.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = operand.as_ref() {
                 if mutable_props.contains(property) {
                     into.mutates_state = true;
                 }
@@ -308,7 +308,7 @@ fn collect_expr<'a>(
             // this.X(...) or member.X(...) — output intrinsics or
             // private method calls.
             let callee_name: Option<&str> = match callee.as_ref() {
-                Expression::PropertyAccess { property } => Some(property.as_str()),
+                Expression::PropertyAccess { property, .. } => Some(property.as_str()),
                 Expression::MemberExpr { property, .. } => Some(property.as_str()),
                 _ => None,
             };
@@ -328,7 +328,7 @@ fn collect_expr<'a>(
             // Bareword calls: identifiers that resolve to private
             // methods (Go/Rust DSL surfaces route private helpers as
             // bare identifiers) or to builtins like checkPreimage.
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if name == "checkPreimage" {
                     into.uses_preimage = true;
                 }

@@ -50,11 +50,37 @@ module RunarCompiler
     # .runar.ts parser sets it, as the TS reference does; elsewhere it is nil.
     ByteStringLiteral = Struct.new(:value, :source_location, keyword_init: true)
 
+    # Equality and hashing that ignore source_location (N-463): two nodes
+    # naming the same thing are the same node wherever they were written.
+    module LocationBlindEquality
+      def ==(other)
+        other.is_a?(self.class) && location_blind_key == other.location_blind_key
+      end
+      alias_method :eql?, :==
+
+      def hash
+        [self.class, location_blind_key].hash
+      end
+
+      protected
+
+      def location_blind_key
+        members.reject { |m| m == :source_location }.map { |m| self[m] }
+      end
+    end
+
     # A variable or name reference.
-    Identifier = Struct.new(:name, keyword_init: true)
+    # source_location is the identifier's token (N-463). Only the .runar.ts
+    # parser sets it, as the TS reference does; elsewhere it is nil.
+    Identifier = Struct.new(:name, :source_location, keyword_init: true) do
+      include LocationBlindEquality
+    end
 
     # this.x -- property access on the contract.
-    PropertyAccessExpr = Struct.new(:property, keyword_init: true)
+    # source_location is the `this` token (N-463); .runar.ts parser only.
+    PropertyAccessExpr = Struct.new(:property, :source_location, keyword_init: true) do
+      include LocationBlindEquality
+    end
 
     # A member access like obj.property (not this.x).
     MemberExpr = Struct.new(:object, :property, keyword_init: true)

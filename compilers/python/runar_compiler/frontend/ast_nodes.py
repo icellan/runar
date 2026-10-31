@@ -89,6 +89,11 @@ class Identifier:
     """A variable or name reference."""
 
     name: str
+    # The identifier's token (N-463). Only the .runar.ts parser sets it, as
+    # the TS reference does; typecheck derives a composite expression's
+    # position from its leftmost child (see typecheck._expr_loc). Not part of
+    # equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -96,6 +101,8 @@ class PropertyAccessExpr:
     """``this.x`` -- property access on the contract."""
 
     property: str
+    # The ``this`` token (N-463); .runar.ts parser only. Not part of equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass

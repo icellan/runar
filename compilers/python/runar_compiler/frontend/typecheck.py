@@ -556,11 +556,16 @@ class _TypeChecker:
                 and target.callee.name == "continuationAmount"):
             self._add_error(CONTINUATION_AMOUNT_READ_ONLY)
 
-    def _add_error(self, msg: str) -> None:
+    def _add_error(self, msg: str, at: Expression | None = None) -> None:
         # N-321: a message may echo user-written type text of any length; cap it.
         if len(msg) > MAX_DIAGNOSTIC_CHARS:
             msg = f"{msg[:MAX_DIAGNOSTIC_CHARS]}...({len(msg) - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
-        loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
+        # N-463: an error about an expression is anchored at that expression,
+        # as in TS, when its position is known (the .runar.ts parser records
+        # it); otherwise at the statement, then the method, as before.
+        loc = _expr_loc(at) if at is not None else None
+        if loc is None:
+            loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
 
     def check_property_initializers(self) -> None:
@@ -925,7 +930,8 @@ class _TypeChecker:
                 # everything, exactly as in TS.
                 self._add_error(
                     f"Ternary branches have incompatible types: "
-                    f"'{cons_type}' and '{alt_type}'"
+                    f"'{cons_type}' and '{alt_type}'",
+                    expr,
                 )
             return cons_type
 
@@ -988,22 +994,26 @@ class _TypeChecker:
         if e.op in ("+", "-", "*", "/", "%"):
             if not is_bigint_family(left_type):
                 self._add_error(
-                    f"left operand of '{e.op}' must be bigint, got '{left_type}'"
+                    f"left operand of '{e.op}' must be bigint, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
                 self._add_error(
-                    f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                    f"right operand of '{e.op}' must be bigint, got '{right_type}'",
+                    e.right,
                 )
             return "bigint"
 
         if e.op in ("<", "<=", ">", ">="):
             if not is_bigint_family(left_type):
                 self._add_error(
-                    f"left operand of '{e.op}' must be bigint, got '{left_type}'"
+                    f"left operand of '{e.op}' must be bigint, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
                 self._add_error(
-                    f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                    f"right operand of '{e.op}' must be bigint, got '{right_type}'",
+                    e.right,
                 )
             return "boolean"
 
@@ -1038,11 +1048,13 @@ class _TypeChecker:
         if e.op in ("<<", ">>"):
             if not is_bigint_family(left_type):
                 self._add_error(
-                    f"left operand of '{e.op}' must be bigint, got '{left_type}'"
+                    f"left operand of '{e.op}' must be bigint, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
                 self._add_error(
-                    f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                    f"right operand of '{e.op}' must be bigint, got '{right_type}'",
+                    e.right,
                 )
             return "bigint"
 
@@ -1052,11 +1064,13 @@ class _TypeChecker:
                 return "ByteString"
             if not is_bigint_family(left_type):
                 self._add_error(
-                    f"left operand of '{e.op}' must be bigint or ByteString, got '{left_type}'"
+                    f"left operand of '{e.op}' must be bigint or ByteString, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
                 self._add_error(
-                    f"right operand of '{e.op}' must be bigint or ByteString, got '{right_type}'"
+                    f"right operand of '{e.op}' must be bigint or ByteString, got '{right_type}'",
+                    e.right,
                 )
             return "bigint"
 
@@ -1328,7 +1342,8 @@ class _TypeChecker:
                 if not is_bigint_family(sat_type) and sat_type != "<unknown>":
                     self._add_error(
                         "addOutput() first argument (satoshis) must be bigint, "
-                        f"got '{sat_type}'"
+                        f"got '{sat_type}'",
+                        args[0],
                     )
             i = 0
             while i < len(mutable_props) and i + 1 < len(normalized):
@@ -1357,7 +1372,8 @@ class _TypeChecker:
             if not is_bigint_family(sat_type) and sat_type != "<unknown>":
                 self._add_error(
                     f"{name}() first argument (satoshis) must be bigint, "
-                    f"got '{sat_type}'"
+                    f"got '{sat_type}'",
+                    args[0],
                 )
         if len(args) >= 2:
             # TS uses is_subtype against ByteString, not equality, so every
@@ -1605,7 +1621,8 @@ class _TypeChecker:
 
             if self.consumed_values.get(origin, False) or self._consumed_per_loop_iteration(origin, env):
                 self._add_error(
-                    f"affine value '{label}' has already been consumed"
+                    f"affine value '{label}' has already been consumed",
+                    arg,
                 )
             else:
                 self.consumed_values[origin] = True
@@ -1614,7 +1631,8 @@ class _TypeChecker:
         for origin in consumed_props:
             if self.consumed_values.get(origin, False) or self._consumed_per_loop_iteration(origin, env):
                 self._add_error(
-                    f"affine value 'this.{origin[len('prop:'):]}' has already been consumed"
+                    f"affine value 'this.{origin[len('prop:'):]}' has already been consumed",
+                    args[0] if args else None,
                 )
             else:
                 self.consumed_values[origin] = True
@@ -1785,6 +1803,29 @@ def _type_node_to_string(node: TypeNode | None) -> str:
     if isinstance(node, CustomType):
         return node.name
     return "<unknown>"
+
+
+def _expr_loc(expr: Expression) -> SourceLocation | None:
+    """N-463: the position of ``expr``'s first token, or None when unknown.
+
+    Only identifiers (``this`` included), ``this.x`` and ByteString literals
+    record a position, and only on .runar.ts. A composite expression starts
+    where its leftmost child starts, which is the position TS reports for it
+    (a parenthesised leftmost child is the exception: TS points at the ``(``).
+    """
+    while True:
+        if isinstance(expr, (Identifier, PropertyAccessExpr, ByteStringLiteral)):
+            return expr.source_location
+        if isinstance(expr, BinaryExpr):
+            expr = expr.left
+        elif isinstance(expr, CallExpr):
+            expr = expr.callee
+        elif isinstance(expr, (MemberExpr, IndexAccessExpr)):
+            expr = expr.object
+        elif isinstance(expr, TernaryExpr):
+            expr = expr.condition
+        else:
+            return None
 
 
 def _stmt_source_location(stmt: Statement) -> SourceLocation | None:

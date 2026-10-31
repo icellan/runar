@@ -655,12 +655,26 @@ impl<'a> TypeChecker<'a> {
         self.errors.push(Diagnostic::error(msg, self.current_method_loc.clone()));
     }
 
+    /// N-463: `add_error` anchored at `at`, as the TS reference anchors an
+    /// error about an expression, when its position is known (the
+    /// `.runar.ts` parser records it); otherwise at the method, as before.
+    fn add_error_at(&mut self, msg: impl Into<String>, at: &Expression) {
+        match expr_loc(at) {
+            Some(loc) => {
+                let saved = self.current_method_loc.replace(loc.clone());
+                self.add_error(msg);
+                self.current_method_loc = saved;
+            }
+            None => self.add_error(msg),
+        }
+    }
+
     /// F-024 (R14): `continuationAmount()` is a read-only view of the
     /// auto-injected `_newAmount`. Without this check an assignment to it
     /// would lower as a plain read and silently drop the write.
     fn refuse_continuation_amount_write(&mut self, target: &Expression) {
         if let Expression::CallExpr { callee, .. } = target {
-            if matches!(callee.as_ref(), Expression::Identifier { name } if name == "continuationAmount") {
+            if matches!(callee.as_ref(), Expression::Identifier { name, .. } if name == "continuationAmount") {
                 self.add_error(CONTINUATION_AMOUNT_READ_ONLY);
             }
         }
@@ -954,7 +968,7 @@ terminal (no state mutation)",
 
             Expression::ByteStringLiteral { .. } => BYTESTRING.to_string(),
 
-            Expression::Identifier { name } => {
+            Expression::Identifier { name, .. } => {
                 if name == "this" {
                     return "<this>".to_string();
                 }
@@ -1026,7 +1040,7 @@ terminal (no state mutation)",
                 "<unknown>".to_string()
             }
 
-            Expression::PropertyAccess { property } => {
+            Expression::PropertyAccess { property, .. } => {
                 if let Some(t) = self.prop_types.get(property) {
                     return t.clone();
                 }
@@ -1063,7 +1077,7 @@ terminal (no state mutation)",
                 }
 
                 // SigHash.ALL, SigHash.FORKID, etc.
-                if let Expression::Identifier { name } = object.as_ref() {
+                if let Expression::Identifier { name, .. } = object.as_ref() {
                     if name == "SigHash" {
                         return BIGINT.to_string();
                     }
@@ -1106,10 +1120,13 @@ terminal (no state mutation)",
                     if is_subtype(&cons_type, &alt_type) {
                         return alt_type;
                     }
-                    self.add_error(format!(
-                        "Ternary branches have incompatible types: '{}' and '{}'",
-                        cons_type, alt_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Ternary branches have incompatible types: '{}' and '{}'",
+                            cons_type, alt_type
+                        ),
+                        expr,
+                    );
                 }
                 cons_type
             }
@@ -1190,18 +1207,24 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1209,18 +1232,24 @@ terminal (no state mutation)",
             // Arithmetic: bigint x bigint -> bigint
             BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1228,18 +1257,24 @@ terminal (no state mutation)",
             // Comparison: bigint x bigint -> boolean
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BOOLEAN.to_string()
             }
@@ -1286,18 +1321,24 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1305,18 +1346,24 @@ terminal (no state mutation)",
             // Shift: bigint x bigint -> bigint
             BinaryOp::Shl | BinaryOp::Shr => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1462,10 +1509,13 @@ terminal (no state mutation)",
             if !normalized.is_empty() {
                 let sat_type = self.infer_expr_type(&normalized[0], env);
                 if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
-                    self.add_error(format!(
-                        "addOutput() first argument (satoshis) must be bigint, got '{}'",
-                        sat_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "addOutput() first argument (satoshis) must be bigint, got '{}'",
+                            sat_type
+                        ),
+                        &normalized[0],
+                    );
                 }
             }
             let mut i = 0;
@@ -1502,10 +1552,13 @@ terminal (no state mutation)",
         if !args.is_empty() {
             let sat_type = self.infer_expr_type(&args[0], env);
             if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
-                self.add_error(format!(
-                    "{}() first argument (satoshis) must be bigint, got '{}'",
-                    name, sat_type
-                ));
+                self.add_error_at(
+                    format!(
+                        "{}() first argument (satoshis) must be bigint, got '{}'",
+                        name, sat_type
+                    ),
+                    &args[0],
+                );
             }
         }
         if args.len() >= 2 {
@@ -1530,7 +1583,7 @@ terminal (no state mutation)",
         env: &mut TypeEnv,
     ) -> TType {
         // super() call in constructor
-        if let Expression::Identifier { name } = callee {
+        if let Expression::Identifier { name, .. } = callee {
             if name == "super" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
@@ -1545,7 +1598,7 @@ terminal (no state mutation)",
         // form returns void; the expression form asm<T>({...}) carries the
         // captured return type on asm_return_type and produces a value of that
         // type.
-        if let Expression::Identifier { name } = callee {
+        if let Expression::Identifier { name, .. } = callee {
             if name == "asm" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
@@ -1558,7 +1611,7 @@ terminal (no state mutation)",
         }
 
         // Direct builtin call: assert(...), checkSig(...), sha256(...), etc.
-        if let Expression::Identifier { name } = callee {
+        if let Expression::Identifier { name, .. } = callee {
             if let Some(sig) = self.builtins.get(name.as_str()) {
                 let sig_params = sig.params.clone();
                 let sig_return_type = sig.return_type;
@@ -1623,7 +1676,7 @@ terminal (no state mutation)",
         }
 
         // this.method(...) via PropertyAccess
-        if let Expression::PropertyAccess { property } = callee {
+        if let Expression::PropertyAccess { property, .. } = callee {
             if property == "getStateScript" {
                 if !args.is_empty() {
                     self.add_error("getStateScript() takes no arguments");
@@ -1661,7 +1714,7 @@ terminal (no state mutation)",
             let obj_type = self.infer_expr_type(object, env);
 
             if obj_type == "<this>"
-                || matches!(object.as_ref(), Expression::Identifier { name } if name == "this")
+                || matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "this")
             {
                 if property == "getStateScript" {
                     return BYTESTRING.to_string();
@@ -1686,7 +1739,7 @@ terminal (no state mutation)",
 
             // Not this.method — reject (e.g. std::process::exit)
             let obj_name = match object.as_ref() {
-                Expression::Identifier { name } => name.clone(),
+                Expression::Identifier { name, .. } => name.clone(),
                 _ => "<expr>".to_string(),
             };
             self.add_error(format!(
@@ -2059,18 +2112,18 @@ terminal (no state mutation)",
 
             // Render a short label (source-form) for the diagnostic.
             let label = match arg {
-                Expression::Identifier { name } => name.clone(),
-                Expression::PropertyAccess { property } => format!("this.{}", property),
+                Expression::Identifier { name, .. } => name.clone(),
+                Expression::PropertyAccess { property, .. } => format!("this.{}", property),
                 _ => origin.clone(),
             };
 
             if self.consumed_values.contains(&origin)
                 || self.consumed_per_loop_iteration(&origin, env)
             {
-                self.add_error(format!(
-                    "affine value '{}' has already been consumed",
-                    label
-                ));
+                self.add_error_at(
+                    format!("affine value '{}' has already been consumed", label),
+                    arg,
+                );
             } else {
                 self.consumed_values.insert(origin);
             }
@@ -2081,10 +2134,14 @@ terminal (no state mutation)",
             if self.consumed_values.contains(&origin)
                 || self.consumed_per_loop_iteration(&origin, env)
             {
-                self.add_error(format!(
+                let msg = format!(
                     "affine value 'this.{}' has already been consumed",
                     origin.trim_start_matches("prop:")
-                ));
+                );
+                match args.first() {
+                    Some(first) => self.add_error_at(msg, first),
+                    None => self.add_error(msg),
+                }
             } else {
                 self.consumed_values.insert(origin);
             }
@@ -2139,13 +2196,13 @@ terminal (no state mutation)",
     /// "prop:<name>" namespace; everything else returns None.
     fn affine_origin_of_expr(&self, expr: &Expression) -> Option<String> {
         match expr {
-            Expression::Identifier { name } => Some(
+            Expression::Identifier { name, .. } => Some(
                 self.affine_aliases
                     .get(name)
                     .cloned()
                     .unwrap_or_else(|| name.clone()),
             ),
-            Expression::PropertyAccess { property } => Some(format!("prop:{}", property)),
+            Expression::PropertyAccess { property, .. } => Some(format!("prop:{}", property)),
             _ => None,
         }
     }
@@ -2155,8 +2212,8 @@ terminal (no state mutation)",
     /// prop-types map.
     fn affine_expr_type(&self, expr: &Expression, env: &TypeEnv) -> Option<TType> {
         match expr {
-            Expression::Identifier { name } => env.lookup(name).cloned(),
-            Expression::PropertyAccess { property } => self.prop_types.get(property).cloned(),
+            Expression::Identifier { name, .. } => env.lookup(name).cloned(),
+            Expression::PropertyAccess { property, .. } => self.prop_types.get(property).cloned(),
             _ => None,
         }
     }
@@ -2237,12 +2294,35 @@ fn collect_return_types(stmts: &[Statement]) -> Vec<TType> {
 /// Lightweight static expression type inference without a type environment.
 /// Used for inferring return types of private methods before the full
 /// type-check pass runs.
+/// N-463: the position of `expr`'s first token, or `None` when unknown.
+/// Only identifiers (`this` included), `this.x` and ByteString literals
+/// record a position, and only on `.runar.ts`. A composite expression starts
+/// where its leftmost child starts, which is the position TS reports for it
+/// (a parenthesised leftmost child is the exception: TS points at the `(`).
+fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
+    let mut e = expr;
+    loop {
+        e = match e {
+            Expression::Identifier { source_location, .. }
+            | Expression::PropertyAccess { source_location, .. }
+            | Expression::ByteStringLiteral { source_location, .. } => {
+                return source_location.as_ref()
+            }
+            Expression::BinaryExpr { left, .. } => left,
+            Expression::CallExpr { callee, .. } => callee,
+            Expression::MemberExpr { object, .. } | Expression::IndexAccess { object, .. } => object,
+            Expression::TernaryExpr { condition, .. } => condition,
+            _ => return None,
+        };
+    }
+}
+
 fn infer_expr_type_static(expr: &Expression) -> TType {
     match expr {
         Expression::BigIntLiteral { .. } => BIGINT.to_string(),
         Expression::BoolLiteral { .. } => BOOLEAN.to_string(),
         Expression::ByteStringLiteral { .. } => BYTESTRING.to_string(),
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             if name == "true" || name == "false" {
                 BOOLEAN.to_string()
             } else {
@@ -2272,7 +2352,7 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
             ..
         } => {
             let builtins = builtin_functions();
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 // Expression-form asm<T>({...}) statically yields type T.
                 if name == "asm" {
                     if let Some(t) = asm_return_type {
@@ -2283,7 +2363,7 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
                     return sig.return_type.to_string();
                 }
             }
-            if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = callee.as_ref() {
                 if let Some(sig) = builtins.get(property.as_str()) {
                     return sig.return_type.to_string();
                 }

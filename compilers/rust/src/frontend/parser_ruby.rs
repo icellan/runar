@@ -1692,6 +1692,7 @@ impl<'a> RbParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1887,11 +1888,12 @@ impl<'a> RbParser<'a> {
             op: cmp_op,
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
+                source_location: None,
             }),
             right: Box::new(end_expr),
         };
 
-        let update_operand = Box::new(Expression::Identifier { name: var_name });
+        let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
         let update = Statement::ExpressionStatement {
             expression: if descending {
                 Expression::DecrementExpr { operand: update_operand, prefix: false }
@@ -1943,6 +1945,7 @@ impl<'a> RbParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args,
                 asm_return_type: None,
@@ -1961,6 +1964,7 @@ impl<'a> RbParser<'a> {
         let prop_name = snake_to_camel(&raw_name);
         let mut target = Expression::PropertyAccess {
             property: prop_name,
+            source_location: None,
         };
 
         // Consume index-access postfixes on the LHS so `@var[i] = expr`
@@ -2044,7 +2048,7 @@ impl<'a> RbParser<'a> {
             if self.declared_locals.contains(&camel_name) {
                 // Already declared: this is an assignment
                 return Statement::Assignment {
-                    target: Expression::Identifier { name: camel_name },
+                    target: Expression::Identifier { name: camel_name, source_location: None },
                     value,
                     source_location: self.loc(),
                 };
@@ -2454,6 +2458,7 @@ impl<'a> RbParser<'a> {
             Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "pow".to_string(),
+                    source_location: None,
                 }),
                 args: vec![base, exp],
                 asm_return_type: None,
@@ -2485,11 +2490,12 @@ impl<'a> RbParser<'a> {
                         let arg_refs: Vec<&Expression> = args.iter().collect();
                         if !self.grow(&mut dt, &expr, &[]) || !self.grow(&mut dt, &expr, &arg_refs) { break; }
                         // Handle property_access.method(...)
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
                             expr = Expression::CallExpr {
                                 callee: Box::new(Expression::MemberExpr {
                                     object: Box::new(Expression::Identifier {
                                         name: "this".to_string(),
+                                        source_location: None,
                                     }),
                                     property: prop,
                                 }),
@@ -2508,8 +2514,8 @@ impl<'a> RbParser<'a> {
                         }
                     } else {
                         // Property access
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
-                            expr = Expression::PropertyAccess { property: prop };
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
+                            expr = Expression::PropertyAccess { property: prop, source_location: None };
                             dt = DepthTracker::new();
                         } else {
                             if !self.grow(&mut dt, &expr, &[]) { break; }
@@ -2565,21 +2571,24 @@ impl<'a> RbParser<'a> {
                 let prop_name = snake_to_camel(&name);
                 Expression::PropertyAccess {
                     property: prop_name,
+                    source_location: None,
                 }
             }
             Token::Ident(name) => {
                 let mapped = map_builtin_name(&name);
-                Expression::Identifier { name: mapped }
+                Expression::Identifier { name: mapped, source_location: None }
             }
             Token::Assert => {
                 // assert used as expression (unusual but handle it)
                 Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }
             }
             Token::Super => {
                 Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }
             }
             Token::LParen => {
@@ -2645,12 +2654,14 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2667,9 +2678,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
             source_location: SourceLocation {
                 file: file.to_string(),
@@ -2716,9 +2729,9 @@ fn rewrite_expr(expr: &mut Expression, method_names: &std::collections::HashSet<
             for arg in args.iter_mut() {
                 rewrite_expr(arg, method_names);
             }
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if method_names.contains(name) {
-                    *callee = Box::new(Expression::PropertyAccess { property: name.clone() });
+                    *callee = Box::new(Expression::PropertyAccess { property: name.clone(), source_location: None });
                 }
             } else {
                 rewrite_expr(callee.as_mut(), method_names);

@@ -34,12 +34,24 @@ const log = std.log.scoped(.typecheck);
 pub const TypeCheckResult = struct {
     contract: ContractNode,
     errors: []const []const u8,
+    /// N-463: `error_locations[i]` is where `errors[i]` points in the source,
+    /// when known (only the .runar.ts parser records expression positions).
+    /// Same length as `errors`, or empty.
+    error_locations: []const ?types.SourceLocation = &.{},
 
     pub fn deinit(self: *const TypeCheckResult, allocator: Allocator) void {
         for (self.errors) |msg| allocator.free(msg);
         if (self.errors.len > 0) allocator.free(self.errors);
+        if (self.error_locations.len > 0) allocator.free(self.error_locations);
     }
 };
+
+/// N-463: the recorded first-token position of `args[i]`, or null when the
+/// parser recorded none (every surface but .runar.ts) or the lists disagree.
+fn argLoc(arg_locs: []const ?types.SourceLocation, args: []const Expression, i: usize) ?types.SourceLocation {
+    if (arg_locs.len != args.len or i >= arg_locs.len) return null;
+    return arg_locs[i];
+}
 
 /// N-321: cap on a typecheck message; mirrored in every tier.
 const MAX_DIAGNOSTIC_BYTES: usize = 1024;
@@ -56,7 +68,11 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
     }
 
     const errors = try checker.errors.toOwnedSlice(allocator);
-    return .{ .contract = contract, .errors = errors };
+    const error_locations: []const ?types.SourceLocation = if (checker.error_locs.items.len == errors.len)
+        try checker.error_locs.toOwnedSlice(allocator)
+    else
+        &.{};
+    return .{ .contract = contract, .errors = errors, .error_locations = error_locations };
 }
 
 // ============================================================================
@@ -454,6 +470,8 @@ const TypeChecker = struct {
     allocator: Allocator,
     contract: ContractNode,
     errors: std.ArrayListUnmanaged([]const u8),
+    /// N-463: parallel to `errors`; see `TypeCheckResult.error_locations`.
+    error_locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty,
     prop_types: std.StringHashMapUnmanaged(RunarType),
     /// Element type of each `FixedArray<T, N>` property, for the T that this
     /// tier can actually name. Populated only when T is a scalar: a nested
@@ -549,6 +567,7 @@ const TypeChecker = struct {
     }
 
     fn deinit(self: *TypeChecker) void {
+        self.error_locs.deinit(self.allocator);
         // Free method sig param slices we allocated
         var it = self.method_sigs.iterator();
         while (it.next()) |entry| {
@@ -723,6 +742,12 @@ const TypeChecker = struct {
     }
 
     fn addError(self: *TypeChecker, comptime fmt: []const u8, args: anytype) void {
+        self.addErrorAt(null, fmt, args);
+    }
+
+    /// N-463: `addError` anchored at `loc` -- the offending expression's
+    /// first token, where the TS reference anchors it -- when known.
+    fn addErrorAt(self: *TypeChecker, loc: ?types.SourceLocation, comptime fmt: []const u8, args: anytype) void {
         var msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         // N-321: a message may echo user-written source text of any length; cap it.
         if (msg.len > MAX_DIAGNOSTIC_BYTES) {
@@ -735,9 +760,15 @@ const TypeChecker = struct {
             self.allocator.free(msg);
             msg = capped;
         }
+        self.error_locs.ensureUnusedCapacity(self.allocator, 1) catch {
+            self.allocator.free(msg);
+            return;
+        };
         self.errors.append(self.allocator, msg) catch {
             self.allocator.free(msg);
+            return;
         };
+        self.error_locs.appendAssumeCapacity(loc);
     }
 
     // ------------------------------------------------------------------
@@ -1179,7 +1210,8 @@ const TypeChecker = struct {
                     // `unknown` never reaches here: isSubtype treats it as top
                     // of the lattice, so a private helper's return type is
                     // related to everything, exactly as in TS.
-                    self.addError(
+                    self.addErrorAt(
+                        tern.location,
                         "Ternary branches have incompatible types: '{s}' and '{s}'",
                         .{ types.runarTypeToString(cons_type), types.runarTypeToString(alt_type) },
                     );
@@ -1320,27 +1352,27 @@ const TypeChecker = struct {
             .add => {
                 if (isByteFamily(left_type) and isByteFamily(right_type)) return .byte_string;
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(left_type)});
+                    self.addErrorAt(bin.left_loc, "left operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(left_type)});
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(right_type)});
+                    self.addErrorAt(bin.right_loc, "right operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(right_type)});
                 return .bigint;
             },
             // Arithmetic
             .sub, .mul, .div, .mod => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
             // Comparison
             .lt, .lte, .gt, .gte => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .boolean;
             },
             // Equality
@@ -1376,9 +1408,9 @@ const TypeChecker = struct {
             .lshift, .rshift => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
             // Bitwise: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
@@ -1386,9 +1418,9 @@ const TypeChecker = struct {
                 if (isByteFamily(left_type) and isByteFamily(right_type)) return .byte_string;
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
         }
@@ -1454,12 +1486,12 @@ const TypeChecker = struct {
 
         // Builtin function
         if (builtin_functions.get(name)) |func_sig| {
-            return self.checkCallArgs(name, func_sig, call.args, env);
+            return self.checkCallArgs(name, func_sig, call.args, call.arg_locs, env);
         }
 
         // Known contract method
         if (self.method_sigs.get(name)) |method_sig| {
-            return self.checkCallArgs(name, method_sig, call.args, env);
+            return self.checkCallArgs(name, method_sig, call.args, call.arg_locs, env);
         }
 
         // Local variable (callable) -- F-208: Rúnar has no first-class
@@ -1519,6 +1551,7 @@ const TypeChecker = struct {
         self: *TypeChecker,
         name: []const u8,
         args: []const types.Expression,
+        arg_locs: []const ?types.SourceLocation,
         env: *TypeEnv,
     ) RunarType {
         // N-105: all three intrinsics build an OUTPUT, and an output only
@@ -1581,7 +1614,8 @@ const TypeChecker = struct {
             if (args.len >= 1) {
                 const sat_type = self.inferExprType(args[0], env);
                 if (!isBigintFamily(sat_type) and sat_type != .unknown) {
-                    self.addError(
+                    self.addErrorAt(
+                        argLoc(arg_locs, args, 0),
                         "addOutput() first argument (satoshis) must be bigint, got '{s}'",
                         .{types.runarTypeToString(sat_type)},
                     );
@@ -1629,7 +1663,8 @@ const TypeChecker = struct {
         if (args.len >= 1) {
             const sat_type = self.inferExprType(args[0], env);
             if (!isBigintFamily(sat_type) and sat_type != .unknown) {
-                self.addError(
+                self.addErrorAt(
+                    argLoc(arg_locs, args, 0),
                     "{s}() first argument (satoshis) must be bigint, got '{s}'",
                     .{ name, types.runarTypeToString(sat_type) },
                 );
@@ -1689,13 +1724,13 @@ const TypeChecker = struct {
                 return .byte_string;
             }
             if (std.mem.eql(u8, mc.method, "addOutput")) {
-                return self.checkOutputIntrinsicArgs("addOutput", mc.args, env);
+                return self.checkOutputIntrinsicArgs("addOutput", mc.args, mc.arg_locs, env);
             }
             if (std.mem.eql(u8, mc.method, "addRawOutput")) {
-                return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, env);
+                return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, mc.arg_locs, env);
             }
             if (std.mem.eql(u8, mc.method, "addDataOutput")) {
-                return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, env);
+                return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, mc.arg_locs, env);
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {
                 if (is_this) {
@@ -1704,9 +1739,12 @@ const TypeChecker = struct {
                         return .unknown;
                     };
                     defer if (args.ptr != mc.args.ptr) self.allocator.free(args);
-                    return self.checkCallArgs(mc.method, method_sig, args, env);
+                    // A dropped StatefulContext argument shifts the indices,
+                    // so the locations only line up when nothing was dropped.
+                    const arg_locs: []const ?types.SourceLocation = if (args.ptr == mc.args.ptr) mc.arg_locs else &.{};
+                    return self.checkCallArgs(mc.method, method_sig, args, arg_locs, env);
                 }
-                return self.checkCallArgs(mc.method, method_sig, mc.args, env);
+                return self.checkCallArgs(mc.method, method_sig, mc.args, mc.arg_locs, env);
             }
             self.addError("unknown method '{s}.{s}' -- only Runar built-in methods and contract methods are allowed", .{ mc.object, mc.method });
             for (mc.args) |arg| _ = self.inferExprType(arg, env);
@@ -1723,7 +1761,7 @@ const TypeChecker = struct {
     // Argument checking
     // ------------------------------------------------------------------
 
-    fn checkCallArgs(self: *TypeChecker, func_name: []const u8, func_sig: FuncSig, args: []const Expression, env: *TypeEnv) RunarType {
+    fn checkCallArgs(self: *TypeChecker, func_name: []const u8, func_sig: FuncSig, args: []const Expression, arg_locs: []const ?types.SourceLocation, env: *TypeEnv) RunarType {
         // assert: 1-2 args special case
         if (std.mem.eql(u8, func_name, "assert")) {
             if (args.len < 1 or args.len > 2) {
@@ -1749,7 +1787,7 @@ const TypeChecker = struct {
             if (args.len != 2) {
                 self.addError("checkMultiSig() expects 2 arguments, got {d}", .{args.len});
                 for (args) |arg| _ = self.inferExprType(arg, env);
-                self.checkAffineConsumption(func_name, args, env);
+                self.checkAffineConsumption(func_name, args, arg_locs, env);
                 return func_sig.return_type;
             }
             const expected: [2]RunarType = .{ .sig, .pub_key };
@@ -1776,7 +1814,7 @@ const TypeChecker = struct {
                     },
                 }
             }
-            self.checkAffineConsumption(func_name, args, env);
+            self.checkAffineConsumption(func_name, args, arg_locs, env);
             return func_sig.return_type;
         }
 
@@ -1871,7 +1909,7 @@ const TypeChecker = struct {
                 }
                 _ = self.inferExprType(args[2], env);
             }
-            self.checkAffineConsumption(func_name, args, env);
+            self.checkAffineConsumption(func_name, args, arg_locs, env);
             return func_sig.return_type;
         }
 
@@ -1945,7 +1983,7 @@ const TypeChecker = struct {
         // Type-check extra args beyond expected arity
         for (count..args.len) |i| _ = self.inferExprType(args[i], env);
 
-        self.checkAffineConsumption(func_name, args, env);
+        self.checkAffineConsumption(func_name, args, arg_locs, env);
         return func_sig.return_type;
     }
 
@@ -1957,7 +1995,7 @@ const TypeChecker = struct {
     /// (`const again = sig`) and property accesses (`this.sig`)
     /// cannot launder a double-consumption past the affine check.
     /// 2026-04-30 audit finding F6.
-    fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, env: *TypeEnv) void {
+    fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, arg_locs: []const ?types.SourceLocation, env: *TypeEnv) void {
         var consumed_props: []const []u8 = &.{};
         const indices = consumedIndices(func_name) orelse blk: {
             // N-109: a call to a contract method consumes the arguments at
@@ -1992,10 +2030,11 @@ const TypeChecker = struct {
             const consumed = (self.consumed_values.get(origin) orelse false) or
                 self.consumedPerLoopIteration(origin, env);
             if (consumed) {
+                const at = argLoc(arg_locs, args, param_index);
                 switch (arg) {
-                    .identifier => |name| self.addError("affine value '{s}' has already been consumed", .{name}),
-                    .property_access => |pa| self.addError("affine value 'this.{s}' has already been consumed", .{pa.property}),
-                    else => self.addError("affine value '{s}' has already been consumed", .{origin}),
+                    .identifier => |name| self.addErrorAt(at, "affine value '{s}' has already been consumed", .{name}),
+                    .property_access => |pa| self.addErrorAt(at, "affine value 'this.{s}' has already been consumed", .{pa.property}),
+                    else => self.addErrorAt(at, "affine value '{s}' has already been consumed", .{origin}),
                 }
                 continue;
             }
@@ -2011,7 +2050,7 @@ const TypeChecker = struct {
             const consumed = (self.consumed_values.get(origin) orelse false) or
                 self.consumedPerLoopIteration(origin, env);
             if (consumed) {
-                self.addError("affine value 'this.{s}' has already been consumed", .{prop_name});
+                self.addErrorAt(argLoc(arg_locs, args, 0), "affine value 'this.{s}' has already been consumed", .{prop_name});
                 continue;
             }
             self.consumed_values.put(self.allocator, origin, true) catch {};

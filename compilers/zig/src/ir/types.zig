@@ -398,7 +398,11 @@ pub const Expression = union(enum) {
 /// it is null and the hex diagnostics print no location.
 pub const BytesLiteral = struct { value: []const u8, location: ?SourceLocation = null };
 pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
-pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression };
+/// `left_loc` / `right_loc` are the first tokens of the two operands (N-463).
+/// Only the .runar.ts parser sets them, as the TS reference locates its
+/// operands; elsewhere they are null and an operand type error prints no
+/// location.
+pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression, left_loc: ?SourceLocation = null, right_loc: ?SourceLocation = null };
 pub const UnaryOp = struct { op: UnaryOperator, operand: Expression };
 pub const CallExpr = struct {
     callee: []const u8,
@@ -408,9 +412,14 @@ pub const CallExpr = struct {
     /// "ByteString" when present; empty for the statement form and every
     /// non-asm call.
     asm_return_type: []const u8 = "",
+    /// First token of each argument (N-463); .runar.ts parser only, empty
+    /// elsewhere. See `BinaryOp.left_loc`.
+    arg_locs: []const ?SourceLocation = &.{},
 };
-pub const MethodCall = struct { object: []const u8, method: []const u8, args: []Expression };
-pub const Ternary = struct { condition: Expression, then_expr: Expression, else_expr: Expression };
+/// `arg_locs`: as on `CallExpr` (N-463).
+pub const MethodCall = struct { object: []const u8, method: []const u8, args: []Expression, arg_locs: []const ?SourceLocation = &.{} };
+/// `location` is the ternary's first token (N-463); .runar.ts parser only.
+pub const Ternary = struct { condition: Expression, then_expr: Expression, else_expr: Expression, location: ?SourceLocation = null };
 pub const IndexAccess = struct { object: Expression, index: Expression };
 pub const IncrementExpr = struct { operand: Expression, prefix: bool };
 pub const DecrementExpr = struct { operand: Expression, prefix: bool };
