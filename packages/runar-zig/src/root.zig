@@ -339,6 +339,7 @@ test {
     _ = @import("sdk_wallet.zig");
     _ = @import("sdk_n267_readme_wallet_broadcast_test.zig");
     _ = @import("sdk_http_client.zig");
+    _ = @import("sdk_wallet_client_integration_test.zig");
     _ = @import("analyzer.zig");
     _ = @import("analyzer_script_parser.zig");
     _ = @import("analyzer_stack.zig");

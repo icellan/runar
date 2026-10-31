@@ -117,7 +117,10 @@ RSpec.describe 'BRC-100 WalletClient live endpoint', :integration do
     expect(pub_key).not_to be_empty
     # Compressed secp256k1 public keys are 66 hex chars starting with 02 or 03.
     expect(pub_key.length).to eq(66)
-    expect(pub_key[0, 2]).to be_in(%w[02 03])
+    # N-480: was `be_in(%w[02 03])`, which is not an RSpec matcher (it is a dynamic
+    # predicate matcher that calls String#in?, an ActiveSupport method this suite does not
+    # load) — it raised on the first run this spec ever had. Same assertion, real matcher.
+    expect(%w[02 03]).to include(pub_key[0, 2])
     expect(pub_key).to match(/\A[0-9a-fA-F]+\z/)
 
     # list_outputs should return an array (may be empty on a fresh wallet).

@@ -138,13 +138,13 @@ pair with its own row.
 | `TestCLI_Groth16WAVKFlag_UnreachableWithoutIt` / `TestCLI_Groth16WAVKFlag_CompilesWithIt` / `TestCLI_Groth16WAVKFlag_CompilesWithIt_IRPath` | `compilers/go/groth16_wa_vk_flag_cli_test.go:37,55,97` | Environmental | Same CLI-binary-build + SP1 v6.0.0 fixture cost as `TestCLI_Groth16WA_SP1`; this trio instead exercises the `--groth16-wa-vk` flag on the main `--source`/`--ir` compile path (F-305). |
 | `TestGroth16WA_EndToEnd_SP1Proof_Script` | `packages/runar-go/bn254witness/sp1_script_test.go:207` | Environmental | Script execution of the Groth16-WA verifier against the SP1 fixture is minutes-long on the go-sdk interpreter. |
 | `TestSp1FriVerifier_PerQueryFoldsMatchReference` / `TestSp1FriVerifier_PerQueryConditionalFoldsMatchReference` arity-skip branches (was `TestSp1Fri_FoldRow`, renamed) | `compilers/go/codegen/sp1_fri_test.go:1274,1600` | Environmental | Test only handles arity = 2; SP1 fixtures use arity = 2, so the skip is a future-proof guard for higher-arity SP1 builds. |
-| `TestWalletClient_LiveEndpoint_RoundTrip` | `packages/runar-go/sdk_wallet_client_integration_test.go:130` | Environmental | Set `RUNAR_WALLET_ENDPOINT` to a BRC-100 wallet URL to enable. Optional `RUNAR_WALLET_AUTH`, `RUNAR_WALLET_BASKET`. |
-| `BRC-100 WalletClient live endpoint` | `packages/runar-sdk/src/__tests__/wallet-client.spec.ts:47` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. |
-| `BRC-100 WalletClient live endpoint round-trip` | `packages/runar-zig/src/sdk_wallet_client_integration_test.zig:96,97` | Environmental | `return error.SkipZigTest` when `RUNAR_WALLET_ENDPOINT` is unset; same precondition as Go. |
-| `walletClientLiveRoundTrip` | `packages/runar-java/src/test/java/runar/lang/sdk/WalletClientIntegrationTest.java:44` | Environmental | `@EnabledIfEnvironmentVariable("RUNAR_WALLET_ENDPOINT")` — same precondition as Go. |
-| `test_wallet_client_live_round_trip` | `packages/runar-py/tests/test_wallet_client_integration.py:61` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. |
-| `wallet_client_live_round_trip` | `packages/runar-rs/tests/wallet_client_integration.rs:46` | Environmental | `#[ignore]` annotation; run with `cargo test -- --ignored` and `RUNAR_WALLET_ENDPOINT` set. Same precondition as Go. |
-| `HttpWalletClient` class / `is skipped — set RUNAR_WALLET_ENDPOINT to a BRC-100 wallet URL to enable` (BRC-100 live endpoint round-trip) | `integration/ruby/spec/wallet_client_spec.rb:107,142` | Environmental | Two RSpec `skip 'reason'` calls (the `before do` gate at :107 and the auth-required spec body at :142); same `RUNAR_WALLET_ENDPOINT` precondition as Go. |
+| `TestWalletClient_LiveEndpoint_RoundTrip` | `packages/runar-go/sdk_wallet_client_integration_test.go:130` | Environmental | Set `RUNAR_WALLET_ENDPOINT` to a BRC-100 wallet URL to enable. Optional `RUNAR_WALLET_AUTH`, `RUNAR_WALLET_BASKET`. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
+| `BRC-100 WalletClient live endpoint` | `packages/runar-sdk/src/__tests__/wallet-client.spec.ts:47` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
+| `BRC-100 WalletClient live endpoint round-trip` | `packages/runar-zig/src/sdk_wallet_client_integration_test.zig:96,97` | Environmental | `return error.SkipZigTest` when `RUNAR_WALLET_ENDPOINT` is unset; same precondition as Go. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
+| `walletClientLiveRoundTrip` | `packages/runar-java/src/test/java/runar/lang/sdk/WalletClientIntegrationTest.java:44` | Environmental | `@EnabledIfEnvironmentVariable("RUNAR_WALLET_ENDPOINT")` — same precondition as Go. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
+| `test_wallet_client_live_round_trip` | `packages/runar-py/tests/test_wallet_client_integration.py:61` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
+| `wallet_client_live_round_trip` | `packages/runar-rs/tests/wallet_client_integration.rs:46` | Environmental | `#[ignore]` annotation; run with `cargo test -- --ignored` and `RUNAR_WALLET_ENDPOINT` set. Same precondition as Go. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
+| `HttpWalletClient` class / `is skipped — set RUNAR_WALLET_ENDPOINT to a BRC-100 wallet URL to enable` (BRC-100 live endpoint round-trip) | `integration/ruby/spec/wallet_client_spec.rb:107,145` | Environmental | Two RSpec `skip 'reason'` calls (the `before do` gate at :107 and the auth-required spec body at :145); same `RUNAR_WALLET_ENDPOINT` precondition as Go. CI runs it in the `integration` job against the in-repo mock BRC-100 wallet (`integration/mock-wallet/`, N-480). |
 | `Cross-compiler: TS IR -> Go Script` / `Cross-compiler: all examples TS IR -> Go` / `Cross-compiler conformance: Go output vs golden hex` / `Cross-compiler: all examples TS IR -> Rust` / `Cross-compiler conformance: Rust output vs golden hex` / `Cross-compiler: all three compilers produce identical hex` (+ Rust / Python / Zig / Ruby / Java suites, 11 `describe.skipIf(...)` blocks) | `packages/runar-compiler/src/__tests__/cross-compiler.test.ts:610,687,821,940,994,1038,1088,1133,1176,1217,1259` | Environmental | CI-strict: the `ts-compiler` CI job sets `RUNAR_REQUIRE_ALL_COMPILERS=1` and installs every toolchain the matrix references, so a missing compiler hard-fails the suite via `cross-compiler.test.ts:283-304`. Local devs without a given toolchain see a one-line WARNING and the suite skips. Set `RUNAR_REQUIRE_ALL_COMPILERS=1` locally to upgrade to hard-fail. |
 | `assembleMultiContractCall — regtest integration` | `packages/runar-sdk/src/__tests__/multi-contract-call.regtest.test.ts:237` | Environmental | `describe.skipIf(!nodeUp)` — the accept/reject on-chain paths need a live BSV regtest node (probed by `isNodeAvailable()`). Skipped when no node is up; the 11 in-process `Spend`-validated unit tests in `multi-contract-call.test.ts` are the always-on gate. CI's `integration` job runs a regtest node. |
 | `CurlHttpTransport live GET hits httpbin` / `StdHttpTransport live GET hits httpbin` | `packages/runar-zig/src/sdk_http_client.zig:331,341` | Environmental | Set `RUNAR_HTTP_LIVE=1` to exercise the real HTTPS GET path. |
@@ -321,14 +321,12 @@ opt-outs at the conformance-runner level, not test-level skips. See
 cd compilers/go && go test ./... -count=1
 cd integration/go && go test -tags=integration ./... -count=1
 
-# BRC-100 wallet round-trip across all 7 SDKs:
-RUNAR_WALLET_ENDPOINT=https://your-brc100-wallet/ pnpm test
-RUNAR_WALLET_ENDPOINT=... cd packages/runar-go && go test ./...
-RUNAR_WALLET_ENDPOINT=... cd packages/runar-py && python3 -m pytest
-RUNAR_WALLET_ENDPOINT=... cd packages/runar-rs && cargo test
-RUNAR_WALLET_ENDPOINT=... cd packages/runar-zig && zig build test
-RUNAR_WALLET_ENDPOINT=... cd packages/runar-rb && bundle exec rspec
-RUNAR_WALLET_ENDPOINT=... cd packages/runar-java && gradle test
+# BRC-100 wallet round-trip across all 7 SDKs, against the in-repo mock wallet
+# (what CI's integration job does; or point RUNAR_WALLET_ENDPOINT at a real one).
+# wallet-client:ruby also needs the regtest node (integration/ruby's spec_helper).
+integration/mock-wallet/mock-wallet.sh start
+RUNAR_WALLET_ENDPOINT=http://127.0.0.1:18480 pnpm run wallet-client:all
+integration/mock-wallet/mock-wallet.sh stop
 
 # Cross-compiler vitest suites (require all toolchains; skip-with-warning locally,
 # hard-fail in CI):

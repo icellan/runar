@@ -64,9 +64,11 @@
  * below — so a NEW gap (a ci.yml step added with nothing in test:ci reaching
  * it, or an existing equivalence that stops holding because test:ci's chain
  * changed) fails this test instead of silently widening the gap further.
- * Also: no ci.yml text names any "wallet-client" family test — the one
- * direction where `test:ci` runs something (seven per-tier wallet-client
- * commands) that CI runs NOTHING like, by design (env-gated, skip clean).
+ * Also: the seven per-tier `wallet-client:*` commands `test:ci` runs are run
+ * by ci.yml too — since N-480 the integration job starts an in-repo BRC-100
+ * test wallet and runs the TS/Go/Rust/Python/Zig/Java commands verbatim (and
+ * Ruby's spec inside its whole-suite integration step). Before N-480 this was
+ * the one direction where test:ci ran something CI ran nothing like.
  *
  * What this test does not prove: that the wired `test:ci-local` commands pass
  * on every machine — it diffs TEXT only; each was run once, green, for N-290.
@@ -468,18 +470,23 @@ describe('N-283: pnpm test:ci vs .github/workflows/ci.yml — the measured drift
     expect(dupes).toEqual([]);
   });
 
-  it('the reverse direction: pnpm test:ci runs a wallet-client family that ci.yml never names', () => {
-    // The one direction where test:ci runs something CI runs nothing like:
-    // seven per-tier `wallet-client:*` commands (env-gated — RUNAR_WALLET_ENDPOINT
-    // unset means each skips clean, so this is harmless, not a false-green risk,
-    // but it IS local work with zero CI counterpart).
+  it('the wallet-client family pnpm test:ci runs is run by ci.yml too (N-480)', () => {
+    // Before N-480 this asserted the opposite: ci.yml named no wallet-client test, because no
+    // CI job had a BRC-100 wallet, so the seven env-gated `wallet-client:*` commands ran only
+    // locally (and skipped there too without RUNAR_WALLET_ENDPOINT). The integration job now
+    // starts integration/mock-wallet and runs each tier's command verbatim. Ruby's
+    // `wallet-client:ruby` narrows the integration rspec run to one file; CI runs that file
+    // inside the whole-suite Ruby integration step instead (held by the N-474 guard).
+    // Proves: the commands are textually present in ci.yml. Does not prove the wallet is up
+    // or the endpoint set for them — tests/n474-gated-vitest-skips-reachable-from-ci.test.ts
+    // checks that per step.
     const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
     expect(pkg.scripts['wallet-client:all'], 'package.json: wallet-client:all script not found').toBeTruthy();
-    expect(
-      ciText,
-      'ci.yml now mentions "wallet-client" -- update this test (and the module comment) to say which ' +
-        'direction the gap closed in, instead of leaving a stale "CI never runs this" claim.',
-    ).not.toMatch(/wallet.?client/i);
+    for (const tier of ['ts', 'go', 'rust', 'python', 'zig', 'java']) {
+      const cmd = pkg.scripts[`wallet-client:${tier}`];
+      expect(cmd, `package.json: wallet-client:${tier} script not found`).toBeTruthy();
+      expect(ciText, `ci.yml does not run \`${cmd}\` (wallet-client:${tier})`).toContain(`run: ${cmd}\n`);
+    }
   });
 
   it('README.md / CONTRIBUTING.md no longer promise an unconditional mirror and point at this test', () => {

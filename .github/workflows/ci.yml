@@ -1702,6 +1702,10 @@ jobs:
       RPC_URL: http://localhost:18332
       RPC_USER: regtest
       RPC_PASS: regtest
+      # N-480: the in-repo BRC-100 test wallet started below. Job-wide so the
+      # Ruby integration step's wallet_client_spec.rb runs too, not just the
+      # dedicated per-tier wallet-client steps.
+      RUNAR_WALLET_ENDPOINT: http://127.0.0.1:18480
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -1721,6 +1725,7 @@ jobs:
         with:
           workspaces: |
             integration/rust
+            packages/runar-rs
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -1783,6 +1788,13 @@ jobs:
       - name: Start BSV regtest node
         run: cd integration && ./regtest.sh start
 
+      - name: Start mock BRC-100 wallet
+        # N-480: in-repo test wallet (integration/mock-wallet/server.mjs) on
+        # 127.0.0.1:18480, so the seven tiers' RUNAR_WALLET_ENDPOINT-gated
+        # wallet-client tests run here instead of skipping. `start` returns
+        # only once the server answers a getPublicKey call.
+        run: cd integration/mock-wallet && ./mock-wallet.sh start
+
       - name: Go integration tests
         # Timeout raised to 30min because TestRollupGroth16WAMSM_AdvanceState
         # broadcasts a ~900KB Groth16 MSM tx and regularly spends 10+ minutes
@@ -1822,11 +1834,43 @@ jobs:
         run: cd integration/java && ./gradlew test -Drunar.integration=true --no-daemon
         timeout-minutes: 35
 
+      # N-480: each tier's BRC-100 wallet-client round-trip (getPublicKey +
+      # listOutputs) against the mock wallet. RUNAR_WALLET_ENDPOINT comes from
+      # the job env; with it set, a dead wallet is a connection failure, not a
+      # skip. Ruby's wallet_client_spec.rb already ran in the Ruby step above.
+      - name: TypeScript wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-sdk && npx vitest run src/__tests__/wallet-client.spec.ts
+
+      - name: Go wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-go && go test -run TestWalletClient_LiveEndpoint_RoundTrip -v
+
+      - name: Rust wallet-client test (mock BRC-100 wallet)
+        # The test is #[ignore]d so a plain `cargo test` skips it; --ignored runs it.
+        run: cd packages/runar-rs && cargo test --test wallet_client_integration -- --ignored
+        timeout-minutes: 30
+
+      - name: Python wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-py && python3 -m pytest tests/test_wallet_client_integration.py -v
+
+      - name: Zig wallet-client test (mock BRC-100 wallet)
+        # build.zig has no test filter: this reruns the whole runar-zig suite,
+        # with the wallet test (SkipZigTest when the endpoint is unset) now live.
+        run: cd packages/runar-zig && zig build test
+        timeout-minutes: 30
+
+      - name: Java wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-java && ./gradlew test --tests runar.lang.sdk.WalletClientIntegrationTest --no-daemon
+        timeout-minutes: 30
+
       - name: Install end-to-end Ruby deps
         run: cd examples/end2end-example/ruby && bundle install
 
       - name: All end-to-end PriceBet examples
         run: pnpm run e2e:all
+
+      - name: Stop mock BRC-100 wallet
+        if: always()
+        run: cd integration/mock-wallet && ./mock-wallet.sh stop
 
       - name: Stop regtest node
         if: always()

@@ -28,10 +28,15 @@
  *             RUNAR_INTEGRATION_STRICT=1 — which the file must honour by
  *             failing, not skipping, when no node answers. Without the strict
  *             half a dead node turns the step back into a green skip.
- *   external  `RUNAR_WALLET_ENDPOINT` (a live BRC-100 wallet). No CI job has
- *             one, in any of the seven tiers. Pinned EXACTLY below: a new file
- *             gated on an external service fails here until someone decides
- *             how it gets run; removing one fails until the pin is lowered.
+ *   wallet    `RUNAR_WALLET_ENDPOINT` (a BRC-100 wallet). N-480: CI provides
+ *             one — integration/mock-wallet/mock-wallet.sh starts an in-repo
+ *             BRC-100 test wallet in the integration job. Some CI step must
+ *             reach the file with RUNAR_WALLET_ENDPOINT set (step or job env)
+ *             AFTER a step that ran `mock-wallet.sh start`. No strict-mode
+ *             half is needed: the gate IS the env var, so with it set a dead
+ *             wallet is a connection failure, not a skip. The same rule is
+ *             held for the six non-vitest wallet-client tests (Go, Rust,
+ *             Python, Zig, Ruby, Java), pinned with their CI commands below.
  *   toolchain a peer compiler / SDK driver binary is absent. CI builds every
  *             tier and sets RUNAR_REQUIRE_ALL_COMPILERS / strict driver gates
  *             for those suites; they are not env-gated skips and are not
@@ -44,7 +49,8 @@
  * step that reaches it (a `vitest run` naming it or an ancestor dir, or a
  * whole-workspace `pnpm run test` / `pnpm --filter <pkg> run test` for a
  * workspace package whose test script is a bare `vitest run`) under the
- * conditions above; the external-service set is exactly the pinned one.
+ * conditions above; every wallet-gated test, in all seven tiers, runs in a
+ * CI step with the wallet started and RUNAR_WALLET_ENDPOINT set.
  * Does NOT prove the reached tests pass in CI — that is what the CI run is
  * for; N-474's logs record one local passing run of each with the gate set.
  * Does not parse YAML in general: it understands this repo's ci.yml layout
@@ -130,12 +136,12 @@ function gatePredicates(src: string): string[] {
   return out;
 }
 
-type GateClass = 'slow' | 'regtest' | 'external' | 'toolchain';
+type GateClass = 'slow' | 'regtest' | 'wallet' | 'toolchain';
 
 function classify(pred: string): GateClass | null {
   if (/\brunSlowTests\b/.test(pred)) return 'slow';
   if (/\bnodeUp\b/.test(pred)) return 'regtest';
-  if (/\bENDPOINT\b/.test(pred)) return 'external';
+  if (/\bENDPOINT\b/.test(pred)) return 'wallet';
   if (
     /\bisDriverAvailable\(|\bhas(Go|Rust|Python)\b|\w+(BinaryPath|ScriptPath|JarPath)\b|\b\w*[bB]inary\s*===\s*null\b/.test(
       pred,
@@ -146,8 +152,49 @@ function classify(pred: string): GateClass | null {
   return null;
 }
 
-/** External-service gates with no CI provision. Exact pin — see header. */
-const EXTERNAL_SERVICE_GATED = ['packages/runar-sdk/src/__tests__/wallet-client.spec.ts'];
+/**
+ * N-480: the wallet-gated tests outside vitest (one per non-TS tier), each with
+ * the exact CI command that must run it. Their gates are not `.skipIf` calls
+ * (t.Skip, #[ignore], pytest.mark.skipif, SkipZigTest, rspec `skip`,
+ * @EnabledIfEnvironmentVariable), so this guard cannot discover them; it pins
+ * them instead, and checks each file still reads RUNAR_WALLET_ENDPOINT.
+ */
+const NATIVE_WALLET_TESTS: { file: string; command: string; wiredBy?: { file: string; text: string } }[] = [
+  {
+    file: 'packages/runar-go/sdk_wallet_client_integration_test.go',
+    command: 'cd packages/runar-go && go test -run TestWalletClient_LiveEndpoint_RoundTrip -v',
+  },
+  {
+    file: 'packages/runar-rs/tests/wallet_client_integration.rs',
+    command: 'cd packages/runar-rs && cargo test --test wallet_client_integration -- --ignored',
+  },
+  {
+    file: 'packages/runar-py/tests/test_wallet_client_integration.py',
+    command: 'cd packages/runar-py && python3 -m pytest tests/test_wallet_client_integration.py -v',
+  },
+  {
+    file: 'packages/runar-zig/src/sdk_wallet_client_integration_test.zig',
+    command: 'cd packages/runar-zig && zig build test',
+    // Zig compiles only the test files root.zig imports; this one was orphaned (N-480 found
+    // `zig build test` with the endpoint set never ran it).
+    wiredBy: { file: 'packages/runar-zig/src/root.zig', text: '_ = @import("sdk_wallet_client_integration_test.zig");' },
+  },
+  // Reached by the integration job's whole-suite Ruby step (the job env sets the endpoint).
+  { file: 'integration/ruby/spec/wallet_client_spec.rb', command: 'cd integration/ruby && bundle exec rspec --format documentation' },
+  {
+    file: 'packages/runar-java/src/test/java/runar/lang/sdk/WalletClientIntegrationTest.java',
+    command: 'cd packages/runar-java && ./gradlew test --tests runar.lang.sdk.WalletClientIntegrationTest --no-daemon',
+  },
+];
+
+/** Is `step` (index `stepIdx` of `job`) run with a BRC-100 wallet up and RUNAR_WALLET_ENDPOINT set? */
+function walletProvisioned(job: Job, stepIdx: number, step: Step): boolean {
+  const started = job.steps
+    .slice(0, stepIdx)
+    .some((s) => s.commands.some((c) => /mock-wallet\.sh\s+start\b/.test(c)));
+  const endpoint = step.env.RUNAR_WALLET_ENDPOINT ?? job.env.RUNAR_WALLET_ENDPOINT ?? '';
+  return started && endpoint.trim() !== '';
+}
 
 // ---------------------------------------------------------------- ci.yml
 
@@ -383,9 +430,39 @@ describe('N-474: every env-gated vitest skip is executed by CI with its gate set
     expect(problems).toEqual([]);
   });
 
-  it('the external-service-gated set is exactly the pinned one (no CI provision exists)', () => {
-    expect([...(byClass.get('external') ?? [])].sort()).toEqual([...EXTERNAL_SERVICE_GATED].sort());
-    for (const f of EXTERNAL_SERVICE_GATED) expect(existsSync(join(ROOT, f))).toBe(true);
+  // N-480. Proves: every vitest file gated on RUNAR_WALLET_ENDPOINT, and each pinned
+  // native-tier wallet test, is run by a ci.yml step that comes after `mock-wallet.sh start`
+  // in the same job and has RUNAR_WALLET_ENDPOINT set — so none of the seven is a skip in CI.
+  // Does not prove: that they pass (the CI run shows that; N-480's log records one local
+  // passing run of each against the mock), nor that the mock is a full BRC-100 wallet — it
+  // serves exactly the two calls these tests make (getPublicKey, listOutputs).
+  it('every wallet-gated test runs after `mock-wallet.sh start` with RUNAR_WALLET_ENDPOINT set', () => {
+    const wallet = byClass.get('wallet') ?? [];
+    expect(wallet).toContain('packages/runar-sdk/src/__tests__/wallet-client.spec.ts');
+    const problems: string[] = [];
+    for (const f of wallet) {
+      const ok = reachingSteps(jobs, f, pkgs).some(({ job, stepIdx, step }) => walletProvisioned(job, stepIdx, step));
+      if (!ok) problems.push(`${f}: no CI step runs it after \`mock-wallet.sh start\` with RUNAR_WALLET_ENDPOINT set`);
+    }
+    for (const { file, command, wiredBy } of NATIVE_WALLET_TESTS) {
+      // A whole line equal to the import (so a commented-out `// _ = @import(...)` does not count).
+      const wired = !wiredBy || readFileSync(join(ROOT, wiredBy.file), 'utf8').split('\n').some((l) => l.trim() === wiredBy.text);
+      if (!wired && wiredBy) {
+        problems.push(`${file}: not compiled into the suite \`${command}\` runs (${wiredBy.file} lacks \`${wiredBy.text}\`)`);
+      }
+      if (!existsSync(join(ROOT, file))) {
+        problems.push(`${file}: pinned wallet test no longer exists`);
+        continue;
+      }
+      if (!readFileSync(join(ROOT, file), 'utf8').includes('RUNAR_WALLET_ENDPOINT')) {
+        problems.push(`${file}: no longer gated on RUNAR_WALLET_ENDPOINT — re-pin it`);
+      }
+      const ok = jobs.some((job) =>
+        job.steps.some((step, stepIdx) => step.commands.includes(command) && walletProvisioned(job, stepIdx, step)),
+      );
+      if (!ok) problems.push(`${file}: no CI step runs \`${command}\` after \`mock-wallet.sh start\` with RUNAR_WALLET_ENDPOINT set`);
+    }
+    expect(problems).toEqual([]);
   });
 
   // Proves: the scanner reads call syntax, not prose — a `.skipIf(` inside a comment or
