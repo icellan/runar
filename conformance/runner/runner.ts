@@ -2764,7 +2764,8 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   // with the fold-off compiler flag. Cross-tier parity (above) is still
   // strictly enforced in fold-on mode — the goldens are merely a reference
   // for the fold-off run.
-  const skipGolden = !constantFoldingDisabled();
+  // N-473: a fixture flagged foldOnMatchesGolden is compared under fold-ON too.
+  const skipGolden = !constantFoldingDisabled() && !readFixtureFoldOnMatchesGolden(testDir);
   const goldenGateOk = tsIncluded ? tsResult.success : true;
   // F-049: how many tier outputs each golden block below actually compares.
   const nativeOutputs = [goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult];
@@ -3188,6 +3189,46 @@ export function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> |
 }
 
 /**
+ * N-473: per-fixture opt-in `"foldOnMatchesGolden": true` in source.json.
+ *
+ * Goldens are stamped fold-OFF, so the golden comparison is normally skipped
+ * under fold-ON. For a single-tier (`"compilers"` allowlisted) fixture that
+ * left the fold-ON row comparing NOTHING (F-049 vacuous). A fixture whose
+ * fold-ON output is byte-identical to its fold-OFF golden declares so with
+ * this flag, and the runner then compares fold-ON output against the existing
+ * (provenance-gated) golden — every format against the same bytes, so the
+ * nine surface formats are also held to each other.
+ *
+ * Fail closed: the flag must be literally `true`, and it is refused on a
+ * fixture without a `compilers` allowlist (those are cross-validated
+ * tier-against-tier under fold-ON; the flag exists only for single-tier rows).
+ */
+export function readFixtureFoldOnMatchesGolden(testDir: string): boolean {
+  const configFile = join(testDir, 'source.json');
+  if (!existsSync(configFile)) return false;
+  const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
+    compilers?: unknown;
+    foldOnMatchesGolden?: unknown;
+  };
+  if (config.foldOnMatchesGolden === undefined) return false;
+  const fixture = basename(testDir);
+  if (config.foldOnMatchesGolden !== true) {
+    throw new Error(
+      `conformance fixture '${fixture}': source.json "foldOnMatchesGolden" must be true ` +
+      `when present (got ${JSON.stringify(config.foldOnMatchesGolden)})`,
+    );
+  }
+  if (!Array.isArray(config.compilers)) {
+    throw new Error(
+      `conformance fixture '${fixture}': source.json "foldOnMatchesGolden" is only allowed ` +
+      `on a fixture with a "compilers" allowlist (single-tier rows); every-tier fixtures ` +
+      `are cross-validated under fold-ON`,
+    );
+  }
+  return true;
+}
+
+/**
  * Run a single conformance test for a specific format variant.
  *
  * Only runs compilers that support the given format. Results are compared
@@ -3335,7 +3376,8 @@ export async function runConformanceTestForFormat(
   // Golden file comparison (use any successful compiler output). Skipped
   // under fold-on (RUNAR_DISABLE_CONSTANT_FOLDING=0) — see runConformanceTest
   // above for the rationale.
-  const skipGoldenMf = !constantFoldingDisabled();
+  // N-473: a fixture flagged foldOnMatchesGolden is compared under fold-ON too.
+  const skipGoldenMf = !constantFoldingDisabled() && !readFixtureFoldOnMatchesGolden(testDir);
   // F-049: how many tier outputs each golden block below actually compares.
   let irGoldenChecked = 0;
   let scriptGoldenChecked = 0;
