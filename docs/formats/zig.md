@@ -216,6 +216,7 @@ port of both (N-093).
 | Private method | `fn name(self: *const Name, ...) Type { ... }` |
 | Readonly field | plain field in `SmartContract`, or `runar.Readonly(T)` in `StatefulSmartContract` |
 | Mutable/defaulted field | `field: i64 = 0,` in `StatefulSmartContract` |
+| Unused parameter | `_ = name;` is accepted and erased (it compiles to the same bytes as omitting it), so a native-Zig method can discard an unused `ctx` or other parameter |
 
 ---
 
