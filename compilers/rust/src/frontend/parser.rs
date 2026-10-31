@@ -1340,6 +1340,7 @@ fn parse_assignment_expr(
                     op: bin_op,
                     left: Box::new(target_for_rhs),
                     right: Box::new(right),
+                    source_location: None,
                 };
                 Statement::Assignment {
                     target,
@@ -1772,6 +1773,8 @@ fn parse_binary_expression(
         op,
         left: Box::new(left),
         right: Box::new(right),
+        // N-472: where the node starts, including a leading `(`.
+        source_location: Some(real_loc(cm, file, bin.span.lo)),
     }
 }
 
@@ -1796,6 +1799,8 @@ fn parse_unary_expression(
     Expression::UnaryExpr {
         op,
         operand: Box::new(operand),
+        // N-472: the operator token.
+        source_location: Some(real_loc(cm, file, unary.span.lo)),
     }
 }
 

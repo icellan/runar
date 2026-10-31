@@ -568,6 +568,20 @@ class _TypeChecker:
             loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
 
+    def _add_operand_error(self, msg: str, operand: Expression) -> None:
+        # N-472: an operand type error is anchored at the operand with no
+        # fallback, as TS does with ``operand.sourceLocation``. A bigint or
+        # boolean literal carries no location in any TS parser, so the
+        # diagnostic prints none rather than the statement. Any other operand
+        # without a recorded position (a surface that does not record it)
+        # keeps ``_add_error``'s statement anchor.
+        if _expr_loc(operand) is None and isinstance(operand, (BigIntLiteral, BoolLiteral)):
+            if len(msg) > MAX_DIAGNOSTIC_CHARS:
+                msg = f"{msg[:MAX_DIAGNOSTIC_CHARS]}...({len(msg) - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+            self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=None))
+            return
+        self._add_error(msg, operand)
+
     def check_property_initializers(self) -> None:
         """N-234: a scalar property initializer whose literal type does not
         match the declared property type compiled without complaint on
@@ -993,12 +1007,12 @@ class _TypeChecker:
         # Arithmetic: bigint x bigint -> bigint
         if e.op in ("+", "-", "*", "/", "%"):
             if not is_bigint_family(left_type):
-                self._add_error(
+                self._add_operand_error(
                     f"left operand of '{e.op}' must be bigint, got '{left_type}'",
                     e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
+                self._add_operand_error(
                     f"right operand of '{e.op}' must be bigint, got '{right_type}'",
                     e.right,
                 )
@@ -1006,12 +1020,12 @@ class _TypeChecker:
 
         if e.op in ("<", "<=", ">", ">="):
             if not is_bigint_family(left_type):
-                self._add_error(
+                self._add_operand_error(
                     f"left operand of '{e.op}' must be bigint, got '{left_type}'",
                     e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
+                self._add_operand_error(
                     f"right operand of '{e.op}' must be bigint, got '{right_type}'",
                     e.right,
                 )
@@ -1036,23 +1050,25 @@ class _TypeChecker:
 
         if e.op in ("&&", "||"):
             if left_type != "boolean" and left_type != "<unknown>":
-                self._add_error(
-                    f"left operand of '{e.op}' must be boolean, got '{left_type}'"
+                self._add_operand_error(
+                    f"left operand of '{e.op}' must be boolean, got '{left_type}'",
+                    e.left,
                 )
             if right_type != "boolean" and right_type != "<unknown>":
-                self._add_error(
-                    f"right operand of '{e.op}' must be boolean, got '{right_type}'"
+                self._add_operand_error(
+                    f"right operand of '{e.op}' must be boolean, got '{right_type}'",
+                    e.right,
                 )
             return "boolean"
 
         if e.op in ("<<", ">>"):
             if not is_bigint_family(left_type):
-                self._add_error(
+                self._add_operand_error(
                     f"left operand of '{e.op}' must be bigint, got '{left_type}'",
                     e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
+                self._add_operand_error(
                     f"right operand of '{e.op}' must be bigint, got '{right_type}'",
                     e.right,
                 )
@@ -1063,12 +1079,12 @@ class _TypeChecker:
             if is_byte_family(left_type) and is_byte_family(right_type):
                 return "ByteString"
             if not is_bigint_family(left_type):
-                self._add_error(
+                self._add_operand_error(
                     f"left operand of '{e.op}' must be bigint or ByteString, got '{left_type}'",
                     e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
+                self._add_operand_error(
                     f"right operand of '{e.op}' must be bigint or ByteString, got '{right_type}'",
                     e.right,
                 )
@@ -1086,14 +1102,16 @@ class _TypeChecker:
         if e.op == "!":
             if operand_type != "boolean" and operand_type != "<unknown>":
                 self._add_error(
-                    f"operand of '!' must be boolean, got '{operand_type}'"
+                    f"operand of '!' must be boolean, got '{operand_type}'",
+                    e,
                 )
             return "boolean"
 
         if e.op == "-":
             if not is_bigint_family(operand_type):
                 self._add_error(
-                    f"operand of unary '-' must be bigint, got '{operand_type}'"
+                    f"operand of unary '-' must be bigint, got '{operand_type}'",
+                    e,
                 )
             return "bigint"
 
@@ -1102,7 +1120,8 @@ class _TypeChecker:
                 return "ByteString"
             if not is_bigint_family(operand_type):
                 self._add_error(
-                    f"operand of '~' must be bigint or ByteString, got '{operand_type}'"
+                    f"operand of '~' must be bigint or ByteString, got '{operand_type}'",
+                    e,
                 )
             return "bigint"
 
@@ -1382,7 +1401,8 @@ class _TypeChecker:
             if not is_subtype(script_type, "ByteString") and script_type != "<unknown>":
                 self._add_error(
                     f"{name}() second argument (scriptBytes) must be ByteString, "
-                    f"got '{script_type}'"
+                    f"got '{script_type}'",
+                    args[1],
                 )
         return "void"
 
@@ -1817,7 +1837,14 @@ def _expr_loc(expr: Expression) -> SourceLocation | None:
         if isinstance(expr, (Identifier, PropertyAccessExpr, ByteStringLiteral)):
             return expr.source_location
         if isinstance(expr, BinaryExpr):
+            # N-472: the .runar.ts parser records where the whole expression
+            # starts, which a leading ``(`` moves left of the leftmost leaf.
+            if expr.source_location is not None:
+                return expr.source_location
             expr = expr.left
+        elif isinstance(expr, UnaryExpr):
+            # N-472: the operator token; the other surfaces record none.
+            return expr.source_location
         elif isinstance(expr, CallExpr):
             expr = expr.callee
         elif isinstance(expr, (MemberExpr, IndexAccessExpr)):

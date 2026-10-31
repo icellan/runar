@@ -859,6 +859,7 @@ impl RustDslParser {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     }],
                     asm_return_type: None,
                 },
@@ -1019,6 +1020,7 @@ impl RustDslParser {
                 op: if descending { BinaryOp::Ge } else { BinaryOp::Lt },
                 left: Box::new(Expression::Identifier { name: var_name.clone(), source_location: None }),
                 right: Box::new(end_expr),
+                source_location: None,
             };
             let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
             let update = Statement::ExpressionStatement {
@@ -1073,7 +1075,7 @@ impl RustDslParser {
             let target = self.convert_self_access(expr.clone());
             return Some(Statement::Assignment {
                 target: target.clone(),
-                value: Expression::BinaryExpr { op: BinaryOp::Add, left: Box::new(target), right: Box::new(rhs) },
+                value: Expression::BinaryExpr { op: BinaryOp::Add, left: Box::new(target), right: Box::new(rhs), source_location: None },
                 source_location: loc,
             });
         }
@@ -1084,7 +1086,7 @@ impl RustDslParser {
             let target = self.convert_self_access(expr.clone());
             return Some(Statement::Assignment {
                 target: target.clone(),
-                value: Expression::BinaryExpr { op: BinaryOp::Sub, left: Box::new(target), right: Box::new(rhs) },
+                value: Expression::BinaryExpr { op: BinaryOp::Sub, left: Box::new(target), right: Box::new(rhs), source_location: None },
                 source_location: loc,
             });
         }
@@ -1128,7 +1130,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1140,7 +1142,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_bit_or();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1152,7 +1154,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_bit_xor();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1164,7 +1166,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_bit_and();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1176,7 +1178,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_equality();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1193,7 +1195,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_comparison();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1212,7 +1214,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_shift();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1229,7 +1231,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_add_sub();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1246,7 +1248,7 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_mul_div();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
@@ -1264,14 +1266,14 @@ impl RustDslParser {
             self.advance_clone();
             let right = self.parse_unary();
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
         }
         left
     }
 
     fn parse_unary(&mut self) -> Expression {
         match self.current().typ {
-            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.nested(zero(), |p| p.parse_unary())) } }
+            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: None } }
             TokenType::Minus => {
                 self.advance_clone();
                 // F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1288,9 +1290,9 @@ impl RustDslParser {
                         self.tokens[k].typ = TokenType::Number(v);
                     }
                 }
-                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.nested(zero(), |p| p.parse_unary())) }
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: None }
             }
-            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.nested(zero(), |p| p.parse_unary())) } }
+            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: None } }
             TokenType::Amp => {
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Mut) { self.advance_clone(); }
@@ -1454,7 +1456,7 @@ fn zero() -> Expression {
 fn literal_int_value(expr: &Expression) -> Option<BigInt> {
     match expr {
         Expression::BigIntLiteral { value } => Some(value.clone()),
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             literal_int_value(operand).map(|v| -v)
         }
         _ => None,

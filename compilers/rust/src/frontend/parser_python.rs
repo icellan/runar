@@ -116,7 +116,7 @@ const RANGE_STEP_DIAGNOSTIC: &str = concat!(
 fn literal_int_value(expr: &Expression) -> Option<BigInt> {
     match expr {
         Expression::BigIntLiteral { value } => Some(value.clone()),
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             literal_int_value(operand).map(|v| -v)
         }
         _ => None,
@@ -1879,6 +1879,7 @@ impl<'a> PyParser<'a> {
                 source_location: None,
             }),
             right: Box::new(end_expr),
+            source_location: None,
         };
 
         let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
@@ -1977,6 +1978,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Add,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1991,6 +1993,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Sub,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2005,6 +2008,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mul,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2019,6 +2023,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Div,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2033,6 +2038,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mod,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2111,6 +2117,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Add,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2125,6 +2132,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Sub,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2139,6 +2147,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mul,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2153,6 +2162,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Div,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2167,6 +2177,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mod,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2222,6 +2233,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2238,6 +2250,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2250,6 +2263,7 @@ impl<'a> PyParser<'a> {
             Expression::UnaryExpr {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
+                source_location: None,
             }
         } else {
             self.parse_bit_or()
@@ -2267,6 +2281,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2283,6 +2298,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2299,6 +2315,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2318,6 +2335,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::NotEq => {
@@ -2329,6 +2347,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2350,6 +2369,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Le => {
@@ -2360,6 +2380,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Gt => {
@@ -2370,6 +2391,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Ge => {
@@ -2380,6 +2402,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2401,6 +2424,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::RShift => {
@@ -2411,6 +2435,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2432,6 +2457,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Minus => {
@@ -2442,6 +2468,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2463,6 +2490,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::IntDiv => {
@@ -2474,6 +2502,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Slash => {
@@ -2484,6 +2513,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Percent => {
@@ -2494,6 +2524,7 @@ impl<'a> PyParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2510,6 +2541,7 @@ impl<'a> PyParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Tilde => {
@@ -2518,6 +2550,7 @@ impl<'a> PyParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Bang => {
@@ -2526,6 +2559,7 @@ impl<'a> PyParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             _ => self.parse_power(),

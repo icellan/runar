@@ -323,10 +323,17 @@ pub enum Expression {
         op: BinaryOp,
         left: Box<Expression>,
         right: Box<Expression>,
+        /// Where the expression starts, including a leading `(` (N-472).
+        /// Only the `.runar.ts` parser sets it, as the TS reference does;
+        /// elsewhere it is `None` and the type checker falls back to the
+        /// leftmost leaf.
+        source_location: Option<SourceLocation>,
     },
     UnaryExpr {
         op: UnaryOp,
         operand: Box<Expression>,
+        /// The operator token (N-472); `.runar.ts` parser only.
+        source_location: Option<SourceLocation>,
     },
     CallExpr {
         callee: Box<Expression>,

@@ -202,6 +202,10 @@ type BinaryExpr struct {
 	Op    string // "+", "-", "*", "/", "%", "===", "!==", "<", "<=", ">", ">=", "&&", "||", "&", "|", "^"
 	Left  Expression
 	Right Expression
+	// SourceLocation is where the expression starts, including a leading
+	// `(` (N-472). Only the .runar.ts parser sets it, as the TS reference
+	// does; elsewhere it is zero and exprLoc falls back to the leftmost leaf.
+	SourceLocation SourceLocation
 }
 
 func (BinaryExpr) exprMarker() {}
@@ -210,6 +214,8 @@ func (BinaryExpr) exprMarker() {}
 type UnaryExpr struct {
 	Op      string // "!", "-", "~"
 	Operand Expression
+	// SourceLocation is the operator token (N-472); .runar.ts parser only.
+	SourceLocation SourceLocation
 }
 
 func (UnaryExpr) exprMarker() {}

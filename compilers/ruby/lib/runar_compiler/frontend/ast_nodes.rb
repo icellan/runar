@@ -88,11 +88,19 @@ module RunarCompiler
     # A binary operation like a + b.
     # op is one of: "+", "-", "*", "/", "%", "===", "!==", "<", "<=",
     #   ">", ">=", "&&", "||", "&", "|", "^", "<<", ">>"
-    BinaryExpr = Struct.new(:op, :left, :right, keyword_init: true)
+    # source_location is where the expression starts, including a leading `(`
+    # (N-472); .runar.ts parser only, nil elsewhere (typecheck then falls back
+    # to the leftmost leaf).
+    BinaryExpr = Struct.new(:op, :left, :right, :source_location, keyword_init: true) do
+      include LocationBlindEquality
+    end
 
     # A unary operation like !a, -a, ~a.
     # op is one of: "!", "-", "~"
-    UnaryExpr = Struct.new(:op, :operand, keyword_init: true)
+    # source_location is the operator token (N-472); .runar.ts parser only.
+    UnaryExpr = Struct.new(:op, :operand, :source_location, keyword_init: true) do
+      include LocationBlindEquality
+    end
 
     # A function/method call.
     #

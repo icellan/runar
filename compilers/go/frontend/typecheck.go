@@ -596,8 +596,17 @@ func exprLoc(e Expression) *SourceLocation {
 		case ByteStringLiteral:
 			loc = x.SourceLocation
 		case BinaryExpr:
+			// N-472: the .runar.ts parser records where the whole expression
+			// starts, which a leading `(` moves left of the leftmost leaf.
+			if x.SourceLocation.Line != 0 {
+				loc := x.SourceLocation
+				return &loc
+			}
 			e = x.Left
 			continue
+		case UnaryExpr:
+			// N-472: the operator token; the other surfaces record none.
+			loc = x.SourceLocation
 		case CallExpr:
 			e = x.Callee
 			continue
@@ -618,6 +627,22 @@ func exprLoc(e Expression) *SourceLocation {
 		}
 		return &loc
 	}
+}
+
+// addOperandErrorAt anchors an operand type error at the operand, as TS does
+// with `operand.sourceLocation` and no fallback (N-472): a bigint or boolean
+// literal carries no location in any TS parser, so the diagnostic prints none
+// rather than the statement. Any other operand without a recorded position
+// (a surface that does not record it) keeps addErrorAt's statement anchor.
+func (tc *typeChecker) addOperandErrorAt(msg string, operand Expression) {
+	if exprLoc(operand) == nil {
+		switch operand.(type) {
+		case BigIntLiteral, BoolLiteral:
+			tc.errors = append(tc.errors, Diagnostic{Message: capDiagnostic(msg), Severity: SeverityError})
+			return
+		}
+	}
+	tc.addErrorAt(msg, operand)
 }
 
 func (tc *typeChecker) addErrorWithLoc(msg string, loc *SourceLocation) {
@@ -1099,28 +1124,28 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(leftType) {
-			tc.addErrorAt(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType), e.Left)
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addErrorAt(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType), e.Right)
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType), e.Right)
 		}
 		return "bigint"
 
 	case "-", "*", "/", "%":
 		if !isBigintFamily(leftType) {
-			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 
 	case "<", "<=", ">", ">=":
 		if !isBigintFamily(leftType) {
-			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "boolean"
 
@@ -1141,19 +1166,19 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 
 	case "&&", "||":
 		if leftType != "boolean" && leftType != "<unknown>" {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be boolean, got '%s'", e.Op, leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be boolean, got '%s'", e.Op, leftType), e.Left)
 		}
 		if rightType != "boolean" && rightType != "<unknown>" {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be boolean, got '%s'", e.Op, rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be boolean, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "boolean"
 
 	case "<<", ">>":
 		if !isBigintFamily(leftType) {
-			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 
@@ -1163,15 +1188,26 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(leftType) {
-			tc.addErrorAt(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType), e.Left)
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addErrorAt(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType), e.Right)
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 	}
 
 	return "<unknown>"
+}
+
+// addUnaryError anchors a unary operand error at the operator token when the
+// parser recorded it (N-472, .runar.ts only), as TS does; otherwise at the
+// statement.
+func (tc *typeChecker) addUnaryError(msg string, e UnaryExpr) {
+	if exprLoc(e) != nil {
+		tc.addErrorAt(msg, e)
+		return
+	}
+	tc.addError(msg)
 }
 
 func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
@@ -1180,12 +1216,12 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 	switch e.Op {
 	case "!":
 		if operandType != "boolean" && operandType != "<unknown>" {
-			tc.addError(fmt.Sprintf("operand of '!' must be boolean, got '%s'", operandType))
+			tc.addUnaryError(fmt.Sprintf("operand of '!' must be boolean, got '%s'", operandType), e)
 		}
 		return "boolean"
 	case "-":
 		if !isBigintFamily(operandType) {
-			tc.addError(fmt.Sprintf("operand of unary '-' must be bigint, got '%s'", operandType))
+			tc.addUnaryError(fmt.Sprintf("operand of unary '-' must be bigint, got '%s'", operandType), e)
 		}
 		return "bigint"
 	case "~":
@@ -1194,7 +1230,7 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(operandType) {
-			tc.addError(fmt.Sprintf("operand of '~' must be bigint or ByteString, got '%s'", operandType))
+			tc.addUnaryError(fmt.Sprintf("operand of '~' must be bigint or ByteString, got '%s'", operandType), e)
 		}
 		return "bigint"
 	}
@@ -1323,8 +1359,8 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		// ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
 		scriptType := tc.inferExprType(args[1], env)
 		if !isSubtype(scriptType, "ByteString") && scriptType != "<unknown>" {
-			tc.addError(fmt.Sprintf(
-				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, scriptType))
+			tc.addErrorAt(fmt.Sprintf(
+				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, scriptType), args[1])
 		}
 	}
 	return "void"

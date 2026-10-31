@@ -1447,6 +1447,7 @@ impl<'a> JavaParser<'a> {
                     op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment {
                     target: lhs,
@@ -1547,6 +1548,7 @@ impl<'a> JavaParser<'a> {
                     op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment {
                     target: lhs,
@@ -1616,6 +1618,7 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1632,6 +1635,7 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1648,6 +1652,7 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1664,6 +1669,7 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1680,6 +1686,7 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1756,6 +1763,7 @@ impl<'a> JavaParser<'a> {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1777,6 +1785,7 @@ impl<'a> JavaParser<'a> {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1799,6 +1808,7 @@ impl<'a> JavaParser<'a> {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         Some(left)
@@ -1812,6 +1822,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: None,
                 })
             }
             TokenType::Minus => {
@@ -1825,6 +1836,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: None,
                 })
             }
             TokenType::Plus => {
@@ -1838,6 +1850,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: None,
                 })
             }
             TokenType::PlusPlus => {
@@ -2323,6 +2336,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                         op,
                         left: object.clone(),
                         right: Box::new(args[0].clone()),
+                        source_location: None,
                     };
                 }
             }
@@ -2330,6 +2344,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: object.clone(),
+                    source_location: None,
                 };
             }
             // `a.not()` -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not();
@@ -2339,6 +2354,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: object.clone(),
+                    source_location: None,
                 };
             }
             if args.is_empty() && property == "abs" {
@@ -2356,6 +2372,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                     op: BinaryOp::StrictEq,
                     left: object.clone(),
                     right: Box::new(args[0].clone()),
+                    source_location: None,
                 };
             }
         }
@@ -2465,7 +2482,7 @@ fn is_bigint_of_callee(callee: &Expression) -> bool {
 fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Expression {
     use num_traits::Zero;
     if !is_comparison_op(op.clone()) {
-        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
     }
     if let Some((a, b)) = compare_to_receiver_arg(&left) {
         if matches!(&right, Expression::BigIntLiteral { value } if value.is_zero()) {
@@ -2473,6 +2490,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
                 op,
                 left: Box::new(a),
                 right: Box::new(b),
+                source_location: None,
             };
         }
     }
@@ -2482,10 +2500,11 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
                 op,
                 left: Box::new(b),
                 right: Box::new(a),
+                source_location: None,
             };
         }
     }
-    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) }
+    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None }
 }
 
 fn compare_to_receiver_arg(e: &Expression) -> Option<(Expression, Expression)> {
@@ -2841,7 +2860,7 @@ mod tests {
         // to a canonical BinaryExpr(StrictEq, ...) so cross-format
         // compilation produces identical IR and script.
         match first_call {
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match left.as_ref() {
                     Expression::CallExpr { callee: inner, .. } => match inner.as_ref() {
@@ -2964,7 +2983,7 @@ mod tests {
             other => panic!("expected assertThat call, got {:?}", other),
         };
         match &assert_args[0] {
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match left.as_ref() {
                     Expression::Identifier { name, .. } => assert_eq!(name, "x"),

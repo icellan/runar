@@ -1563,59 +1563,65 @@ public final class TsParser {
         }
 
         Expression parseOr() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(TOK_PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (match(TOK_AMPAMP)) {
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(TOK_PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(TOK_CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(TOK_AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(TOK_EQEQEQ) || match(TOK_EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(TOK_NOTEQEQ) || match(TOK_NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1624,20 +1630,21 @@ public final class TsParser {
         }
 
         Expression parseComparison() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(TOK_LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(TOK_LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(TOK_GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(TOK_GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1646,14 +1653,15 @@ public final class TsParser {
         }
 
         Expression parseShift() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(TOK_LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(TOK_RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1662,14 +1670,15 @@ public final class TsParser {
         }
 
         Expression parseAdditive() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(TOK_PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(TOK_MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1678,17 +1687,18 @@ public final class TsParser {
         }
 
         Expression parseMultiplicative() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(TOK_STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(TOK_SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TOK_PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1697,17 +1707,18 @@ public final class TsParser {
         }
 
         Expression parseUnary() throws ParseException {
+            SourceLocation opLoc = loc();
             if (match(TOK_BANG)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             if (match(TOK_MINUS)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.NEG, operand);
+                return new UnaryExpr(Expression.UnaryOp.NEG, operand, opLoc);
             }
             if (match(TOK_TILDE)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, opLoc);
             }
             if (match(TOK_PLUSPLUS)) {
                 Expression operand = nest.nested(this::parseUnary);

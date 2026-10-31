@@ -53,6 +53,22 @@ fn argLoc(arg_locs: []const ?types.SourceLocation, args: []const Expression, i: 
     return arg_locs[i];
 }
 
+/// N-472: a bigint or boolean literal has no location in any TS parser, so an
+/// error about one anchors at the statement (arguments) or prints none
+/// (operands), whatever token position this tier's parser recorded for it.
+fn isLocationlessLiteral(e: Expression) bool {
+    return switch (e) {
+        .literal_int, .literal_bool, .literal_bigint => true,
+        else => false,
+    };
+}
+
+/// The location of operand `e` whose parser-recorded position is `loc`:
+/// none for a literal, as TS prints none (N-472).
+fn operandLoc(e: Expression, loc: ?types.SourceLocation) ?types.SourceLocation {
+    return if (isLocationlessLiteral(e)) null else loc;
+}
+
 /// N-321: cap on a typecheck message; mirrored in every tier.
 const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 
@@ -472,6 +488,10 @@ const TypeChecker = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     /// N-463: parallel to `errors`; see `TypeCheckResult.error_locations`.
     error_locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty,
+    /// N-472: the statement being checked, TS's `currentStmtLoc`: where an
+    /// error about an argument or call anchors when the argument itself
+    /// carries no location (a literal, or a call with no arguments).
+    current_stmt_loc: ?types.SourceLocation = null,
     prop_types: std.StringHashMapUnmanaged(RunarType),
     /// Element type of each `FixedArray<T, N>` property, for the T that this
     /// tier can actually name. Populated only when T is a scalar: a nested
@@ -771,6 +791,15 @@ const TypeChecker = struct {
         self.error_locs.appendAssumeCapacity(loc);
     }
 
+    /// N-472: the anchor of an error about argument `i`: the argument's own
+    /// position, else the statement, as TS's
+    /// `args[i].sourceLocation ?? currentStmtLoc`. A literal argument has no
+    /// location in TS, whatever token position this tier recorded.
+    fn argErrorLoc(self: *const TypeChecker, arg_locs: []const ?types.SourceLocation, args: []const Expression, i: usize) ?types.SourceLocation {
+        if (i < args.len and isLocationlessLiteral(args[i])) return self.current_stmt_loc;
+        return argLoc(arg_locs, args, i) orelse self.current_stmt_loc;
+    }
+
     // ------------------------------------------------------------------
     // Top-level checks
     // ------------------------------------------------------------------
@@ -927,6 +956,18 @@ const TypeChecker = struct {
     }
 
     fn checkStatement(self: *TypeChecker, stmt: Statement, env: *TypeEnv) void {
+        // N-472: TS's `currentStmtLoc = stmt.sourceLocation ?? currentStmtLoc`.
+        const stmt_loc: ?types.SourceLocation = switch (stmt) {
+            .const_decl => |d| d.source_loc,
+            .let_decl => |d| d.source_loc,
+            .assign => |d| d.source_loc,
+            .if_stmt => |d| d.source_loc,
+            .for_stmt => |d| d.source_loc,
+            .expr_stmt => |d| d.source_loc,
+            .assert_stmt => |d| d.source_loc,
+            .return_stmt => |d| d.source_loc,
+        };
+        if (stmt_loc != null) self.current_stmt_loc = stmt_loc;
         switch (stmt) {
             .const_decl => |decl| {
                 const init_type = self.inferExprType(decl.value, env);
@@ -1353,27 +1394,27 @@ const TypeChecker = struct {
             .add => {
                 if (isByteFamily(left_type) and isByteFamily(right_type)) return .byte_string;
                 if (!isBigintFamily(left_type))
-                    self.addErrorAt(bin.left_loc, "left operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(left_type)});
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(left_type)});
                 if (!isBigintFamily(right_type))
-                    self.addErrorAt(bin.right_loc, "right operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(right_type)});
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(right_type)});
                 return .bigint;
             },
             // Arithmetic
             .sub, .mul, .div, .mod => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
             // Comparison
             .lt, .lte, .gt, .gte => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .boolean;
             },
             // Equality
@@ -1400,18 +1441,18 @@ const TypeChecker = struct {
             .and_op, .or_op => {
                 const op_str = bin.op.toTsString();
                 if (left_type != .boolean and left_type != .unknown)
-                    self.addError("left operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (right_type != .boolean and right_type != .unknown)
-                    self.addError("right operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .boolean;
             },
             // Shifts
             .lshift, .rshift => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
             // Bitwise: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
@@ -1419,9 +1460,9 @@ const TypeChecker = struct {
                 if (isByteFamily(left_type) and isByteFamily(right_type)) return .byte_string;
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addErrorAt(bin.left_loc, "left operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addErrorAt(bin.right_loc, "right operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
         }
@@ -1437,20 +1478,20 @@ const TypeChecker = struct {
         return switch (un.op) {
             .not => {
                 if (operand_type != .boolean and operand_type != .unknown) {
-                    self.addError("operand of '!' must be boolean, got '{s}'", .{types.runarTypeToString(operand_type)});
+                    self.addErrorAt(un.location, "operand of '!' must be boolean, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .boolean;
             },
             .negate => {
                 if (!isBigintFamily(operand_type)) {
-                    self.addError("operand of unary '-' must be bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
+                    self.addErrorAt(un.location, "operand of unary '-' must be bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .bigint;
             },
             .bitnot => {
                 if (isByteFamily(operand_type)) return .byte_string;
                 if (!isBigintFamily(operand_type)) {
-                    self.addError("operand of '~' must be bigint or ByteString, got '{s}'", .{types.runarTypeToString(operand_type)});
+                    self.addErrorAt(un.location, "operand of '~' must be bigint or ByteString, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .bigint;
             },
@@ -1616,7 +1657,7 @@ const TypeChecker = struct {
                 const sat_type = self.inferExprType(args[0], env);
                 if (!isBigintFamily(sat_type) and sat_type != .unknown) {
                     self.addErrorAt(
-                        argLoc(arg_locs, args, 0),
+                        self.argErrorLoc(arg_locs, args, 0),
                         "addOutput() first argument (satoshis) must be bigint, got '{s}'",
                         .{types.runarTypeToString(sat_type)},
                     );
@@ -1665,7 +1706,7 @@ const TypeChecker = struct {
             const sat_type = self.inferExprType(args[0], env);
             if (!isBigintFamily(sat_type) and sat_type != .unknown) {
                 self.addErrorAt(
-                    argLoc(arg_locs, args, 0),
+                    self.argErrorLoc(arg_locs, args, 0),
                     "{s}() first argument (satoshis) must be bigint, got '{s}'",
                     .{ name, types.runarTypeToString(sat_type) },
                 );
@@ -1676,7 +1717,8 @@ const TypeChecker = struct {
             // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
             const script_type = self.inferExprType(args[1], env);
             if (!isSubtype(script_type, .byte_string) and script_type != .unknown) {
-                self.addError(
+                self.addErrorAt(
+                    self.argErrorLoc(arg_locs, args, 1),
                     "{s}() second argument (scriptBytes) must be ByteString, got '{s}'",
                     .{ name, types.runarTypeToString(script_type) },
                 );
@@ -1690,19 +1732,35 @@ const TypeChecker = struct {
     /// method's parameter list (method_sigs), so a `self.helper(ctx, ...)`
     /// call drops it too and the arities line up. Returns `args` itself when
     /// there is nothing to drop; otherwise the caller frees the result.
-    fn withoutStatefulContextArgs(self: *TypeChecker, args: []const Expression) Allocator.Error![]const Expression {
+    ///
+    /// N-472: when `arg_locs` lines up with `args`, the dropped arguments'
+    /// locations are dropped with them (`dropped_locs` is then a fresh slice
+    /// the caller frees too), so the locations of the arguments that remain
+    /// keep their indices instead of all being lost.
+    fn withoutStatefulContextArgs(
+        self: *TypeChecker,
+        args: []const Expression,
+        arg_locs: []const ?types.SourceLocation,
+        dropped_locs: *[]const ?types.SourceLocation,
+    ) Allocator.Error![]const Expression {
+        dropped_locs.* = arg_locs;
         var drop: usize = 0;
         for (args) |arg| {
             if (arg == .identifier and self.stateful_ctx_params.get(arg.identifier) != null) drop += 1;
         }
         if (drop == 0) return args;
         const out = try self.allocator.alloc(Expression, args.len - drop);
+        errdefer self.allocator.free(out);
+        const locs_aligned = arg_locs.len == args.len;
+        const out_locs: []?types.SourceLocation = if (locs_aligned) try self.allocator.alloc(?types.SourceLocation, args.len - drop) else &.{};
         var n: usize = 0;
-        for (args) |arg| {
+        for (args, 0..) |arg, i| {
             if (arg == .identifier and self.stateful_ctx_params.get(arg.identifier) != null) continue;
             out[n] = arg;
+            if (locs_aligned) out_locs[n] = arg_locs[i];
             n += 1;
         }
+        dropped_locs.* = out_locs;
         return out;
     }
 
@@ -1735,14 +1793,15 @@ const TypeChecker = struct {
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {
                 if (is_this) {
-                    const args = self.withoutStatefulContextArgs(mc.args) catch {
+                    var arg_locs: []const ?types.SourceLocation = &.{};
+                    const args = self.withoutStatefulContextArgs(mc.args, mc.arg_locs, &arg_locs) catch {
                         self.addError("out of memory checking call to '{s}'", .{mc.method});
                         return .unknown;
                     };
-                    defer if (args.ptr != mc.args.ptr) self.allocator.free(args);
-                    // A dropped StatefulContext argument shifts the indices,
-                    // so the locations only line up when nothing was dropped.
-                    const arg_locs: []const ?types.SourceLocation = if (args.ptr == mc.args.ptr) mc.arg_locs else &.{};
+                    defer if (args.ptr != mc.args.ptr) {
+                        self.allocator.free(args);
+                        if (arg_locs.ptr != mc.arg_locs.ptr and arg_locs.len > 0) self.allocator.free(arg_locs);
+                    };
                     return self.checkCallArgs(mc.method, method_sig, args, arg_locs, env);
                 }
                 return self.checkCallArgs(mc.method, method_sig, mc.args, mc.arg_locs, env);
@@ -2051,7 +2110,7 @@ const TypeChecker = struct {
             const consumed = (self.consumed_values.get(origin) orelse false) or
                 self.consumedPerLoopIteration(origin, env);
             if (consumed) {
-                self.addErrorAt(argLoc(arg_locs, args, 0), "affine value 'this.{s}' has already been consumed", .{prop_name});
+                self.addErrorAt(self.argErrorLoc(arg_locs, args, 0), "affine value 'this.{s}' has already been consumed", .{prop_name});
                 continue;
             }
             self.consumed_values.put(self.allocator, origin, true) catch {};

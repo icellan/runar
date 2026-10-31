@@ -412,7 +412,9 @@ pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
 /// operands; elsewhere they are null and an operand type error prints no
 /// location.
 pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression, left_loc: ?SourceLocation = null, right_loc: ?SourceLocation = null };
-pub const UnaryOp = struct { op: UnaryOperator, operand: Expression };
+/// `location` is the operator token (N-472); only the .runar.ts parser sets it,
+/// as the TS reference locates a unary node there. Elsewhere it is null.
+pub const UnaryOp = struct { op: UnaryOperator, operand: Expression, location: ?SourceLocation = null };
 pub const CallExpr = struct {
     callee: []const u8,
     args: []Expression,

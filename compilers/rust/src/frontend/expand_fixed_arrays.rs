@@ -844,6 +844,7 @@ impl<'a> ExpandContext<'a> {
                         right: Box::new(Expression::BigIntLiteral {
                             value: BigInt::from(1),
                         }),
+                        source_location: None,
                     },
                     source_location: loc,
                 };
@@ -922,7 +923,7 @@ impl<'a> ExpandContext<'a> {
             Expression::IndexAccess { object, index } => {
                 self.rewrite_index_access(object, index, prelude)
             }
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 let l = self.rewrite_expression(left, prelude);
                 // spec §3.7: the right operand of && / || is conditional.
                 let short_circuit = matches!(op, BinaryOp::And | BinaryOp::Or);
@@ -937,13 +938,15 @@ impl<'a> ExpandContext<'a> {
                     op: op.clone(),
                     left: Box::new(l),
                     right: Box::new(r),
+                    source_location: None,
                 }
             }
-            Expression::UnaryExpr { op, operand } => {
+            Expression::UnaryExpr { op, operand, .. } => {
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::UnaryExpr {
                     op: op.clone(),
                     operand: Box::new(o),
+                    source_location: None,
                 }
             }
             Expression::CallExpr {
@@ -1218,6 +1221,7 @@ impl<'a> ExpandContext<'a> {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
+                source_location: None,
             };
             let assign = Statement::Assignment {
                 target: target.clone(),
@@ -1260,6 +1264,7 @@ impl<'a> ExpandContext<'a> {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
+                source_location: None,
             };
             let branch = Expression::PropertyAccess {
                 property: slot.clone(),
@@ -1376,6 +1381,7 @@ impl<'a> ExpandContext<'a> {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
+                source_location: None,
             };
             let branch_assign = Statement::Assignment {
                 target: Expression::PropertyAccess {
@@ -1536,6 +1542,7 @@ fn as_literal_index(expr: &Expression) -> Option<i128> {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => {
             if let Expression::BigIntLiteral { value } = operand.as_ref() {
                 (-value).to_i128()
@@ -1619,6 +1626,7 @@ fn is_pure_reference(expr: &Expression) -> bool {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => matches!(operand.as_ref(), Expression::BigIntLiteral { .. }),
         _ => false,
     }

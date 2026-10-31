@@ -718,7 +718,8 @@ module RunarCompiler
           script_type = infer_expr_type(args[1], env)
           unless Frontend.subtype?(script_type, "ByteString") || script_type == "<unknown>"
             add_error(
-              "#{name}() second argument (scriptBytes) must be ByteString, got '#{script_type}'"
+              "#{name}() second argument (scriptBytes) must be ByteString, got '#{script_type}'",
+              args[1]
             )
           end
         end
@@ -831,6 +832,23 @@ module RunarCompiler
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
       end
 
+      # N-472: an operand type error is anchored at the operand with no
+      # fallback, as TS does with `operand.sourceLocation`. A bigint or boolean
+      # literal carries no location in any TS parser, so the diagnostic prints
+      # none rather than the statement. Any other operand without a recorded
+      # position (a surface that does not record it) keeps add_error's
+      # statement anchor.
+      def add_operand_error(msg, operand)
+        if expr_loc(operand).nil? && (operand.is_a?(BigIntLiteral) || operand.is_a?(BoolLiteral))
+          if msg.length > MAX_DIAGNOSTIC_CHARS
+            msg = "#{msg[0, MAX_DIAGNOSTIC_CHARS]}...(#{msg.length - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+          end
+          @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: nil)
+          return
+        end
+        add_error(msg, operand)
+      end
+
       # N-463: the position of +expr+'s first token, or nil when unknown.
       # Only identifiers (`this` included), `this.x` and ByteString literals
       # record a position, and only on .runar.ts. A composite expression
@@ -846,7 +864,13 @@ module RunarCompiler
         loop do
           case expr
           when Identifier, PropertyAccessExpr, ByteStringLiteral then return expr.source_location
-          when BinaryExpr then expr = expr.left
+          when BinaryExpr
+            # N-472: the .runar.ts parser records where the whole expression
+            # starts, which a leading `(` moves left of the leftmost leaf.
+            return expr.source_location if expr.source_location
+
+            expr = expr.left
+          when UnaryExpr then return expr.source_location # N-472: the operator token
           when CallExpr then expr = expr.callee
           when MemberExpr, IndexAccessExpr then expr = expr.object
           when TernaryExpr then expr = expr.condition
@@ -1110,7 +1134,7 @@ module RunarCompiler
           refuse_continuation_amount_write(expr.operand)
           operand_type = infer_expr_type(expr.operand, env)
           unless Frontend.bigint_family?(operand_type)
-            add_error("++ operator requires bigint, got '#{operand_type}'")
+            add_error("++ operator requires bigint, got '#{operand_type}'", expr)
           end
           "bigint"
 
@@ -1118,7 +1142,7 @@ module RunarCompiler
           refuse_continuation_amount_write(expr.operand)
           operand_type = infer_expr_type(expr.operand, env)
           unless Frontend.bigint_family?(operand_type)
-            add_error("-- operator requires bigint, got '#{operand_type}'")
+            add_error("-- operator requires bigint, got '#{operand_type}'", expr)
           end
           "bigint"
 
@@ -1160,20 +1184,20 @@ module RunarCompiler
         # Arithmetic: bigint x bigint -> bigint
         if %w[+ - * / %].include?(expr.op)
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
+            add_operand_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
+            add_operand_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
 
         if %w[< <= > >=].include?(expr.op)
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
+            add_operand_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
+            add_operand_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "boolean"
         end
@@ -1197,20 +1221,20 @@ module RunarCompiler
 
         if expr.op == "&&" || expr.op == "||"
           if left_type != "boolean" && left_type != "<unknown>"
-            add_error("left operand of '#{expr.op}' must be boolean, got '#{left_type}'")
+            add_operand_error("left operand of '#{expr.op}' must be boolean, got '#{left_type}'", expr.left)
           end
           if right_type != "boolean" && right_type != "<unknown>"
-            add_error("right operand of '#{expr.op}' must be boolean, got '#{right_type}'")
+            add_operand_error("right operand of '#{expr.op}' must be boolean, got '#{right_type}'", expr.right)
           end
           return "boolean"
         end
 
         if expr.op == "<<" || expr.op == ">>"
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
+            add_operand_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
+            add_operand_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
@@ -1221,10 +1245,10 @@ module RunarCompiler
             return "ByteString"
           end
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint or ByteString, got '#{left_type}'", expr.left)
+            add_operand_error("left operand of '#{expr.op}' must be bigint or ByteString, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint or ByteString, got '#{right_type}'", expr.right)
+            add_operand_error("right operand of '#{expr.op}' must be bigint or ByteString, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
@@ -1242,20 +1266,20 @@ module RunarCompiler
         case expr.op
         when "!"
           if operand_type != "boolean" && operand_type != "<unknown>"
-            add_error("operand of '!' must be boolean, got '#{operand_type}'")
+            add_error("operand of '!' must be boolean, got '#{operand_type}'", expr)
           end
           "boolean"
 
         when "-"
           unless Frontend.bigint_family?(operand_type)
-            add_error("operand of unary '-' must be bigint, got '#{operand_type}'")
+            add_error("operand of unary '-' must be bigint, got '#{operand_type}'", expr)
           end
           "bigint"
 
         when "~"
           return "ByteString" if Frontend.byte_family?(operand_type)
           unless Frontend.bigint_family?(operand_type)
-            add_error("operand of '~' must be bigint or ByteString, got '#{operand_type}'")
+            add_error("operand of '~' must be bigint or ByteString, got '#{operand_type}'", expr)
           end
           "bigint"
 

@@ -1795,6 +1795,7 @@ impl<'a> RbParser<'a> {
         let condition = Expression::UnaryExpr {
             op: UnaryOp::Not,
             operand: Box::new(raw_condition),
+            source_location: None,
         };
 
         Statement::IfStatement {
@@ -1891,6 +1892,7 @@ impl<'a> RbParser<'a> {
                 source_location: None,
             }),
             right: Box::new(end_expr),
+            source_location: None,
         };
 
         let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
@@ -2008,6 +2010,7 @@ impl<'a> RbParser<'a> {
                 op: bin_op,
                 left: Box::new(target.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target,
@@ -2095,6 +2098,7 @@ impl<'a> RbParser<'a> {
                 op: bin_op,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -2148,6 +2152,7 @@ impl<'a> RbParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2164,6 +2169,7 @@ impl<'a> RbParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2176,6 +2182,7 @@ impl<'a> RbParser<'a> {
             Expression::UnaryExpr {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
+                source_location: None,
             }
         } else {
             self.parse_bit_or()
@@ -2193,6 +2200,7 @@ impl<'a> RbParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2209,6 +2217,7 @@ impl<'a> RbParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2225,6 +2234,7 @@ impl<'a> RbParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -2244,6 +2254,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::NotEq => {
@@ -2255,6 +2266,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2276,6 +2288,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Le => {
@@ -2286,6 +2299,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Gt => {
@@ -2296,6 +2310,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Ge => {
@@ -2306,6 +2321,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2327,6 +2343,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::RShift => {
@@ -2337,6 +2354,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2358,6 +2376,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Minus => {
@@ -2368,6 +2387,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2389,6 +2409,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Slash => {
@@ -2399,6 +2420,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Percent => {
@@ -2409,6 +2431,7 @@ impl<'a> RbParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -2425,6 +2448,7 @@ impl<'a> RbParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Tilde => {
@@ -2433,6 +2457,7 @@ impl<'a> RbParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Bang => {
@@ -2441,6 +2466,7 @@ impl<'a> RbParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             _ => self.parse_power(),

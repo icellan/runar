@@ -1441,6 +1441,7 @@ impl<'a> ZigParser<'a> {
                     op: bin_op,
                     left: Box::new(target),
                     right: Box::new(rhs),
+                    source_location: None,
                 },
                 source_location: self.loc(),
             });
@@ -1563,6 +1564,7 @@ impl<'a> ZigParser<'a> {
                         op: bin_op,
                         left: Box::new(update_target),
                         right: Box::new(rhs),
+                        source_location: None,
                     },
                     source_location: self.loc(),
                 };
@@ -1671,6 +1673,7 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1687,6 +1690,7 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1703,6 +1707,7 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1719,6 +1724,7 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1735,6 +1741,7 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1754,6 +1761,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::NotEq => {
@@ -1765,6 +1773,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1786,6 +1795,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Le => {
@@ -1796,6 +1806,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Gt => {
@@ -1806,6 +1817,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Ge => {
@@ -1816,6 +1828,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1837,6 +1850,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::RShift => {
@@ -1847,6 +1861,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1868,6 +1883,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Minus => {
@@ -1878,6 +1894,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1899,6 +1916,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Slash => {
@@ -1909,6 +1927,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Percent => {
@@ -1919,6 +1938,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1935,6 +1955,7 @@ impl<'a> ZigParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Minus => {
@@ -1943,6 +1964,7 @@ impl<'a> ZigParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Tilde => {
@@ -1951,6 +1973,7 @@ impl<'a> ZigParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             // Zig's `&` is the address-of operator used for slice coercion
@@ -2101,6 +2124,7 @@ impl<'a> ZigParser<'a> {
                             op: BinaryOp::StrictEq,
                             left: Box::new(left),
                             right: Box::new(right),
+                            source_location: None,
                         };
                     }
 
@@ -2177,6 +2201,7 @@ impl<'a> ZigParser<'a> {
                     op,
                     left: Box::new(left),
                     right: Box::new(right),
+                    source_location: None,
                 }
             }
             // Cast builtins: return inner expression

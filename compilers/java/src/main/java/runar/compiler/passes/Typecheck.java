@@ -418,6 +418,22 @@ public final class Typecheck {
         }
 
         /**
+         * N-472: an operand type error is anchored at the operand with no
+         * fallback, as TS does with {@code operand.sourceLocation}. A bigint
+         * or boolean literal carries no location in any TS parser, so the
+         * diagnostic prints none rather than the statement. Any other operand
+         * without a recorded position (a surface that does not record it)
+         * keeps {@link #errorAt}'s statement anchor.
+         */
+        void operandErrorAt(String msg, Expression operand) {
+            if (exprLoc(operand) == null && (operand instanceof BigIntLiteral || operand instanceof BoolLiteral)) {
+                errors.add(format(msg, null));
+                return;
+            }
+            errorAt(msg, operand);
+        }
+
+        /**
          * N-463: the position of {@code e}'s first token, or null when unknown.
          * Only identifiers ({@code this} included), {@code this.x} and
          * ByteString literals record a position, and only on
@@ -431,7 +447,14 @@ public final class Typecheck {
                 if (e instanceof Identifier id) return id.sourceLocation();
                 if (e instanceof PropertyAccessExpr pa) return pa.sourceLocation();
                 if (e instanceof ByteStringLiteral bs) return bs.sourceLocation();
-                if (e instanceof BinaryExpr be) e = be.left();
+                // N-472: the .runar.ts parser records where the whole
+                // expression starts, which a leading `(` moves left of the
+                // leftmost leaf.
+                if (e instanceof BinaryExpr be) {
+                    if (be.sourceLocation() != null) return be.sourceLocation();
+                    e = be.left();
+                }
+                else if (e instanceof UnaryExpr ue) return ue.sourceLocation();
                 else if (e instanceof CallExpr ce) e = ce.callee();
                 else if (e instanceof MemberExpr me) e = me.object();
                 else if (e instanceof IndexAccessExpr ie) e = ie.object();
@@ -892,19 +915,19 @@ public final class Typecheck {
             switch (op) {
                 case ADD, SUB, MUL, DIV, MOD -> {
                     if (!isBigintFamily(lt)) {
-                        errorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        errorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "bigint";
                 }
                 case LT, LE, GT, GE -> {
                     if (!isBigintFamily(lt)) {
-                        errorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        errorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "boolean";
                 }
@@ -923,33 +946,33 @@ public final class Typecheck {
                 }
                 case AND, OR -> {
                     if (!"boolean".equals(lt) && !"<unknown>".equals(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be boolean, got '" + lt + "'");
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be boolean, got '" + lt + "'", e.left());
                     }
                     if (!"boolean".equals(rt) && !"<unknown>".equals(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be boolean, got '" + rt + "'");
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be boolean, got '" + rt + "'", e.right());
                     }
                     return "boolean";
                 }
                 case SHL, SHR -> {
                     if (!isBigintFamily(lt)) {
-                        errorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        errorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "bigint";
                 }
                 case BIT_AND, BIT_OR, BIT_XOR -> {
                     if (isByteFamily(lt) && isByteFamily(rt)) return "ByteString";
                     if (!isBigintFamily(lt)) {
-                        errorAt(
+                        operandErrorAt(
                             "left operand of '" + op.canonical()
                                 + "' must be bigint or ByteString, got '" + lt + "'",
                             e.left()
                         );
                     }
                     if (!isBigintFamily(rt)) {
-                        errorAt(
+                        operandErrorAt(
                             "right operand of '" + op.canonical()
                                 + "' must be bigint or ByteString, got '" + rt + "'",
                             e.right()
@@ -966,20 +989,20 @@ public final class Typecheck {
             switch (e.op()) {
                 case NOT -> {
                     if (!"boolean".equals(t) && !"<unknown>".equals(t)) {
-                        error("operand of '!' must be boolean, got '" + t + "'");
+                        errorAt("operand of '!' must be boolean, got '" + t + "'", e);
                     }
                     return "boolean";
                 }
                 case NEG -> {
                     if (!isBigintFamily(t)) {
-                        error("operand of unary '-' must be bigint, got '" + t + "'");
+                        errorAt("operand of unary '-' must be bigint, got '" + t + "'", e);
                     }
                     return "bigint";
                 }
                 case BIT_NOT -> {
                     if (isByteFamily(t)) return "ByteString";
                     if (!isBigintFamily(t)) {
-                        error("operand of '~' must be bigint or ByteString, got '" + t + "'");
+                        errorAt("operand of '~' must be bigint or ByteString, got '" + t + "'", e);
                     }
                     return "bigint";
                 }
@@ -1148,7 +1171,7 @@ public final class Typecheck {
         private void checkScriptBytesArg(String prop, Expression arg, Env env) {
             String t = inferExpr(arg, env);
             if (!isSubtype(t, "ByteString") && !"<unknown>".equals(t)) {
-                error(prop + "() second argument (scriptBytes) must be ByteString, got '" + t + "'");
+                errorAt(prop + "() second argument (scriptBytes) must be ByteString, got '" + t + "'", arg);
             }
         }
 

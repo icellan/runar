@@ -1909,6 +1909,7 @@ impl<'a> GoParser<'a> {
                     op: BinaryOp::Add,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
             }
@@ -1921,6 +1922,7 @@ impl<'a> GoParser<'a> {
                     op: BinaryOp::Sub,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
             }
@@ -2107,6 +2109,7 @@ impl<'a> GoParser<'a> {
                     op: BinaryOp::Add,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
             }
@@ -2117,6 +2120,7 @@ impl<'a> GoParser<'a> {
                     op: BinaryOp::Sub,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
             }
@@ -2167,6 +2171,7 @@ impl<'a> GoParser<'a> {
             op,
             left: Box::new(lhs.clone()),
             right: Box::new(rhs),
+            source_location: None,
         };
         Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
     }
@@ -2196,7 +2201,7 @@ impl<'a> GoParser<'a> {
             self.errors.push(Diagnostic::error(go_ambiguous_precedence_message(&first, &second), Some(start.clone())));
         }
         self.ladder_top = Some(op.clone());
-        Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) }
+        Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None }
     }
 
     fn parse_or(&mut self) -> Option<Expression> {
@@ -2374,17 +2379,17 @@ impl<'a> GoParser<'a> {
             TokenType::Bang => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(operand) })
+                Some(Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(operand), source_location: None })
             }
             TokenType::Minus => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(operand) })
+                Some(Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(operand), source_location: None })
             }
             TokenType::Tilde | TokenType::Caret => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(operand) })
+                Some(Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(operand), source_location: None })
             }
             _ => self.parse_postfix(),
         }
@@ -2608,6 +2613,7 @@ impl<'a> GoParser<'a> {
                                     op,
                                     left: Box::new(left),
                                     right: Box::new(right),
+                                    source_location: None,
                                 });
                             }
                         }

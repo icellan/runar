@@ -1290,6 +1290,7 @@ impl<'a> MoveParser<'a> {
                             op: BinaryOp::Add,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1306,6 +1307,7 @@ impl<'a> MoveParser<'a> {
                             op: BinaryOp::Sub,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1322,6 +1324,7 @@ impl<'a> MoveParser<'a> {
                             op: BinaryOp::Mul,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1371,14 +1374,16 @@ impl<'a> MoveParser<'a> {
                     }
                 }
             }
-            Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+            Expression::BinaryExpr { op, left, right, .. } => Expression::BinaryExpr {
                 op,
                 left: Box::new(self.convert_self_to_this(*left)),
                 right: Box::new(self.convert_self_to_this(*right)),
+                source_location: None,
             },
-            Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+            Expression::UnaryExpr { op, operand, .. } => Expression::UnaryExpr {
                 op,
                 operand: Box::new(self.convert_self_to_this(*operand)),
+                source_location: None,
             },
             Expression::CallExpr { callee, args, .. } => {
                 let new_callee = self.convert_self_to_this(*callee);
@@ -1508,6 +1513,7 @@ impl<'a> MoveParser<'a> {
                     op: BinaryOp::StrictEq,
                     left: Box::new(left),
                     right: Box::new(right),
+                    source_location: None,
                 }],
                 asm_return_type: None,
             },
@@ -1675,6 +1681,7 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1691,6 +1698,7 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1707,6 +1715,7 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1723,6 +1732,7 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1739,6 +1749,7 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1758,6 +1769,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::NotEq => {
@@ -1769,6 +1781,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1790,6 +1803,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Le => {
@@ -1800,6 +1814,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Gt => {
@@ -1810,6 +1825,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Ge => {
@@ -1820,6 +1836,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1841,6 +1858,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Shr => {
@@ -1851,6 +1869,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1872,6 +1891,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Minus => {
@@ -1882,6 +1902,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1903,6 +1924,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Slash => {
@@ -1913,6 +1935,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Percent => {
@@ -1923,6 +1946,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1939,6 +1963,7 @@ impl<'a> MoveParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Minus => {
@@ -1947,6 +1972,7 @@ impl<'a> MoveParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Tilde => {
@@ -1955,6 +1981,7 @@ impl<'a> MoveParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::PlusPlus => {
@@ -2300,7 +2327,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     }
     let (step_op, step_left, step_right) = match value {
-        Expression::BinaryExpr { op, left, right } => (op, left.as_ref(), right.as_ref()),
+        Expression::BinaryExpr { op, left, right, .. } => (op, left.as_ref(), right.as_ref()),
         _ => return None,
     };
     let step_is_add = match step_op {

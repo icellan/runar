@@ -40,6 +40,23 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * locations), and every validator anchors the refusal there, falling back to
  * the old anchor when the argument carries none.
  *
+ * Converged by N-472 — the residual typecheck anchors N-463 left behind, one
+ * crafted negative per shape (fixtures N472-*). Unary `-` / `~` operand errors
+ * anchor at the OPERATOR token (TS records a location on the unary node);
+ * a composite whose first token is `(` anchors at that `(` (TS locates a
+ * binary node by its own start), while a parenthesised operand is the
+ * expression INSIDE the parentheses; a bigint or boolean literal operand has
+ * no location in TS, so every tier prints none instead of falling back to the
+ * statement; the second argument of addRawOutput / addDataOutput anchors at
+ * that argument; the right / bitwise / shift operand and the affine
+ * method-consumed-property sites are pinned too. Four rows run on other
+ * surfaces: a literal argument of addRawOutput on `.runar.sol` and
+ * `.runar.zig` falls back to the statement (Zig used to print the literal's
+ * own position), and a composite argument on `.runar.zig` anchors at its
+ * first token, also when it follows a `ctx` handle that Zig drops from the
+ * argument list. A `null` anchor below means "the message line carries no
+ * location at all".
+ *
  * ANCHOR_PENDING (now empty) is where a row goes when a decision on the
  * anchor is needed; such a row is pinned as divergent so that converging it
  * fails here until it moves into CASES.
@@ -47,26 +64,35 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * What this proves: for every CASES row every tier is present, refuses, and
  * prints the row's message at `<file>:<line>:<column of the anchor text>`.
  * What it does NOT prove: node parity for any other diagnostic, or for the
- * N-463 diagnostics on the eight non-`.runar.ts` surfaces; the verifyRabinSig
+ * N-463 / N-472 diagnostics on the surfaces other than those four rows
+ * (TS's own parsers disagree between surfaces: `.runar.zig` locates a
+ * composite argument, `.runar.sol` does not); the verifyRabinSig
  * anchor when the 4th argument is a composite (arithmetic, ternary, call) or
  * the refusal comes from a private helper's parameter; that a tier's
  * follow-on diagnostics (Go's "unsupported Go statement") agree; anchor
  * agreement for an ambiguous edge nested under a non-ambiguous parent, where
- * Go precedence and the C ladder pick different parent nodes; the other
- * members of the four families (right operands, unary operands,
- * addRawOutput/addDataOutput satoshis) beyond the one shape each row exercises.
+ * Go precedence and the C ladder pick different parent nodes; a composite
+ * that starts with a bigint / boolean literal (`5n + this.pk > x`) or with a
+ * parenthesised call or ternary; the other members of the families beyond
+ * the one shape each row exercises.
  */
 
 const TIERS = buildSourceTiers();
 const PRECEDENCE = 'ambiguous operator precedence in .runar.go';
 const AFFINE = "affine value 'sig' has already been consumed";
+const AFFINE_PROP = "affine value 'this.sig' has already been consumed";
+const RAW_SATS = 'addRawOutput() first argument (satoshis) must be bigint';
+const RAW_SCRIPT = 'addRawOutput() second argument (scriptBytes) must be ByteString';
+const DATA_SATS = 'addDataOutput() first argument (satoshis) must be bigint';
+const DATA_SCRIPT = 'addDataOutput() second argument (scriptBytes) must be ByteString';
 const RABIN = 'verifyRabinSig public key (4th argument) must be a contract property or a literal';
 
 /**
  * [fixture, 1-based line, anchor text whose first character is the position,
- *  message fragment the located line must carry].
+ *  message fragment the located line must carry]. A null anchor expects the
+ * message line to carry no location at all.
  */
-const CASES: Array<[string, number, string, string]> = [
+const CASES: Array<[string, number, string | null, string]> = [
   ['N175-go-precedence-and-add.runar.go', 20, 'a & b + 1', PRECEDENCE],
   ['N176-go-precedence-add-shift.runar.go', 20, 'a + b << 2', PRECEDENCE],
   ['N177-go-precedence-or-add.runar.go', 20, 'a | b + d', PRECEDENCE],
@@ -103,6 +129,34 @@ const CASES: Array<[string, number, string, string]> = [
   ['N226-zig-rabin-pubkey-param.runar.zig', 18, 'n)', RABIN],
   ['N227-rb-rabin-pubkey-param.runar.rb', 18, 'n)', RABIN],
   ['N228-java-rabin-pubkey-param.runar.java', 28, 'n)', RABIN],
+  // N-472: the residual N-463 shapes. The message fragments omit the first
+  // letter's case (`Left`/`left`) because the tiers word them differently.
+  ['N472-ts-unary-minus-operand.runar.ts', 20, '-this.hp()', "perand of unary '-' must be bigint"],
+  ['N472-ts-unary-tilde-operand.runar.ts', 20, '~flag', "perand of '~' must be bigint or ByteString"],
+  ['N472-ts-paren-composite-left.runar.ts', 20, '(this.pk + this.pk) + this.pk', "eft operand of '>' must be bigint"],
+  ['N472-ts-paren-wrapped-operand.runar.ts', 18, 'this.pk + this.pk', "eft operand of '*' must be bigint"],
+  ['N472-ts-literal-left-operand.runar.ts', 20, null, "eft operand of '>' must be bigint"],
+  ['N472-ts-bigint-literal-left-operand.runar.ts', 20, null, "eft operand of '&&' must be boolean"],
+  ['N472-ts-right-operand.runar.ts', 20, 'flag >', "ight operand of '-' must be bigint"],
+  ['N472-ts-bitwise-operand.runar.ts', 20, 'flag)', "ight operand of '&' must be bigint or ByteString"],
+  ['N472-ts-shift-operand.runar.ts', 20, 'flag)', "ight operand of '<<' must be bigint"],
+  ['N472-ts-raw-output-satoshis.runar.ts', 16, 'x > 0n', RAW_SATS],
+  ['N472-ts-raw-output-script.runar.ts', 16, 'flag)', RAW_SCRIPT],
+  ['N472-ts-data-output-satoshis.runar.ts', 16, 'flag,', DATA_SATS],
+  ['N472-ts-data-output-script.runar.ts', 16, 'x + 1n', DATA_SCRIPT],
+  // The second call of a helper that consumes a Sig property: the first
+  // argument when it has one, else the statement.
+  ['N472-ts-affine-property-helper-no-arg.runar.ts', 24, 'this.h();', AFFINE_PROP],
+  ['N472-ts-affine-property-helper-with-arg.runar.ts', 25, 'n);', AFFINE_PROP],
+  // Other surfaces. A literal argument has no location, so TS falls back to
+  // the statement; `.runar.zig` locates a composite argument at its first
+  // token.
+  ['N472-sol-raw-output-literal-satoshis.runar.sol', 15, 'this.addRawOutput', RAW_SATS],
+  ['N472-zig-raw-output-literal-satoshis.runar.zig', 17, 'ctx.addRawOutput', RAW_SATS],
+  ['N472-zig-raw-output-composite-script.runar.zig', 17, 'n + 1', RAW_SCRIPT],
+  // `self.check(ctx, sig)`: Zig drops the `ctx` argument, and the location of
+  // the argument that remains must keep its index.
+  ['N472-zig-ctx-helper-affine-arg.runar.zig', 26, 'sig);', AFFINE],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */
@@ -131,14 +185,19 @@ describe('N-233: every tier anchors a diagnostic at the same node', () => {
   });
 
   for (const [fixture, line, anchor, message] of CASES) {
-    it(`${fixture} -> :${line}:<column of ${JSON.stringify(anchor)}>`, () => {
-      const want = `${line}:${expectedColumn(fixture, line, anchor)}`;
+    it(`${fixture} -> ${anchor === null ? 'no location' : `:${line}:<column of ${JSON.stringify(anchor)}>`}`, () => {
+      const want = anchor === null ? null : `${line}:${expectedColumn(fixture, line, anchor)}`;
       const got: Record<string, string | null> = {};
       for (const tier of TIERS) {
         const r = judge(tier, join(REPO, 'conformance/negatives', fixture));
         expect(r.verdict, `${tier.id} must refuse ${fixture}`).toBe('rejected');
         expect(r.diag, `${tier.id} must print ${JSON.stringify(message)}`).toContain(message);
         got[tier.id] = locationOf(r.diag, fixture, message);
+        if (anchor === null) {
+          // `file:line:` without a column would also read as "no location" above.
+          const carried = r.diag.split('\n').find((l) => l.includes(message));
+          expect(carried, `${tier.id} must print the message`).not.toContain(`${fixture}:`);
+        }
       }
       expect(got).toEqual(Object.fromEntries(TIERS.map((t) => [t.id, want])));
     }, 900_000);

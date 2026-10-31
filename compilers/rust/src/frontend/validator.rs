@@ -227,7 +227,7 @@ fn is_literal_expression(expr: &Expression) -> bool {
         Expression::BigIntLiteral { .. }
         | Expression::BoolLiteral { .. }
         | Expression::ByteStringLiteral { .. } => true,
-        Expression::UnaryExpr { op, operand } => {
+        Expression::UnaryExpr { op, operand, .. } => {
             *op == UnaryOp::Neg && matches!(operand.as_ref(), Expression::BigIntLiteral { .. })
         }
         // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
@@ -1640,7 +1640,7 @@ fn for_update_is_representable(
                 return false;
             }
             match value {
-                Expression::BinaryExpr { op, left, right } => match op {
+                Expression::BinaryExpr { op, left, right, .. } => match op {
                     BinaryOp::Add => {
                         (is_allowed_loop_var(allowed, left) && is_literal_one(right))
                             || (is_literal_one(left) && is_allowed_loop_var(allowed, right))
@@ -1664,7 +1664,7 @@ fn for_update_is_representable(
 /// verbatim by all seven tiers (N-026).
 fn for_loop_bound_diagnostic(bound: &Expression) -> &'static str {
     let mut e = bound;
-    while let Expression::UnaryExpr { op, operand } = e {
+    while let Expression::UnaryExpr { op, operand, .. } = e {
         if *op != UnaryOp::Neg {
             break;
         }
@@ -1687,7 +1687,7 @@ fn is_compile_time_constant(expr: &Expression) -> bool {
     // behavior: only literal loop bounds compile.
     match expr {
         Expression::BigIntLiteral { .. } => true,
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             is_compile_time_constant(operand)
         }
         _ => false,
@@ -2088,7 +2088,7 @@ fn is_locktime_read(expr: &Expression) -> bool {
 /// Also NOT accepted: `extractSequence(pre) < 0`. Unsigned nSequence is never
 /// negative, so that comparison is vacuous.
 fn is_sequence_finality_guard(expr: &Expression) -> bool {
-    let Expression::BinaryExpr { op, left, right } = expr else {
+    let Expression::BinaryExpr { op, left, right, .. } = expr else {
         return false;
     };
     let final_sentinel = num_bigint::BigInt::from(SEQUENCE_FINAL);

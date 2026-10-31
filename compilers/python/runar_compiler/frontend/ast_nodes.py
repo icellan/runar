@@ -120,6 +120,11 @@ class BinaryExpr:
     op: str  # "+", "-", "*", "/", "%", "===", "!==", "<", "<=", ">", ">=", "&&", "||", "&", "|", "^", "<<", ">>"
     left: Expression
     right: Expression
+    # Where the expression starts, including a leading ``(`` (N-472). Only the
+    # .runar.ts parser sets it, as the TS reference does; elsewhere typecheck
+    # falls back to the leftmost leaf (see typecheck._expr_loc). Not part of
+    # equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -128,6 +133,8 @@ class UnaryExpr:
 
     op: str  # "!", "-", "~"
     operand: Expression
+    # The operator token (N-472); .runar.ts parser only. Not part of equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass

@@ -1127,6 +1127,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Add,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1142,6 +1143,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Sub,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1157,6 +1159,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Mul,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1172,6 +1175,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Div,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1187,6 +1191,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Mod,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1439,6 +1444,7 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1455,6 +1461,7 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1471,6 +1478,7 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1487,6 +1495,7 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1503,6 +1512,7 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: None,
             };
         }
         left
@@ -1521,6 +1531,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::NotEq | Token::NotEqEq => {
@@ -1531,6 +1542,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1552,6 +1564,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Le => {
@@ -1562,6 +1575,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Gt => {
@@ -1572,6 +1586,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Ge => {
@@ -1582,6 +1597,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1603,6 +1619,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Shr => {
@@ -1613,6 +1630,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1634,6 +1652,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Minus => {
@@ -1644,6 +1663,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1665,6 +1685,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Slash => {
@@ -1675,6 +1696,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 Token::Percent => {
@@ -1685,6 +1707,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     };
                 }
                 _ => break,
@@ -1701,6 +1724,7 @@ impl<'a> SolParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Minus => {
@@ -1709,6 +1733,7 @@ impl<'a> SolParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::Tilde => {
@@ -1717,6 +1742,7 @@ impl<'a> SolParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: None,
                 }
             }
             Token::PlusPlus => {
@@ -1977,14 +2003,16 @@ fn sol_rename_identifiers_in_expr(
                 .collect(),
             asm_return_type: None,
         },
-        Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, .. } => Expression::BinaryExpr {
             op,
             left: Box::new(sol_rename_identifiers_in_expr(*left, rename_map)),
             right: Box::new(sol_rename_identifiers_in_expr(*right, rename_map)),
+            source_location: None,
         },
-        Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, .. } => Expression::UnaryExpr {
             op,
             operand: Box::new(sol_rename_identifiers_in_expr(*operand, rename_map)),
+            source_location: None,
         },
         Expression::MemberExpr { object, property } => Expression::MemberExpr {
             object: Box::new(sol_rename_identifiers_in_expr(*object, rename_map)),
@@ -2089,14 +2117,16 @@ fn sol_rewrite_expr_bare_props(
                 asm_return_type: None,
             }
         }
-        Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, .. } => Expression::BinaryExpr {
             op,
             left: Box::new(sol_rewrite_expr_bare_props(*left, prop_names, locals, method_names)),
             right: Box::new(sol_rewrite_expr_bare_props(*right, prop_names, locals, method_names)),
+            source_location: None,
         },
-        Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, .. } => Expression::UnaryExpr {
             op,
             operand: Box::new(sol_rewrite_expr_bare_props(*operand, prop_names, locals, method_names)),
+            source_location: None,
         },
         Expression::MemberExpr { object, property } => Expression::MemberExpr {
             object: Box::new(sol_rewrite_expr_bare_props(*object, prop_names, locals, method_names)),

@@ -29,11 +29,11 @@ fn mirrored(op: &BinaryOp) -> Option<BinaryOp> {
 
 /// The canonical form of `cond` for a loop over `iter` (or `cond` itself).
 pub fn normalize_loop_condition(cond: &Expression, iter: &str) -> Expression {
-    if let Expression::BinaryExpr { op, left, right } = cond {
+    if let Expression::BinaryExpr { op, left, right, .. } = cond {
         let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name, .. } if name == iter);
         if let Some(m) = mirrored(op) {
             if is_iter(right) && !is_iter(left) {
-                return Expression::BinaryExpr { op: m, left: right.clone(), right: left.clone() };
+                return Expression::BinaryExpr { op: m, left: right.clone(), right: left.clone(), source_location: None };
             }
         }
     }

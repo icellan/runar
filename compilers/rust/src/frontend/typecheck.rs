@@ -478,7 +478,7 @@ fn loop_may_run_twice(init: &Statement, condition: &Expression) -> bool {
     fn literal(e: &Expression) -> Option<num_bigint::BigInt> {
         match e {
             Expression::BigIntLiteral { value } => Some(value.clone()),
-            Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => literal(operand).map(|v| -v),
+            Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => literal(operand).map(|v| -v),
             _ => None,
         }
     }
@@ -666,6 +666,45 @@ impl<'a> TypeChecker<'a> {
     /// `.runar.ts` parser records it); otherwise at the method, as before.
     fn add_error_at(&mut self, msg: impl Into<String>, at: &Expression) {
         match expr_loc(at) {
+            Some(loc) => {
+                let saved = self.current_stmt_loc.replace(loc.clone());
+                self.add_error(msg);
+                self.current_stmt_loc = saved;
+            }
+            None => self.add_error(msg),
+        }
+    }
+
+    /// N-472: an operand type error is anchored at the operand with no
+    /// fallback, as TS does with `operand.sourceLocation`. A bigint or boolean
+    /// literal carries no location in any TS parser, so the diagnostic prints
+    /// none rather than the statement. Any other operand without a recorded
+    /// position (a surface that does not record it) keeps `add_error_at`'s
+    /// anchor.
+    fn add_operand_error_at(&mut self, msg: impl Into<String>, at: &Expression) {
+        if expr_loc(at).is_none()
+            && matches!(at, Expression::BigIntLiteral { .. } | Expression::BoolLiteral { .. })
+        {
+            let mut msg: String = msg.into();
+            if msg.len() > MAX_DIAGNOSTIC_BYTES {
+                let mut cut = MAX_DIAGNOSTIC_BYTES;
+                while !msg.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let elided = msg.len() - cut;
+                msg.truncate(cut);
+                msg.push_str(&format!("...({} more bytes elided)", elided));
+            }
+            self.errors.push(Diagnostic::error(msg, None));
+            return;
+        }
+        self.add_error_at(msg, at);
+    }
+
+    /// N-472: `add_error` anchored at an already-known position (the unary
+    /// operator token), else at the statement as before.
+    fn add_error_at_loc(&mut self, msg: impl Into<String>, loc: Option<&SourceLocation>) {
+        match loc {
             Some(loc) => {
                 let saved = self.current_stmt_loc.replace(loc.clone());
                 self.add_error(msg);
@@ -1104,11 +1143,15 @@ terminal (no state mutation)",
                 "<unknown>".to_string()
             }
 
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 self.check_binary_expr(op, left, right, env)
             }
 
-            Expression::UnaryExpr { op, operand } => self.check_unary_expr(op, operand, env),
+            Expression::UnaryExpr {
+                op,
+                operand,
+                source_location,
+            } => self.check_unary_expr(op, operand, source_location.as_ref(), env),
 
             Expression::CallExpr {
                 callee,
@@ -1225,7 +1268,7 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&left_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Left operand of '{}' must be bigint or ByteString, got '{}'",
                             op.as_str(),
@@ -1235,7 +1278,7 @@ terminal (no state mutation)",
                     );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Right operand of '{}' must be bigint or ByteString, got '{}'",
                             op.as_str(),
@@ -1250,7 +1293,7 @@ terminal (no state mutation)",
             // Arithmetic: bigint x bigint -> bigint
             BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Left operand of '{}' must be bigint, got '{}'",
                             op.as_str(),
@@ -1260,7 +1303,7 @@ terminal (no state mutation)",
                     );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Right operand of '{}' must be bigint, got '{}'",
                             op.as_str(),
@@ -1275,7 +1318,7 @@ terminal (no state mutation)",
             // Comparison: bigint x bigint -> boolean
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Left operand of '{}' must be bigint, got '{}'",
                             op.as_str(),
@@ -1285,7 +1328,7 @@ terminal (no state mutation)",
                     );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Right operand of '{}' must be bigint, got '{}'",
                             op.as_str(),
@@ -1317,18 +1360,24 @@ terminal (no state mutation)",
             // Logical: boolean x boolean -> boolean
             BinaryOp::And | BinaryOp::Or => {
                 if left_type != BOOLEAN && left_type != "<unknown>" {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be boolean, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be boolean, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if right_type != BOOLEAN && right_type != "<unknown>" {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be boolean, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be boolean, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BOOLEAN.to_string()
             }
@@ -1339,7 +1388,7 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&left_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Left operand of '{}' must be bigint or ByteString, got '{}'",
                             op.as_str(),
@@ -1349,7 +1398,7 @@ terminal (no state mutation)",
                     );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Right operand of '{}' must be bigint or ByteString, got '{}'",
                             op.as_str(),
@@ -1364,7 +1413,7 @@ terminal (no state mutation)",
             // Shift: bigint x bigint -> bigint
             BinaryOp::Shl | BinaryOp::Shr => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Left operand of '{}' must be bigint, got '{}'",
                             op.as_str(),
@@ -1374,7 +1423,7 @@ terminal (no state mutation)",
                     );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error_at(
+                    self.add_operand_error_at(
                         format!(
                             "Right operand of '{}' must be bigint, got '{}'",
                             op.as_str(),
@@ -1392,6 +1441,7 @@ terminal (no state mutation)",
         &mut self,
         op: &UnaryOp,
         operand: &Expression,
+        op_loc: Option<&SourceLocation>,
         env: &mut TypeEnv,
     ) -> TType {
         let operand_type = self.infer_expr_type(operand, env);
@@ -1399,19 +1449,25 @@ terminal (no state mutation)",
         match op {
             UnaryOp::Not => {
                 if operand_type != BOOLEAN && operand_type != "<unknown>" {
-                    self.add_error(format!(
-                        "Operand of '!' must be boolean, got '{}'",
-                        operand_type
-                    ));
+                    self.add_error_at_loc(
+                        format!(
+                            "Operand of '!' must be boolean, got '{}'",
+                            operand_type
+                        ),
+                        op_loc,
+                    );
                 }
                 BOOLEAN.to_string()
             }
             UnaryOp::Neg => {
                 if !is_bigint_family(&operand_type) {
-                    self.add_error(format!(
-                        "Operand of unary '-' must be bigint, got '{}'",
-                        operand_type
-                    ));
+                    self.add_error_at_loc(
+                        format!(
+                            "Operand of unary '-' must be bigint, got '{}'",
+                            operand_type
+                        ),
+                        op_loc,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1420,10 +1476,13 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&operand_type) {
-                    self.add_error(format!(
-                        "Operand of '~' must be bigint or ByteString, got '{}'",
-                        operand_type
-                    ));
+                    self.add_error_at_loc(
+                        format!(
+                            "Operand of '~' must be bigint or ByteString, got '{}'",
+                            operand_type
+                        ),
+                        op_loc,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1584,10 +1643,13 @@ terminal (no state mutation)",
             // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
             let script_type = self.infer_expr_type(&args[1], env);
             if !is_subtype(&script_type, "ByteString") && script_type != "<unknown>" {
-                self.add_error(format!(
-                    "{}() second argument (scriptBytes) must be ByteString, got '{}'",
-                    name, script_type
-                ));
+                self.add_error_at(
+                    format!(
+                        "{}() second argument (scriptBytes) must be ByteString, got '{}'",
+                        name, script_type
+                    ),
+                    &args[1],
+                );
             }
         }
         VOID.to_string()
@@ -1867,7 +1929,7 @@ terminal (no state mutation)",
                 use num_traits::ToPrimitive;
                 let idx_lit: Option<i128> = match &args[0] {
                     Expression::BigIntLiteral { value } => value.to_i128(),
-                    Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
+                    Expression::UnaryExpr { op: UnaryOp::Neg, operand, .. } => {
                         if let Expression::BigIntLiteral { value } = operand.as_ref() {
                             // R-068: this arm exists ONLY to reach the
                             // "must be >= 0" message below, so it must
@@ -2023,7 +2085,7 @@ terminal (no state mutation)",
         if func_name == "substr" && args.len() >= 2 {
             let start_lit: Option<BigInt> = match &args[1] {
                 Expression::BigIntLiteral { value } => Some(value.clone()),
-                Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand, .. } => {
                     if let Expression::BigIntLiteral { value } = operand.as_ref() {
                         Some(-value.clone())
                     } else {
@@ -2326,7 +2388,17 @@ pub(crate) fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
             | Expression::ByteStringLiteral { source_location, .. } => {
                 return source_location.as_ref()
             }
-            Expression::BinaryExpr { left, .. } => left,
+            Expression::BinaryExpr { left, source_location, .. } => {
+                // N-472: the `.runar.ts` parser records where the whole
+                // expression starts, which a leading `(` moves left of the
+                // leftmost leaf.
+                if let Some(loc) = source_location {
+                    return Some(loc);
+                }
+                left
+            }
+            // N-472: the operator token; the other surfaces record none.
+            Expression::UnaryExpr { source_location, .. } => return source_location.as_ref(),
             Expression::CallExpr { callee, .. } => callee,
             Expression::MemberExpr { object, .. } | Expression::IndexAccess { object, .. } => object,
             Expression::TernaryExpr { condition, .. } => condition,

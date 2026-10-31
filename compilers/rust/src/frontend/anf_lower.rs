@@ -229,6 +229,7 @@ fn literal_bigint(expr: &Expression) -> Option<num_bigint::BigInt> {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => match operand.as_ref() {
             Expression::BigIntLiteral { value } => Some(-value),
             _ => None,
@@ -302,6 +303,7 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => {
             if let Expression::BigIntLiteral { value } = operand.as_ref() {
                 Some(bigint_to_json(&(-value)))
@@ -2462,7 +2464,7 @@ fn extract_loop_step(condition: &Expression, update: &Statement) -> i64 {
 fn extract_bigint_value(expr: &Expression) -> Option<i128> {
     match expr {
         Expression::BigIntLiteral { value } => value.to_i128(),
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             extract_bigint_value(operand).map(|v| -v)
         }
         _ => None,
@@ -2520,9 +2522,9 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
 
         Expression::MemberExpr { object, property } => lower_member_expr(object, property, ctx),
 
-        Expression::BinaryExpr { op, left, right } => lower_binary_expr(op, left, right, ctx),
+        Expression::BinaryExpr { op, left, right, .. } => lower_binary_expr(op, left, right, ctx),
 
-        Expression::UnaryExpr { op, operand } => lower_unary_expr(op, operand, ctx),
+        Expression::UnaryExpr { op, operand, .. } => lower_unary_expr(op, operand, ctx),
 
         Expression::CallExpr { callee, args, .. } => lower_call_expr(callee, args, ctx),
 

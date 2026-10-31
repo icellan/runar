@@ -26,8 +26,10 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  *   - a refusal AT column 0 prints `:0`, not a bare `file:line:`;
  *   - every tier is present (a missing toolchain fails, it is not skipped).
  * What it does NOT prove:
- *   - that tiers point at the same NODE for every rule (N15-N17, N175-N179,
- *     N200-N209, N220-N228 disagree on the node, not the base; N-233);
+ *   - that tiers point at the same NODE for every rule. That is the job of
+ *     n233-diagnostic-anchor-parity.test.ts, which pins N15-N17, N175-N179,
+ *     N200-N209, N220-N228 (converged by N-233, N-463, N-464) and the N-472
+ *     shapes; node parity for any other rule is not claimed anywhere;
  *   - columns for diagnostics that carry no location at all. Those are the
  *     NO_LOCATION rows below, pinned so the list must shrink when fixed;
  *   - tab expansion (columns count characters; a tab is one column).

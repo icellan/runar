@@ -1992,7 +1992,7 @@ func (p *parseContext) parseBinaryExpression(node *sitter.Node) Expression {
 		return p.unsupportedBinaryOp(node, op)
 	}
 
-	return BinaryExpr{Op: op, Left: left, Right: right}
+	return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: p.loc(node)}
 }
 
 func (p *parseContext) parseUnaryExpression(node *sitter.Node) Expression {
@@ -2038,7 +2038,7 @@ func (p *parseContext) parseUnaryExpression(node *sitter.Node) Expression {
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
 
-	return UnaryExpr{Op: op, Operand: operand}
+	return UnaryExpr{Op: op, Operand: operand, SourceLocation: p.loc(node)}
 }
 
 func (p *parseContext) parseUpdateExpression(node *sitter.Node) Expression {
