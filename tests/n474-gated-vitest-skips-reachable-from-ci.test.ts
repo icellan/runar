@@ -465,6 +465,64 @@ describe('N-474: every env-gated vitest skip is executed by CI with its gate set
     expect(problems).toEqual([]);
   });
 
+  // N-485. Proves: the two Zig HTTP-client live-GET tests (gated on RUN_LIVE_HTTP) are run by a
+  // ci.yml step that comes after `mock-http.sh start` in the same job, with RUN_LIVE_HTTP=1 and
+  // RUN_LIVE_HTTP_BASE pointing at the local echo server (not httpbin.org), that the test file
+  // honours that base URL, and that the suite step compiles sdk_http_client.zig via root.zig.
+  // Does not prove: that they pass in CI (local runs only), nor that the echo server behaves like
+  // httpbin beyond reflecting the request Host (see the server test below).
+  it('the Zig live-HTTP tests run after `mock-http.sh start` with RUN_LIVE_HTTP=1 and a local base URL', () => {
+    const file = 'packages/runar-zig/src/sdk_http_client.zig';
+    const src = readFileSync(join(ROOT, file), 'utf8');
+    const problems: string[] = [];
+    if (!src.includes('RUN_LIVE_HTTP_BASE')) problems.push(`${file}: does not read RUN_LIVE_HTTP_BASE`);
+    const wired = readFileSync(join(ROOT, 'packages/runar-zig/src/root.zig'), 'utf8')
+      .split('\n')
+      .some((l) => l.trim() === '_ = @import("sdk_http_client.zig");');
+    if (!wired) problems.push('root.zig does not import sdk_http_client.zig');
+    const command = 'cd packages/runar-zig && zig build test';
+    const ok = jobs.some((job) =>
+      job.steps.some((step, stepIdx) => {
+        if (!step.commands.includes(command)) return false;
+        const started = job.steps
+          .slice(0, stepIdx)
+          .some((s) => s.commands.some((c) => /mock-http\.sh\s+start\b/.test(c)));
+        const live = (step.env.RUN_LIVE_HTTP ?? job.env.RUN_LIVE_HTTP) === '1';
+        const base = (step.env.RUN_LIVE_HTTP_BASE ?? job.env.RUN_LIVE_HTTP_BASE ?? '').trim();
+        return started && live && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(base);
+      }),
+    );
+    if (!ok) problems.push(`no CI step runs \`${command}\` after \`mock-http.sh start\` with RUN_LIVE_HTTP=1 and a local RUN_LIVE_HTTP_BASE`);
+    expect(problems).toEqual([]);
+  });
+
+  // N-485. Proves: integration/mock-http/server.mjs answers GET /get with a body that contains the
+  // request's Host (what the Zig tests assert, as httpbin does), and 404s other paths.
+  // Does not prove: parity with httpbin for any other field.
+  it('the mock HTTP echo server reflects the request Host on GET /get', async () => {
+    const { spawn } = await import('node:child_process');
+    const port = 18000 + Math.floor(Math.random() * 1000);
+    const child = spawn('node', ['server.mjs', '--port', String(port)], {
+      cwd: join(ROOT, 'integration/mock-http'),
+      stdio: 'ignore',
+    });
+    try {
+      let res: Response | undefined;
+      for (let i = 0; i < 50 && !res; i++) {
+        try {
+          res = await fetch(`http://127.0.0.1:${port}/get`);
+        } catch {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      expect(res?.status).toBe(200);
+      expect(await res!.text()).toContain(`127.0.0.1:${port}`);
+      expect((await fetch(`http://127.0.0.1:${port}/nope`)).status).toBe(404);
+    } finally {
+      child.kill();
+    }
+  });
+
   // Proves: the scanner reads call syntax, not prose — a `.skipIf(` inside a comment or
   // string/template literal is ignored (so this file does not flag itself once tracked), while
   // a real unclassified `.skipIf(process.env.X)` is still reported and a real classified one

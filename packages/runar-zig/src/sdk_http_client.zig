@@ -327,14 +327,29 @@ test "StdHttpTransport converters produce HttpTransport structs" {
     try testing.expect(r.ctx == @as(*anyopaque, @ptrCast(t)));
 }
 
+/// Live-GET target, from RUN_LIVE_HTTP_BASE (CI points it at the local echo
+/// server, integration/mock-http, N-485); defaults to httpbin.org for manual
+/// runs. The response body must contain the base URL's host[:port].
+fn liveBase() []const u8 {
+    return std.testing.environ.getPosix("RUN_LIVE_HTTP_BASE") orelse "https://httpbin.org";
+}
+
+fn liveHost(base: []const u8) []const u8 {
+    const after_scheme = if (std.mem.indexOf(u8, base, "://")) |i| base[i + 3 ..] else base;
+    const end = std.mem.indexOfScalar(u8, after_scheme, '/') orelse after_scheme.len;
+    return after_scheme[0..end];
+}
+
 test "CurlHttpTransport live GET hits httpbin" {
     if (!liveHttpEnabled()) return error.SkipZigTest;
     const t = try CurlHttpTransport.init(testing.allocator);
     defer t.deinit();
     const woc = t.wocTransport();
-    const body = try woc.get(woc.ctx, testing.allocator, "https://httpbin.org/get");
+    const url = try std.fmt.allocPrint(testing.allocator, "{s}/get", .{liveBase()});
+    defer testing.allocator.free(url);
+    const body = try woc.get(woc.ctx, testing.allocator, url);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "httpbin.org") != null);
+    try testing.expect(std.mem.indexOf(u8, body, liveHost(liveBase())) != null);
 }
 
 test "StdHttpTransport live GET hits httpbin" {
@@ -342,7 +357,9 @@ test "StdHttpTransport live GET hits httpbin" {
     const t = try StdHttpTransport.init(testing.allocator);
     defer t.deinit();
     const woc = t.wocTransport();
-    const body = try woc.get(woc.ctx, testing.allocator, "https://httpbin.org/get");
+    const url = try std.fmt.allocPrint(testing.allocator, "{s}/get", .{liveBase()});
+    defer testing.allocator.free(url);
+    const body = try woc.get(woc.ctx, testing.allocator, url);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "httpbin.org") != null);
+    try testing.expect(std.mem.indexOf(u8, body, liveHost(liveBase())) != null);
 }

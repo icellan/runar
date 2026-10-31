@@ -1795,6 +1795,12 @@ jobs:
         # only once the server answers a getPublicKey call.
         run: cd integration/mock-wallet && ./mock-wallet.sh start
 
+      - name: Start mock HTTP echo server
+        # N-485: in-repo httpbin stand-in (integration/mock-http/server.mjs) on
+        # 127.0.0.1:18481 for the Zig SDK's RUN_LIVE_HTTP live-GET tests, so
+        # they run in the Zig step below instead of skipping.
+        run: cd integration/mock-http && ./mock-http.sh start
+
       - name: Go integration tests
         # Timeout raised to 30min because TestRollupGroth16WAMSM_AdvanceState
         # broadcasts a ~900KB Groth16 MSM tx and regularly spends 10+ minutes
@@ -1855,6 +1861,11 @@ jobs:
       - name: Zig wallet-client test (mock BRC-100 wallet)
         # build.zig has no test filter: this reruns the whole runar-zig suite,
         # with the wallet test (SkipZigTest when the endpoint is unset) now live.
+        # N-485: RUN_LIVE_HTTP/RUN_LIVE_HTTP_BASE make the two sdk_http_client.zig
+        # live-GET tests hit the local echo server instead of skipping.
+        env:
+          RUN_LIVE_HTTP: '1'
+          RUN_LIVE_HTTP_BASE: http://127.0.0.1:18481
         run: cd packages/runar-zig && zig build test
         timeout-minutes: 30
 
@@ -1871,6 +1882,10 @@ jobs:
       - name: Stop mock BRC-100 wallet
         if: always()
         run: cd integration/mock-wallet && ./mock-wallet.sh stop
+
+      - name: Stop mock HTTP echo server
+        if: always()
+        run: cd integration/mock-http && ./mock-http.sh stop
 
       - name: Stop regtest node
         if: always()
