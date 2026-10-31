@@ -2564,7 +2564,11 @@ pub const RABIN_PUBKEY_PROVENANCE_MESSAGE =
 /// parameters, every value bound to each local name (initialisers and
 /// assignments), and the names that are ever ++/-- or are loop counters.
 const RabinScope = struct {
+    /// N-453: without StatefulContext handles, so a parameter index lines up
+    /// with a call site's argument index (`rabinValueArgs`).
     params: []const types.ParamNode,
+    /// N-453: every declared parameter, handles included.
+    all_params: []const types.ParamNode = &.{},
     /// Name of the private method this scope is, or null for a public method
     /// or the constructor (whose parameters are never trusted).
     private_name: ?[]const u8,
@@ -2585,6 +2589,35 @@ const RabinScope = struct {
 };
 
 const RabinCallSite = struct { args: []const Expression, scope: *const RabinScope };
+
+/// N-453: `params` without StatefulContext handles. Typecheck and ANF
+/// lowering elide the handle from a method's parameter list and drop a bare
+/// handle from a `self.helper(ctx, ...)` call, so a helper may be called with
+/// or without it; pairing parameters with arguments by position over the
+/// declared lists would then shift every later pair onto the wrong argument.
+fn rabinValueParams(a: Allocator, params: []const types.ParamNode) ![]const types.ParamNode {
+    var out: std.ArrayListUnmanaged(types.ParamNode) = .empty;
+    for (params) |p| {
+        if (std.mem.eql(u8, p.type_name, "StatefulContext")) continue;
+        try out.append(a, p);
+    }
+    return out.items;
+}
+
+/// N-453: a `self.helper(...)` call's arguments without the bare identifiers
+/// naming a StatefulContext handle of the calling scope (see rabinValueParams).
+fn rabinValueArgs(a: Allocator, args: []const Expression, scope: *const RabinScope) ![]const Expression {
+    var out: std.ArrayListUnmanaged(Expression) = .empty;
+    outer: for (args) |arg| {
+        if (arg == .identifier) {
+            for (scope.all_params) |p| {
+                if (std.mem.eql(u8, p.type_name, "StatefulContext") and std.mem.eql(u8, p.name, arg.identifier)) continue :outer;
+            }
+        }
+        try out.append(a, arg);
+    }
+    return out.items;
+}
 
 /// Port of the TS reference `checkRabinPubKeyProvenance` (02-validate.ts).
 ///
@@ -2610,7 +2643,7 @@ fn checkRabinPubKeyProvenance(
     const scopes = try a.alloc(RabinScope, contract.methods.len + 1);
     scopes[0] = .{ .params = contract.constructor.params, .private_name = null, .body = contract.constructor.body, .loc = null };
     for (contract.methods, 0..) |m, i| {
-        scopes[i + 1] = .{ .params = m.params, .private_name = if (m.is_public) null else m.name, .body = m.body, .loc = m.source_loc };
+        scopes[i + 1] = .{ .params = try rabinValueParams(a, m.params), .all_params = m.params, .private_name = if (m.is_public) null else m.name, .body = m.body, .loc = m.source_loc };
     }
     for (scopes) |*sc| try rabinCollectBindings(a, sc, sc.body);
 
@@ -2619,7 +2652,7 @@ fn checkRabinPubKeyProvenance(
     var sites = std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)){};
     for (contract.methods) |m| {
         if (m.is_public) continue;
-        const flags = try a.alloc(bool, m.params.len);
+        const flags = try a.alloc(bool, (try rabinValueParams(a, m.params)).len);
         @memset(flags, false);
         try trusted.put(a, m.name, flags);
         try sites.put(a, m.name, .empty);
@@ -2631,7 +2664,7 @@ fn checkRabinPubKeyProvenance(
         sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
         fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
             const hit: ?struct { name: []const u8, args: []const Expression } = switch (expr) {
-                .method_call => |mc| if (std.mem.eql(u8, mc.object, "this")) .{ .name = mc.method, .args = mc.args } else null,
+                .method_call => |mc| if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) .{ .name = mc.method, .args = try rabinValueArgs(self.a, mc.args, self.scope) } else null,
                 .call => |c| .{ .name = c.callee, .args = c.args },
                 else => null,
             };
