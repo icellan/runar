@@ -3,8 +3,8 @@
 require 'spec_helper'
 require 'runar/sdk'
 require 'json'
-require 'open3'
 require 'tmpdir'
+require_relative '../support/ruby_compiler_cli'
 
 # Issue #100: a terminal method that reads variable-length (ByteString) state
 # must receive _codePart in its unlocking script. Without it the on-chain
@@ -41,10 +41,6 @@ RSpec.describe 'Issue #100 — terminal var-len state read gets _codePart' do
   # Compile via the Ruby compiler CLI; skip cleanly if the repo layout/CLI is
   # unavailable (keeps the SDK gem's spec run self-contained).
   def compile_state_read(src = I100_SRC)
-    repo_root = File.expand_path('../../../..', __dir__)
-    cli = File.join(repo_root, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
-    return nil unless File.exist?(cli)
-
     # Per-call private temp dir (not the shared Dir.tmpdir root) so a
     # concurrent compile of this same spec can't collide on the filename
     # the CLI dispatches on (CK18-FU8).
@@ -52,8 +48,7 @@ RSpec.describe 'Issue #100 — terminal var-len state read gets _codePart' do
       src_path = File.join(dir, 'StateRead.runar.ts')
       File.write(src_path, src)
       yield if block_given?
-      out, _err, status = Open3.capture3('ruby', cli, '--source', src_path)
-      return status.success? ? out : nil
+      return RubyCompilerCli.compile(src_path)
     end
   end
 

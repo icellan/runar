@@ -874,6 +874,10 @@ jobs:
           bundler-cache: true
           working-directory: packages/runar-rb
       - name: SDK tests
+        # N-477: strict gate - an absent compilers/ruby CLI fails the
+        # issue100/106/123 specs instead of skipping them.
+        env:
+          RUNAR_INTEGRATION_STRICT: '1'
         run: cd packages/runar-rb && bundle exec rspec
       - name: Example tests
         run: |
