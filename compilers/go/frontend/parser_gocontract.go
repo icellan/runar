@@ -1085,7 +1085,10 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 
 	case *ast.BinaryExpr:
 		if msg, ambiguous := goAmbiguousPrecedenceMessage(e); ambiguous {
-			p.addError(msg) // N-056: see go_precedence.go
+			// N-056: see go_precedence.go. N-233: anchored, as in the TS
+			// reference, at the expression's first token (its leftmost operand).
+			loc := p.locAt(p.fset.Position(e.Pos()))
+			p.errors = append(p.errors, MakeDiagnostic(msg, SeverityError, &loc))
 			return nil
 		}
 		left := p.convertExpression(e.X)

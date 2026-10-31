@@ -822,6 +822,12 @@ public final class GoParser {
         final SourceNesting.Counter nest = new SourceNesting.Counter();
         /** N-056: expression operands (primaries, calls, parenthesised groups). */
         final Set<Expression> goAtoms = Collections.newSetFromMap(new IdentityHashMap<>());
+        /**
+         * N-233: operand -> location of its first token, so the N-056 refusal
+         * is anchored where the TS reference anchors it (the ambiguous
+         * expression's leftmost operand).
+         */
+        final Map<Expression, SourceLocation> goStarts = new IdentityHashMap<>();
         String receiverName = "";
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
@@ -1730,20 +1736,28 @@ public final class GoParser {
                 if (!(work.pop() instanceof BinaryExpr e) || goAtoms.contains(e)) continue;
                 if (e.left() instanceof BinaryExpr l && !goAtoms.contains(l)) {
                     if (isGoAmbiguousPrecedence(l.op(), e.op())) {
-                        addError(goAmbiguousPrecedenceMessage(l.op(), e.op()));
+                        addError(atLeftmost(e, goAmbiguousPrecedenceMessage(l.op(), e.op())));
                         return expr;
                     }
                     work.push(l);
                 }
                 if (e.right() instanceof BinaryExpr r && !goAtoms.contains(r)) {
                     if (isGoAmbiguousPrecedence(e.op(), r.op())) {
-                        addError(goAmbiguousPrecedenceMessage(e.op(), r.op()));
+                        addError(atLeftmost(e, goAmbiguousPrecedenceMessage(e.op(), r.op())));
                         return expr;
                     }
                     work.push(r);
                 }
             }
             return expr;
+        }
+
+        /** N-233: {@code message} located at the first token of {@code e}. */
+        String atLeftmost(BinaryExpr e, String message) {
+            Expression leftmost = e;
+            while (leftmost instanceof BinaryExpr b && !goAtoms.contains(b)) leftmost = b.left();
+            SourceLocation start = goStarts.get(leftmost);
+            return start == null ? message : LexDiag.at(fileName, start.line(), start.column(), message);
         }
 
         Expression parseOr() {
@@ -1881,6 +1895,13 @@ public final class GoParser {
         }
 
         Expression parseUnary() {
+            SourceLocation start = loc();
+            Expression expr = parseUnaryOperand();
+            goStarts.put(expr, start);
+            return expr;
+        }
+
+        Expression parseUnaryOperand() {
             if (match(Tok.MINUS)) {
                 return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
             }

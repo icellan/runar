@@ -658,6 +658,10 @@ class _GoParser:
         # N-056: id() -> node of every expression operand (atoms); holding the
         # node keeps its id() from being reused.
         self._go_atoms: dict[int, Expression] = {}
+        # N-233: id() -> (node, location of its first token) of every operand
+        # _parse_unary returns, so the N-056 refusal can be anchored where the
+        # TS reference anchors it (the ambiguous expression's leftmost operand).
+        self._go_starts: dict[int, tuple[Expression, SourceLocation]] = {}
         # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
         self._nest = NestingCounter()
         # N-093: every `//runar:` directive in the file, in source order, and
@@ -1704,7 +1708,15 @@ class _GoParser:
                 edges.append((e.right, e.op, e.right.op))
             for child, first, second in edges:
                 if is_go_ambiguous_precedence(first, second):
-                    self.add_error(go_ambiguous_precedence_message(first, second))
+                    leftmost = e
+                    while isinstance(leftmost, BinaryExpr) and id(leftmost) not in atoms:
+                        leftmost = leftmost.left
+                    start = self._go_starts.get(id(leftmost))
+                    self.errors.append(Diagnostic(
+                        message=go_ambiguous_precedence_message(first, second),
+                        severity=Severity.ERROR,
+                        loc=start[1] if start else None,
+                    ))
                     return expr
                 work.append(child)
         return expr
@@ -1819,6 +1831,12 @@ class _GoParser:
         return left
 
     def _parse_unary(self) -> Expression:
+        start = self.loc()
+        expr = self._parse_unary_operand()
+        self._go_starts[id(expr)] = (expr, start)
+        return expr
+
+    def _parse_unary_operand(self) -> Expression:
         if self.match(TOK_MINUS):
             with self._nest.nested(self.loc):
                 operand = self._parse_unary()

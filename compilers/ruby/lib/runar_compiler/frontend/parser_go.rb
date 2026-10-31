@@ -642,6 +642,10 @@ module RunarCompiler
         @self_names = Set.new
         @contract_name = ""
         @go_atoms = {}.compare_by_identity # N-056: expression operands
+        # N-233: operand -> location of its first token, so the N-056 refusal
+        # is anchored where the TS reference anchors it (the ambiguous
+        # expression's leftmost operand).
+        @go_starts = {}.compare_by_identity
         @bare_literal_ok = Set.new # N-448: token indexes of legal bare literals
       end
 
@@ -1420,7 +1424,13 @@ module RunarCompiler
           edges << [e.right, e.op, e.right.op] if e.right.is_a?(BinaryExpr) && !atoms.key?(e.right)
           edges.each do |child, first, second|
             if Frontend.go_ambiguous_precedence?(first, second)
-              add_error(Frontend.go_ambiguous_precedence_message(first, second))
+              leftmost = e
+              leftmost = leftmost.left while leftmost.is_a?(BinaryExpr) && !atoms.key?(leftmost)
+              @errors << Diagnostic.new(
+                message: Frontend.go_ambiguous_precedence_message(first, second),
+                severity: Severity::ERROR,
+                loc: @go_starts[leftmost]
+              )
               return expr
             end
             work << child
@@ -1548,6 +1558,13 @@ module RunarCompiler
       end
 
       def parse_unary
+        start = loc
+        expr = parse_unary_operand
+        @go_starts[expr] = start
+        expr
+      end
+
+      def parse_unary_operand
         if match_tok(TOK_BANG)
           return UnaryExpr.new(op: "!", operand: nested { parse_unary })
         end

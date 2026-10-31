@@ -2183,7 +2183,9 @@ impl<'a> GoParser<'a> {
     /// whose grouping differs between Go precedence and the C ladder.
     /// `left_top` / `self.ladder_top` hold each operand's top-level
     /// unparenthesised operator (None for an atom: primary, call, `( … )`).
-    fn go_bin(&mut self, op: BinaryOp, left: Expression, left_top: Option<BinaryOp>, right: Expression) -> Expression {
+    /// N-233: `start` is where `left` begins, the TS reference's anchor for
+    /// the refusal (the binary expression's leftmost operand).
+    fn go_bin(&mut self, op: BinaryOp, left: Expression, left_top: Option<BinaryOp>, right: Expression, start: &SourceLocation) -> Expression {
         let right_top = self.ladder_top.take();
         let edge = match (left_top, right_top) {
             (Some(l), _) if is_go_ambiguous_precedence(&l, &op) => Some((l, op.clone())),
@@ -2191,13 +2193,14 @@ impl<'a> GoParser<'a> {
             _ => None,
         };
         if let Some((first, second)) = edge {
-            self.errors.push(Diagnostic::error(go_ambiguous_precedence_message(&first, &second), None));
+            self.errors.push(Diagnostic::error(go_ambiguous_precedence_message(&first, &second), Some(start.clone())));
         }
         self.ladder_top = Some(op.clone());
         Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) }
     }
 
     fn parse_or(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_and()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
@@ -2205,12 +2208,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_and()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(BinaryOp::Or, left, left_top, right);
+            left = self.go_bin(BinaryOp::Or, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_and(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitor()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
@@ -2218,12 +2222,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_bitor()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(BinaryOp::And, left, left_top, right);
+            left = self.go_bin(BinaryOp::And, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_bitor(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitxor()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
@@ -2231,12 +2236,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_bitxor()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(BinaryOp::BitOr, left, left_top, right);
+            left = self.go_bin(BinaryOp::BitOr, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_bitxor(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitand()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
@@ -2244,12 +2250,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_bitand()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(BinaryOp::BitXor, left, left_top, right);
+            left = self.go_bin(BinaryOp::BitXor, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_bitand(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_equality()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
@@ -2257,12 +2264,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_equality()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(BinaryOp::BitAnd, left, left_top, right);
+            left = self.go_bin(BinaryOp::BitAnd, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_equality(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_relational()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -2275,12 +2283,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_relational()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(op, left, left_top, right);
+            left = self.go_bin(op, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_relational(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_shift()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -2295,12 +2304,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_shift()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(op, left, left_top, right);
+            left = self.go_bin(op, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_shift(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_additive()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -2313,12 +2323,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_additive()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(op, left, left_top, right);
+            left = self.go_bin(op, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_additive(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_multiplicative()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -2331,12 +2342,13 @@ impl<'a> GoParser<'a> {
             self.advance();
             let right = self.parse_multiplicative()?;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(op, left, left_top, right);
+            left = self.go_bin(op, left, left_top, right, &start);
         }
         Some(left)
     }
 
     fn parse_multiplicative(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_unary()?;
         let mut dt = DepthTracker::new();
         self.ladder_top = None; // N-056: a unary/primary operand is an atom
@@ -2352,7 +2364,7 @@ impl<'a> GoParser<'a> {
             let right = self.parse_unary()?;
             self.ladder_top = None;
             if !self.grow(&mut dt, &left, &[&right]) { break; }
-            left = self.go_bin(op, left, left_top, right);
+            left = self.go_bin(op, left, left_top, right, &start);
         }
         Some(left)
     }

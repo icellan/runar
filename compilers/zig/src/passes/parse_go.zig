@@ -929,6 +929,10 @@ const Parser = struct {
     /// N-056: binary nodes that are expression operands (parenthesised
     /// groups, BigintBig rewrites) and so are atoms to the precedence check.
     go_atoms: std.AutoHashMapUnmanaged(*BinaryOp, void) = .empty,
+    /// N-233: the first token of each binary node built by the precedence
+    /// ladder, so the N-056 refusal is anchored where the TS reference anchors
+    /// it (the ambiguous expression's leftmost operand).
+    go_starts: std.AutoHashMapUnmanaged(*BinaryOp, Token) = .empty,
 
     /// N-093: the flag specs of the `//runar:sighash` directives attached to
     /// the declaration whose first token is at `line`/`col` (null for a
@@ -2197,6 +2201,13 @@ const Parser = struct {
         }
     }
 
+    /// N-233: a precedence-ladder binary node whose left operand began at `start`.
+    fn goBin(self: *Parser, op: BinOperator, left: Expression, right: Expression, start: Token) ?Expression {
+        const e = self.makeBinaryExpr(op, left, right) orelse return null;
+        self.go_starts.put(self.allocator, e.binary_op, start) catch {};
+        return e;
+    }
+
     fn makeBinaryExpr(self: *Parser, op: BinOperator, left: Expression, right: Expression) ?Expression {
         const bop = self.allocator.create(BinaryOp) catch return null;
         bop.* = .{ .op = op, .left = left, .right = right };
@@ -2246,7 +2257,11 @@ const Parser = struct {
                 const first = if (side.left_side) c.op else e.op;
                 const second = if (side.left_side) e.op else c.op;
                 if (isGoAmbiguousPrecedence(first, second)) {
-                    self.addErrorFmt(go_ambiguous_precedence_fmt, .{ goSpelling(first), goSpelling(second) });
+                    const at = self.go_starts.get(e) orelse self.current;
+                    const msg = std.fmt.allocPrint(self.allocator, go_ambiguous_precedence_fmt, .{ goSpelling(first), goSpelling(second) }) catch return;
+                    defer self.allocator.free(msg);
+                    const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, at.line, lex_diag.diagCol(at.col), msg }) catch return;
+                    self.errors.append(self.allocator, f) catch {};
                     return;
                 }
                 work.append(self.allocator, c) catch return;
@@ -2255,68 +2270,75 @@ const Parser = struct {
     }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseLogicalAnd() orelse return null;
         while (self.current.kind == .pipe_pipe) {
             _ = self.bump();
             const right = self.parseLogicalAnd() orelse return null;
-            left = self.makeBinaryExpr(.or_op, left, right) orelse return null;
+            left = self.goBin(.or_op, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseLogicalAnd(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseBitwiseOr() orelse return null;
         while (self.current.kind == .amp_amp) {
             _ = self.bump();
             const right = self.parseBitwiseOr() orelse return null;
-            left = self.makeBinaryExpr(.and_op, left, right) orelse return null;
+            left = self.goBin(.and_op, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseBitwiseOr(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseBitwiseXor() orelse return null;
         while (self.current.kind == .pipe) {
             _ = self.bump();
             const right = self.parseBitwiseXor() orelse return null;
-            left = self.makeBinaryExpr(.bitor, left, right) orelse return null;
+            left = self.goBin(.bitor, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseBitwiseXor(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseBitwiseAnd() orelse return null;
         while (self.current.kind == .caret) {
             _ = self.bump();
             const right = self.parseBitwiseAnd() orelse return null;
-            left = self.makeBinaryExpr(.bitxor, left, right) orelse return null;
+            left = self.goBin(.bitxor, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseBitwiseAnd(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseEquality() orelse return null;
         while (self.current.kind == .ampersand) {
             _ = self.bump();
             const right = self.parseEquality() orelse return null;
-            left = self.makeBinaryExpr(.bitand, left, right) orelse return null;
+            left = self.goBin(.bitand, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseEquality(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseComparison() orelse return null;
         while (self.current.kind == .eqeq or self.current.kind == .bang_eq) {
             // Go == maps to === , Go != maps to !==
             const op: BinOperator = if (self.current.kind == .eqeq) .eq else .neq;
             _ = self.bump();
             const right = self.parseComparison() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.goBin(op, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseComparison(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseShift() orelse return null;
         while (self.current.kind == .lt or self.current.kind == .lt_eq or
             self.current.kind == .gt or self.current.kind == .gt_eq)
@@ -2330,34 +2352,37 @@ const Parser = struct {
             };
             _ = self.bump();
             const right = self.parseShift() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.goBin(op, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseShift(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseAdditive() orelse return null;
         while (self.current.kind == .lshift or self.current.kind == .rshift) {
             const op: BinOperator = if (self.current.kind == .lshift) .lshift else .rshift;
             _ = self.bump();
             const right = self.parseAdditive() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.goBin(op, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseAdditive(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseMultiplicative() orelse return null;
         while (self.current.kind == .plus or self.current.kind == .minus) {
             const op: BinOperator = if (self.current.kind == .plus) .add else .sub;
             _ = self.bump();
             const right = self.parseMultiplicative() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.goBin(op, left, right, start) orelse return null;
         }
         return left;
     }
 
     fn parseMultiplicative(self: *Parser) ?Expression {
+        const start = self.current;
         var left = self.parseUnary() orelse return null;
         while (self.current.kind == .star or self.current.kind == .slash or self.current.kind == .percent) {
             const op: BinOperator = switch (self.current.kind) {
@@ -2368,7 +2393,7 @@ const Parser = struct {
             };
             _ = self.bump();
             const right = self.parseUnary() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.goBin(op, left, right, start) orelse return null;
         }
         return left;
     }
