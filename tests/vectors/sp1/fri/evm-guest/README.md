@@ -14,7 +14,7 @@ peak stack, wall-clock). Verifier algorithm is identical for both.
 
 | File                   | Size       | Notes                                                     |
 |------------------------|------------|-----------------------------------------------------------|
-| `proof.postcard`       | 140778 B   | postcard-encoded `p3_uni_stark::Proof<MyConfig>`          |
+| `proof.postcard`       | 326909 B   | postcard-encoded `p3_uni_stark::Proof<MyConfig>`          |
 | `public_values.hex`    | 12 B       | `[a, b, x]` = `[0, 1, 377841674]` as little-endian `u32`s, lowercase hex, no `0x` |
 | `README.md`            | --         | this file                                                 |
 | `regen/Cargo.toml`     | --         | Rust fixture generator manifest (depends on Plonky3 main) |
