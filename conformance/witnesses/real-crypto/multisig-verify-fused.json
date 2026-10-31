@@ -1,0 +1,60 @@
+{
+  "fixture": "multisig-verify-fused",
+  "kind": "stateless-signed",
+  "note": "2-of-3 OP_CHECKMULTISIGVERIFY (0xaf, the peephole fusion of OP_CHECKMULTISIG OP_VERIFY) over real signatures, followed by a second assert (amount > 0). pk1=alice, pk2=bob, pk3=charlie. Signatures must be supplied in committed-pubkey order. checkInterpreter is disabled because the ANF interpreter does not implement checkMultiSig; the compiled bytes are exercised for real on @bsv/sdk Spend instead.",
+  "constructorArgs": {
+    "pk1": { "$pubkey": "alice" },
+    "pk2": { "$pubkey": "bob" },
+    "pk3": { "$pubkey": "charlie" }
+  },
+  "spends": [
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$sig": "bob" }, "5n"],
+      "checkInterpreter": false,
+      "expect": "accept",
+      "note": "pk1 + pk2 (in order) satisfy 2-of-3, amount > 0"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "bob" }, { "$sig": "charlie" }, "1n"],
+      "checkInterpreter": false,
+      "expect": "accept",
+      "note": "pk2 + pk3 (in order) satisfy 2-of-3, amount at the lower boundary (1)"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$sig": "charlie" }, "7n"],
+      "checkInterpreter": false,
+      "expect": "accept",
+      "note": "pk1 + pk3 (in order) satisfy 2-of-3"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$sig": "dave" }, "5n"],
+      "checkInterpreter": false,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "crypto near-miss: dave is not a committed key -- only 1 valid sig, so OP_CHECKMULTISIGVERIFY fails"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "bob" }, { "$sig": "alice" }, "5n"],
+      "checkInterpreter": false,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "crypto near-miss: both signers are committed keys but supplied out of committed-pubkey order"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$sig": "bob" }, "0n"],
+      "checkInterpreter": false,
+      "expect": "reject",
+      "note": "valid signatures, failing SECOND assert: amount 0 is not > 0. Proves the script continues after the fused verify and the trailing assert is live"
+    }
+  ],
+  "goldenHashes": {
+    "expected-ir.json": "b6e8edfe4e1a4be3cac074c69d775fc0696d061678936c98ba1c09d2b7201ad4",
+    "expected-script.hex": "ca8ecb157eb3490ad2494f5d2918f7f849a894b5c73ebb245ecca2d5cb4c998c"
+  }
+}

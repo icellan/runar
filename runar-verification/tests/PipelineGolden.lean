@@ -887,7 +887,7 @@ number. It is pinned from both sides:
 -- (`state-array-set`, `state-digest-log`, `state-leaderboard`, `state-ledger`,
 -- `state-notary`, `state-owner-box`), all byte-exact, all in baselineMatches:
 -- 78 = baselineMatches (75) + (22 - 19).
-def expectedByteExact : Nat := 78
+def expectedByteExact : Nat := 79
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -914,8 +914,10 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-10-22 (N-314): 97 -> 98 for N-314's Go-only `bn254-pairing` fixture
 (in `goOnlyFixtures`: the Lean model has no BN254 pairing lowering, so it
 compiles to `OP_RUNAR_UNKNOWN_BUILTIN` and is not byte-exact).
+2026-10-31 (N-456): 98 -> 99 for N-456's `multisig-verify-fused` fixture
+(in `baselineMatches`; pins the fused OP_CHECKMULTISIGVERIFY).
 -/
-def expectedFixtureTotal : Nat := 98
+def expectedFixtureTotal : Nat := 99
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -963,6 +965,7 @@ def baselineMatches : List String := [
   "merge-locals-shapes",
   "multi-method",
   "multisig",
+  "multisig-verify-fused",
   "oracle-price",
   "oversize-bigint-shift",
   "p256-encode-negate",
@@ -1317,7 +1320,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 98 := by rfl
+        + lowerDivergencePending.length = 99 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

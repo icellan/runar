@@ -55,6 +55,7 @@
     "merkle-proof": 183,
     "multi-method": 19,
     "multisig": 17,
+    "multisig-verify-fused": 21,
     "oracle-price": 67,
     "oversize-bigint-shift": 706,
     "p256-encode-negate": 2254,

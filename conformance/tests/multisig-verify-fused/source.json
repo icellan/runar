@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./MultiSigVerifyFused.runar.ts",
+    ".runar.sol": "./MultiSigVerifyFused.runar.sol",
+    ".runar.move": "./MultiSigVerifyFused.runar.move",
+    ".runar.go": "./MultiSigVerifyFused.runar.go",
+    ".runar.rs": "./MultiSigVerifyFused.runar.rs",
+    ".runar.py": "./MultiSigVerifyFused.runar.py",
+    ".runar.zig": "./MultiSigVerifyFused.runar.zig",
+    ".runar.rb": "./MultiSigVerifyFused.runar.rb",
+    ".runar.java": "./MultiSigVerifyFused.runar.java"
+  }
+}
