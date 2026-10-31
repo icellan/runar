@@ -427,6 +427,108 @@ fn emit_neg_cancel_gate(base: &str, q: &str, out: &mut Vec<ANFBinding>, used_nam
     add("_gate", ANFValue::Assert { value: ok, is_auto_injected_state_check: false }, out);
 }
 
+/// N-460 — what a fusing rule (R9, R10, R11) needs to know at its fire site
+/// (the TS `FusionScope` in anf-ec.ts).
+///
+/// A fusion replaces the outer call with ONE new scalar multiplication, so it
+/// shrinks the script only if `remove_gate_subsumed_ec_calls` then drops an
+/// inner call it read. Each fusing rule therefore fires only when at least one
+/// of its inner operands is ELIMINABLE (`fusion_eliminates`):
+///
+///  - every name on its alias chain (the operand, each `@ref:` hop, the call
+///    binding itself — `canonical`'s walk) has exactly one referrer: the
+///    rewritten binding for the operand, the previous hop for the rest. Any
+///    other reader keeps the inner call alive after the fusion;
+///  - the call is an `ecMulGen` bound in the current scope or an enclosing one
+///    inside the same loop body (`frame`). It needs no witness, but one bound
+///    outside a loop the fusion sits in would trade one multiplication for one
+///    per iteration;
+///  - or the call is an `ecMul` bound in the current scope itself (`local`):
+///    the fused `ecMul` on the same point is then its witness. One bound in an
+///    enclosing scope has no witness (the fused call is nested) and stays.
+///
+/// `referrers` is computed once per sweep, from the body the sweep starts with
+/// (`count_referrers`), and not updated as the sweep rewrites. A rewrite only
+/// adds a reference to a name its own binding, or the inner binding it lifts
+/// from, already read, so a stale count is never too low. Every tier computes
+/// it the same way, because which rules fire decides the bytes.
+struct FusionScope<'a> {
+    referrers: &'a HashMap<String, usize>,
+    local: HashSet<String>,
+    frame: HashSet<String>,
+}
+
+/// N-460: referrer count per name — the bindings, at any depth, whose value
+/// reads it (once per binding, however many operands name it; an `if` reads
+/// its `cond`, its arms' bindings are counted themselves), plus one for each
+/// name in an `if`'s `results` and one for a private method's return binding
+/// (F-108): the two things `remove_gate_subsumed_ec_calls` protects.
+fn count_referrers(body: &[ANFBinding], method: &ANFMethod) -> HashMap<String, usize> {
+    fn walk(bindings: &[ANFBinding], counts: &mut HashMap<String, usize>) {
+        for b in bindings {
+            let mut reads: HashSet<String> = HashSet::new();
+            match &b.value {
+                ANFValue::If { cond, results, .. } => {
+                    reads.insert(cond.clone());
+                    for r in results {
+                        reads.insert(r.clone());
+                    }
+                }
+                ANFValue::Loop { .. } => {}
+                v => super::dce::collect_refs_from_value(v, &mut reads),
+            }
+            for name in reads {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, counts);
+                    walk(else_branch, counts);
+                }
+                ANFValue::Loop { body, .. } => walk(body, counts),
+                _ => {}
+            }
+        }
+    }
+    let mut counts = HashMap::new();
+    walk(body, &mut counts);
+    if method.name != "constructor" && !method.is_public {
+        if let Some(last) = body.last() {
+            *counts.entry(last.name.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// N-460: does fusing these inner operands let at least one inner call go?
+fn fusion_eliminates(operands: &[&String], value_map: &ValueMap, scope: &FusionScope) -> bool {
+    operands.iter().any(|operand| {
+        let c = match value_map.canonical(operand) {
+            Some(c) => c,
+            None => return false,
+        };
+        // `canonical` already walked this chain, so every hop is an `@ref:`.
+        let mut cur = operand.to_string();
+        loop {
+            if scope.referrers.get(&cur).copied().unwrap_or(0) != 1 {
+                return false;
+            }
+            if cur == c {
+                break;
+            }
+            cur = match value_map.values.get(&cur) {
+                Some(ANFValue::LoadConst { value: serde_json::Value::String(s) }) => s[5..].to_string(),
+                _ => return false,
+            };
+        }
+        match value_map.values.get(&c) {
+            Some(ANFValue::Call { func, .. }) if func == "ecMulGen" => scope.frame.contains(&c),
+            Some(ANFValue::Call { func, .. }) if func == "ecMul" => scope.local.contains(&c),
+            _ => false,
+        }
+    })
+}
+
 /// Try to rewrite a single binding. Returns Some(new_value) if rewritten.
 /// May push extra bindings (e.g., computed scalars) into `extra_bindings`.
 fn try_rewrite(
@@ -434,6 +536,7 @@ fn try_rewrite(
     value_map: &ValueMap,
     extra_bindings: &mut Vec<ANFBinding>,
     used_names: &mut HashSet<String>,
+    scope: &FusionScope,
 ) -> Option<ANFValue> {
     let value = &binding.value;
 
@@ -500,6 +603,9 @@ fn try_rewrite(
                             let k1 = get_const_int(inner_scalar_val);
                             let k2 = get_const_int(scalar_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
+                                if !fusion_eliminates(&[point_arg], value_map, scope) {
+                                    return None;
+                                }
                                 let product = reduce_mod_n(k1 * k2);
                                 let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
@@ -590,6 +696,9 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
+                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope) {
+                                    return None;
+                                }
                                 let sum = reduce_mod_n(k1 + k2);
                                 let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
@@ -624,6 +733,9 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
+                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope) {
+                                    return None;
+                                }
                                 let sum = reduce_mod_n(k1 + k2);
                                 let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
@@ -711,8 +823,16 @@ fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMet
     // number of EC calls or replaces a call with a constant, so the loop
     // terminates.
     loop {
-        let (next, pass_changed) =
-            optimize_method_ec_once(&body, &mut used_names, &ValueMap::new(rebound.clone()), None);
+        // N-460: the fusion guard's referrer counts, once per sweep.
+        let referrers = count_referrers(&body, method);
+        let (next, pass_changed) = optimize_method_ec_once(
+            &body,
+            &mut used_names,
+            &ValueMap::new(rebound.clone()),
+            None,
+            &referrers,
+            &HashSet::new(),
+        );
         body = next;
         if !pass_changed {
             break;
@@ -744,8 +864,15 @@ fn optimize_method_ec_once(
     used_names: &mut HashSet<String>,
     outer: &ValueMap,
     hidden: Option<&str>,
+    referrers: &HashMap<String, usize>,
+    outer_frame: &HashSet<String>,
 ) -> (Vec<ANFBinding>, bool) {
     let mut value_map = outer.nested_scope(hidden);
+    // N-460: an `if` arm sees its enclosing frame, a loop body starts a new one.
+    let local: HashSet<String> = body.iter().map(|b| b.name.clone()).collect();
+    let mut frame = outer_frame.clone();
+    frame.extend(local.iter().cloned());
+    let scope = FusionScope { referrers, local, frame };
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 
@@ -757,8 +884,10 @@ fn optimize_method_ec_once(
             let mut value = binding.value.clone();
             let nested_changed = match &mut value {
                 ANFValue::If { then, else_branch, .. } => {
-                    let (then_b, then_c) = optimize_method_ec_once(then, used_names, &value_map, None);
-                    let (else_b, else_c) = optimize_method_ec_once(else_branch, used_names, &value_map, None);
+                    let (then_b, then_c) =
+                        optimize_method_ec_once(then, used_names, &value_map, None, referrers, &scope.frame);
+                    let (else_b, else_c) =
+                        optimize_method_ec_once(else_branch, used_names, &value_map, None, referrers, &scope.frame);
                     *then = then_b;
                     *else_branch = else_b;
                     then_c || else_c
@@ -766,7 +895,7 @@ fn optimize_method_ec_once(
                 ANFValue::Loop { body: loop_body, iter_var, .. } => {
                     let hidden = iter_var.clone();
                     let (body_b, body_c) =
-                        optimize_method_ec_once(loop_body, used_names, &value_map, Some(&hidden));
+                        optimize_method_ec_once(loop_body, used_names, &value_map, Some(&hidden), referrers, &HashSet::new());
                     *loop_body = body_b;
                     body_c
                 }
@@ -783,7 +912,7 @@ fn optimize_method_ec_once(
         }
 
         let mut extra_bindings = Vec::new();
-        let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings, used_names);
+        let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings, used_names, &scope);
 
         if let Some(new_value) = rewritten {
             // Add any new helper bindings (e.g., computed scalars).

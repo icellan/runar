@@ -295,7 +295,10 @@ def _optimize_method(method: ANFMethod, properties) -> bool:
     used_names = _collect_used_names(method, properties)
     fired = False
     while True:
-        new_body = _optimize_body(method.body, _ValueMap(rebound), None, used_names)
+        # N-460: the fusion guard's referrer counts, once per sweep.
+        referrers = _count_referrers(method.body, method)
+        new_body = _optimize_body(method.body, _ValueMap(rebound), None, used_names,
+                                  referrers, frozenset())
         if new_body is None:
             break
         method.body = new_body
@@ -303,14 +306,111 @@ def _optimize_method(method: ANFMethod, properties) -> bool:
     return fired
 
 
+class _FusionScope:
+    """N-460 -- what a fusing rule (R9, R10, R11) needs to know at its fire
+    site (the TS ``FusionScope`` in anf-ec.ts).
+
+    A fusion replaces the outer call with ONE new scalar multiplication, so it
+    shrinks the script only if _remove_gate_subsumed_ec_calls then drops an
+    inner call it read. Each fusing rule therefore fires only when at least
+    one of its inner operands is ELIMINABLE (_fusion_eliminates):
+
+    - every name on its alias chain (the operand, each ``@ref:`` hop, the call
+      binding itself -- _canonical's walk) has exactly one referrer: the
+      rewritten binding for the operand, the previous hop for the rest. Any
+      other reader keeps the inner call alive after the fusion;
+    - the call is an ``ecMulGen`` bound in the current scope or an enclosing
+      one inside the same loop body (``frame``). It needs no witness, but one
+      bound outside a loop the fusion sits in would trade one multiplication
+      for one per iteration;
+    - or the call is an ``ecMul`` bound in the current scope itself
+      (``local``): the fused ``ecMul`` on the same point is then its witness.
+      One bound in an enclosing scope has no witness (the fused call is
+      nested) and stays.
+
+    ``referrers`` is computed once per sweep, from the body the sweep starts
+    with (_count_referrers), and not updated as the sweep rewrites. A rewrite
+    only adds a reference to a name its own binding, or the inner binding it
+    lifts from, already read, so a stale count is never too low. Every tier
+    computes it the same way, because which rules fire decides the bytes."""
+
+    def __init__(self, referrers: dict[str, int], local: frozenset, frame: frozenset):
+        self.referrers = referrers
+        self.local = local
+        self.frame = frame
+
+
+def _count_referrers(body, method: ANFMethod) -> dict[str, int]:
+    """N-460: referrer count per name -- the bindings, at any depth, whose
+    value reads it (once per binding, however many operands name it; an ``if``
+    reads its ``cond``, its arms' bindings are counted themselves), plus one
+    for each name in an ``if``'s ``results`` and one for a private method's
+    return binding (F-108): the two things _remove_gate_subsumed_ec_calls
+    protects."""
+    counts: dict[str, int] = {}
+
+    def walk(bindings) -> None:
+        for b in bindings or ():
+            v = b.value
+            reads: set[str] = set()
+            if v.kind == "if":
+                reads.add(v.cond)
+                reads.update(v.results or ())
+            elif v.kind != "loop":
+                _collect_refs(v, reads)
+            for name in reads:
+                counts[name] = counts.get(name, 0) + 1
+            if v.kind == "if":
+                walk(v.then)
+                walk(v.else_)
+            elif v.kind == "loop":
+                walk(v.body)
+
+    walk(body)
+    if method.name != "constructor" and not method.is_public and body:
+        last = body[-1].name
+        counts[last] = counts.get(last, 0) + 1
+    return counts
+
+
+def _fusion_eliminates(operands: list[str], vm: dict[str, ANFValue], scope: _FusionScope) -> bool:
+    """N-460: does fusing these inner operands let at least one inner call go?"""
+    for operand in operands:
+        c = _canonical(operand, vm)
+        if c is None:
+            continue
+        # _canonical already walked this chain, so every hop is an @ref:.
+        cur = operand
+        single = True
+        while True:
+            if scope.referrers.get(cur, 0) != 1:
+                single = False
+                break
+            if cur == c:
+                break
+            cur = vm[cur].const_string[5:]
+        if not single:
+            continue
+        v = vm.get(c)
+        if v is None or v.kind != "call":
+            continue
+        if (v.func == "ecMulGen" and c in scope.frame) or (v.func == "ecMul" and c in scope.local):
+            return True
+    return False
+
+
 def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
-                   used_names: set[str]) -> Optional[list[ANFBinding]]:
+                   used_names: set[str], referrers: dict[str, int],
+                   outer_frame: frozenset) -> Optional[list[ANFBinding]]:
     """One left-to-right sweep over a scope (the TS optimizeBodyOnce): each
     binding is tried once against the values of the bindings before it, as
     already rewritten in this sweep. N-201: it descends into if arms (then
     before else) and loop bodies at the position of their binding, each with
     its own scope (_ValueMap.nested_scope). Returns None when no rule fired."""
     value_map = outer.nested_scope(hidden)
+    # N-460: an ``if`` arm sees its enclosing frame, a loop body starts a new one.
+    local = frozenset(b.name for b in body or ())
+    scope = _FusionScope(referrers, local, outer_frame | local)
     new_body: list[ANFBinding] = []
     changed = False
     for binding in body or []:
@@ -318,8 +418,8 @@ def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
         if v.kind in ("if", "loop"):
             value_map[binding.name] = v
             if v.kind == "if":
-                then_b = _optimize_body(v.then, value_map, None, used_names)
-                else_b = _optimize_body(v.else_, value_map, None, used_names)
+                then_b = _optimize_body(v.then, value_map, None, used_names, referrers, scope.frame)
+                else_b = _optimize_body(v.else_, value_map, None, used_names, referrers, scope.frame)
                 if then_b is not None or else_b is not None:
                     if then_b is not None:
                         v.then = then_b
@@ -327,7 +427,7 @@ def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
                         v.else_ = else_b
                     changed = True
             else:
-                body_b = _optimize_body(v.body, value_map, v.iter_var, used_names)
+                body_b = _optimize_body(v.body, value_map, v.iter_var, used_names, referrers, frozenset())
                 if body_b is not None:
                     v.body = body_b
                     changed = True
@@ -338,7 +438,7 @@ def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
         # binding being rewritten (see _fresh_const_name).
         prelude_start = len(new_body)
         value_map[binding.name] = v
-        optimized = _try_optimize(v, value_map, new_body, used_names, binding.name)
+        optimized = _try_optimize(v, value_map, new_body, used_names, scope, binding.name)
         if optimized is not None:
             # N-218: every helper a rewrite mints (the N-104/N-251 gate
             # bindings, the fused-scalar helper) takes the rewritten
@@ -362,6 +462,7 @@ def _optimize_body(body, outer: _ValueMap, hidden: Optional[str],
 def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
                   prelude: list[ANFBinding],
                   used_names: set[str],
+                  scope: _FusionScope,
                   name: str = "") -> Optional[ANFValue]:
     if v.kind != "call" or v.func is None or v.args is None:
         return None
@@ -447,7 +548,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
         if (inner is not None and k2 is not None and inner.kind == "call" and inner.func == "ecMul" and inner.args
                 and len(inner.args) == 2 and _stable(inner.args[0], vm)):
             k1 = _get_const_int(inner.args[1], vm)
-            if k1 is not None:
+            if k1 is not None and _fusion_eliminates([args[0]], vm, scope):
                 combined = (k1 * k2) % CURVE_N
                 return _make_call("ecMul", [inner.args[0], _fresh_const_name(name, combined, vm, prelude, used_names)])
 
@@ -460,7 +561,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
                 and right.kind == "call" and right.func == "ecMulGen" and right.args and len(right.args) == 1):
             k1 = _get_const_int(left.args[0], vm)
             k2 = _get_const_int(right.args[0], vm)
-            if k1 is not None and k2 is not None:
+            if k1 is not None and k2 is not None and _fusion_eliminates(args, vm, scope):
                 combined = (k1 + k2) % CURVE_N
                 return _make_call("ecMulGen", [_fresh_const_name(name, combined, vm, prelude, used_names)])
 
@@ -474,7 +575,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
             if _same_binding(left.args[0], right.args[0], vm):
                 k1 = _get_const_int(left.args[1], vm)
                 k2 = _get_const_int(right.args[1], vm)
-                if k1 is not None and k2 is not None:
+                if k1 is not None and k2 is not None and _fusion_eliminates(args, vm, scope):
                     combined = (k1 + k2) % CURVE_N
                     return _make_call("ecMul", [left.args[0], _fresh_const_name(name, combined, vm, prelude, used_names)])
 

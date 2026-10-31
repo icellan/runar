@@ -224,7 +224,19 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) (map[st
 
 	var before map[string]bool
 	for {
-		body, changed := optimizeBodyEC(method.Body, map[string]*ir.ANFValue{}, "", used, rebound)
+		// N-460: the fusion guard's referrer counts, once per sweep, from the
+		// body the sweep starts with. Counted on first use, so a method no
+		// fusing rule matches in is never walked (optimizeBodyEC leaves its
+		// input intact, so the count is the same whenever it is taken).
+		start := method.Body
+		var counts map[string]int
+		referrers := func() map[string]int {
+			if counts == nil {
+				counts = countReferrers(start, method)
+			}
+			return counts
+		}
+		body, changed := optimizeBodyEC(method.Body, map[string]*ir.ANFValue{}, "", used, rebound, referrers, map[string]bool{})
 		if !changed {
 			break
 		}
@@ -248,7 +260,16 @@ func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) (map[st
 // is a loop's iteration variable, which the body must not resolve through an
 // outer binding of the same name. Helpers a rewrite mints are inserted just
 // before the rewritten binding, in the same scope.
-func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden string, used map[string]bool, rebound map[string]bool) ([]ir.ANFBinding, bool) {
+func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden string, used map[string]bool, rebound map[string]bool, referrers func() map[string]int, outerFrame map[string]bool) ([]ir.ANFBinding, bool) {
+	// N-460: an if arm sees its enclosing frame, a loop body starts a new one.
+	scope := &fusionScope{referrers: referrers, local: make(map[string]bool, len(body)), frame: make(map[string]bool, len(outerFrame)+len(body))}
+	for k := range outerFrame {
+		scope.frame[k] = true
+	}
+	for i := range body {
+		scope.local[body[i].Name] = true
+		scope.frame[body[i].Name] = true
+	}
 	lookup := make(map[string]*ir.ANFValue, len(outer)+len(body))
 	for k, v := range outer {
 		lookup[k] = v
@@ -262,15 +283,15 @@ func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden 
 		b := body[i]
 		switch b.Value.Kind {
 		case "if":
-			thenB, thenChanged := optimizeBodyEC(b.Value.Then, lookup, "", used, rebound)
-			elseB, elseChanged := optimizeBodyEC(b.Value.Else, lookup, "", used, rebound)
+			thenB, thenChanged := optimizeBodyEC(b.Value.Then, lookup, "", used, rebound, referrers, scope.frame)
+			elseB, elseChanged := optimizeBodyEC(b.Value.Else, lookup, "", used, rebound, referrers, scope.frame)
 			if thenChanged || elseChanged {
 				b.Value.Then = thenB
 				b.Value.Else = elseB
 				changed = true
 			}
 		case "loop":
-			bodyB, bodyChanged := optimizeBodyEC(b.Value.Body, lookup, b.Value.IterVar, used, rebound)
+			bodyB, bodyChanged := optimizeBodyEC(b.Value.Body, lookup, b.Value.IterVar, used, rebound, referrers, map[string]bool{})
 			if bodyChanged {
 				b.Value.Body = bodyB
 				changed = true
@@ -280,7 +301,7 @@ func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden 
 			// as in TS, where it is registered before tryRewrite.
 			cur := b.Value
 			lookup[b.Name] = &cur
-			extra, ok := optimizeBindingECWithInserts(&b, lookup, used, rebound)
+			extra, ok := optimizeBindingECWithInserts(&b, lookup, used, rebound, scope)
 			if ok {
 				changed = true
 				// N-218: every helper a rewrite mints (the N-104/N-251
@@ -315,16 +336,19 @@ func optimizeBodyEC(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden 
 // generic rule engine. Adding a new rule to the JSON file makes it active
 // without any changes here, provided it's tagged "go" (or untagged) and
 // fits the engine's match/replace grammar.
-func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) ([]ir.ANFBinding, bool) {
+//
+// N-460: scope is the fusion guard's context; nil (a single binding tried
+// outside any method sweep) applies no guard.
+func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool, scope *fusionScope) ([]ir.ANFBinding, bool) {
 	v := &b.Value
 	if v.Kind != "call" {
 		return nil, false
 	}
-	return applyECRules(b, lookup, used, rebound)
+	return applyECRules(b, lookup, used, rebound, scope)
 }
 
 func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) bool {
-	_, ok := optimizeBindingECWithInserts(b, lookup, used, rebound)
+	_, ok := optimizeBindingECWithInserts(b, lookup, used, rebound, nil)
 	return ok
 }
 

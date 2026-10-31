@@ -465,7 +465,17 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
     while (true) {
         var top = ValueMap{ .map = std.StringHashMap(types.ANFValue).init(allocator), .rebound = &rebound };
         defer top.map.deinit();
-        const next = (try optimizeBody(allocator, body, &top, null, &used_names)) orelse break;
+        // N-460: the fusion guard's referrer counts, once per sweep.
+        var referrers = std.StringHashMap(u32).init(allocator);
+        defer referrers.deinit();
+        try countReferrers(allocator, &referrers, body);
+        if (!method.is_public and !std.mem.eql(u8, method.name, "constructor") and body.len > 0) {
+            const gop = try referrers.getOrPut(body[body.len - 1].name);
+            gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+        }
+        var no_frame = std.StringHashMap(void).init(allocator);
+        defer no_frame.deinit();
+        const next = (try optimizeBody(allocator, body, &top, null, &used_names, &referrers, &no_frame)) orelse break;
         allocator.free(body);
         body = next;
         fired.* = true;
@@ -494,9 +504,22 @@ fn optimizeBody(
     outer: *ValueMap,
     hidden: ?[]const u8,
     used_names: *std.StringHashMap(void),
+    referrers: *const std.StringHashMap(u32),
+    outer_frame: *const std.StringHashMap(void),
 ) !?[]types.ANFBinding {
     var value_map = try outer.nestedScope(hidden);
     defer value_map.map.deinit();
+
+    // N-460: an if arm sees its enclosing frame, a loop body starts a new one.
+    var local = std.StringHashMap(void).init(allocator);
+    defer local.deinit();
+    var frame = try outer_frame.clone();
+    defer frame.deinit();
+    for (body) |b| {
+        try local.put(b.name, {});
+        try frame.put(b.name, {});
+    }
+    const scope = FusionScope{ .referrers = referrers, .local = &local, .frame = &frame };
 
     var new_body = std.ArrayListUnmanaged(types.ANFBinding).empty;
     defer new_body.deinit(allocator);
@@ -507,8 +530,8 @@ fn optimizeBody(
         switch (binding.value) {
             .@"if" => |iv| {
                 try value_map.put(binding.name, binding.value);
-                const then_b = try optimizeBody(allocator, iv.then, &value_map, null, used_names);
-                const else_b = try optimizeBody(allocator, iv.@"else", &value_map, null, used_names);
+                const then_b = try optimizeBody(allocator, iv.then, &value_map, null, used_names, referrers, &frame);
+                const else_b = try optimizeBody(allocator, iv.@"else", &value_map, null, used_names, referrers, &frame);
                 if (then_b != null or else_b != null) {
                     const ni = try allocator.create(types.ANFIf);
                     ni.* = iv.*;
@@ -520,7 +543,9 @@ fn optimizeBody(
             },
             .loop => |lv| {
                 try value_map.put(binding.name, binding.value);
-                if (try optimizeBody(allocator, lv.body, &value_map, lv.iter_var, used_names)) |nb| {
+                var loop_frame = std.StringHashMap(void).init(allocator);
+                defer loop_frame.deinit();
+                if (try optimizeBody(allocator, lv.body, &value_map, lv.iter_var, used_names, referrers, &loop_frame)) |nb| {
                     const nl = try allocator.create(types.ANFLoop);
                     nl.* = lv.*;
                     nl.body = nb;
@@ -534,7 +559,7 @@ fn optimizeBody(
                 // BEFORE the binding being rewritten (see `freshConstName`).
                 const prelude_start = new_body.items.len;
                 try value_map.put(binding.name, binding.value);
-                if (tryOptimize(allocator, binding.name, current.value, &value_map, used_names, &new_body)) |optimized| {
+                if (tryOptimize(allocator, binding.name, current.value, &value_map, used_names, &new_body, scope)) |optimized| {
                     // N-218: every helper a rewrite mints (the N-104/N-251
                     // gate bindings, the fused-scalar helper) takes the
                     // rewritten binding's own source_loc, mirroring F-343 in
@@ -572,6 +597,93 @@ fn hasEcCalls(body: []const types.ANFBinding) bool {
 // Optimization rules
 // ============================================================================
 
+/// N-460 -- what a fusing rule (R9, R10, R11) needs to know at its fire site
+/// (the TS `FusionScope` in anf-ec.ts).
+///
+/// A fusion replaces the outer call with ONE new scalar multiplication, so it
+/// shrinks the script only if `removeGateSubsumedEcCalls` then drops an inner
+/// call it read. Each fusing rule therefore fires only when at least one of
+/// its inner operands is ELIMINABLE (`fusionEliminates`):
+///
+///  - every name on its alias chain (the operand, each `@ref:` hop, the call
+///    binding itself -- `canonical`'s walk) has exactly one referrer: the
+///    rewritten binding for the operand, the previous hop for the rest. Any
+///    other reader keeps the inner call alive after the fusion;
+///  - the call is an `ecMulGen` bound in the current scope or an enclosing one
+///    inside the same loop body (`frame`). It needs no witness, but one bound
+///    outside a loop the fusion sits in would trade one multiplication for one
+///    per iteration;
+///  - or the call is an `ecMul` bound in the current scope itself (`local`):
+///    the fused `ecMul` on the same point is then its witness. One bound in an
+///    enclosing scope has no witness (the fused call is nested) and stays.
+///
+/// `referrers` is computed once per sweep, from the body the sweep starts with
+/// (`countReferrers`), and not updated as the sweep rewrites. A rewrite only
+/// adds a reference to a name its own binding, or the inner binding it lifts
+/// from, already read, so a stale count is never too low. Every tier computes
+/// it the same way, because which rules fire decides the bytes.
+const FusionScope = struct {
+    referrers: *const std.StringHashMap(u32),
+    local: *const std.StringHashMap(void),
+    frame: *const std.StringHashMap(void),
+};
+
+/// N-460: referrer count per name -- the bindings, at any depth, whose value
+/// reads it (once per binding, however many operands name it; an if reads its
+/// cond, its arms' bindings are counted themselves), plus one for each name in
+/// an if's results. The caller adds one for a private method's return binding
+/// (F-108): the two things `removeGateSubsumedEcCalls` protects.
+fn countReferrers(allocator: Allocator, counts: *std.StringHashMap(u32), bindings: []const types.ANFBinding) !void {
+    for (bindings) |b| {
+        var reads = std.StringHashMap(void).init(allocator);
+        defer reads.deinit();
+        switch (b.value) {
+            .@"if" => |iv| {
+                try reads.put(iv.cond, {});
+                for (iv.results) |r| try reads.put(r, {});
+            },
+            .loop => {},
+            else => try dce.collectRefs(b.value, &reads),
+        }
+        var it = reads.keyIterator();
+        while (it.next()) |k| {
+            const gop = try counts.getOrPut(k.*);
+            gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+        }
+        switch (b.value) {
+            .@"if" => |iv| {
+                try countReferrers(allocator, counts, iv.then);
+                try countReferrers(allocator, counts, iv.@"else");
+            },
+            .loop => |lv| try countReferrers(allocator, counts, lv.body),
+            else => {},
+        }
+    }
+}
+
+/// N-460: does fusing these inner operands let at least one inner call go?
+fn fusionEliminates(operands: []const []const u8, vm: *ValueMap, scope: FusionScope) bool {
+    for (operands) |operand| {
+        const c = vm.canonical(operand) orelse continue;
+        // `canonical` already walked this chain, so every hop is an `@ref:`.
+        var cur = operand;
+        const single = while (true) {
+            if ((scope.referrers.get(cur) orelse 0) != 1) break false;
+            if (eql(cur, c)) break true;
+            cur = vm.map.get(cur).?.load_const.value.string[5..];
+        };
+        if (!single) continue;
+        switch (vm.map.get(c) orelse continue) {
+            .call => |call| {
+                if ((eql(call.func, "ecMulGen") and scope.frame.contains(c)) or
+                    (eql(call.func, "ecMul") and scope.local.contains(c))) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn tryOptimize(
     allocator: Allocator,
     name: []const u8,
@@ -579,6 +691,7 @@ fn tryOptimize(
     vm: *ValueMap,
     used: *std.StringHashMap(void),
     prelude: *std.ArrayListUnmanaged(types.ANFBinding),
+    scope: FusionScope,
 ) ?types.ANFValue {
     const c = switch (v) {
         .call => |call| call,
@@ -675,6 +788,7 @@ fn tryOptimize(
                     if (getConstBig(allocator, ic.args[1], vm)) |k1_loaded| {
                         var k1 = k1_loaded;
                         defer k1.deinit();
+                        if (!fusionEliminates(&.{args[0]}, vm, scope)) return null;
                         const combined = combineModN(allocator, k1, k2, .mul) catch return null;
                         const fresh = freshConstName(allocator, name, combined, vm, used, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ ic.args[0], fresh });
@@ -696,7 +810,7 @@ fn tryOptimize(
                 defer if (k1) |*m| m.deinit();
                 var k2 = getConstBig(allocator, rc.?.args[0], vm);
                 defer if (k2) |*m| m.deinit();
-                if (k1 != null and k2 != null) {
+                if (k1 != null and k2 != null and fusionEliminates(args, vm, scope)) {
                     const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
                     const fresh = freshConstName(allocator, name, combined, vm, used, prelude) orelse return null;
                     return makeCall(allocator, "ecMulGen", &.{fresh});
@@ -718,7 +832,7 @@ fn tryOptimize(
                     defer if (k1) |*m| m.deinit();
                     var k2 = getConstBig(allocator, rc.?.args[1], vm);
                     defer if (k2) |*m| m.deinit();
-                    if (k1 != null and k2 != null) {
+                    if (k1 != null and k2 != null and fusionEliminates(args, vm, scope)) {
                         const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
                         const fresh = freshConstName(allocator, name, combined, vm, used, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ lc.?.args[0], fresh });

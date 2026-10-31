@@ -72,6 +72,7 @@ type ecRule struct {
 	Match     ecPattern
 	Replace   ecReplace
 	Gate      *ecGate  // N-104: operand validation the rewrite must keep, or nil
+	Fuses     []int    // N-460: operand positions holding the inner calls a fusion subsumes, or nil
 	Supported []string // empty = supported by all compilers
 }
 
@@ -219,6 +220,20 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 			}
 			gate = &ecGate{Of: of, Operand: operand[1:]}
 		}
+		var fuses []int
+		if fRaw, ok := rr["fuses"]; ok {
+			fl, ok := fRaw.([]interface{})
+			if !ok {
+				return nil, fmt.Errorf("rule %q: fuses must be an array", name)
+			}
+			for _, f := range fl {
+				n, ok := f.(float64)
+				if !ok || n < 0 || n != float64(int(n)) {
+					return nil, fmt.Errorf("rule %q: fuses must hold operand positions", name)
+				}
+				fuses = append(fuses, int(n))
+			}
+		}
 		var supported []string
 		if supRaw, ok := rr["supported"]; ok {
 			sl, ok := supRaw.([]interface{})
@@ -237,6 +252,7 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 			Match:     match,
 			Replace:   replace,
 			Gate:      gate,
+			Fuses:     fuses,
 			Supported: supported,
 		})
 	}
@@ -648,7 +664,7 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 
 // applyECRules tries each rule in order on binding b. Returns any extra
 // bindings and whether a rewrite occurred.
-func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) ([]ir.ANFBinding, bool) {
+func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool, scope *fusionScope) ([]ir.ANFBinding, bool) {
 	for _, rule := range ecRules {
 		if !ruleAppliesToGo(rule) {
 			continue
@@ -663,6 +679,10 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[str
 		if !opOperandsAreConst(rule, binds, lookup, rebound) {
 			continue
 		}
+		// N-460: a fusing rule fires only when it lets an inner call go.
+		if len(rule.Fuses) > 0 && scope != nil && !fusionEliminates(rule.Fuses, b, lookup, rebound, scope) {
+			continue
+		}
 		var gate []ir.ANFBinding
 		if rule.Gate != nil {
 			gate = emitOperandGate(rule.Gate.Of, b.Name, binds[rule.Gate.Operand], lookup, used)
@@ -671,6 +691,121 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[str
 		return append(gate, extra...), true
 	}
 	return nil, false
+}
+
+// ---------------------------------------------------------------------------
+// N-460 fusion guard
+// ---------------------------------------------------------------------------
+
+// fusionScope is what a fusing rule (a rule with "fuses": R9, R10, R11)
+// needs to know at its fire site — the TS reference's FusionScope
+// (packages/runar-compiler/src/optimizer/anf-ec.ts).
+//
+// A fusion replaces the outer call with ONE new scalar multiplication, so it
+// shrinks the script only if removeGateSubsumedEcCalls then drops an inner
+// call it read. Each fusing rule therefore fires only when at least one of its
+// inner operands is ELIMINABLE (fusionEliminates):
+//
+//   - every name on its alias chain (the operand, each @ref: hop, the call
+//     binding itself — canonicalName's walk) has exactly one referrer: the
+//     rewritten binding for the operand, the previous hop for the rest. Any
+//     other reader keeps the inner call alive after the fusion;
+//   - the call is an ecMulGen bound in the current scope or an enclosing one
+//     inside the same loop body (frame). It needs no witness, but one bound
+//     outside a loop the fusion sits in would trade one multiplication for one
+//     per iteration;
+//   - or the call is an ecMul bound in the current scope itself (local): the
+//     fused ecMul on the same point is then its witness. One bound in an
+//     enclosing scope has no witness (the fused call is nested) and stays.
+//
+// referrers is computed once per sweep, from the body the sweep starts with
+// (countReferrers), and not updated as the sweep rewrites. A rewrite only adds
+// a reference to a name its own binding, or the inner binding it lifts from,
+// already read, so a stale count is never too low. Every tier computes it the
+// same way, because which rules fire decides the bytes.
+type fusionScope struct {
+	referrers func() map[string]int
+	local     map[string]bool
+	frame     map[string]bool
+}
+
+// countReferrers is the N-460 referrer count per name: the bindings, at any
+// depth, whose value reads it (once per binding, however many operands name
+// it; an if reads its Cond, its arms' bindings are counted themselves), plus
+// one for each name in an if's Results and one for a private method's return
+// binding (F-108): the two things removeGateSubsumedEcCalls protects.
+func countReferrers(body []ir.ANFBinding, method *ir.ANFMethod) map[string]int {
+	counts := make(map[string]int)
+	var walk func(bindings []ir.ANFBinding)
+	walk = func(bindings []ir.ANFBinding) {
+		for i := range bindings {
+			v := &bindings[i].Value
+			reads := make(map[string]bool)
+			switch v.Kind {
+			case "if":
+				reads[v.Cond] = true
+				for _, r := range v.Results {
+					reads[r] = true
+				}
+			case "loop":
+			default:
+				collectValueRefs(v, reads)
+			}
+			for name := range reads {
+				counts[name]++
+			}
+			switch v.Kind {
+			case "if":
+				walk(v.Then)
+				walk(v.Else)
+			case "loop":
+				walk(v.Body)
+			}
+		}
+	}
+	walk(body)
+	if returnsLastBinding(method) && len(body) > 0 {
+		counts[body[len(body)-1].Name]++
+	}
+	return counts
+}
+
+// fusionEliminates reports whether fusing the inner operands at positions
+// `fuses` of b's call lets at least one inner call go (N-460).
+func fusionEliminates(fuses []int, b *ir.ANFBinding, lookup map[string]*ir.ANFValue, rebound map[string]bool, scope *fusionScope) bool {
+	for _, pos := range fuses {
+		if pos >= len(b.Value.Args) {
+			continue
+		}
+		operand := b.Value.Args[pos]
+		c, ok := canonicalName(operand, lookup, rebound)
+		if !ok {
+			continue
+		}
+		// canonicalName already walked this chain, so every hop is an @ref:.
+		single := true
+		for cur := operand; ; {
+			if scope.referrers()[cur] != 1 {
+				single = false
+				break
+			}
+			if cur == c {
+				break
+			}
+			cur = (*lookup[cur].ConstString)[5:]
+		}
+		if !single {
+			continue
+		}
+		v := lookup[c]
+		if v == nil || v.Kind != "call" {
+			continue
+		}
+		if (v.Func == "ecMulGen" && scope.frame[c]) || (v.Func == "ecMul" && scope.local[c]) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

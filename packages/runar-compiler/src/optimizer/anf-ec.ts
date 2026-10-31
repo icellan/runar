@@ -349,6 +349,90 @@ function emitNegCancelGate(base: string, q: string, out: ANFBinding[], usedNames
 }
 
 /**
+ * N-460 — what a fusing rule (R9, R10, R11) needs to know at its fire site.
+ *
+ * A fusion replaces the outer call with ONE new scalar multiplication, so it
+ * shrinks the script only if `removeGateSubsumedEcCalls` then drops an inner
+ * call it read. Each fusing rule therefore fires only when at least one of its
+ * inner operands is ELIMINABLE (`fusionEliminates`):
+ *
+ *  - every name on its alias chain (the operand, each `@ref:` hop, the call
+ *    binding itself — `canonicalName`'s walk) has exactly one referrer: the
+ *    rewritten binding for the operand, the previous hop for the rest. Any
+ *    other reader keeps the inner call alive after the fusion;
+ *  - the call is an `ecMulGen` bound in the current scope or an enclosing one
+ *    inside the same loop body (`frame`). It needs no witness, but one bound
+ *    outside a loop the fusion sits in would trade one multiplication for one
+ *    per iteration;
+ *  - or the call is an `ecMul` bound in the current scope itself (`local`):
+ *    the fused `ecMul` on the same point is then its witness. One bound in an
+ *    enclosing scope has no witness (the fused call is nested) and stays.
+ *
+ * `referrers` is computed once per sweep, from the body the sweep starts with
+ * (`countReferrers`), and not updated as the sweep rewrites. A rewrite only
+ * adds a reference to a name its own binding, or the inner binding it lifts
+ * from, already read, so a stale count is never too low. Every tier computes
+ * it the same way, because which rules fire decides the bytes.
+ */
+interface FusionScope {
+  readonly referrers: ReadonlyMap<string, number>;
+  readonly local: ReadonlySet<string>;
+  readonly frame: ReadonlySet<string>;
+}
+
+/**
+ * N-460: referrer count per name — the bindings, at any depth, whose value
+ * reads it (once per binding, however many operands name it; an `if` reads
+ * its `cond`, its arms' bindings are counted themselves), plus one for each
+ * name in an `if`'s `results` and one for a private method's return binding
+ * (F-108): the two things `removeGateSubsumedEcCalls` protects.
+ */
+function countReferrers(body: readonly ANFBinding[], method: ANFMethod): Map<string, number> {
+  const counts = new Map<string, number>();
+  const bump = (name: string): void => { counts.set(name, (counts.get(name) ?? 0) + 1); };
+  const walk = (bindings: readonly ANFBinding[]): void => {
+    for (const b of bindings) {
+      const v = b.value;
+      const reads = new Set<string>();
+      if (v.kind === 'if') {
+        reads.add(v.cond);
+        for (const r of v.results ?? []) reads.add(r);
+      } else if (v.kind !== 'loop') {
+        collectRefsFromValue(v, reads);
+      }
+      for (const name of reads) bump(name);
+      if (v.kind === 'if') { walk(v.then); walk(v.else); }
+      if (v.kind === 'loop') walk(v.body);
+    }
+  };
+  walk(body);
+  if (method.name !== 'constructor' && !method.isPublic && body.length > 0) {
+    bump(body[body.length - 1]!.name);
+  }
+  return counts;
+}
+
+/** N-460: does fusing these inner operands let at least one inner call go? */
+function fusionEliminates(operands: readonly string[], valueMap: ValueMap, scope: FusionScope): boolean {
+  return operands.some((operand) => {
+    const c = canonicalName(operand, valueMap);
+    if (c === null) return false;
+    // canonicalName already walked this chain, so every hop is an `@ref:`.
+    let cur = operand;
+    for (;;) {
+      if ((scope.referrers.get(cur) ?? 0) !== 1) return false;
+      if (cur === c) break;
+      cur = ((valueMap.get(cur) as LoadConst).value as string).slice(5);
+    }
+    const v = valueMap.get(c);
+    if (v === undefined || v.kind !== 'call') return false;
+    if (v.func === 'ecMulGen') return scope.frame.has(c);
+    if (v.func === 'ecMul') return scope.local.has(c);
+    return false;
+  });
+}
+
+/**
  * Try to rewrite a single binding. Returns the new value if rewritten, or null.
  */
 function tryRewrite(
@@ -356,6 +440,7 @@ function tryRewrite(
   valueMap: ValueMap,
   newBindings: ANFBinding[],
   usedNames: Set<string>,
+  scope: FusionScope,
 ): ANFValue | null {
   const { value } = binding;
   if (value.kind !== 'call') return null;
@@ -416,7 +501,7 @@ function tryRewrite(
         const k2Val = scalarVal;
         const k1 = k1Val ? getConstInt(k1Val) : undefined;
         const k2 = getConstInt(k2Val);
-        if (k1 !== undefined && k2 !== undefined) {
+        if (k1 !== undefined && k2 !== undefined && fusionEliminates([pointArg], valueMap, scope)) {
           // Normalise into [0, CURVE_N). JavaScript's `%` is truncated, so a
           // negative constant scalar would otherwise fuse to a negative value
           // while every other tier (Go/Rust/Python/Zig/Ruby/Java) reduces
@@ -492,7 +577,7 @@ function tryRewrite(
         const k2Val = resolveArg(rightVal.args[0]!, valueMap);
         const k1 = k1Val ? getConstInt(k1Val) : undefined;
         const k2 = k2Val ? getConstInt(k2Val) : undefined;
-        if (k1 !== undefined && k2 !== undefined) {
+        if (k1 !== undefined && k2 !== undefined && fusionEliminates([leftArg, rightArg], valueMap, scope)) {
           const sum = ((k1 + k2) % CURVE_N + CURVE_N) % CURVE_N;
           const newScalarName = freshName(`${binding.name}_k`, usedNames);
           newBindings.push({ name: newScalarName, value: makeLoadConst(sum) });
@@ -509,7 +594,7 @@ function tryRewrite(
           const k2Val = resolveArg(rightVal.args[1]!, valueMap);
           const k1 = k1Val ? getConstInt(k1Val) : undefined;
           const k2 = k2Val ? getConstInt(k2Val) : undefined;
-          if (k1 !== undefined && k2 !== undefined) {
+          if (k1 !== undefined && k2 !== undefined && fusionEliminates([leftArg, rightArg], valueMap, scope)) {
             const sum = ((k1 + k2) % CURVE_N + CURVE_N) % CURVE_N;
             const newScalarName = freshName(`${binding.name}_k`, usedNames);
             newBindings.push({ name: newScalarName, value: makeLoadConst(sum) });
@@ -561,9 +646,14 @@ function optimizeBodyOnce(
   body: readonly ANFBinding[],
   usedNames: Set<string>,
   outer: ValueMap,
+  referrers: ReadonlyMap<string, number>,
+  outerFrame: ReadonlySet<string>,
   hidden?: string,
 ): ANFBinding[] | null {
   const valueMap = outer.nestedScope(hidden);
+  // N-460: an `if` arm sees its enclosing frame, a loop body starts a new one.
+  const local = new Set(body.map((b) => b.name));
+  const scope: FusionScope = { referrers, local, frame: new Set([...outerFrame, ...local]) };
   const result: ANFBinding[] = [];
   let changed = false;
 
@@ -575,13 +665,13 @@ function optimizeBodyOnce(
     if (v.kind === 'if' || v.kind === 'loop') {
       let nested: ANFValue | null = null;
       if (v.kind === 'if') {
-        const thenB = optimizeBodyOnce(v.then, usedNames, valueMap);
-        const elseB = optimizeBodyOnce(v.else, usedNames, valueMap);
+        const thenB = optimizeBodyOnce(v.then, usedNames, valueMap, referrers, scope.frame);
+        const elseB = optimizeBodyOnce(v.else, usedNames, valueMap, referrers, scope.frame);
         if (thenB !== null || elseB !== null) {
           nested = { ...v, then: thenB ?? v.then, else: elseB ?? v.else };
         }
       } else {
-        const bodyB = optimizeBodyOnce(v.body, usedNames, valueMap, v.iterVar);
+        const bodyB = optimizeBodyOnce(v.body, usedNames, valueMap, referrers, new Set(), v.iterVar);
         if (bodyB !== null) nested = { ...v, body: bodyB };
       }
       if (nested !== null) {
@@ -595,7 +685,7 @@ function optimizeBodyOnce(
     }
 
     const extraBindings: ANFBinding[] = [];
-    const rewritten = tryRewrite(binding, valueMap, extraBindings, usedNames);
+    const rewritten = tryRewrite(binding, valueMap, extraBindings, usedNames, scope);
 
     if (rewritten !== null) {
       // F-343: the rewritten binding keeps its source location, and every
@@ -635,7 +725,8 @@ function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string
   let anyChanged = false;
 
   for (;;) {
-    const next = optimizeBodyOnce(body, usedNames, new ValueMap(rebound));
+    const next = optimizeBodyOnce(
+      body, usedNames, new ValueMap(rebound), countReferrers(body, method), new Set());
     if (next === null) break;
     body = next;
     anyChanged = true;

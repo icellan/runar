@@ -331,7 +331,10 @@ public final class AnfOptimize {
         boolean converged = false;
         boolean fired = false;
         for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
-            List<AnfBinding> next = optimizeBodyOnce(body, new ValueMap(reboundNames), null, usedNames);
+            // N-460: the fusion guard's referrer counts, once per sweep.
+            Map<String, Integer> referrers = countReferrers(body, method);
+            List<AnfBinding> next = optimizeBodyOnce(body, new ValueMap(reboundNames), null, usedNames,
+                referrers, Set.of());
             boolean changed = next != null;
             if (next == null) next = body;
             body = next;
@@ -364,15 +367,24 @@ public final class AnfOptimize {
      * the top level only. Returns {@code null} when no rule fired.
      */
     private static List<AnfBinding> optimizeBodyOnce(List<AnfBinding> body, ValueMap outer, String hidden,
-                                                     Set<String> usedNames) {
+                                                     Set<String> usedNames, Map<String, Integer> referrers,
+                                                     Set<String> outerFrame) {
         ValueMap valueMap = outer.nestedScope(hidden);
+        // N-460: an if arm sees its enclosing frame, a loop body starts a new one.
+        Set<String> local = new HashSet<>();
+        for (AnfBinding b : body) local.add(b.name());
+        Set<String> frame = new HashSet<>(outerFrame);
+        frame.addAll(local);
+        FusionScope scope = new FusionScope(referrers, local, frame);
         List<AnfBinding> next = new ArrayList<>(body.size());
         boolean changed = false;
         for (AnfBinding b : body) {
             valueMap.put(b.name(), b.value());
             if (b.value() instanceof If ifv) {
-                List<AnfBinding> thenB = optimizeBodyOnce(orEmpty(ifv.thenBranch()), valueMap, null, usedNames);
-                List<AnfBinding> elseB = optimizeBodyOnce(orEmpty(ifv.elseBranch()), valueMap, null, usedNames);
+                List<AnfBinding> thenB = optimizeBodyOnce(orEmpty(ifv.thenBranch()), valueMap, null, usedNames,
+                    referrers, frame);
+                List<AnfBinding> elseB = optimizeBodyOnce(orEmpty(ifv.elseBranch()), valueMap, null, usedNames,
+                    referrers, frame);
                 if (thenB != null || elseB != null) {
                     If nv = new If(ifv.cond(),
                         thenB != null ? thenB : ifv.thenBranch(),
@@ -387,7 +399,8 @@ public final class AnfOptimize {
                 continue;
             }
             if (b.value() instanceof Loop lp) {
-                List<AnfBinding> bodyB = optimizeBodyOnce(orEmpty(lp.body()), valueMap, lp.iterVar(), usedNames);
+                List<AnfBinding> bodyB = optimizeBodyOnce(orEmpty(lp.body()), valueMap, lp.iterVar(), usedNames,
+                    referrers, Set.of());
                 if (bodyB != null) {
                     Loop nv = new Loop(lp.count(), bodyB, lp.iterVar(), lp.start(), lp.step());
                     valueMap.put(b.name(), nv);
@@ -399,7 +412,7 @@ public final class AnfOptimize {
                 continue;
             }
             int preludeStart = next.size();
-            AnfValue optimized = tryOptimize(b.name(), b.value(), valueMap, next, usedNames);
+            AnfValue optimized = tryOptimize(b.name(), b.value(), valueMap, next, usedNames, scope);
             AnfBinding rebound = b;
             if (optimized != null) {
                 // N-218: every helper a rewrite mints (the N-104/N-251
@@ -517,7 +530,104 @@ public final class AnfOptimize {
      * combining two scalars into one). Those are appended to {@code prelude}
      * so the rewritten call can reference them.
      */
-    private static AnfValue tryOptimize(String name, AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude, Set<String> usedNames) {
+    /**
+     * N-460 — what a fusing rule (R9, R10, R11) needs to know at its fire
+     * site (the TS {@code FusionScope} in anf-ec.ts).
+     *
+     * <p>A fusion replaces the outer call with ONE new scalar multiplication,
+     * so it shrinks the script only if {@link #removeGateSubsumedEcCalls}
+     * then drops an inner call it read. Each fusing rule therefore fires only
+     * when at least one of its inner operands is ELIMINABLE
+     * ({@link #fusionEliminates}):
+     * <ul>
+     *   <li>every name on its alias chain (the operand, each {@code @ref:}
+     *   hop, the call binding itself — {@link #canonical}'s walk) has exactly
+     *   one referrer: the rewritten binding for the operand, the previous hop
+     *   for the rest. Any other reader keeps the inner call alive after the
+     *   fusion;</li>
+     *   <li>the call is an {@code ecMulGen} bound in the current scope or an
+     *   enclosing one inside the same loop body ({@code frame}). It needs no
+     *   witness, but one bound outside a loop the fusion sits in would trade
+     *   one multiplication for one per iteration;</li>
+     *   <li>or the call is an {@code ecMul} bound in the current scope itself
+     *   ({@code local}): the fused {@code ecMul} on the same point is then
+     *   its witness. One bound in an enclosing scope has no witness (the
+     *   fused call is nested) and stays.</li>
+     * </ul>
+     *
+     * <p>{@code referrers} is computed once per sweep, from the body the
+     * sweep starts with ({@link #countReferrers}), and not updated as the
+     * sweep rewrites. A rewrite only adds a reference to a name its own
+     * binding, or the inner binding it lifts from, already read, so a stale
+     * count is never too low. Every tier computes it the same way, because
+     * which rules fire decides the bytes.
+     */
+    private record FusionScope(Map<String, Integer> referrers, Set<String> local, Set<String> frame) {}
+
+    /**
+     * N-460: referrer count per name — the bindings, at any depth, whose
+     * value reads it (once per binding, however many operands name it; an
+     * {@code if} reads its {@code cond}, its arms' bindings are counted
+     * themselves), plus one for each name in an {@code if}'s {@code results}
+     * and one for a private method's return binding (F-108): the two things
+     * {@link #removeGateSubsumedEcCalls} protects.
+     */
+    private static Map<String, Integer> countReferrers(List<AnfBinding> body, AnfMethod method) {
+        Map<String, Integer> counts = new HashMap<>();
+        countReferrers(body, counts);
+        if (!"constructor".equals(method.name()) && !method.isPublic() && !body.isEmpty()) {
+            counts.merge(body.get(body.size() - 1).name(), 1, Integer::sum);
+        }
+        return counts;
+    }
+
+    private static void countReferrers(List<AnfBinding> bindings, Map<String, Integer> counts) {
+        for (AnfBinding b : bindings) {
+            Set<String> reads = new HashSet<>();
+            if (b.value() instanceof If ifv) {
+                reads.add(ifv.cond());
+                if (ifv.results() != null) reads.addAll(ifv.results());
+            } else if (!(b.value() instanceof Loop)) {
+                Dce.collectRefs(b.value(), reads);
+            }
+            for (String name : reads) counts.merge(name, 1, Integer::sum);
+            if (b.value() instanceof If ifv) {
+                countReferrers(orEmpty(ifv.thenBranch()), counts);
+                countReferrers(orEmpty(ifv.elseBranch()), counts);
+            } else if (b.value() instanceof Loop lp) {
+                countReferrers(orEmpty(lp.body()), counts);
+            }
+        }
+    }
+
+    /** N-460: does fusing these inner operands let at least one inner call go? */
+    private static boolean fusionEliminates(List<String> operands, Map<String, AnfValue> vm, FusionScope scope) {
+        for (String operand : operands) {
+            String c = canonical(operand, vm);
+            if (c == null) continue;
+            // canonical already walked this chain, so every hop is an @ref:.
+            String cur = operand;
+            boolean single = true;
+            while (true) {
+                if (scope.referrers().getOrDefault(cur, 0) != 1) {
+                    single = false;
+                    break;
+                }
+                if (cur.equals(c)) break;
+                cur = ((BytesConst) ((LoadConst) vm.get(cur)).value()).hex().substring(5);
+            }
+            if (!single) continue;
+            if (vm.get(c) instanceof Call call
+                && (("ecMulGen".equals(call.func()) && scope.frame().contains(c))
+                    || ("ecMul".equals(call.func()) && scope.local().contains(c)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static AnfValue tryOptimize(String name, AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude,
+                                        Set<String> usedNames, FusionScope scope) {
         if (!(v instanceof Call call)) return null;
         String func = call.func();
         List<String> args = call.args();
@@ -601,7 +711,7 @@ public final class AnfOptimize {
                     && ic.args() != null && ic.args().size() == 2 && k2 != null
                     && stable(ic.args().get(0), vm)) {
                 BigInteger k1 = getConstInt(ic.args().get(1), vm);
-                if (k1 != null) {
+                if (k1 != null && fusionEliminates(List.of(args.get(0)), vm, scope)) {
                     BigInteger combined = k1.multiply(k2).mod(CURVE_N);
                     String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(ic.args().get(0), fresh));
@@ -616,7 +726,7 @@ public final class AnfOptimize {
                     && right instanceof Call rc && "ecMulGen".equals(rc.func()) && rc.args() != null && rc.args().size() == 1) {
                 BigInteger k1 = getConstInt(lc.args().get(0), vm);
                 BigInteger k2 = getConstInt(rc.args().get(0), vm);
-                if (k1 != null && k2 != null) {
+                if (k1 != null && k2 != null && fusionEliminates(args, vm, scope)) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
                     String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMulGen", List.of(fresh));
@@ -632,7 +742,7 @@ public final class AnfOptimize {
                     && sameBinding(lc.args().get(0), rc.args().get(0), vm)) {
                 BigInteger k1 = getConstInt(lc.args().get(1), vm);
                 BigInteger k2 = getConstInt(rc.args().get(1), vm);
-                if (k1 != null && k2 != null) {
+                if (k1 != null && k2 != null && fusionEliminates(args, vm, scope)) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
                     String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(lc.args().get(0), fresh));

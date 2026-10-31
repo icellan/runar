@@ -368,7 +368,9 @@ module RunarCompiler
         used_names = collect_used_names(method, properties)
         fired = false
         loop do
-          new_body = optimize_body(method.body, ValueMap.new(rebound), nil, used_names)
+          # N-460: the fusion guard's referrer counts, once per sweep.
+          referrers = count_referrers(method.body, method)
+          new_body = optimize_body(method.body, ValueMap.new(rebound), nil, used_names, referrers, Set.new)
           break if new_body.nil?
           method.body = new_body
           fired = true
@@ -382,8 +384,11 @@ module RunarCompiler
       # (then before else) and loop bodies at the position of their binding,
       # each with its own scope (ValueMap#nested_scope). nil when no rule
       # fired.
-      def self.optimize_body(body, outer, hidden, used_names)
+      def self.optimize_body(body, outer, hidden, used_names, referrers, outer_frame)
         value_map = outer.nested_scope(hidden)
+        # N-460: an if arm sees its enclosing frame, a loop body starts a new one.
+        local = Set.new((body || []).map(&:name))
+        scope = FusionScope.new(referrers, local, outer_frame | local)
         new_body = []
         changed = false
         (body || []).each do |binding|
@@ -391,15 +396,15 @@ module RunarCompiler
           if v.kind == "if" || v.kind == "loop"
             value_map[binding.name] = v
             if v.kind == "if"
-              then_b = optimize_body(v.then, value_map, nil, used_names)
-              else_b = optimize_body(v.else_, value_map, nil, used_names)
+              then_b = optimize_body(v.then, value_map, nil, used_names, referrers, scope.frame)
+              else_b = optimize_body(v.else_, value_map, nil, used_names, referrers, scope.frame)
               unless then_b.nil? && else_b.nil?
                 v.then = then_b unless then_b.nil?
                 v.else_ = else_b unless else_b.nil?
                 changed = true
               end
             else
-              body_b = optimize_body(v.body, value_map, v.iter_var, used_names)
+              body_b = optimize_body(v.body, value_map, v.iter_var, used_names, referrers, Set.new)
               unless body_b.nil?
                 v.body = body_b
                 changed = true
@@ -413,7 +418,7 @@ module RunarCompiler
           # binding being rewritten (see fresh_const_name).
           prelude_start = new_body.length
           value_map[binding.name] = v
-          optimized = try_optimize(v, value_map, new_body, used_names, binding.name)
+          optimized = try_optimize(v, value_map, new_body, used_names, scope, binding.name)
           if optimized
             # N-218: every helper a rewrite mints (the N-104/N-251 gate
             # bindings, the fused-scalar helper) takes the rewritten
@@ -437,11 +442,98 @@ module RunarCompiler
       private_class_method :optimize_body
       private_class_method :optimize_method
 
+      # N-460 -- what a fusing rule (R9, R10, R11) needs to know at its fire
+      # site (the TS FusionScope in anf-ec.ts).
+      #
+      # A fusion replaces the outer call with ONE new scalar multiplication,
+      # so it shrinks the script only if remove_gate_subsumed_ec_calls then
+      # drops an inner call it read. Each fusing rule therefore fires only
+      # when at least one of its inner operands is ELIMINABLE
+      # (fusion_eliminates?):
+      #
+      # - every name on its alias chain (the operand, each @ref: hop, the call
+      #   binding itself -- canonical's walk) has exactly one referrer: the
+      #   rewritten binding for the operand, the previous hop for the rest.
+      #   Any other reader keeps the inner call alive after the fusion;
+      # - the call is an ecMulGen bound in the current scope or an enclosing
+      #   one inside the same loop body (frame). It needs no witness, but one
+      #   bound outside a loop the fusion sits in would trade one
+      #   multiplication for one per iteration;
+      # - or the call is an ecMul bound in the current scope itself (local):
+      #   the fused ecMul on the same point is then its witness. One bound in
+      #   an enclosing scope has no witness (the fused call is nested) and
+      #   stays.
+      #
+      # referrers is computed once per sweep, from the body the sweep starts
+      # with (count_referrers), and not updated as the sweep rewrites. A
+      # rewrite only adds a reference to a name its own binding, or the inner
+      # binding it lifts from, already read, so a stale count is never too
+      # low. Every tier computes it the same way, because which rules fire
+      # decides the bytes.
+      FusionScope = Struct.new(:referrers, :local, :frame)
+
+      # N-460: referrer count per name -- the bindings, at any depth, whose
+      # value reads it (once per binding, however many operands name it; an
+      # if reads its cond, its arms' bindings are counted themselves), plus
+      # one for each name in an if's results and one for a private method's
+      # return binding (F-108): the two things remove_gate_subsumed_ec_calls
+      # protects.
+      def self.count_referrers(body, method)
+        counts = Hash.new(0)
+        walk = lambda do |bindings|
+          (bindings || []).each do |b|
+            v = b.value
+            reads = Set.new
+            if v.kind == "if"
+              reads << v.cond
+              (v.results || []).each { |r| reads << r }
+            elsif v.kind != "loop"
+              DCE.collect_refs(v, reads)
+            end
+            reads.each { |name| counts[name] += 1 }
+            if v.kind == "if"
+              walk.call(v.then)
+              walk.call(v.else_)
+            elsif v.kind == "loop"
+              walk.call(v.body)
+            end
+          end
+        end
+        walk.call(body)
+        counts[body.last.name] += 1 if method.name != "constructor" && !method.is_public && body && !body.empty?
+        counts
+      end
+      private_class_method :count_referrers
+
+      # N-460: does fusing these inner operands let at least one inner call go?
+      def self.fusion_eliminates?(operands, vm, scope)
+        operands.any? do |operand|
+          c = canonical(operand, vm)
+          next false if c.nil?
+          # canonical already walked this chain, so every hop is an @ref:.
+          cur = operand
+          single = true
+          loop do
+            if scope.referrers[cur] != 1
+              single = false
+              break
+            end
+            break if cur == c
+            cur = vm[cur].const_string[5..]
+          end
+          next false unless single
+          v = vm[c]
+          next false if v.nil? || v.kind != "call"
+          (v.func == "ecMulGen" && scope.frame.include?(c)) || (v.func == "ecMul" && scope.local.include?(c))
+        end
+      end
+      private_class_method :fusion_eliminates?
+
       # -----------------------------------------------------------------
       # Optimization rules
       # -----------------------------------------------------------------
 
-      def self.try_optimize(v, vm, prelude, used_names, name = "")
+      def self.try_optimize(v, vm, prelude, used_names, scope, name = "")
         return nil unless v.kind == "call" && v.func && v.args
 
         func = v.func
@@ -533,7 +625,7 @@ module RunarCompiler
           if inner && k2 && inner.kind == "call" && inner.func == "ecMul" && inner.args && inner.args.size == 2 &&
              stable?(inner.args[0], vm)
             k1 = get_const_int(inner.args[1], vm)
-            if k1
+            if k1 && fusion_eliminates?([args[0]], vm, scope)
               combined = (k1 * k2) % CURVE_N
               return make_call("ecMul", [inner.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
             end
@@ -549,7 +641,7 @@ module RunarCompiler
              right_v.kind == "call" && right_v.func == "ecMulGen" && right_v.args && right_v.args.size == 1
             k1 = get_const_int(left_v.args[0], vm)
             k2 = get_const_int(right_v.args[0], vm)
-            if k1 && k2
+            if k1 && k2 && fusion_eliminates?(args, vm, scope)
               combined = (k1 + k2) % CURVE_N
               return make_call("ecMulGen", [fresh_const_name(name, combined, vm, prelude, used_names)])
             end
@@ -566,7 +658,7 @@ module RunarCompiler
             if same_binding?(left_v.args[0], right_v.args[0], vm)
               k1 = get_const_int(left_v.args[1], vm)
               k2 = get_const_int(right_v.args[1], vm)
-              if k1 && k2
+              if k1 && k2 && fusion_eliminates?(args, vm, scope)
                 combined = (k1 + k2) % CURVE_N
                 return make_call("ecMul", [left_v.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
               end
