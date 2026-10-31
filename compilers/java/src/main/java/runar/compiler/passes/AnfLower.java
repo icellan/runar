@@ -1198,10 +1198,11 @@ public final class AnfLower {
             sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
             // N-202: if / ternary arms inherit the enclosing loop product.
             sub.enclosingLoopCount = this.enclosingLoopCount;
-            // GAP-002: inherit the outer statement's source location so
-            // bindings emitted inside an if/else / loop branch are still
-            // mapped back to the originating AST statement.
-            sub.currentSourceLoc = this.currentSourceLoc;
+            // N-468: a sub-context starts with NO source location, as TS
+            // subContext() does. Statements inside the block stamp their own;
+            // bindings no statement owns (short-circuit / ternary arms,
+            // FixedArray index dispatch) stay unmapped.
+            sub.currentSourceLoc = null;
             sub.nested = true;
             return sub;
         }

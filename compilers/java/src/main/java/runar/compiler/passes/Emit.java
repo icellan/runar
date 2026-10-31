@@ -425,13 +425,20 @@ public final class Emit {
                 StackOp op = frame.ops.next();
                 // GAP-002: read the StackSourceLoc the StackLower pass stamped onto
                 // this op (when any) so Ctx#recordSourceMapping can attach it to
-                // the next opcode index.
-                ctx.setPendingSourceLoc(extractSourceLoc(op));
+                // the opcodes it emits.
+                // N-468: same bookkeeping as TS emitOps. An op WITHOUT a loc
+                // keeps whatever is pending (so the first op of an if-arm
+                // inherits the if's loc), a leaf op clears it after emitting,
+                // and OP_ELSE / OP_ENDIF go out under whatever the last arm op
+                // left, cleared after OP_ENDIF.
+                runar.compiler.ir.stack.StackSourceLoc loc = extractSourceLoc(op);
+                if (loc != null) ctx.setPendingSourceLoc(loc);
                 if (op instanceof IfOp ifo) {
                     ctx.emitOpcode("OP_IF");
                     stack.push(new EmitFrame(ifo.thenBranch(), 1, ifo.elseBranch()));
                 } else {
                     emitLeafOp(op, ctx);
+                    ctx.setPendingSourceLoc(null);
                 }
                 continue;
             }
@@ -443,6 +450,7 @@ public final class Emit {
                 continue;
             }
             ctx.emitOpcode("OP_ENDIF");
+            ctx.setPendingSourceLoc(null);
         }
     }
 
@@ -559,11 +567,9 @@ public final class Emit {
                 pendingSourceLoc.line().intValueExact(),
                 pendingSourceLoc.column().intValueExact()
             ));
-            // Consume after recording so each StackOp produces at most one
-            // mapping. Dispatch-table opcodes (OP_DUP/OP_NUMEQUAL/...) and
-            // emitIf opcodes (OP_IF/OP_ELSE/OP_ENDIF) emitted between user
-            // ops therefore don't pick up the prior op's loc by accident.
-            pendingSourceLoc = null;
+            // N-468: NOT consumed here, as in TS: every opcode a leaf op
+            // emits is mapped, and emitOps clears the loc after each leaf
+            // and after OP_ENDIF.
         }
 
         void emitOpcode(String name) {
