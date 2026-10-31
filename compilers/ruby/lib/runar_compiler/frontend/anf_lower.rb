@@ -1279,7 +1279,8 @@ module RunarCompiler
             modified_if = IfStmt.new(
               condition: stmt.condition,
               then: stmt.then,
-              else_: remaining
+              else_: remaining,
+              source_location: stmt.source_location
             )
             lower_statement(modified_if, reads_after_block)
             return

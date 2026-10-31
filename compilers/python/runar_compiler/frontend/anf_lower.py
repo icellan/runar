@@ -1173,6 +1173,7 @@ class _LowerCtx:
                     condition=stmt.condition,
                     then=stmt.then,
                     else_=remaining,
+                    source_location=stmt.source_location,
                 )
                 self.lower_statement(modified_if, reads_after_block)
                 return
