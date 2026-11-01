@@ -1699,6 +1699,9 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_equality(&mut self) -> Option<Expression> {
+        // N-505: a comparison node is located at its first token, as the TS
+        // reference's Java parser locates it (folded `compareTo` included).
+        let start = self.loc();
         let mut left = self.parse_relational()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -1712,7 +1715,7 @@ impl<'a> JavaParser<'a> {
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             // compareTo folding can make the node shallower; re-measure then.
             let refolds = compare_to_receiver_arg(&left).is_some() || compare_to_receiver_arg(&right).is_some();
-            left = fold_compare_to_zero(op, left, right);
+            left = fold_compare_to_zero(op, left, right, start.clone());
             if refolds {
                 dt = DepthTracker::new();
             }
@@ -1721,6 +1724,9 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_relational(&mut self) -> Option<Expression> {
+        // N-505: a comparison node is located at its first token, as the TS
+        // reference's Java parser locates it (folded `compareTo` included).
+        let start = self.loc();
         let mut left = self.parse_shift()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -1742,7 +1748,7 @@ impl<'a> JavaParser<'a> {
             if !self.grow(&mut dt, &left, &[&right]) { break; }
             // compareTo folding can make the node shallower; re-measure then.
             let refolds = compare_to_receiver_arg(&left).is_some() || compare_to_receiver_arg(&right).is_some();
-            left = fold_compare_to_zero(op, left, right);
+            left = fold_compare_to_zero(op, left, right, start.clone());
             if refolds {
                 dt = DepthTracker::new();
             }
@@ -2489,10 +2495,10 @@ fn is_bigint_of_callee(callee: &Expression) -> bool {
 /// BinaryExpr so the canonical Rúnar AST matches the IR produced by
 /// `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
 /// unknown call (which the typechecker rejects loudly).
-fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Expression {
+fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression, start: SourceLocation) -> Expression {
     use num_traits::Zero;
     if !is_comparison_op(op.clone()) {
-        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None };
+        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start) };
     }
     if let Some((a, b)) = compare_to_receiver_arg(&left) {
         if matches!(&right, Expression::BigIntLiteral { value } if value.is_zero()) {
@@ -2500,7 +2506,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
                 op,
                 left: Box::new(a),
                 right: Box::new(b),
-                source_location: None,
+                source_location: Some(start),
             };
         }
     }
@@ -2510,11 +2516,11 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
                 op,
                 left: Box::new(b),
                 right: Box::new(a),
-                source_location: None,
+                source_location: Some(start),
             };
         }
     }
-    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None }
+    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start) }
 }
 
 fn compare_to_receiver_arg(e: &Expression) -> Option<(Expression, Expression)> {

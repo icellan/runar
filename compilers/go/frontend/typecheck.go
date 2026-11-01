@@ -1159,7 +1159,7 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 		compatible := isSubtype(leftType, rightType) || isSubtype(rightType, leftType)
 		if !compatible {
 			if leftType != "<unknown>" && rightType != "<unknown>" {
-				tc.addError(fmt.Sprintf("cannot compare '%s' and '%s' with '%s'", leftType, rightType, e.Op))
+				tc.addErrorAt(fmt.Sprintf("cannot compare '%s' and '%s' with '%s'", leftType, rightType, e.Op), e)
 			}
 		}
 		return "boolean"

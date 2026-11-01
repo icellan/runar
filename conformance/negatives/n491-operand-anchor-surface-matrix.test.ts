@@ -32,6 +32,15 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  *     a listed pair that matches fails ("converged — remove it"), an unlisted
  *     pair that diverges fails. The per-tier items N-492..N-497 empty it.
  *
+ * N-505 adds the comparison shapes (fixtures N491-<surface>-cmp-left /
+ * cmp-right / eq-mismatch / eq-paren-left): `<` anchors at the offending
+ * operand, and the `===` / `!==` "Cannot compare" error anchors at the whole
+ * comparison, which starts at its left operand's first token, a leading `(`
+ * included (unlike an operand, a comparison is never unwrapped). Measured
+ * before the fix: every non-TS tier anchored the `===` error at the
+ * statement (Zig printed no location), and the Java surface parsers of the
+ * Rust, Python, Ruby and Zig tiers left comparison nodes unlocated.
+ *
  * Excluded, deliberately and not silently: the paren-ternary shape on the four
  * surfaces without a `?:` ternary (NO_TERNARY). `.runar.move`, `.runar.go` and
  * `.runar.zig` have no conditional expression in any tier's TS parser at all;
@@ -39,7 +48,7 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * parser (and five of the other six tiers) does not accept as an expression —
  * a parse-acceptance question, not an anchor one, and not this item.
  *
- * What this proves: for these 60 (surface, shape) fixtures TS anchors every
+ * What this proves: for these (surface, shape) fixtures TS anchors every
  * refusal by the `.runar.ts` rule, every tier refuses, and the set of tiers
  * that anchor differently is exactly DIVERGENT.
  * What it does NOT prove: anchor parity for any other operand shape (a bare
@@ -72,6 +81,9 @@ const NEG_MSG = "perand of unary '-' must be bigint";
 const AND_RIGHT = "ight operand of '&&' must be boolean";
 const OR_LEFT = "eft operand of '||' must be boolean";
 const AND_LEFT = "eft operand of '&&' must be boolean";
+const LT_LEFT = "eft operand of '<' must be bigint";
+const LT_RIGHT = "ight operand of '<' must be bigint";
+const EQ_MISMATCH = "annot compare 'bigint' and 'boolean' with '==='";
 
 /**
  * shape -> [message fragment, anchor text by surface ('*' = default)]. The
@@ -87,6 +99,11 @@ const SHAPES: Record<string, [string, Partial<Record<Surface | '*', string>>]> =
   'lit-led': [AND_LEFT, { '*': '5 + 1' }],
   'paren-call': [AND_LEFT, { '*': '(abs(x)) + 1', go: '(runar.Abs(x)) + 1', zig: '(runar.abs(x)) + 1' }],
   'paren-ternary': [AND_LEFT, { '*': '(flag ? x : x) + 1', py: '(x if flag else x) + 1' }],
+  // N-505: comparison operands. `<` anchors at the offending operand, `==` at the whole comparison.
+  'cmp-left': [LT_LEFT, { '*': 'flag < x' }],
+  'cmp-right': [LT_RIGHT, { '*': 'flag);', move: 'flag, 0', go: 'flag)', py: 'flag)', rb: 'flag)' }],
+  'eq-mismatch': [EQ_MISMATCH, { '*': 'x == flag' }],
+  'eq-paren-left': [EQ_MISMATCH, { '*': '(x + 1) == flag' }],
 };
 
 /**

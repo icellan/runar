@@ -213,6 +213,13 @@ const CASES: Array<[string, number, string | null, string]> = [
   ['N489-rs-not-bigint.runar.rs', 14, '!x', "perand of '!' must be boolean"],
   ['N489-rs-paren-call.runar.rs', 14, '(abs(x)) + 1', "eft operand of '&&' must be boolean"],
   ['N489-zig-lit-led.runar.zig', 16, '5 + 1', "eft operand of '&&' must be boolean"],
+  // N-505: comparison operands. `<` anchors at the offending operand; a
+  // `===` between incompatible types anchors at the whole comparison, which
+  // starts at its left operand. The other eight surfaces are pinned by the
+  // cmp-left / cmp-right / eq-mismatch shapes of the N-491 matrix.
+  ['N505-ts-cmp-left.runar.ts', 15, 'flag < x', "eft operand of '<' must be bigint"],
+  ['N505-ts-cmp-right.runar.ts', 15, 'flag)', "ight operand of '<' must be bigint"],
+  ['N505-ts-eq-mismatch.runar.ts', 15, 'x === flag', "annot compare 'bigint' and 'boolean' with '==='"],
   // N-508: a validation refusal about a whole method anchors at the method
   // declaration (TS: the method's own source location), where Zig used to
   // print no location. The column is that of the `public` / `private` keyword.

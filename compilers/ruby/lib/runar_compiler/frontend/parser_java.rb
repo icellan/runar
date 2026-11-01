@@ -1400,12 +1400,15 @@ module RunarCompiler
       end
 
       def parse_equality
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = loc
         left = parse_comparison
         loop do
           if match_tok(TOK_EQEQ)
-            left = fold_compare_to_zero("===", left, parse_comparison)
+            left = fold_compare_to_zero("===", left, parse_comparison, start)
           elsif match_tok(TOK_BANGEQ)
-            left = fold_compare_to_zero("!==", left, parse_comparison)
+            left = fold_compare_to_zero("!==", left, parse_comparison, start)
           else
             break
           end
@@ -1414,16 +1417,19 @@ module RunarCompiler
       end
 
       def parse_comparison
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = loc
         left = parse_shift
         loop do
           if match_tok(TOK_LT)
-            left = fold_compare_to_zero("<", left, parse_shift)
+            left = fold_compare_to_zero("<", left, parse_shift, start)
           elsif match_tok(TOK_LTEQ)
-            left = fold_compare_to_zero("<=", left, parse_shift)
+            left = fold_compare_to_zero("<=", left, parse_shift, start)
           elsif match_tok(TOK_GT)
-            left = fold_compare_to_zero(">", left, parse_shift)
+            left = fold_compare_to_zero(">", left, parse_shift, start)
           elsif match_tok(TOK_GTEQ)
-            left = fold_compare_to_zero(">=", left, parse_shift)
+            left = fold_compare_to_zero(">=", left, parse_shift, start)
           else
             break
           end
@@ -1439,18 +1445,18 @@ module RunarCompiler
       # Rúnar AST matches the IR produced by +<a> <cmp> <b>+ in other
       # formats. Any other shape leaves +compareTo+ as an unknown call
       # (which the typechecker rejects loudly).
-      def fold_compare_to_zero(op, left, right)
+      def fold_compare_to_zero(op, left, right, start)
         if left_pair = compare_to_receiver_arg(left)
           if right.is_a?(BigIntLiteral) && right.value == 0
-            return BinaryExpr.new(op: op, left: left_pair[0], right: left_pair[1])
+            return BinaryExpr.new(op: op, left: left_pair[0], right: left_pair[1], source_location: start)
           end
         end
         if right_pair = compare_to_receiver_arg(right)
           if left.is_a?(BigIntLiteral) && left.value == 0
-            return BinaryExpr.new(op: op, left: right_pair[1], right: right_pair[0])
+            return BinaryExpr.new(op: op, left: right_pair[1], right: right_pair[0], source_location: start)
           end
         end
-        BinaryExpr.new(op: op, left: left, right: right)
+        BinaryExpr.new(op: op, left: left, right: right, source_location: start)
       end
 
       def compare_to_receiver_arg(e)

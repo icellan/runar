@@ -1144,7 +1144,7 @@ terminal (no state mutation)",
             }
 
             Expression::BinaryExpr { op, left, right, .. } => {
-                self.check_binary_expr(op, left, right, env)
+                self.check_binary_expr(expr, op, left, right, env)
             }
 
             Expression::UnaryExpr {
@@ -1253,6 +1253,7 @@ terminal (no state mutation)",
 
     fn check_binary_expr(
         &mut self,
+        whole: &Expression,
         op: &BinaryOp,
         left: &Expression,
         right: &Expression,
@@ -1346,12 +1347,15 @@ terminal (no state mutation)",
                     && !is_subtype(&right_type, &left_type)
                 {
                     if left_type != "<unknown>" && right_type != "<unknown>" {
-                        self.add_error(format!(
-                            "Cannot compare '{}' and '{}' with '{}'",
-                            left_type,
-                            right_type,
-                            op.as_str()
-                        ));
+                        self.add_error_at(
+                            format!(
+                                "Cannot compare '{}' and '{}' with '{}'",
+                                left_type,
+                                right_type,
+                                op.as_str()
+                            ),
+                            whole,
+                        );
                     }
                 }
                 BOOLEAN.to_string()

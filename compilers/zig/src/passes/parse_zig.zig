@@ -1586,6 +1586,10 @@ const Parser = struct {
             const op: BinOperator = if (self.current.kind == .eqeq) .eq else .neq;
             _ = self.bump(); const right_start = self.current; const r = self.parseComparison() orelse return null; const right_loc = self.operandLocFrom(right_start);
             left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
+            // N-505: the comparison node is located at its first token (a leading
+            // `(` included), as the TS reference locates it; `===` / `!==` type
+            // errors anchor here.
+            left.binary_op.loc = left_loc;
         }
         return left;
     }

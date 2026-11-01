@@ -2033,6 +2033,10 @@ const Parser = struct {
             const right_loc = self.operandLocFrom(right_start);
             left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
             left_loc = self.operandLocFrom(left_start);
+            // N-505: the comparison node is located at its first token (a leading
+            // `(` included), as the TS reference locates it; `===` / `!==` type
+            // errors anchor here.
+            left.binary_op.loc = left_loc;
         }
         return left;
     }

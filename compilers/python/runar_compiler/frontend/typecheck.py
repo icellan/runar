@@ -1044,7 +1044,8 @@ class _TypeChecker:
             if not compatible:
                 if left_type != "<unknown>" and right_type != "<unknown>":
                     self._add_error(
-                        f"cannot compare '{left_type}' and '{right_type}' with '{e.op}'"
+                        f"cannot compare '{left_type}' and '{right_type}' with '{e.op}'",
+                        e,
                     )
             return "boolean"
 

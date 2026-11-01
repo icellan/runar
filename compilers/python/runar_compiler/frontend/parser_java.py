@@ -1379,33 +1379,39 @@ class _JavaParser:
         return left
 
     def _parse_equality(self) -> Expression:
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match_tok(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = _fold_compare_to_zero("===", left, right)
+                left = _fold_compare_to_zero("===", left, right, start)
             elif self.match_tok(TOK_BANGEQ):
                 right = self._parse_comparison()
-                left = _fold_compare_to_zero("!==", left, right)
+                left = _fold_compare_to_zero("!==", left, right, start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match_tok(TOK_LT):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero("<", left, right)
+                left = _fold_compare_to_zero("<", left, right, start)
             elif self.match_tok(TOK_LTEQ):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero("<=", left, right)
+                left = _fold_compare_to_zero("<=", left, right, start)
             elif self.match_tok(TOK_GT):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero(">", left, right)
+                left = _fold_compare_to_zero(">", left, right, start)
             elif self.match_tok(TOK_GTEQ):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero(">=", left, right)
+                left = _fold_compare_to_zero(">=", left, right, start)
             else:
                 break
         return left
@@ -1822,18 +1828,18 @@ def _is_bigint_of_callee(callee: Expression) -> bool:
 _COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "===", "!=="})
 
 
-def _fold_compare_to_zero(op: str, left: Expression, right: Expression) -> Expression:
+def _fold_compare_to_zero(op: str, left: Expression, right: Expression, start) -> Expression:
     if op not in _COMPARISON_OPS:
-        return BinaryExpr(op=op, left=left, right=right)
+        return BinaryExpr(op=op, left=left, right=right, source_location=start)
     pair = _compare_to_receiver_arg(left)
     if pair is not None and isinstance(right, BigIntLiteral) and right.value == 0:
         a, b = pair
-        return BinaryExpr(op=op, left=a, right=b)
+        return BinaryExpr(op=op, left=a, right=b, source_location=start)
     pair = _compare_to_receiver_arg(right)
     if pair is not None and isinstance(left, BigIntLiteral) and left.value == 0:
         a, b = pair
-        return BinaryExpr(op=op, left=b, right=a)
-    return BinaryExpr(op=op, left=left, right=right)
+        return BinaryExpr(op=op, left=b, right=a, source_location=start)
+    return BinaryExpr(op=op, left=left, right=right, source_location=start)
 
 
 def _compare_to_receiver_arg(e: Expression):

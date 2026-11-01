@@ -1429,7 +1429,7 @@ const TypeChecker = struct {
                 const compatible = isSubtype(left_type, right_type) or
                     isSubtype(right_type, left_type);
                 if (!compatible and left_type != .unknown and right_type != .unknown) {
-                    self.addError("cannot compare '{s}' and '{s}' with '{s}'", .{
+                    self.addErrorAt(bin.loc, "cannot compare '{s}' and '{s}' with '{s}'", .{
                         types.runarTypeToString(left_type),
                         types.runarTypeToString(right_type),
                         bin.op.toTsString(),

@@ -1214,7 +1214,7 @@ module RunarCompiler
             Frontend.subtype?(right_type, left_type)
           unless compatible
             if left_type != "<unknown>" && right_type != "<unknown>"
-              add_error("cannot compare '#{left_type}' and '#{right_type}' with '#{expr.op}'")
+              add_error("cannot compare '#{left_type}' and '#{right_type}' with '#{expr.op}'", expr)
             end
           end
           return "boolean"

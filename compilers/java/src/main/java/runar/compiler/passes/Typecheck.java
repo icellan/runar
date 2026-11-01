@@ -940,7 +940,7 @@ public final class Typecheck {
                     // here would be a second copy of the lattice to drift.
                     boolean compatible = isSubtype(lt, rt) || isSubtype(rt, lt);
                     if (!compatible && !"<unknown>".equals(lt) && !"<unknown>".equals(rt)) {
-                        error("cannot compare '" + lt + "' and '" + rt + "' with '" + op.canonical() + "'");
+                        errorAt("cannot compare '" + lt + "' and '" + rt + "' with '" + op.canonical() + "'", e);
                     }
                     return "boolean";
                 }
