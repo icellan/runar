@@ -1425,59 +1425,65 @@ func (p *solParser) parseSolTernary() Expression {
 }
 
 func (p *solParser) parseSolOr() Expression {
+	start := p.loc()
 	left := p.parseSolAnd()
 	for p.match(solTokPipePipe) {
 		right := p.parseSolAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolAnd() Expression {
+	start := p.loc()
 	left := p.parseSolBitwiseOr()
 	for p.match(solTokAmpAmp) {
 		right := p.parseSolBitwiseOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseSolBitwiseXor()
 	for p.match(solTokPipe) {
 		right := p.parseSolBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseSolBitwiseAnd()
 	for p.match(solTokCaret) {
 		right := p.parseSolBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseSolEquality()
 	for p.match(solTokAmp) {
 		right := p.parseSolEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolEquality() Expression {
+	start := p.loc()
 	left := p.parseSolComparison()
 	for {
 		if p.match(solTokEqEq) {
 			right := p.parseSolComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(solTokNotEq) {
 			right := p.parseSolComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1486,20 +1492,21 @@ func (p *solParser) parseSolEquality() Expression {
 }
 
 func (p *solParser) parseSolComparison() Expression {
+	start := p.loc()
 	left := p.parseSolShift()
 	for {
 		if p.match(solTokLt) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokLtEq) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokGt) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokGtEq) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1508,14 +1515,15 @@ func (p *solParser) parseSolComparison() Expression {
 }
 
 func (p *solParser) parseSolShift() Expression {
+	start := p.loc()
 	left := p.parseSolAdditive()
 	for {
 		if p.match(solTokShl) {
 			right := p.parseSolAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokShr) {
 			right := p.parseSolAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1524,14 +1532,15 @@ func (p *solParser) parseSolShift() Expression {
 }
 
 func (p *solParser) parseSolAdditive() Expression {
+	start := p.loc()
 	left := p.parseSolMultiplicative()
 	for {
 		if p.match(solTokPlus) {
 			right := p.parseSolMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokMinus) {
 			right := p.parseSolMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1540,17 +1549,18 @@ func (p *solParser) parseSolAdditive() Expression {
 }
 
 func (p *solParser) parseSolMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseSolUnary()
 	for {
 		if p.match(solTokStar) {
 			right := p.parseSolUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokSlash) {
 			right := p.parseSolUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokPercent) {
 			right := p.parseSolUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1559,17 +1569,18 @@ func (p *solParser) parseSolMultiplicative() Expression {
 }
 
 func (p *solParser) parseSolUnary() Expression {
+	opLoc := p.loc()
 	if p.match(solTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(solTokMinus) {
 		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
-		return UnaryExpr{Op: "-", Operand: operand}
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(solTokTilde) {
 		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
-		return UnaryExpr{Op: "~", Operand: operand}
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	// Prefix increment/decrement
 	if p.match(solTokPlusPlus) {

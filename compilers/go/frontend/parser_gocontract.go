@@ -1110,7 +1110,7 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 			p.addError(fmt.Sprintf("Unsupported binary operator: '%s'", e.Op))
 			return nil
 		}
-		return BinaryExpr{Op: op, Left: left, Right: right}
+		return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: p.locAt(p.fset.Position(e.Pos()))}
 
 	case *ast.UnaryExpr:
 		operand := p.convertExpression(e.X)
@@ -1119,11 +1119,11 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		}
 		switch e.Op {
 		case token.NOT:
-			return UnaryExpr{Op: "!", Operand: operand}
+			return UnaryExpr{Op: "!", Operand: operand, SourceLocation: p.locAt(p.fset.Position(e.Pos()))}
 		case token.SUB:
-			return UnaryExpr{Op: "-", Operand: operand}
+			return UnaryExpr{Op: "-", Operand: operand, SourceLocation: p.locAt(p.fset.Position(e.Pos()))}
 		case token.XOR:
-			return UnaryExpr{Op: "~", Operand: operand}
+			return UnaryExpr{Op: "~", Operand: operand, SourceLocation: p.locAt(p.fset.Position(e.Pos()))}
 		}
 
 	case *ast.ParenExpr:

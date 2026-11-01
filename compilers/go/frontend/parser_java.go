@@ -1680,51 +1680,57 @@ func (p *javaParser) parseTernary() Expression {
 }
 
 func (p *javaParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.current().kind == javaTokPipePipe {
 		p.advance()
-		left = BinaryExpr{Op: "||", Left: left, Right: p.parseAnd()}
+		left = BinaryExpr{Op: "||", Left: left, Right: p.parseAnd(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseBitOr()
 	for p.current().kind == javaTokAmpAmp {
 		p.advance()
-		left = BinaryExpr{Op: "&&", Left: left, Right: p.parseBitOr()}
+		left = BinaryExpr{Op: "&&", Left: left, Right: p.parseBitOr(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseBitOr() Expression {
+	start := p.loc()
 	left := p.parseBitXor()
 	for p.current().kind == javaTokPipe {
 		p.advance()
-		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor()}
+		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseBitXor() Expression {
+	start := p.loc()
 	left := p.parseBitAnd()
 	for p.current().kind == javaTokCaret {
 		p.advance()
-		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd()}
+		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseBitAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.current().kind == javaTokAmp {
 		p.advance()
-		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality()}
+		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		var op string
@@ -1737,11 +1743,12 @@ func (p *javaParser) parseEquality() Expression {
 			return left
 		}
 		p.advance()
-		left = foldJavaCompareToZero(op, left, p.parseComparison())
+		left = foldJavaCompareToZero(op, left, p.parseComparison(), start)
 	}
 }
 
 func (p *javaParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		var op string
@@ -1758,11 +1765,12 @@ func (p *javaParser) parseComparison() Expression {
 			return left
 		}
 		p.advance()
-		left = foldJavaCompareToZero(op, left, p.parseShift())
+		left = foldJavaCompareToZero(op, left, p.parseShift(), start)
 	}
 }
 
 func (p *javaParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAddSub()
 	for {
 		var op string
@@ -1775,11 +1783,12 @@ func (p *javaParser) parseShift() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub(), SourceLocation: start}
 	}
 }
 
 func (p *javaParser) parseAddSub() Expression {
+	start := p.loc()
 	left := p.parseMulDiv()
 	for {
 		var op string
@@ -1792,11 +1801,12 @@ func (p *javaParser) parseAddSub() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv(), SourceLocation: start}
 	}
 }
 
 func (p *javaParser) parseMulDiv() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		var op string
@@ -1811,15 +1821,16 @@ func (p *javaParser) parseMulDiv() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary(), SourceLocation: start}
 	}
 }
 
 func (p *javaParser) parseUnary() Expression {
+	opLoc := p.loc()
 	switch p.current().kind {
 	case javaTokBang:
 		p.advance()
-		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
+		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case javaTokMinus:
 		p.advance()
 		// F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
@@ -1827,14 +1838,14 @@ func (p *javaParser) parseUnary() Expression {
 		if p.pos < len(p.tokens) && p.tokens[p.pos].kind == javaTokNumber {
 			p.tokens[p.pos].negOnly = false
 		}
-		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
+		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case javaTokPlus:
 		// +x == x
 		p.advance()
 		return nested(&p.nest, p.loc(), p.parseUnary)
 	case javaTokTilde:
 		p.advance()
-		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
+		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case javaTokPlusPlus:
 		p.advance()
 		return IncrementExpr{Operand: nested(&p.nest, p.loc(), p.parseUnary), Prefix: true}
@@ -2063,21 +2074,21 @@ func isJavaBigintOfCallee(me MemberExpr) bool {
 // to a single BinaryExpr so the canonical Rúnar AST matches the IR produced by
 // `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
 // unknown call (which the typechecker rejects loudly).
-func foldJavaCompareToZero(op string, left, right Expression) Expression {
+func foldJavaCompareToZero(op string, left, right Expression, start SourceLocation) Expression {
 	if !isJavaComparisonOp(op) {
-		return BinaryExpr{Op: op, Left: left, Right: right}
+		return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: start}
 	}
 	if a, b, ok := compareToReceiverArg(left); ok {
 		if lit, ok := right.(BigIntLiteral); ok && lit.Value.Sign() == 0 {
-			return BinaryExpr{Op: op, Left: a, Right: b}
+			return BinaryExpr{Op: op, Left: a, Right: b, SourceLocation: start}
 		}
 	}
 	if a, b, ok := compareToReceiverArg(right); ok {
 		if lit, ok := left.(BigIntLiteral); ok && lit.Value.Sign() == 0 {
-			return BinaryExpr{Op: op, Left: b, Right: a}
+			return BinaryExpr{Op: op, Left: b, Right: a, SourceLocation: start}
 		}
 	}
-	return BinaryExpr{Op: op, Left: left, Right: right}
+	return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: start}
 }
 
 func compareToReceiverArg(e Expression) (Expression, Expression, bool) {

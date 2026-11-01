@@ -1895,67 +1895,74 @@ func (p *pyParser) parsePyTernary() Expression {
 }
 
 func (p *pyParser) parsePyOr() Expression {
+	start := p.loc()
 	left := p.parsePyAnd()
 	for p.match(pyTokPipePipe) {
 		right := p.parsePyAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyAnd() Expression {
+	start := p.loc()
 	left := p.parsePyNot()
 	for p.match(pyTokAmpAmp) {
 		right := p.parsePyNot()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyNot() Expression {
+	opLoc := p.loc()
 	if p.match(pyTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parsePyNot)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parsePyBitwiseOr()
 }
 
 func (p *pyParser) parsePyBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parsePyBitwiseXor()
 	for p.match(pyTokPipe) {
 		right := p.parsePyBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parsePyBitwiseAnd()
 	for p.match(pyTokCaret) {
 		right := p.parsePyBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parsePyEquality()
 	for p.match(pyTokAmp) {
 		right := p.parsePyEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyEquality() Expression {
+	start := p.loc()
 	left := p.parsePyComparison()
 	for {
 		if p.match(pyTokEqEq) {
 			right := p.parsePyComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(pyTokNotEq) {
 			right := p.parsePyComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1964,20 +1971,21 @@ func (p *pyParser) parsePyEquality() Expression {
 }
 
 func (p *pyParser) parsePyComparison() Expression {
+	start := p.loc()
 	left := p.parsePyShift()
 	for {
 		if p.match(pyTokLt) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokLtEq) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokGt) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokGtEq) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1986,14 +1994,15 @@ func (p *pyParser) parsePyComparison() Expression {
 }
 
 func (p *pyParser) parsePyShift() Expression {
+	start := p.loc()
 	left := p.parsePyAdditive()
 	for {
 		if p.match(pyTokLShift) {
 			right := p.parsePyAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokRShift) {
 			right := p.parsePyAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -2002,14 +2011,15 @@ func (p *pyParser) parsePyShift() Expression {
 }
 
 func (p *pyParser) parsePyAdditive() Expression {
+	start := p.loc()
 	left := p.parsePyMultiplicative()
 	for {
 		if p.match(pyTokPlus) {
 			right := p.parsePyMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokMinus) {
 			right := p.parsePyMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -2018,21 +2028,22 @@ func (p *pyParser) parsePyAdditive() Expression {
 }
 
 func (p *pyParser) parsePyMultiplicative() Expression {
+	start := p.loc()
 	left := p.parsePyUnary()
 	for {
 		if p.match(pyTokStar) {
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokSlashSlash) {
 			// Python // (integer division) maps to / in Rúnar
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokSlash) {
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokPercent) {
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -2041,17 +2052,18 @@ func (p *pyParser) parsePyMultiplicative() Expression {
 }
 
 func (p *pyParser) parsePyUnary() Expression {
+	opLoc := p.loc()
 	if p.match(pyTokMinus) {
 		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
-		return UnaryExpr{Op: "-", Operand: operand}
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(pyTokTilde) {
 		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
-		return UnaryExpr{Op: "~", Operand: operand}
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(pyTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parsePyPower()
 }

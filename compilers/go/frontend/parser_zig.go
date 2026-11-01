@@ -1466,59 +1466,65 @@ func (p *zigParser) parseExpression() Expression {
 }
 
 func (p *zigParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.match(zigTokPipePipe) {
 		right := p.parseAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseBitwiseOr()
 	for p.match(zigTokAmpAmp) {
 		right := p.parseBitwiseOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseBitwiseXor()
 	for p.match(zigTokPipe) {
 		right := p.parseBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseBitwiseAnd()
 	for p.match(zigTokCaret) {
 		right := p.parseBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.match(zigTokAmp) {
 		right := p.parseEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		if p.match(zigTokEqEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // == -> ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // == -> ===
 		} else if p.match(zigTokNotEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // != -> !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // != -> !==
 		} else {
 			break
 		}
@@ -1527,20 +1533,21 @@ func (p *zigParser) parseEquality() Expression {
 }
 
 func (p *zigParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		if p.match(zigTokLt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokLtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokGt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokGtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1549,14 +1556,15 @@ func (p *zigParser) parseComparison() Expression {
 }
 
 func (p *zigParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAdditive()
 	for {
 		if p.match(zigTokLShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokRShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1565,14 +1573,15 @@ func (p *zigParser) parseShift() Expression {
 }
 
 func (p *zigParser) parseAdditive() Expression {
+	start := p.loc()
 	left := p.parseMultiplicative()
 	for {
 		if p.match(zigTokPlus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokMinus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1581,17 +1590,18 @@ func (p *zigParser) parseAdditive() Expression {
 }
 
 func (p *zigParser) parseMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		if p.match(zigTokStar) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokSlash) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokPercent) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1600,17 +1610,18 @@ func (p *zigParser) parseMultiplicative() Expression {
 }
 
 func (p *zigParser) parseUnary() Expression {
+	opLoc := p.loc()
 	if p.match(zigTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(zigTokMinus) {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
-		return UnaryExpr{Op: "-", Operand: operand}
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(zigTokTilde) {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
-		return UnaryExpr{Op: "~", Operand: operand}
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	// Zig's `&` is the address-of operator used for slice coercion at call
 	// sites like `&.{sig1, sig2}` (an anonymous-struct literal coerced to a

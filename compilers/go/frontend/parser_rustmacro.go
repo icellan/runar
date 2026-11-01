@@ -1323,53 +1323,59 @@ func (p *rustMacroParser) parseExpression() Expression {
 }
 
 func (p *rustMacroParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.current().kind == rustTokPipePipe {
 		p.advance()
 		right := p.parseAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseBitOr()
 	for p.current().kind == rustTokAmpAmp {
 		p.advance()
 		right := p.parseBitOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseBitOr() Expression {
+	start := p.loc()
 	left := p.parseBitXor()
 	for p.current().kind == rustTokPipe {
 		p.advance()
-		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor()}
+		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseBitXor() Expression {
+	start := p.loc()
 	left := p.parseBitAnd()
 	for p.current().kind == rustTokCaret {
 		p.advance()
-		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd()}
+		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseBitAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.current().kind == rustTokAmp {
 		p.advance()
-		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality()}
+		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		var op string
@@ -1382,11 +1388,12 @@ func (p *rustMacroParser) parseEquality() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseComparison()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseComparison(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		var op string
@@ -1403,11 +1410,12 @@ func (p *rustMacroParser) parseComparison() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseShift()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseShift(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAddSub()
 	for {
 		var op string
@@ -1420,11 +1428,12 @@ func (p *rustMacroParser) parseShift() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseAddSub() Expression {
+	start := p.loc()
 	left := p.parseMulDiv()
 	for {
 		var op string
@@ -1437,11 +1446,12 @@ func (p *rustMacroParser) parseAddSub() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseMulDiv() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		var op string
@@ -1456,15 +1466,16 @@ func (p *rustMacroParser) parseMulDiv() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseUnary() Expression {
+	opLoc := p.loc()
 	switch p.current().kind {
 	case rustTokBang:
 		p.advance()
-		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
+		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case rustTokMinus:
 		p.advance()
 		// F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1485,10 +1496,10 @@ func (p *rustMacroParser) parseUnary() Expression {
 				p.tokens[k].negOnly = false
 			}
 		}
-		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
+		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case rustTokTilde:
 		p.advance()
-		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary)}
+		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case rustTokAmp:
 		// & and &mut are reference-taking operators — skip them. Counted
 		// as a prefix operator (F-213), as the TS reference counts it.

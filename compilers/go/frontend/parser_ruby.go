@@ -1814,67 +1814,74 @@ func (p *rbParser) parseTernary() Expression {
 }
 
 func (p *rbParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.match(rbTokOr) || p.match(rbTokPipePipe) {
 		right := p.parseAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseNot()
 	for p.match(rbTokAnd) || p.match(rbTokAmpAmp) {
 		right := p.parseNot()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseNot() Expression {
+	opLoc := p.loc()
 	if p.match(rbTokNot) || p.match(rbTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parseNot)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parseBitwiseOr()
 }
 
 func (p *rbParser) parseBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseBitwiseXor()
 	for p.match(rbTokPipe) {
 		right := p.parseBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseBitwiseAnd()
 	for p.match(rbTokCaret) {
 		right := p.parseBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.match(rbTokAmp) {
 		right := p.parseEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		if p.match(rbTokEqEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(rbTokNotEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1883,20 +1890,21 @@ func (p *rbParser) parseEquality() Expression {
 }
 
 func (p *rbParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		if p.match(rbTokLt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokLtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokGt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokGtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1905,14 +1913,15 @@ func (p *rbParser) parseComparison() Expression {
 }
 
 func (p *rbParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAdditive()
 	for {
 		if p.match(rbTokLShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokRShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1921,14 +1930,15 @@ func (p *rbParser) parseShift() Expression {
 }
 
 func (p *rbParser) parseAdditive() Expression {
+	start := p.loc()
 	left := p.parseMultiplicative()
 	for {
 		if p.match(rbTokPlus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokMinus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1937,17 +1947,18 @@ func (p *rbParser) parseAdditive() Expression {
 }
 
 func (p *rbParser) parseMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		if p.match(rbTokStar) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokSlash) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokPercent) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1956,17 +1967,18 @@ func (p *rbParser) parseMultiplicative() Expression {
 }
 
 func (p *rbParser) parseUnary() Expression {
+	opLoc := p.loc()
 	if p.match(rbTokMinus) {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
-		return UnaryExpr{Op: "-", Operand: operand}
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(rbTokTilde) {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
-		return UnaryExpr{Op: "~", Operand: operand}
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(rbTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parseUnary)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parsePower()
 }

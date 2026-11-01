@@ -1617,59 +1617,65 @@ func (p *moveParser) parseMoveExpression() Expression {
 }
 
 func (p *moveParser) parseMoveOr() Expression {
+	start := p.loc()
 	left := p.parseMoveAnd()
 	for p.match(moveTokPipePipe) {
 		right := p.parseMoveAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveAnd() Expression {
+	start := p.loc()
 	left := p.parseMoveBitwiseOr()
 	for p.match(moveTokAmpAmp) {
 		right := p.parseMoveBitwiseOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseMoveBitwiseXor()
 	for p.match(moveTokPipe) {
 		right := p.parseMoveBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseMoveBitwiseAnd()
 	for p.match(moveTokCaret) {
 		right := p.parseMoveBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseMoveEquality()
 	for p.match(moveTokAmp) {
 		right := p.parseMoveEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveEquality() Expression {
+	start := p.loc()
 	left := p.parseMoveComparison()
 	for {
 		if p.match(moveTokEqEq) {
 			right := p.parseMoveComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(moveTokNotEq) {
 			right := p.parseMoveComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1678,20 +1684,21 @@ func (p *moveParser) parseMoveEquality() Expression {
 }
 
 func (p *moveParser) parseMoveComparison() Expression {
+	start := p.loc()
 	left := p.parseMoveShift()
 	for {
 		if p.match(moveTokLt) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokLtEq) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokGt) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokGtEq) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1700,14 +1707,15 @@ func (p *moveParser) parseMoveComparison() Expression {
 }
 
 func (p *moveParser) parseMoveShift() Expression {
+	start := p.loc()
 	left := p.parseMoveAdditive()
 	for {
 		if p.match(moveTokShl) {
 			right := p.parseMoveAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokShr) {
 			right := p.parseMoveAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1716,14 +1724,15 @@ func (p *moveParser) parseMoveShift() Expression {
 }
 
 func (p *moveParser) parseMoveAdditive() Expression {
+	start := p.loc()
 	left := p.parseMoveMultiplicative()
 	for {
 		if p.match(moveTokPlus) {
 			right := p.parseMoveMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokMinus) {
 			right := p.parseMoveMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1732,17 +1741,18 @@ func (p *moveParser) parseMoveAdditive() Expression {
 }
 
 func (p *moveParser) parseMoveMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseMoveUnary()
 	for {
 		if p.match(moveTokStar) {
 			right := p.parseMoveUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokSlash) {
 			right := p.parseMoveUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokPercent) {
 			right := p.parseMoveUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1751,17 +1761,18 @@ func (p *moveParser) parseMoveMultiplicative() Expression {
 }
 
 func (p *moveParser) parseMoveUnary() Expression {
+	opLoc := p.loc()
 	if p.match(moveTokBang) {
 		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
-		return UnaryExpr{Op: "!", Operand: operand}
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(moveTokMinus) {
 		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
-		return UnaryExpr{Op: "-", Operand: operand}
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(moveTokTilde) {
 		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
-		return UnaryExpr{Op: "~", Operand: operand}
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	// Skip & (reference) — it's a no-op in the Rúnar context
 	if p.match(moveTokAmp) {

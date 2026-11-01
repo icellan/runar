@@ -115,8 +115,8 @@ const PEER_SHAPES = ['not-bigint', 'neg-bool', 'lit-led', 'paren-call', 'paren-t
 const DIVERGENT: Record<string, string[]> = {
   // N-492 (Zig): converged — every Zig surface parser records operand locations.
   zig: [],
-  // N-493 (Go)
-  go: on(PEER_SHAPES),
+  // N-493 (Go): converged — every Go-side surface parser records operand locations.
+  go: [],
   // N-494 (Rust)
   rust: on(PEER_SHAPES),
   // N-495 (Python)
