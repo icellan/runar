@@ -1034,7 +1034,7 @@ impl<'a> ZigParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_method(&mut self, is_public: bool) -> Option<MethodNode> {
-        // N-490: where the method starts — the constructor's location for `init`.
+        // N-490 / N-500: where the method starts — the location of every method node.
         let start_loc = self.loc();
         if is_public {
             self.advance(); // pub
@@ -1150,7 +1150,7 @@ impl<'a> ZigParser<'a> {
             } else {
                 Visibility::Private
             },
-            source_location: self.loc(),
+            source_location: start_loc,
             sighash_type,
         })
     }
@@ -2787,6 +2787,55 @@ pub const BigCoord = struct {
             matches!(contract.methods[0].params[0].param_type, TypeNode::Primitive(PrimitiveTypeName::Bigint)),
             "expected bigint, got {:?}",
             contract.methods[0].params[0].param_type
+        );
+    }
+
+    // N-500: a method's source_location is where the method starts (its `pub`,
+    // or the `fn` of a private one), as the TS reference records it, not the
+    // token after its body. Proves the parser records the start for a private
+    // and a public method that are each followed by another method. Does not
+    // prove any diagnostic wording or the other Rust surface parsers.
+    #[test]
+    fn test_method_source_location_is_method_start() {
+        let source = r#"const runar = @import("runar");
+
+pub const Anchor = struct {
+    pub const Contract = runar.SmartContract;
+
+    t: i64,
+
+    pub fn init(t: i64) Anchor {
+        return .{ .t = t };
+    }
+
+    fn helper(self: *const Anchor, x: i64) i64 {
+        return x + self.t;
+    }
+
+    pub fn check(self: *const Anchor, x: i64) void {
+        runar.assert(self.helper(x) == self.t);
+    }
+
+    pub fn last(self: *const Anchor, x: i64) void {
+        runar.assert(x == self.t);
+    }
+};
+"#;
+        let result = parse_zig(source, Some("Anchor.runar.zig"));
+        assert!(result.errors.is_empty(), "Unexpected errors: {:?}", result.error_strings());
+        let contract = result.contract.unwrap();
+        let got: Vec<(String, usize, usize)> = contract
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), m.source_location.line as usize, m.source_location.column as usize))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("helper".to_string(), 12, 5),
+                ("check".to_string(), 16, 5),
+                ("last".to_string(), 20, 5),
+            ]
         );
     }
 
