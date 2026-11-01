@@ -1034,100 +1034,122 @@ class JavaParser {
   }
 
   private parseLogicalOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseLogicalAnd();
     while (this.current().type === '||') {
       this.advance();
-      left = { kind: 'binary_expr', op: '||', left, right: this.parseLogicalAnd() };
+      left = { kind: 'binary_expr', op: '||', left, right: this.parseLogicalAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseLogicalAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitOr();
     while (this.current().type === '&&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr() };
+      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitXor();
     while (this.current().type === '|') {
       this.advance();
-      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor() };
+      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitXor(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitAnd();
     while (this.current().type === '^') {
       this.advance();
-      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd() };
+      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseEquality();
     while (this.current().type === '&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality() };
+      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality(), sourceLocation: start };
     }
     return left;
   }
 
   private parseEquality(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseComparison();
     while (this.current().type === '==' || this.current().type === '!=') {
       const op: BinaryOp = this.advance().type === '==' ? '===' : '!==';
-      left = foldCompareToZero(op, left, this.parseComparison());
+      left = { ...foldCompareToZero(op, left, this.parseComparison()), sourceLocation: start };
     }
     return left;
   }
 
   private parseComparison(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
       const op = this.advance().value as BinaryOp;
-      left = foldCompareToZero(op, left, this.parseShift());
+      left = { ...foldCompareToZero(op, left, this.parseShift()), sourceLocation: start };
     }
     return left;
   }
 
   private parseShift(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAddSub();
     while (this.current().type === '<<' || this.current().type === '>>') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseAddSub() };
+      left = { kind: 'binary_expr', op, left, right: this.parseAddSub(), sourceLocation: start };
     }
     return left;
   }
 
   private parseAddSub(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (this.current().type === '+' || this.current().type === '-') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv() };
+      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv(), sourceLocation: start };
     }
     return left;
   }
 
   private parseMulDiv(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseUnary();
     while (this.current().type === '*' || this.current().type === '/' || this.current().type === '%') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseUnary() };
+      left = { kind: 'binary_expr', op, left, right: this.parseUnary(), sourceLocation: start };
     }
     return left;
   }
 
   private parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     const t = this.current().type;
     if (t === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (t === '-') {
       this.advance();
@@ -1135,7 +1157,7 @@ class JavaParser {
       // legal only as the direct operand of this minus.
       const next = this.current();
       if (next.type === 'number' && next.negOnly) next.negOnly = false;
-      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (t === '+') {
       // unary plus: just the operand
@@ -1144,7 +1166,7 @@ class JavaParser {
     }
     if (t === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()) };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (t === '++') {
       this.advance();
