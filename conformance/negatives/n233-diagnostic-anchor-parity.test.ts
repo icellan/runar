@@ -72,6 +72,17 @@ import { REPO, buildSourceTiers, judge } from './tier-harness.js';
  * `.zig` additionally locate literal-led / paren-led composites but not a
  * unary, and only `.runar.rs` locates every shape.
  *
+ * Converged by N-508 — the validation refusals about a whole method (fixtures
+ * N508-ts-*): a public method that does not end with an assert(), the same for
+ * an UnsafeSmartContract, recursion, a FixedArray method parameter and a
+ * method parameter of a non-Runar type. TS anchors each at the method
+ * declaration's start (the `public` / `private` keyword). Zig printed no
+ * location for the first four, and located the fifth, like every other
+ * method-level diagnostic on `.runar.ts`, at the method NAME. Only the
+ * `.runar.ts` surface is pinned; the message fragments are matched because
+ * Java words the assert message differently and Zig words the FixedArray one
+ * differently (not changed here).
+ *
  * ANCHOR_PENDING is where a row goes when a decision on the
  * anchor is needed or the work is not done yet; such a row is pinned as divergent so that converging it
  * fails here until it moves into CASES.
@@ -202,6 +213,14 @@ const CASES: Array<[string, number, string | null, string]> = [
   ['N489-rs-not-bigint.runar.rs', 14, '!x', "perand of '!' must be boolean"],
   ['N489-rs-paren-call.runar.rs', 14, '(abs(x)) + 1', "eft operand of '&&' must be boolean"],
   ['N489-zig-lit-led.runar.zig', 16, '5 + 1', "eft operand of '&&' must be boolean"],
+  // N-508: a validation refusal about a whole method anchors at the method
+  // declaration (TS: the method's own source location), where Zig used to
+  // print no location. The column is that of the `public` / `private` keyword.
+  ['N508-ts-no-assert.runar.ts', 15, 'public go(', 'must end with an assert()'],
+  ['N508-ts-unsafe-no-assert.runar.ts', 15, 'public go(', 'a terminal asm({...}) with out_arity 1'],
+  ['N508-ts-recursion.runar.ts', 14, 'private loop(', 'ecursion detected'],
+  ['N508-ts-fixedarray-param.runar.ts', 14, 'public go(', 'FixedArray'],
+  ['N508-ts-unknown-param-type.runar.ts', 15, 'public go(', 'is not a Rúnar type'],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */

@@ -599,7 +599,7 @@ fn validateConstructor(
                 .severity = .@"error",
             });
         }
-        try rejectUnknownParamType(allocator, errors, param, "constructor", null);
+        try rejectUnknownParamType(allocator, errors, param, "constructor", null, null);
     }
 
     try validateConstructorSlotBijection(allocator, contract, errors);
@@ -616,6 +616,7 @@ fn rejectUnknownParamType(
     param: types.ParamNode,
     comptime kind: []const u8,
     method_name: ?[]const u8,
+    location: ?types.SourceLocation,
 ) !void {
     if (param.spelled_type.len == 0) return;
     if (std.mem.eql(u8, param.spelled_type, "unknown") or std.mem.eql(u8, param.spelled_type, "StatefulContext")) return;
@@ -623,7 +624,7 @@ fn rejectUnknownParamType(
         try std.fmt.allocPrint(allocator, "type '{s}' of parameter '{s}' in {s} '{s}' is not a Rúnar type", .{ param.spelled_type, param.name, kind, m })
     else
         try std.fmt.allocPrint(allocator, "type '{s}' of parameter '{s}' in {s} is not a Rúnar type", .{ param.spelled_type, param.name, kind });
-    try errors.append(allocator, .{ .message = message, .owned_message = true, .severity = .@"error" });
+    try errors.append(allocator, .{ .message = message, .owned_message = true, .severity = .@"error", .location = location });
 }
 
 /// Distinct bare constructor parameters the constructor assigns to one
@@ -871,9 +872,10 @@ fn validateMethods(
                 try errors.append(allocator, .{
                     .message = "FixedArray is not allowed as a method parameter",
                     .severity = .@"error",
+                    .location = method.source_loc,
                 });
             }
-            try rejectUnknownParamType(allocator, errors, p, "method", method.name);
+            try rejectUnknownParamType(allocator, errors, p, "method", method.name, method.source_loc);
         }
 
         // `return` is a PRIVATE-helper construct only (NEW-012).
@@ -904,6 +906,7 @@ fn validateMethods(
                 try errors.append(allocator, .{
                     .message = "public method must end with an assert() call",
                     .severity = .@"error",
+                    .location = method.source_loc,
                 });
             }
         }
@@ -912,6 +915,7 @@ fn validateMethods(
                 try errors.append(allocator, .{
                     .message = "public method in UnsafeSmartContract must end with an assert() call or a terminal asm({...}) with out_arity 1",
                     .severity = .@"error",
+                    .location = method.source_loc,
                 });
             }
         }
@@ -2389,6 +2393,7 @@ fn checkNoRecursion(
             try errors.append(allocator, .{
                 .message = "recursion detected: method calls itself directly or indirectly",
                 .severity = .@"error",
+                .location = method.source_loc,
             });
         }
     }

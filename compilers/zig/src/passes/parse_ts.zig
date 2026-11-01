@@ -897,7 +897,7 @@ const Parser = struct {
         if (self.current.kind == .lparen) {
             // N-050: a static method is not a contract method.
             if (is_static) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{member_name});
-            var m = self.parseMethod(member_name, is_public, self.tokenSourceLoc(name_tok));
+            var m = self.parseMethod(member_name, is_public, self.tokenSourceLoc(member_first_tok));
             // Issue #123: honour a `/** @sighash <FLAGS> */` directive in the
             // method's leading comment trivia. Only public methods are spending
             // entry points, so a directive on a private helper is meaningless.
