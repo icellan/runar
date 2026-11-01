@@ -688,8 +688,36 @@ const Parser = struct {
 
         return ContractNode{
             .name = name_tok.text, .parent_class = pc, .properties = properties.items,
-            .constructor = constructor orelse .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+            .constructor = constructor orelse self.fallbackConstructor(properties.items),
             .methods = methods.items,
+        };
+    }
+
+    /// N-501: a contract with no `init` gets the constructor TS synthesizes
+    /// (`createFallbackConstructor` in 01-parse-zig.ts): one parameter per
+    /// field without a default, passed to `super(...)` and assigned to its
+    /// field, anchored at the `struct` keyword (N-490). An empty constructor
+    /// here left every such field unassigned and the validator refused it.
+    fn fallbackConstructor(self: *Parser, properties: []const PropertyNode) ConstructorNode {
+        var params: std.ArrayListUnmanaged(ParamNode) = .empty;
+        var super_args: std.ArrayListUnmanaged(Expression) = .empty;
+        var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        for (properties) |prop| {
+            if (prop.initializer != null) continue;
+            params.append(self.allocator, .{
+                .name = prop.name,
+                .type_info = prop.type_info,
+                .type_name = prop.type_name,
+                .spelled_type = types.spelledIfUnknown(prop.type_info, prop.type_name),
+            }) catch {};
+            super_args.append(self.allocator, .{ .identifier = prop.name }) catch {};
+            assignments.append(self.allocator, .{ .target = prop.name, .value = .{ .identifier = prop.name } }) catch {};
+        }
+        return .{
+            .params = params.items,
+            .super_args = super_args.items,
+            .assignments = assignments.items,
+            .super_loc = self.ctor_loc,
         };
     }
 
@@ -2036,6 +2064,45 @@ test "parse runar.BigintBig as bigint (N-182)" {
     try std.testing.expectEqual(@as(usize, 1), c.methods[0].params.len);
     try std.testing.expectEqual(RunarType.bigint, c.methods[0].params[0].type_info);
     try std.testing.expectEqualStrings("bigint", c.methods[0].params[0].type_name);
+}
+
+// N-501: with no `init`, the constructor is synthesized from the fields that
+// have no default (TS `createFallbackConstructor`): each is a parameter, a
+// `super` argument and an assignment, anchored at the `struct` keyword. A
+// defaulted field is left to its initializer. Proves the parser shape only;
+// the all-tier verdict and bytes are pinned in
+// conformance/negatives/n490-synthesized-constructor-loc-parity.test.ts.
+test "N-501: no init synthesizes the constructor from fields without a default" {
+    const source =
+        \\const runar = @import("runar");
+        \\pub const NoInit = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\    owner: runar.PubKey,
+        \\    count: i64 = 0,
+        \\    pub fn bump(self: *NoInit, sig: runar.Sig) void {
+        \\        runar.assert(runar.checkSig(sig, self.owner));
+        \\        self.count += 1;
+        \\    }
+        \\};
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = parseZig(arena.allocator(), source, "NoInit.runar.zig");
+    try std.testing.expectEqual(@as(usize, 0), res.errors.len);
+    const ctor = res.contract.?.constructor;
+    try std.testing.expectEqual(@as(usize, 1), ctor.params.len);
+    try std.testing.expectEqualStrings("owner", ctor.params[0].name);
+    try std.testing.expectEqual(RunarType.pub_key, ctor.params[0].type_info);
+    try std.testing.expectEqual(@as(usize, 1), ctor.super_args.len);
+    try std.testing.expectEqual(@as(usize, 1), ctor.assignments.len);
+    try std.testing.expectEqualStrings("owner", ctor.assignments[0].target);
+    switch (ctor.assignments[0].value) {
+        .identifier => |name| try std.testing.expectEqualStrings("owner", name),
+        else => return error.UnexpectedVariant,
+    }
+    // `pub const NoInit = struct`: the `struct` keyword, line 2, 1-based column 20 (0-based 19).
+    try std.testing.expectEqual(@as(u32, 2), ctor.super_loc.?.line);
+    try std.testing.expectEqual(@as(u32, 20), ctor.super_loc.?.column);
 }
 
 test "parse constructor struct return assignments" {

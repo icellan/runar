@@ -47,9 +47,10 @@ import { BrokenTier, REPO, Tier, buildSourceTiers, judge } from './tier-harness.
  * What it does NOT prove: the Python and Ruby ANF anchors (unobservable in
  * their artifact; their parsers are fixed alongside and covered by the
  * warning channel only); the TS / Zig warning anchor (no location printed);
- * fold-on artifacts; a Zig `init` that does not end in `return .{ ... }`; the
- * Zig tier on a `.runar.zig` contract with no `init` (Zig refuses it,
- * pre-existing accept/reject split, pinned in the last test).
+ * fold-on artifacts; a Zig `init` that does not end in `return .{ ... }`.
+ * (N-501: the Zig tier used to refuse a `.runar.zig` contract with no `init`;
+ * it now synthesizes the constructor from the field list like TS, and the
+ * last test pins the all-tier verdict and bytes.)
  */
 
 const TIERS = buildSourceTiers();
@@ -190,7 +191,7 @@ describe('N-490: a synthesized constructor is anchored at the contract declarati
   });
 
   for (const c of [...CASES, NO_INIT_ZIG_CASE]) {
-    const tiers = c === NO_INIT_ZIG_CASE ? TIERS.filter((t) => t.id !== 'zig') : TIERS;
+    const tiers = TIERS;
     it(`${base(c.file)}: ANF constructor bindings at ${c.decl}`, () => {
       const got = Object.fromEntries(tiers.map((t) => [t.id, ctorAnfLocs(compileArtifact(t, c.file))]));
       expect(got).toEqual(Object.fromEntries(tiers.map((t) => [t.id, expectedAnf(t.id, c.decl)])));
@@ -210,10 +211,24 @@ describe('N-490: a synthesized constructor is anchored at the contract declarati
     }
   }
 
-  it('Zig still refuses a .runar.zig contract with no init (pre-existing split; drop the zig exclusion above when it accepts)', () => {
-    const zig = TIERS.find((t) => t.id === 'zig')!;
-    const r = judge(zig, NO_INIT_ZIG_CASE.file);
-    expect(r.verdict).toBe('rejected');
-    expect(r.diag).toContain('property must be assigned in the constructor');
+  /**
+   * N-501: a `.runar.zig` StatefulSmartContract with no `init` is accepted by
+   * every tier, and every tier emits the same locking script for it. TS (the
+   * reference, `createFallbackConstructor` in 01-parse-zig.ts) synthesizes
+   * `constructor(owner) { super(owner); this.owner = owner; }` from the
+   * fields without an initializer — every property is assigned from a
+   * constructor argument, so acceptance is sound. Zig used to build an empty
+   * constructor and its validator then refused with "property must be
+   * assigned in the constructor".
+   * Proves: same accept verdict and byte-identical script hex (fold-off) in
+   * all seven tiers. Does not prove: fold-on output, a no-`init` contract
+   * with a defaulted field (the TS rule excludes it from the parameters; the
+   * Zig unit test in parse_zig.zig pins that shape), on-chain execution.
+   */
+  it('NoInit.runar.zig: all seven tiers accept it with identical script hex', () => {
+    const hex = Object.fromEntries(TIERS.map((t) => [t.id, compileArtifact(t, NO_INIT_ZIG_CASE.file).script as string]));
+    const ts = hex.ts!;
+    expect(ts).toMatch(/^[0-9a-f]+$/);
+    expect(hex).toEqual(Object.fromEntries(TIERS.map((t) => [t.id, ts])));
   }, 900_000);
 });
