@@ -514,6 +514,10 @@ struct ZigParser<'a> {
     /// statements the source does not write (the implied super() and
     /// property assignments) are anchored.
     ctor_loc: SourceLocation,
+    /// N-502: names of the struct fields parsed so far, in declaration order.
+    /// An `init` with no `return .{ ... }` assigns each one that shares a name
+    /// with an `init` parameter (the TS parser's rule).
+    field_names: Vec<String>,
     /// Names used as `self` receiver (first parameter whose type == contract name).
     self_names: HashSet<String>,
     /// Names of parameters typed as `StatefulContext`.
@@ -540,6 +544,7 @@ impl<'a> ZigParser<'a> {
             errors,
             contract_name: String::new(),
             ctor_loc: SourceLocation { file: file.to_string(), line: 1, column: 1 },
+            field_names: Vec::new(),
             self_names: HashSet::new(),
             stateful_context_names: HashSet::new(),
             nest: NestingCounter::new(),
@@ -777,6 +782,7 @@ impl<'a> ZigParser<'a> {
             // Field: `name: type [= value],`
             if matches!(self.peek(), Token::Ident(_)) {
                 if let Some(prop) = self.parse_field() {
+                    self.field_names.push(prop.name.clone());
                     properties.push(prop);
                 }
                 continue;
@@ -1230,11 +1236,24 @@ impl<'a> ZigParser<'a> {
 
         self.expect(&Token::RBrace);
 
-        // If no struct return was found, auto-assign params to properties
+        // N-502: no struct return, so assign every field that shares a name
+        // with an `init` parameter, in field declaration order (as TS does).
         if !found_return_struct {
-            // We don't have access to properties here directly, but the
-            // fallback constructor handles that. For user-written init()
-            // with explicit assignments, nothing extra is needed.
+            for field in self.field_names.clone() {
+                if params.iter().any(|p| p.name == field) {
+                    body.push(Statement::Assignment {
+                        target: Expression::PropertyAccess {
+                            property: field.clone(),
+                            source_location: None,
+                        },
+                        value: Expression::Identifier {
+                            name: field,
+                            source_location: None,
+                        },
+                        source_location: self.ctor_loc.clone(),
+                    });
+                }
+            }
         }
 
         body
