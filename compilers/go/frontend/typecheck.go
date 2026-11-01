@@ -570,7 +570,7 @@ func (tc *typeChecker) addError(msg string) {
 }
 
 // addErrorAt anchors an error about an expression at that expression, as the
-// TS reference does, when its position is known (the .runar.ts parser records
+// TS reference does, when its position is known (every surface parser records
 // it, N-463); otherwise it falls back to addError's statement/method anchor.
 func (tc *typeChecker) addErrorAt(msg string, at Expression) {
 	if loc := exprLoc(at); loc != nil {
@@ -596,7 +596,7 @@ func exprLoc(e Expression) *SourceLocation {
 		case ByteStringLiteral:
 			loc = x.SourceLocation
 		case BinaryExpr:
-			// N-472: the .runar.ts parser records where the whole expression
+			// N-472: the parser records where the whole expression
 			// starts, which a leading `(` moves left of the leftmost leaf.
 			if x.SourceLocation.Line != 0 {
 				loc := x.SourceLocation

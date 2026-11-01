@@ -2392,7 +2392,7 @@ pub(crate) fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
                 return source_location.as_ref()
             }
             Expression::BinaryExpr { left, source_location, .. } => {
-                // N-472: the `.runar.ts` parser records where the whole
+                // N-472: the parser records where the whole
                 // expression starts, which a leading `(` moves left of the
                 // leftmost leaf.
                 if let Some(loc) = source_location {
@@ -2400,7 +2400,7 @@ pub(crate) fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
                 }
                 left
             }
-            // N-472: the operator token; the other surfaces record none.
+            // N-472: the operator token.
             Expression::UnaryExpr { source_location, .. } => return source_location.as_ref(),
             Expression::CallExpr { callee, .. } => callee,
             Expression::MemberExpr { object, .. } | Expression::IndexAccess { object, .. } => object,

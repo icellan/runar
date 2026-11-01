@@ -35,7 +35,7 @@ pub const TypeCheckResult = struct {
     contract: ContractNode,
     errors: []const []const u8,
     /// N-463: `error_locations[i]` is where `errors[i]` points in the source,
-    /// when known (only the .runar.ts parser records expression positions).
+    /// when known (every surface parser records expression positions).
     /// Same length as `errors`, or empty.
     error_locations: []const ?types.SourceLocation = &.{},
 

@@ -4,9 +4,9 @@ package runar.compiler.ir.ast;
  * A binary operation like {@code a + b}.
  *
  * <p>{@code sourceLocation} is where the expression starts, including a
- * leading {@code (} (N-472). Only the {@code .runar.ts} parser sets it, as the
- * TS reference does; elsewhere it is {@code null} and typecheck falls back to
- * the leftmost leaf. It is not part of equality.
+ * leading {@code (} (N-472). Every surface parser sets it, as the TS reference
+ * does; a node a parser synthesizes carries {@code null} and typecheck falls
+ * back to the leftmost leaf. It is not part of equality.
  */
 public record BinaryExpr(Expression.BinaryOp op, Expression left, Expression right, SourceLocation sourceLocation)
         implements Expression {

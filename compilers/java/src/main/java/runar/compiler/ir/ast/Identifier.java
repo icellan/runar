@@ -3,8 +3,8 @@ package runar.compiler.ir.ast;
 /**
  * A variable or name reference.
  *
- * <p>{@code sourceLocation} is the identifier's token (N-463). Only the
- * {@code .runar.ts} parser sets it, as the TS reference does; elsewhere it is
+ * <p>{@code sourceLocation} is the identifier's token (N-463). Every surface
+ * parser sets it, as the TS reference does; a synthesized identifier carries
  * {@code null}. It is not part of equality: two identifiers naming the same
  * thing are the same identifier wherever they were written.
  */

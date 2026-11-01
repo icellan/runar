@@ -70,8 +70,8 @@ module RunarCompiler
     end
 
     # A variable or name reference.
-    # source_location is the identifier's token (N-463). Only the .runar.ts
-    # parser sets it, as the TS reference does; elsewhere it is nil.
+    # source_location is the identifier's token (N-463). Every surface
+    # parser sets it, as the TS reference does; a synthesized node carries nil.
     Identifier = Struct.new(:name, :source_location, keyword_init: true) do
       include LocationBlindEquality
     end
@@ -89,15 +89,15 @@ module RunarCompiler
     # op is one of: "+", "-", "*", "/", "%", "===", "!==", "<", "<=",
     #   ">", ">=", "&&", "||", "&", "|", "^", "<<", ">>"
     # source_location is where the expression starts, including a leading `(`
-    # (N-472); .runar.ts parser only, nil elsewhere (typecheck then falls back
-    # to the leftmost leaf).
+    # (N-472); every surface parser sets it, nil on a synthesized node (typecheck
+    # then falls back to the leftmost leaf).
     BinaryExpr = Struct.new(:op, :left, :right, :source_location, keyword_init: true) do
       include LocationBlindEquality
     end
 
     # A unary operation like !a, -a, ~a.
     # op is one of: "!", "-", "~"
-    # source_location is the operator token (N-472); .runar.ts parser only.
+    # source_location is the operator token (N-472); every surface parser sets it.
     UnaryExpr = Struct.new(:op, :operand, :source_location, keyword_init: true) do
       include LocationBlindEquality
     end

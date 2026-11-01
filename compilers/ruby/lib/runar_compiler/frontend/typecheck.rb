@@ -827,7 +827,7 @@ module RunarCompiler
           msg = "#{msg[0, MAX_DIAGNOSTIC_CHARS]}...(#{msg.length - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
         end
         # N-463: an error about an expression is anchored at that expression,
-        # as in TS, when its position is known (the .runar.ts parser records
+        # as in TS, when its position is known (every surface parser records
         # it); otherwise at the statement, then the method, as before.
         loc = (at && expr_loc(at)) || @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
@@ -866,7 +866,7 @@ module RunarCompiler
           case expr
           when Identifier, PropertyAccessExpr, ByteStringLiteral then return expr.source_location
           when BinaryExpr
-            # N-472: the .runar.ts parser records where the whole expression
+            # N-472: the parser records where the whole expression
             # starts, which a leading `(` moves left of the leftmost leaf.
             return expr.source_location if expr.source_location
 

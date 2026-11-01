@@ -561,7 +561,7 @@ class _TypeChecker:
         if len(msg) > MAX_DIAGNOSTIC_CHARS:
             msg = f"{msg[:MAX_DIAGNOSTIC_CHARS]}...({len(msg) - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
         # N-463: an error about an expression is anchored at that expression,
-        # as in TS, when its position is known (the .runar.ts parser records
+        # as in TS, when its position is known (every surface parser records
         # it); otherwise at the statement, then the method, as before.
         loc = _expr_loc(at) if at is not None else None
         if loc is None:
@@ -1838,7 +1838,7 @@ def _expr_loc(expr: Expression) -> SourceLocation | None:
         if isinstance(expr, (Identifier, PropertyAccessExpr, ByteStringLiteral)):
             return expr.source_location
         if isinstance(expr, BinaryExpr):
-            # N-472: the .runar.ts parser records where the whole expression
+            # N-472: the parser records where the whole expression
             # starts, which a leading ``(`` moves left of the leftmost leaf.
             if expr.source_location is not None:
                 return expr.source_location

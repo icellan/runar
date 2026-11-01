@@ -324,15 +324,15 @@ pub enum Expression {
         left: Box<Expression>,
         right: Box<Expression>,
         /// Where the expression starts, including a leading `(` (N-472).
-        /// Only the `.runar.ts` parser sets it, as the TS reference does;
-        /// elsewhere it is `None` and the type checker falls back to the
-        /// leftmost leaf.
+        /// Every surface parser sets it, as the TS reference does; a node a
+        /// parser synthesizes carries `None` and the type checker falls back
+        /// to the leftmost leaf.
         source_location: Option<SourceLocation>,
     },
     UnaryExpr {
         op: UnaryOp,
         operand: Box<Expression>,
-        /// The operator token (N-472); `.runar.ts` parser only.
+        /// The operator token (N-472); every surface parser sets it.
         source_location: Option<SourceLocation>,
     },
     CallExpr {
@@ -350,9 +350,9 @@ pub enum Expression {
     },
     Identifier {
         name: String,
-        /// The identifier's token (N-463). Only the `.runar.ts` parser sets
-        /// it, as the TS reference does; elsewhere it is `None`. The type
-        /// checker derives a composite expression's position from it.
+        /// The identifier's token (N-463). Every surface parser sets it, as
+        /// the TS reference does; a synthesized identifier carries `None`. The
+        /// type checker derives a composite expression's position from it.
         source_location: Option<SourceLocation>,
     },
     BigIntLiteral {

@@ -447,7 +447,7 @@ public final class Typecheck {
                 if (e instanceof Identifier id) return id.sourceLocation();
                 if (e instanceof PropertyAccessExpr pa) return pa.sourceLocation();
                 if (e instanceof ByteStringLiteral bs) return bs.sourceLocation();
-                // N-472: the .runar.ts parser records where the whole
+                // N-472: the parser records where the whole
                 // expression starts, which a leading `(` moves left of the
                 // leftmost leaf.
                 if (e instanceof BinaryExpr be) {
