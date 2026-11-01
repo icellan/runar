@@ -1444,59 +1444,65 @@ public final class RustParser {
     }
 
     private static Expression parseOr(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseAnd(s);
         while (s.matchTok(TOK_PIPEPIPE)) {
             Expression right = parseAnd(s);
-            left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
         }
         return left;
     }
 
     private static Expression parseAnd(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseBitOr(s);
         while (s.matchTok(TOK_AMPAMP)) {
             Expression right = parseBitOr(s);
-            left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
         }
         return left;
     }
 
     private static Expression parseBitOr(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseBitXor(s);
         while (s.matchTok(TOK_PIPE)) {
             Expression right = parseBitXor(s);
-            left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
         }
         return left;
     }
 
     private static Expression parseBitXor(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseBitAnd(s);
         while (s.matchTok(TOK_CARET)) {
             Expression right = parseBitAnd(s);
-            left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
         }
         return left;
     }
 
     private static Expression parseBitAnd(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseEquality(s);
         while (s.matchTok(TOK_AMP)) {
             Expression right = parseEquality(s);
-            left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
         }
         return left;
     }
 
     private static Expression parseEquality(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseComparison(s);
         while (true) {
             if (s.matchTok(TOK_EQEQ)) {
                 Expression right = parseComparison(s);
-                left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
             } else if (s.matchTok(TOK_BANGEQ)) {
                 Expression right = parseComparison(s);
-                left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
             } else {
                 break;
             }
@@ -1505,20 +1511,21 @@ public final class RustParser {
     }
 
     private static Expression parseComparison(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseShift(s);
         while (true) {
             if (s.matchTok(TOK_LT)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
             } else if (s.matchTok(TOK_LTEQ)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
             } else if (s.matchTok(TOK_GT)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
             } else if (s.matchTok(TOK_GTEQ)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
             } else {
                 break;
             }
@@ -1527,14 +1534,15 @@ public final class RustParser {
     }
 
     private static Expression parseShift(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseAddSub(s);
         while (true) {
             if (s.matchTok(TOK_LSHIFT)) {
                 Expression right = parseAddSub(s);
-                left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
             } else if (s.matchTok(TOK_RSHIFT)) {
                 Expression right = parseAddSub(s);
-                left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
             } else {
                 break;
             }
@@ -1543,14 +1551,15 @@ public final class RustParser {
     }
 
     private static Expression parseAddSub(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseMulDiv(s);
         while (true) {
             if (s.matchTok(TOK_PLUS)) {
                 Expression right = parseMulDiv(s);
-                left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
             } else if (s.matchTok(TOK_MINUS)) {
                 Expression right = parseMulDiv(s);
-                left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
             } else {
                 break;
             }
@@ -1559,17 +1568,18 @@ public final class RustParser {
     }
 
     private static Expression parseMulDiv(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseUnary(s);
         while (true) {
             if (s.matchTok(TOK_STAR)) {
                 Expression right = parseUnary(s);
-                left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
             } else if (s.matchTok(TOK_SLASH)) {
                 Expression right = parseUnary(s);
-                left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
             } else if (s.matchTok(TOK_PERCENT)) {
                 Expression right = parseUnary(s);
-                left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
             } else {
                 break;
             }
@@ -1578,8 +1588,9 @@ public final class RustParser {
     }
 
     private static Expression parseUnary(State s) {
+        SourceLocation opLoc = s.loc();
         if (s.matchTok(TOK_BANG)) {
-            return new UnaryExpr(Expression.UnaryOp.NOT, s.nest.nested(() -> parseUnary(s)));
+            return new UnaryExpr(Expression.UnaryOp.NOT, s.nest.nested(() -> parseUnary(s)), opLoc);
         }
         if (s.matchTok(TOK_MINUS)) {
             // F-026: a signed-suffix minimum (`128i8`) is legal under this
@@ -1594,10 +1605,10 @@ public final class RustParser {
                 }
                 if (closed) s.tokens.get(k).negOnly = false;
             }
-            return new UnaryExpr(Expression.UnaryOp.NEG, s.nest.nested(() -> parseUnary(s)));
+            return new UnaryExpr(Expression.UnaryOp.NEG, s.nest.nested(() -> parseUnary(s)), opLoc);
         }
         if (s.matchTok(TOK_TILDE)) {
-            return new UnaryExpr(Expression.UnaryOp.BIT_NOT, s.nest.nested(() -> parseUnary(s)));
+            return new UnaryExpr(Expression.UnaryOp.BIT_NOT, s.nest.nested(() -> parseUnary(s)), opLoc);
         }
         if (s.check(TOK_AMP)) {
             // & or &mut — borrow operators, no AST node.

@@ -1679,67 +1679,74 @@ public final class PyParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(TokKind.PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseNot();
             while (match(TokKind.AMPAMP)) {
                 Expression right = parseNot();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseNot() {
+            SourceLocation opLoc = loc();
             if (match(TokKind.BANG)) {
                 Expression operand = nest.nested(this::parseNot);
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             return parseBitwiseOr();
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(TokKind.PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(TokKind.CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(TokKind.AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(TokKind.EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(TokKind.NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1748,20 +1755,21 @@ public final class PyParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(TokKind.LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(TokKind.LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(TokKind.GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(TokKind.GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1770,14 +1778,15 @@ public final class PyParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(TokKind.LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(TokKind.RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1786,14 +1795,15 @@ public final class PyParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(TokKind.PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(TokKind.MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1802,20 +1812,21 @@ public final class PyParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(TokKind.STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(TokKind.SLASHSLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TokKind.SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TokKind.PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1824,17 +1835,18 @@ public final class PyParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             if (match(TokKind.MINUS)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.NEG, operand);
+                return new UnaryExpr(Expression.UnaryOp.NEG, operand, opLoc);
             }
             if (match(TokKind.TILDE)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, opLoc);
             }
             if (match(TokKind.BANG)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             return parsePower();
         }

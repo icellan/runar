@@ -1531,82 +1531,90 @@ public final class RbParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (peek().kind == TK.OR || peek().kind == TK.PIPEPIPE) {
                 advance();
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseNot();
             while (peek().kind == TK.AND || peek().kind == TK.AMPAMP) {
                 advance();
                 Expression right = parseNot();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseNot() {
+            SourceLocation opLoc = loc();
             if (peek().kind == TK.NOT || peek().kind == TK.BANG) {
                 advance();
                 Expression operand = nest.nested(this::parseNot);
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             return parseBitOr();
         }
 
         Expression parseBitOr() {
+            SourceLocation start = loc();
             Expression left = parseBitXor();
             while (peek().kind == TK.PIPE) {
                 advance();
                 Expression right = parseBitXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitXor() {
+            SourceLocation start = loc();
             Expression left = parseBitAnd();
             while (peek().kind == TK.CARET) {
                 advance();
                 Expression right = parseBitAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (peek().kind == TK.AMP) {
                 advance();
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.EQEQ) {
                     advance();
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (k == TK.NOTEQ) {
                     advance();
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else break;
             }
             return left;
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 TK k = peek().kind;
@@ -1620,72 +1628,76 @@ public final class RbParser {
                 if (op == null) break;
                 advance();
                 Expression right = parseShift();
-                left = new BinaryExpr(op, left, right);
+                left = new BinaryExpr(op, left, right, start);
             }
             return left;
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAddSub();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.LSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub(), start);
                 } else if (k == TK.RSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub(), start);
                 } else break;
             }
             return left;
         }
 
         Expression parseAddSub() {
+            SourceLocation start = loc();
             Expression left = parseMulDiv();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.PLUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv(), start);
                 } else if (k == TK.MINUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv(), start);
                 } else break;
             }
             return left;
         }
 
         Expression parseMulDiv() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.STAR) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary(), start);
                 } else if (k == TK.SLASH) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary(), start);
                 } else if (k == TK.PERCENT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary(), start);
                 } else break;
             }
             return left;
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             TK k = peek().kind;
             if (k == TK.MINUS) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (k == TK.TILDE) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (k == TK.BANG) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             return parsePower();
         }
@@ -1908,10 +1920,10 @@ public final class RbParser {
             if (e instanceof BinaryExpr be) {
                 return new BinaryExpr(be.op(),
                     rewriteExpr(be.left(), methodNames),
-                    rewriteExpr(be.right(), methodNames));
+                    rewriteExpr(be.right(), methodNames), be.sourceLocation());
             }
             if (e instanceof UnaryExpr ue) {
-                return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames));
+                return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames), ue.sourceLocation());
             }
             if (e instanceof TernaryExpr te) {
                 return new TernaryExpr(

@@ -1265,59 +1265,65 @@ public final class MoveParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(Kind.PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitOr();
             while (match(Kind.AMPAMP)) {
                 Expression right = parseBitOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitOr() {
+            SourceLocation start = loc();
             Expression left = parseBitXor();
             while (match(Kind.PIPE)) {
                 Expression right = parseBitXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitXor() {
+            SourceLocation start = loc();
             Expression left = parseBitAnd();
             while (match(Kind.CARET)) {
                 Expression right = parseBitAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(Kind.AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(Kind.EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(Kind.NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1326,20 +1332,21 @@ public final class MoveParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(Kind.LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(Kind.LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(Kind.GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(Kind.GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1348,14 +1355,15 @@ public final class MoveParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(Kind.SHL)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(Kind.SHR)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1364,14 +1372,15 @@ public final class MoveParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(Kind.PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(Kind.MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1380,17 +1389,18 @@ public final class MoveParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(Kind.STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(Kind.SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(Kind.PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1399,14 +1409,15 @@ public final class MoveParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             if (match(Kind.BANG)) {
-                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Kind.MINUS)) {
-                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Kind.TILDE)) {
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Kind.AMP)) {
                 matchIdent("mut");

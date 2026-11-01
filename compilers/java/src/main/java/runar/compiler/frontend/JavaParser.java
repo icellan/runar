@@ -775,7 +775,7 @@ public final class JavaParser {
                 && leftMi.getArguments().size() == 1) {
                 Expression a = convertExpression(leftMs.getExpression(), filename, cu);
                 Expression b = convertExpression(leftMi.getArguments().get(0), filename, cu);
-                return new BinaryExpr(op, a, b);
+                return new BinaryExpr(op, a, b, locationOf(bt, cu, filename));
             }
             // Symmetric: `0 <cmp> <a>.compareTo(<b>)` → `<b> <cmp> <a>`.
             if (isComparisonOp(op)
@@ -788,11 +788,12 @@ public final class JavaParser {
                 && rightMi.getArguments().size() == 1) {
                 Expression a = convertExpression(rightMs.getExpression(), filename, cu);
                 Expression b = convertExpression(rightMi.getArguments().get(0), filename, cu);
-                return new BinaryExpr(op, b, a);
+                return new BinaryExpr(op, b, a, locationOf(bt, cu, filename));
             }
             return new BinaryExpr(op,
                 convertExpression(bt.getLeftOperand(), filename, cu),
-                convertExpression(bt.getRightOperand(), filename, cu)
+                convertExpression(bt.getRightOperand(), filename, cu),
+                locationOf(bt, cu, filename)
             );
         }
         if (e instanceof UnaryTree ut) {
@@ -1203,9 +1204,9 @@ public final class JavaParser {
     private static Expression convertUnary(UnaryTree ut, String filename, Unit cu) {
         Expression operand = convertExpression(ut.getExpression(), filename, cu);
         return switch (ut.getKind()) {
-            case LOGICAL_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.NOT, operand);
-            case UNARY_MINUS -> new UnaryExpr(Expression.UnaryOp.NEG, operand);
-            case BITWISE_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+            case LOGICAL_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.NOT, operand, locationOf(ut, cu, filename));
+            case UNARY_MINUS -> new UnaryExpr(Expression.UnaryOp.NEG, operand, locationOf(ut, cu, filename));
+            case BITWISE_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, locationOf(ut, cu, filename));
             case UNARY_PLUS -> operand; // +x == x
             case PREFIX_INCREMENT -> new IncrementExpr(operand, true);
             case POSTFIX_INCREMENT -> new IncrementExpr(operand, false);

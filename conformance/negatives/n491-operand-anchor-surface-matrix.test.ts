@@ -89,25 +89,6 @@ const SHAPES: Record<string, [string, Partial<Record<Surface | '*', string>>]> =
   'paren-ternary': [AND_LEFT, { '*': '(flag ? x : x) + 1', py: '(x if flag else x) + 1' }],
 };
 
-/** The matrix fixtures for `shapes` on `surfaces` (skipping NO_TERNARY pairs). */
-function on(shapes: string[], surfaces: readonly Surface[] = SURFACES): string[] {
-  return surfaces.flatMap((s) =>
-    shapes
-      .filter((sh) => !(sh === 'paren-ternary' && NO_TERNARY[s] !== undefined))
-      .map((sh) => `N491-${s}-${sh}.runar.${s}`),
-  );
-}
-
-/**
- * The shapes the five non-Zig peers anchor differently on every surface, as
- * measured at the N-491 tip: a unary `!` / `-` and a literal-led composite
- * fall back to the enclosing statement, and a composite led by a
- * parenthesised call or ternary anchors at the first token INSIDE the `(`
- * instead of at the `(` itself. Identifier operands and a parenthesis
- * wrapping the whole operand already agree.
- */
-const PEER_SHAPES = ['not-bigint', 'neg-bool', 'lit-led', 'paren-call', 'paren-ternary'];
-
 /**
  * (tier, fixture) pairs whose anchor still differs from TS's, measured at the
  * N-491 tip. Each tier's follow-up item empties its list.
@@ -123,8 +104,8 @@ const DIVERGENT: Record<string, string[]> = {
   python: [],
   // N-496 (Ruby): converged — every Ruby-side surface parser records operand locations.
   ruby: [],
-  // N-497 (Java)
-  java: on(PEER_SHAPES),
+  // N-497 (Java): converged — every Java-side surface parser records operand locations.
+  java: [],
 };
 
 interface Row {

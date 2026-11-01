@@ -195,22 +195,17 @@ const CASES: Array<[string, number, string | null, string]> = [
   // N-492: the Zig surface parsers now record operand locations, so the
   // identifier-operand shape converged on `.runar.sol` in all seven tiers.
   ['N489-sol-and-right.runar.sol', 14, 'x)', "ight operand of '&&' must be boolean"],
+  // N-497: the Java tier now anchors operands as TS does on every surface, so
+  // the last rows that were pending on it converged in all seven tiers.
+  ['N489-go-lit-led.runar.go', 14, '5 + 1', "eft operand of '&&' must be boolean"],
+  ['N489-go-paren-call.runar.go', 14, '(runar.Abs(x)) + 1', "eft operand of '&&' must be boolean"],
+  ['N489-rs-not-bigint.runar.rs', 14, '!x', "perand of '!' must be boolean"],
+  ['N489-rs-paren-call.runar.rs', 14, '(abs(x)) + 1', "eft operand of '&&' must be boolean"],
+  ['N489-zig-lit-led.runar.zig', 16, '5 + 1', "eft operand of '&&' must be boolean"],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */
-const ANCHOR_PENDING: Array<[string, string]> = [
-  // N-489: TS locates these on the named surface exactly where it does on
-  // `.runar.ts` (so the surface is not the open question), but other tiers do
-  // not yet: the go / python /
-  // ruby / java / rust / zig tiers fall back to the statement on `.runar.go`,
-  // `.runar.rs` and `.runar.zig` for a literal-led or paren-call-led composite
-  // and (`.runar.rs`) a unary `!`. Move a row to CASES when its tiers converge.
-  ['N489-go-lit-led.runar.go', "eft operand of '&&' must be boolean"],
-  ['N489-go-paren-call.runar.go', "eft operand of '&&' must be boolean"],
-  ['N489-rs-not-bigint.runar.rs', "perand of '!' must be boolean"],
-  ['N489-rs-paren-call.runar.rs', "eft operand of '&&' must be boolean"],
-  ['N489-zig-lit-led.runar.zig', "eft operand of '&&' must be boolean"],
-];
+const ANCHOR_PENDING: Array<[string, string]> = [];
 
 function expectedColumn(fixture: string, line: number, anchor: string): number {
   const text = readFileSync(join(REPO, 'conformance/negatives', fixture), 'utf8').split('\n')[line - 1] ?? '';

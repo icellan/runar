@@ -1170,59 +1170,65 @@ public final class SolParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(TOK_PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (match(TOK_AMPAMP)) {
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(TOK_PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(TOK_CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(TOK_AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(TOK_EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(TOK_NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1231,20 +1237,21 @@ public final class SolParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(TOK_LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(TOK_LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(TOK_GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(TOK_GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1253,14 +1260,15 @@ public final class SolParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(TOK_LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(TOK_RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1269,14 +1277,15 @@ public final class SolParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(TOK_PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(TOK_MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1285,17 +1294,18 @@ public final class SolParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(TOK_STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(TOK_SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TOK_PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1304,17 +1314,18 @@ public final class SolParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             if (match(TOK_BANG)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             if (match(TOK_MINUS)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.NEG, operand);
+                return new UnaryExpr(Expression.UnaryOp.NEG, operand, opLoc);
             }
             if (match(TOK_TILDE)) {
                 Expression operand = nest.nested(this::parseUnary);
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, opLoc);
             }
             if (match(TOK_PLUSPLUS)) {
                 Expression operand = nest.nested(this::parseUnary);
@@ -1486,10 +1497,10 @@ public final class SolParser {
         if (expr instanceof BinaryExpr be) {
             return new BinaryExpr(be.op(),
                 renameInExpr(be.left(), renameMap),
-                renameInExpr(be.right(), renameMap));
+                renameInExpr(be.right(), renameMap), be.sourceLocation());
         }
         if (expr instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), renameInExpr(ue.operand(), renameMap));
+            return new UnaryExpr(ue.op(), renameInExpr(ue.operand(), renameMap), ue.sourceLocation());
         }
         if (expr instanceof CallExpr ce) {
             List<Expression> newArgs = new ArrayList<>(ce.args().size());
@@ -1601,11 +1612,12 @@ public final class SolParser {
             return new BinaryExpr(
                 be.op(),
                 rewriteBareProps(be.left(), propNames, paramNames, methodNames),
-                rewriteBareProps(be.right(), propNames, paramNames, methodNames)
+                rewriteBareProps(be.right(), propNames, paramNames, methodNames),
+                be.sourceLocation()
             );
         }
         if (expr instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), rewriteBareProps(ue.operand(), propNames, paramNames, methodNames));
+            return new UnaryExpr(ue.op(), rewriteBareProps(ue.operand(), propNames, paramNames, methodNames), ue.sourceLocation());
         }
         if (expr instanceof CallExpr ce) {
             // Bare method call: foo(args) -> this.foo(args)

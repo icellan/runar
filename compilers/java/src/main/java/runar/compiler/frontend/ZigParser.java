@@ -1283,65 +1283,71 @@ public final class ZigParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (current().kind == Kind.PIPEPIPE) {
                 advance();
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (current().kind == Kind.AMPAMP) {
                 advance();
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (current().kind == Kind.PIPE) {
                 advance();
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (current().kind == Kind.CARET) {
                 advance();
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (current().kind == Kind.AMP) {
                 advance();
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.EQEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, parseComparison());
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, parseComparison(), start);
                 } else if (k == Kind.NOTEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, parseComparison());
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, parseComparison(), start);
                 } else {
                     break;
                 }
@@ -1350,21 +1356,22 @@ public final class ZigParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.LT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, parseShift(), start);
                 } else if (k == Kind.LTEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, parseShift(), start);
                 } else if (k == Kind.GT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, parseShift(), start);
                 } else if (k == Kind.GTEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, parseShift(), start);
                 } else {
                     break;
                 }
@@ -1373,15 +1380,16 @@ public final class ZigParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAddSub();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.LSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub(), start);
                 } else if (k == Kind.RSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub(), start);
                 } else {
                     break;
                 }
@@ -1390,15 +1398,16 @@ public final class ZigParser {
         }
 
         Expression parseAddSub() {
+            SourceLocation start = loc();
             Expression left = parseMulDiv();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.PLUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv(), start);
                 } else if (k == Kind.MINUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv(), start);
                 } else {
                     break;
                 }
@@ -1407,18 +1416,19 @@ public final class ZigParser {
         }
 
         Expression parseMulDiv() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.STAR) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary(), start);
                 } else if (k == Kind.SLASH) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary(), start);
                 } else if (k == Kind.PERCENT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary(), start);
                 } else {
                     break;
                 }
@@ -1427,18 +1437,19 @@ public final class ZigParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             Kind k = current().kind;
             if (k == Kind.BANG) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (k == Kind.MINUS) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (k == Kind.TILDE) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary));
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
             }
             // Zig's `&` is the address-of operator used for slice coercion
             // at call sites like `&.{sig1, sig2}` (an anonymous-struct
@@ -1847,10 +1858,10 @@ public final class ZigParser {
         if (e instanceof BinaryExpr be) {
             return new BinaryExpr(be.op(),
                 rewriteExpr(be.left(), methodNames, scope),
-                rewriteExpr(be.right(), methodNames, scope));
+                rewriteExpr(be.right(), methodNames, scope), be.sourceLocation());
         }
         if (e instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames, scope));
+            return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames, scope), ue.sourceLocation());
         }
         if (e instanceof TernaryExpr te) {
             return new TernaryExpr(
