@@ -125,10 +125,9 @@ class TestParserRsEdges < Minitest::Test
     end
   end
 
-  def test_no_contract_attribute_emits_no_methods
-    # A plain Rust struct (no #[runar::contract]) without an impl block is
-    # parsed as a methodless contract — downstream validation rejects it for
-    # missing public methods. The parser is intentionally lenient here.
+  def test_no_contract_attribute_is_refused
+    # N-503: a plain Rust struct (no #[runar::contract]) is not a contract.
+    # Every tier refuses it with the same diagnostic.
     source = <<~RS
       use runar::prelude::*;
 
@@ -138,8 +137,8 @@ class TestParserRsEdges < Minitest::Test
     RS
 
     result = parse(source, 'Plain.runar.rs')
-    refute_nil result.contract
-    assert_empty result.contract.methods,
-                 'plain struct without impl must produce no methods'
+    assert_nil result.contract
+    assert(result.errors.any? { |e| e.format_message.include?('no Rúnar contract struct found in Rust source') },
+           "expected the shared no-contract diagnostic, got: #{result.errors.map(&:format_message)}")
   end
 end

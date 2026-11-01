@@ -635,19 +635,9 @@ module RunarCompiler
             next
           end
 
-          if check(TOK_PUB) || check(TOK_STRUCT)
-            advance if check(TOK_PUB)
-            if check(TOK_STRUCT)
-              result = parse_struct_decl
-              if result
-                @contract_name = result[:name]
-                @contract_loc = result[:struct_loc]
-                parent_class = result[:parent_class]
-                properties = result[:properties]
-              end
-              next
-            end
-          end
+          # N-503: a struct without #[runar::contract] (or the stateful / unsafe
+          # spellings) is not a contract; it falls through to the token skip
+          # below, like every other tier.
 
           if check(TOK_IMPL)
             impl_methods = parse_impl_block

@@ -432,21 +432,9 @@ class RustParser extends ParserCore<RustToken> {
         continue;
       }
 
-      if (this.current().type === 'pub' || this.current().type === 'struct') {
-        // Struct without #[runar::contract] — still parse it
-        if (this.current().type === 'pub') this.advance();
-        if (this.current().type === 'struct') {
-          const result = this.parseStructDecl();
-          if (result) {
-            this.contractName = result.name;
-            this.contractLoc = result.structLoc;
-            parentClass = result.parentClass;
-            properties.push(...result.properties);
-          }
-          continue;
-        }
-      }
-
+      // N-503: a struct without #[runar::contract] (or the stateful / unsafe
+      // spellings) is not a contract; it falls through to the token skip below,
+      // like every other tier.
       if (this.current().type === 'impl') {
         const implMethods = this.parseImplBlock();
         methods.push(...implMethods);
