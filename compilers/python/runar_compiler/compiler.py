@@ -1216,6 +1216,11 @@ def artifact_to_json(artifact: Artifact) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def source_loc_to_wire(loc: Any) -> dict[str, Any]:
+    """N-498: ANF `sourceLoc` wire shape ({file, line, column}, 0-based column)."""
+    return {"file": loc.file, "line": loc.line, "column": loc.column}
+
+
 def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
     """Serialize an ANFProgram to a JSON-compatible dict (camelCase keys)."""
     def _ser_value(v: Any) -> dict[str, Any]:
@@ -1295,7 +1300,10 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
         return d
 
     def _ser_binding(b: Any) -> dict[str, Any]:
-        return {"name": b.name, "value": _ser_value(b.value)}
+        d = {"name": b.name, "value": _ser_value(b.value)}
+        if b.source_loc is not None:
+            d["sourceLoc"] = source_loc_to_wire(b.source_loc)
+        return d
 
     return {
         "contractName": program.contract_name,

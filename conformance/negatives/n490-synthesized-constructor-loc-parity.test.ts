@@ -28,10 +28,10 @@ import { BrokenTier, REPO, Tier, buildSourceTiers, judge } from './tier-harness.
  *
  * Two channels, because no single one reaches every tier:
  *  - the artifact's ANF constructor bindings (`anf.methods[constructor].body[].sourceLoc`):
- *    TS, Go, Zig and Java emit it with 0-based columns. Rust emits every ANF
- *    column 1-based (all bindings, not just these — pre-existing, not this
- *    item), so its row is the same line and column + 1. Python and Ruby emit
- *    no `sourceLoc` on any ANF binding (pre-existing, not this item).
+ *    TS, Go, Zig, Java, Python and Ruby emit it with 0-based columns (Python
+ *    and Ruby since N-498). Rust emits every ANF column 1-based (all
+ *    bindings, not just these — pre-existing, not this item), so its row is
+ *    the same line and column + 1.
  *  - the `StatefulSmartContract has no mutable properties` warning, which every
  *    validator anchors at the constructor: Go, Rust, Python, Ruby and Java
  *    print its `file:line:col`; the TS and Zig CLIs print warnings without a
@@ -44,9 +44,7 @@ import { BrokenTier, REPO, Tier, buildSourceTiers, judge } from './tier-harness.
  * line:column (the `init` position for the Zig `init` warning), and the
  * tiers that do not expose one are pinned as such, so a tier that starts or
  * stops emitting one fails here.
- * What it does NOT prove: the Python and Ruby ANF anchors (unobservable in
- * their artifact; their parsers are fixed alongside and covered by the
- * warning channel only); the TS / Zig warning anchor (no location printed);
+ * What it does NOT prove: the TS / Zig warning anchor (no location printed);
  * fold-on artifacts; a Zig `init` that does not end in `return .{ ... }`.
  * (N-501: the Zig tier used to refuse a `.runar.zig` contract with no `init`;
  * it now synthesizes the constructor from the field list like TS, and the
@@ -159,7 +157,6 @@ function ctorAnfLocs(artifact: Record<string, any>): Array<string | null> {
 
 /** What each tier must report on the ANF channel for a declaration at `decl`. */
 function expectedAnf(tierId: string, decl: string): Array<string | null> {
-  if (tierId === 'python' || tierId === 'ruby') return [null];
   if (tierId === 'rust') {
     const [l, c] = decl.split(':').map(Number);
     return [`${l}:${c! + 1}`];

@@ -18,6 +18,7 @@ import os
 import sys
 
 from runar_compiler.compiler import (
+    source_loc_to_wire,
     CompilationError,
     artifact_to_json,
     compile_from_ir,
@@ -26,6 +27,7 @@ from runar_compiler.compiler import (
     compile_source_to_ir_collecting_warnings,
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
+from runar_compiler.ir.types import SourceLocation
 
 
 # GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
@@ -384,7 +386,6 @@ _FIELD_ALIASES = {
 # Fields that should be excluded from IR output (internal decoded fields)
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
-    "source_loc",  # debug-only, not part of conformance
     # Issue #109 (@embedAlways): compiler-internal DCE opt-out flag on
     # load_prop. The Zig reference keeps it out of the emitted IR too, so
     # excluding it here keeps the cross-tier ANF bytes identical.
@@ -424,6 +425,8 @@ def _anf_to_camel_dict(obj: object) -> object:
     import json as _json
     from dataclasses import fields, is_dataclass
     if is_dataclass(obj) and not isinstance(obj, type):
+        if isinstance(obj, SourceLocation):
+            return source_loc_to_wire(obj)
         d: dict = {}
         has_raw_value = False
         kind_val = getattr(obj, "kind", None)

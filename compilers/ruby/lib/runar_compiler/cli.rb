@@ -49,8 +49,6 @@ module RunarCompiler
     IR_EXCLUDED_FIELDS = Set.new([
       # Decoded constant values; the wire carries the raw "value" instead.
       "const_string", "const_big_int", "const_bool", "const_int",
-      # Debug-only source positions, not part of conformance.
-      "source_loc",
       # Issue #109 (@embedAlways): compiler-internal DCE opt-out on load_prop.
       # The Zig reference keeps it out of the emitted IR too.
       "preserve",

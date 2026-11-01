@@ -1364,7 +1364,12 @@ module RunarCompiler
     end
 
     ser_binding = lambda do |b|
-      { "name" => b.name, "value" => ser_value.call(b.value) }
+      d = { "name" => b.name, "value" => ser_value.call(b.value) }
+      # N-498: same {file, line, column} shape and 0-based column as TS.
+      unless b.source_loc.nil?
+        d["sourceLoc"] = { "file" => b.source_loc.file, "line" => b.source_loc.line, "column" => b.source_loc.column }
+      end
+      d
     end
 
     out = {
