@@ -70,7 +70,16 @@ impl ValueMap {
         ValueMap { values: HashMap::new(), rebound }
     }
 
+    /// N-510: an `if`/`loop` binding is stored as an opaque stub, never as
+    /// its value. No rule resolves a name to an `if`/`loop` (every lookup
+    /// matches a `Call` / `LoadConst`), but the value carries its whole nested
+    /// subtree, and `nested_scope` clones this map once per nesting level —
+    /// 3,840 levels deep that was cubic work (30 s on N-264's D=32 x 120).
     fn insert(&mut self, name: String, value: ANFValue) {
+        let value = match value {
+            ANFValue::If { .. } | ANFValue::Loop { .. } => ANFValue::LoadParam { name: String::new() },
+            v => v,
+        };
         self.values.insert(name, value);
     }
 
