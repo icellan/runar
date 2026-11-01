@@ -1350,46 +1350,51 @@ module RunarCompiler
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match_tok(TOK_PIPEPIPE)
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_bit_or
         while match_tok(TOK_AMPAMP)
           right = parse_bit_or
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bit_or
+        start = loc
         left = parse_bit_xor
         while match_tok(TOK_PIPE)
           right = parse_bit_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bit_xor
+        start = loc
         left = parse_bit_and
         while match_tok(TOK_CARET)
           right = parse_bit_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bit_and
+        start = loc
         left = parse_equality
         while match_tok(TOK_AMP)
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
@@ -1456,12 +1461,13 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match_tok(TOK_LSHIFT)
-            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive, source_location: start)
           elsif match_tok(TOK_RSHIFT)
-            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive, source_location: start)
           else
             break
           end
@@ -1470,12 +1476,13 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match_tok(TOK_PLUS)
-            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative, source_location: start)
           elsif match_tok(TOK_MINUS)
-            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative, source_location: start)
           else
             break
           end
@@ -1484,14 +1491,15 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match_tok(TOK_STAR)
-            left = BinaryExpr.new(op: "*", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "*", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_SLASH)
-            left = BinaryExpr.new(op: "/", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "/", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_PERCENT)
-            left = BinaryExpr.new(op: "%", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "%", left: left, right: parse_unary, source_location: start)
           else
             break
           end
@@ -1500,21 +1508,22 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: nested { parse_unary })
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_MINUS)
           # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
           # legal only as the direct operand of this minus.
           peek.neg_only = false if check(TOK_NUMBER)
-          return UnaryExpr.new(op: "-", operand: nested { parse_unary })
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_PLUS)
           # Unary plus is a no-op in Java (+x == x).
           return nested { parse_unary }
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_PLUSPLUS)
           return IncrementExpr.new(operand: nested { parse_unary }, prefix: true)

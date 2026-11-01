@@ -1728,76 +1728,83 @@ module RunarCompiler
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while peek.kind == TOK_OR || peek.kind == TOK_PIPEPIPE
           advance
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_not
         while peek.kind == TOK_AND || peek.kind == TOK_AMPAMP
           advance
           right = parse_not
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_not
+        op_loc = loc
         if peek.kind == TOK_NOT || peek.kind == TOK_BANG
           advance
           operand = nested { parse_not }
-          return UnaryExpr.new(op: "!", operand: operand)
+          return UnaryExpr.new(op: "!", operand: operand, source_location: op_loc)
         end
         parse_bitwise_or
       end
 
       def parse_bitwise_or
+        start = loc
         left = parse_bitwise_xor
         while peek.kind == TOK_PIPE
           advance
           right = parse_bitwise_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_xor
+        start = loc
         left = parse_bitwise_and
         while peek.kind == TOK_CARET
           advance
           right = parse_bitwise_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_and
+        start = loc
         left = parse_equality
         while peek.kind == TOK_AMP
           advance
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           kind = peek.kind
           if kind == TOK_EQEQ
             advance
             right = parse_comparison
-            left = BinaryExpr.new(op: "===", left: left, right: right)
+            left = BinaryExpr.new(op: "===", left: left, right: right, source_location: start)
           elsif kind == TOK_NOTEQ
             advance
             right = parse_comparison
-            left = BinaryExpr.new(op: "!==", left: left, right: right)
+            left = BinaryExpr.new(op: "!==", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1806,25 +1813,26 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           kind = peek.kind
           if kind == TOK_LT
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: "<", left: left, right: right)
+            left = BinaryExpr.new(op: "<", left: left, right: right, source_location: start)
           elsif kind == TOK_LTEQ
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: "<=", left: left, right: right)
+            left = BinaryExpr.new(op: "<=", left: left, right: right, source_location: start)
           elsif kind == TOK_GT
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: ">", left: left, right: right)
+            left = BinaryExpr.new(op: ">", left: left, right: right, source_location: start)
           elsif kind == TOK_GTEQ
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: ">=", left: left, right: right)
+            left = BinaryExpr.new(op: ">=", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1833,17 +1841,18 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_add_sub
         loop do
           kind = peek.kind
           if kind == TOK_LSHIFT
             advance
             right = parse_add_sub
-            left = BinaryExpr.new(op: "<<", left: left, right: right)
+            left = BinaryExpr.new(op: "<<", left: left, right: right, source_location: start)
           elsif kind == TOK_RSHIFT
             advance
             right = parse_add_sub
-            left = BinaryExpr.new(op: ">>", left: left, right: right)
+            left = BinaryExpr.new(op: ">>", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1852,17 +1861,18 @@ module RunarCompiler
       end
 
       def parse_add_sub
+        start = loc
         left = parse_mul_div
         loop do
           kind = peek.kind
           if kind == TOK_PLUS
             advance
             right = parse_mul_div
-            left = BinaryExpr.new(op: "+", left: left, right: right)
+            left = BinaryExpr.new(op: "+", left: left, right: right, source_location: start)
           elsif kind == TOK_MINUS
             advance
             right = parse_mul_div
-            left = BinaryExpr.new(op: "-", left: left, right: right)
+            left = BinaryExpr.new(op: "-", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1871,21 +1881,22 @@ module RunarCompiler
       end
 
       def parse_mul_div
+        start = loc
         left = parse_unary
         loop do
           kind = peek.kind
           if kind == TOK_STAR
             advance
             right = parse_unary
-            left = BinaryExpr.new(op: "*", left: left, right: right)
+            left = BinaryExpr.new(op: "*", left: left, right: right, source_location: start)
           elsif kind == TOK_SLASH
             advance
             right = parse_unary
-            left = BinaryExpr.new(op: "/", left: left, right: right)
+            left = BinaryExpr.new(op: "/", left: left, right: right, source_location: start)
           elsif kind == TOK_PERCENT
             advance
             right = parse_unary
-            left = BinaryExpr.new(op: "%", left: left, right: right)
+            left = BinaryExpr.new(op: "%", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1894,18 +1905,19 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         kind = peek.kind
         if kind == TOK_MINUS
           advance
-          return UnaryExpr.new(op: "-", operand: nested { parse_unary })
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary }, source_location: op_loc)
         end
         if kind == TOK_TILDE
           advance
-          return UnaryExpr.new(op: "~", operand: nested { parse_unary })
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
         if kind == TOK_BANG
           advance
-          return UnaryExpr.new(op: "!", operand: nested { parse_unary })
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary }, source_location: op_loc)
         end
         parse_power
       end
