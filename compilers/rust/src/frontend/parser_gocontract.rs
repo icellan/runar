@@ -2206,7 +2206,7 @@ impl<'a> GoParser<'a> {
             self.errors.push(Diagnostic::error(go_ambiguous_precedence_message(&first, &second), Some(start.clone())));
         }
         self.ladder_top = Some(op.clone());
-        Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: None }
+        Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) }
     }
 
     fn parse_or(&mut self) -> Option<Expression> {
@@ -2380,21 +2380,22 @@ impl<'a> GoParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Option<Expression> {
+        let op_loc = self.loc();
         match self.current().typ.clone() {
             TokenType::Bang => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(operand), source_location: None })
+                Some(Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
             }
             TokenType::Minus => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(operand), source_location: None })
+                Some(Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
             }
             TokenType::Tilde | TokenType::Caret => {
                 self.advance();
                 let operand = self.nested(None, |p| p.parse_unary())?;
-                Some(Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(operand), source_location: None })
+                Some(Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(operand), source_location: Some(op_loc.clone()) })
             }
             _ => self.parse_postfix(),
         }

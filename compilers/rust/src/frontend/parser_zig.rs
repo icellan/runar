@@ -1671,6 +1671,7 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::OrOr {
@@ -1681,13 +1682,14 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_or();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::AndAnd {
@@ -1698,13 +1700,14 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
@@ -1715,13 +1718,14 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
@@ -1732,13 +1736,14 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
@@ -1749,13 +1754,14 @@ impl<'a> ZigParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
         let mut dt = DepthTracker::new();
         loop {
@@ -1769,7 +1775,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq => {
@@ -1781,7 +1787,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1791,6 +1797,7 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
         let mut dt = DepthTracker::new();
         loop {
@@ -1803,7 +1810,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
@@ -1814,7 +1821,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
@@ -1825,7 +1832,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
@@ -1836,7 +1843,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1846,6 +1853,7 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
         let mut dt = DepthTracker::new();
         loop {
@@ -1858,7 +1866,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::RShift => {
@@ -1869,7 +1877,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1879,6 +1887,7 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
         let mut dt = DepthTracker::new();
         loop {
@@ -1891,7 +1900,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
@@ -1902,7 +1911,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1912,6 +1921,7 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
         let mut dt = DepthTracker::new();
         loop {
@@ -1924,7 +1934,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
@@ -1935,7 +1945,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
@@ -1946,7 +1956,7 @@ impl<'a> ZigParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1956,6 +1966,7 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Bang => {
                 self.advance();
@@ -1963,7 +1974,7 @@ impl<'a> ZigParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Minus => {
@@ -1972,7 +1983,7 @@ impl<'a> ZigParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
@@ -1981,7 +1992,7 @@ impl<'a> ZigParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             // Zig's `&` is the address-of operator used for slice coercion

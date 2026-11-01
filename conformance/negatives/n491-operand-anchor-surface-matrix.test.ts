@@ -117,8 +117,8 @@ const DIVERGENT: Record<string, string[]> = {
   zig: [],
   // N-493 (Go): converged — every Go-side surface parser records operand locations.
   go: [],
-  // N-494 (Rust)
-  rust: on(PEER_SHAPES),
+  // N-494 (Rust): converged — every Rust-side surface parser records operand locations.
+  rust: [],
   // N-495 (Python)
   python: on(PEER_SHAPES),
   // N-496 (Ruby)

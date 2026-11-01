@@ -1387,16 +1387,16 @@ impl<'a> MoveParser<'a> {
                     }
                 }
             }
-            Expression::BinaryExpr { op, left, right, .. } => Expression::BinaryExpr {
+            Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
                 op,
                 left: Box::new(self.convert_self_to_this(*left)),
                 right: Box::new(self.convert_self_to_this(*right)),
-                source_location: None,
+                source_location: source_location,
             },
-            Expression::UnaryExpr { op, operand, .. } => Expression::UnaryExpr {
+            Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
                 op,
                 operand: Box::new(self.convert_self_to_this(*operand)),
-                source_location: None,
+                source_location: source_location,
             },
             Expression::CallExpr { callee, args, .. } => {
                 let new_callee = self.convert_self_to_this(*callee);
@@ -1684,6 +1684,7 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or {
@@ -1694,13 +1695,14 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_or();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::And {
@@ -1711,13 +1713,14 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::Pipe {
@@ -1728,13 +1731,14 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::Caret {
@@ -1745,13 +1749,14 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::Amp {
@@ -1762,13 +1767,14 @@ impl<'a> MoveParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
         let mut dt = DepthTracker::new();
         loop {
@@ -1782,7 +1788,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq => {
@@ -1794,7 +1800,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1804,6 +1810,7 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
         let mut dt = DepthTracker::new();
         loop {
@@ -1816,7 +1823,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
@@ -1827,7 +1834,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
@@ -1838,7 +1845,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
@@ -1849,7 +1856,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1859,6 +1866,7 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
         let mut dt = DepthTracker::new();
         loop {
@@ -1871,7 +1879,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Shr => {
@@ -1882,7 +1890,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1892,6 +1900,7 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
         let mut dt = DepthTracker::new();
         loop {
@@ -1904,7 +1913,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
@@ -1915,7 +1924,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1925,6 +1934,7 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
         let mut dt = DepthTracker::new();
         loop {
@@ -1937,7 +1947,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
@@ -1948,7 +1958,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
@@ -1959,7 +1969,7 @@ impl<'a> MoveParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1969,6 +1979,7 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Bang => {
                 self.advance();
@@ -1976,7 +1987,7 @@ impl<'a> MoveParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Minus => {
@@ -1985,7 +1996,7 @@ impl<'a> MoveParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
@@ -1994,7 +2005,7 @@ impl<'a> MoveParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::PlusPlus => {

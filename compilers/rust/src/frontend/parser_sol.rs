@@ -1436,6 +1436,7 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or {
@@ -1446,13 +1447,14 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_or();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::And {
@@ -1463,13 +1465,14 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
@@ -1480,13 +1483,14 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
@@ -1497,13 +1501,14 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
         let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
@@ -1514,13 +1519,14 @@ impl<'a> SolParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
         let mut dt = DepthTracker::new();
         loop {
@@ -1533,7 +1539,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq | Token::NotEqEq => {
@@ -1544,7 +1550,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1554,6 +1560,7 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
         let mut dt = DepthTracker::new();
         loop {
@@ -1566,7 +1573,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
@@ -1577,7 +1584,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
@@ -1588,7 +1595,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
@@ -1599,7 +1606,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1609,6 +1616,7 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
         let mut dt = DepthTracker::new();
         loop {
@@ -1621,7 +1629,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Shr => {
@@ -1632,7 +1640,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1642,6 +1650,7 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
         let mut dt = DepthTracker::new();
         loop {
@@ -1654,7 +1663,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
@@ -1665,7 +1674,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1675,6 +1684,7 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
         let mut dt = DepthTracker::new();
         loop {
@@ -1687,7 +1697,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
@@ -1698,7 +1708,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
@@ -1709,7 +1719,7 @@ impl<'a> SolParser<'a> {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
-                        source_location: None,
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1719,6 +1729,7 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Not => {
                 self.advance();
@@ -1726,7 +1737,7 @@ impl<'a> SolParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Minus => {
@@ -1735,7 +1746,7 @@ impl<'a> SolParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
@@ -1744,7 +1755,7 @@ impl<'a> SolParser<'a> {
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::PlusPlus => {
@@ -2005,16 +2016,16 @@ fn sol_rename_identifiers_in_expr(
                 .collect(),
             asm_return_type: None,
         },
-        Expression::BinaryExpr { op, left, right, .. } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
             op,
             left: Box::new(sol_rename_identifiers_in_expr(*left, rename_map)),
             right: Box::new(sol_rename_identifiers_in_expr(*right, rename_map)),
-            source_location: None,
+            source_location: source_location,
         },
-        Expression::UnaryExpr { op, operand, .. } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
             op,
             operand: Box::new(sol_rename_identifiers_in_expr(*operand, rename_map)),
-            source_location: None,
+            source_location: source_location,
         },
         Expression::MemberExpr { object, property } => Expression::MemberExpr {
             object: Box::new(sol_rename_identifiers_in_expr(*object, rename_map)),
@@ -2119,16 +2130,16 @@ fn sol_rewrite_expr_bare_props(
                 asm_return_type: None,
             }
         }
-        Expression::BinaryExpr { op, left, right, .. } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
             op,
             left: Box::new(sol_rewrite_expr_bare_props(*left, prop_names, locals, method_names)),
             right: Box::new(sol_rewrite_expr_bare_props(*right, prop_names, locals, method_names)),
-            source_location: None,
+            source_location: source_location,
         },
-        Expression::UnaryExpr { op, operand, .. } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
             op,
             operand: Box::new(sol_rewrite_expr_bare_props(*operand, prop_names, locals, method_names)),
-            source_location: None,
+            source_location: source_location,
         },
         Expression::MemberExpr { object, property } => Expression::MemberExpr {
             object: Box::new(sol_rewrite_expr_bare_props(*object, prop_names, locals, method_names)),

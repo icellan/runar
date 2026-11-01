@@ -1608,6 +1608,7 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_or(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_and()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
@@ -1618,13 +1619,14 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_and(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitor()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
@@ -1635,13 +1637,14 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_bitor(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitxor()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
@@ -1652,13 +1655,14 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_bitxor(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitand()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
@@ -1669,13 +1673,14 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_bitand(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_equality()?;
         let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
@@ -1686,7 +1691,7 @@ impl<'a> JavaParser<'a> {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
@@ -1745,6 +1750,7 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_additive()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -1763,13 +1769,14 @@ impl<'a> JavaParser<'a> {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_additive(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_multiplicative()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -1785,13 +1792,14 @@ impl<'a> JavaParser<'a> {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_multiplicative(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_unary()?;
         let mut dt = DepthTracker::new();
         loop {
@@ -1808,13 +1816,14 @@ impl<'a> JavaParser<'a> {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
-                source_location: None,
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_unary(&mut self) -> Option<Expression> {
+        let op_loc = self.loc();
         match self.current().typ.clone() {
             TokenType::Bang => {
                 self.advance();
@@ -1822,7 +1831,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 })
             }
             TokenType::Minus => {
@@ -1836,7 +1845,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 })
             }
             TokenType::Plus => {
@@ -1850,7 +1859,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
-                    source_location: None,
+                    source_location: Some(op_loc.clone()),
                 })
             }
             TokenType::PlusPlus => {
