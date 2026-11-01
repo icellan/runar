@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { REPO, buildSourceTiers } from './negatives/tier-harness.js';
+import { REPO, buildSourceTiers } from './tier-harness.js';
 
 /**
  * N-498 — Python and Ruby artifacts carry `sourceLoc` on ANF bindings like TS.
