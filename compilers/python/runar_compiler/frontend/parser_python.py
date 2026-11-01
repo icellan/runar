@@ -1481,137 +1481,149 @@ class _PyParser:
         return expr
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_not()
         while self.match(TOK_AMPAMP):
             right = self._parse_not()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_not(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_BANG):
             with self._nest.nested(self.loc):
                 operand = self._parse_not()
-            return UnaryExpr(op="!", operand=operand)
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         return self._parse_bitwise_or()
 
     def _parse_bitwise_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_xor()
         while self.match(TOK_PIPE):
             right = self._parse_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_and()
         while self.match(TOK_CARET):
             right = self._parse_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif self.match(TOK_NOTEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match(TOK_LT):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif self.match(TOK_LTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif self.match(TOK_GT):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif self.match(TOK_GTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_additive()
         while True:
             if self.match(TOK_LSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match(TOK_RSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_additive(self) -> Expression:
+        start = self.loc()
         left = self._parse_multiplicative()
         while True:
             if self.match(TOK_PLUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match(TOK_MINUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_multiplicative(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASHSLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_MINUS):
             with self._nest.nested(self.loc):
                 operand = self._parse_unary()
-            return UnaryExpr(op="-", operand=operand)
+            return UnaryExpr(op="-", operand=operand, source_location=op_loc)
         if self.match(TOK_TILDE):
             with self._nest.nested(self.loc):
                 operand = self._parse_unary()
-            return UnaryExpr(op="~", operand=operand)
+            return UnaryExpr(op="~", operand=operand, source_location=op_loc)
         if self.match(TOK_BANG):
             with self._nest.nested(self.loc):
                 operand = self._parse_unary()
-            return UnaryExpr(op="!", operand=operand)
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         return self._parse_power()
 
     def _parse_power(self) -> Expression:

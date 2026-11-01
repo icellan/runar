@@ -1339,38 +1339,43 @@ class _JavaParser:
         return cond
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match_tok(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_or()
         while self.match_tok(TOK_AMPAMP):
             right = self._parse_bit_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_xor()
         while self.match_tok(TOK_PIPE):
             right = self._parse_bit_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_and()
         while self.match_tok(TOK_CARET):
             right = self._parse_bit_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match_tok(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
@@ -1406,61 +1411,65 @@ class _JavaParser:
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_add()
         while True:
             if self.match_tok(TOK_LSHIFT):
                 right = self._parse_add()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_RSHIFT):
                 right = self._parse_add()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_add(self) -> Expression:
+        start = self.loc()
         left = self._parse_mul()
         while True:
             if self.match_tok(TOK_PLUS):
                 right = self._parse_mul()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_MINUS):
                 right = self._parse_mul()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_mul(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match_tok(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match_tok(TOK_BANG):
             with self._nest.nested(self.loc):
-                return UnaryExpr(op="!", operand=self._parse_unary())
+                return UnaryExpr(op="!", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_TILDE):
             with self._nest.nested(self.loc):
-                return UnaryExpr(op="~", operand=self._parse_unary())
+                return UnaryExpr(op="~", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_MINUS):
             # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
             # legal only as the direct operand of this minus.
             if self.check(TOK_NUMBER):
                 self.peek().neg_only = False
             with self._nest.nested(self.loc):
-                return UnaryExpr(op="-", operand=self._parse_unary())
+                return UnaryExpr(op="-", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_PLUS):
             # Unary +x == x (matches Java parser reference).
             with self._nest.nested(self.loc):
