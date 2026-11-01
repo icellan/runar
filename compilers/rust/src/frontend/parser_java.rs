@@ -845,6 +845,7 @@ impl<'a> JavaParser<'a> {
         // recognize is a loud "unsupported annotation" diagnostic (matching
         // the TS reference's parseMember), never a silent visibility
         // downgrade.
+        let start_loc = self.loc();
         let mut annotations: Vec<String> = Vec::new();
         // N-093: `@EmbedAlways` / `@Sighash("FLAGS")` locations and specs.
         let mut embed_always: Option<SourceLocation> = None;
@@ -953,7 +954,7 @@ impl<'a> JavaParser<'a> {
                     params,
                     body,
                     visibility: Visibility::Public,
-                    source_location: member_loc,
+                    source_location: start_loc,
                     sighash_type: None,
                 });
                 return;
@@ -1033,7 +1034,7 @@ impl<'a> JavaParser<'a> {
                 params,
                 body,
                 visibility,
-                source_location: member_loc,
+                source_location: start_loc,
                 sighash_type,
             });
             return;

@@ -1064,15 +1064,16 @@ impl<'a> GoParser<'a> {
             if matches!(self.current().typ, TokenType::Func) {
                 // N-093: the `//runar:sighash` directives directly above this func.
                 let func_token_index = self.pos;
+                let func_loc = self.loc();
                 self.advance(); // consume 'func'
                 if matches!(self.current().typ, TokenType::LParen) {
                     // Method: func (recv *Type) MethodName(...)
-                    let (mut method, go_name, recv) = self.parse_method();
+                    let (mut method, go_name, recv) = self.parse_method(func_loc);
                     self.take_sighash(func_token_index, &mut method);
                     funcs.push((method, go_name, recv));
                 } else {
                     self.refuse_sighash_on_dropped_func(func_token_index);
-                    if let Some((mut func, go_name)) = self.parse_standalone_func() {
+                    if let Some((mut func, go_name)) = self.parse_standalone_func(func_loc) {
                         self.take_sighash(func_token_index, &mut func);
                         funcs.push((func, go_name, None));
                     }
@@ -1443,7 +1444,7 @@ impl<'a> GoParser<'a> {
     /// The `func` keyword has already been consumed. Returns the method, the
     /// Go spelling of its name and its receiver type (`*` stripped); `parse`
     /// checks the receiver type against the contract (F-010).
-    fn parse_method(&mut self) -> (MethodNode, String, Option<String>) {
+    fn parse_method(&mut self, loc: SourceLocation) -> (MethodNode, String, Option<String>) {
         // (recv *Type)
         self.expect_tok(&TokenType::LParen);
 
@@ -1485,12 +1486,6 @@ impl<'a> GoParser<'a> {
             Visibility::Private
         };
 
-        let loc = SourceLocation {
-            file: self.file.clone(),
-            line: self.current().line,
-            column: self.current().col,
-        };
-
         // Parameters
         let params = self.parse_params();
 
@@ -1517,7 +1512,7 @@ impl<'a> GoParser<'a> {
 
     /// Parse a standalone function (no receiver): `FuncName(params) ReturnType { body }`
     /// The `func` keyword has already been consumed.
-    fn parse_standalone_func(&mut self) -> Option<(MethodNode, String)> {
+    fn parse_standalone_func(&mut self, loc: SourceLocation) -> Option<(MethodNode, String)> {
         let func_name_raw = self.expect_ident();
 
         // Skip init() and main()
@@ -1530,12 +1525,6 @@ impl<'a> GoParser<'a> {
         // Standalone functions with receiver = "" → private
         let saved_recv = self.receiver_name.clone();
         self.receiver_name = String::new(); // no receiver
-
-        let loc = SourceLocation {
-            file: self.file.clone(),
-            line: self.current().line,
-            column: self.current().col,
-        };
 
         let params = self.parse_params();
         self.skip_return_type(&func_name, &loc, false);

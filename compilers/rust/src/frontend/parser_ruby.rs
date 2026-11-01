@@ -1487,6 +1487,7 @@ impl<'a> RbParser<'a> {
         pending_visibility: &Option<Visibility>,
         pending_param_types: &Option<HashMap<String, TypeNode>>,
     ) -> MethodNode {
+        let def_loc = self.loc();
         self.expect(&Token::Def);
 
         let mut raw_name = match self.advance() {
@@ -1535,7 +1536,7 @@ impl<'a> RbParser<'a> {
                 params,
                 body,
                 visibility: Visibility::Public,
-                source_location: self.loc(),
+                source_location: def_loc,
                 sighash_type: None,
             };
         }
@@ -1552,7 +1553,7 @@ impl<'a> RbParser<'a> {
             } else {
                 Visibility::Private
             },
-            source_location: self.loc(),
+            source_location: def_loc,
             sighash_type: None,
         }
     }

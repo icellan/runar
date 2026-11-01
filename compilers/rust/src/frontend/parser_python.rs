@@ -1530,7 +1530,7 @@ impl<'a> PyParser<'a> {
                 params,
                 body,
                 visibility: Visibility::Public,
-                source_location: self.loc(),
+                source_location: def_loc,
                 sighash_type: None,
             };
         }
@@ -1541,7 +1541,7 @@ impl<'a> PyParser<'a> {
         let sighash_type = match resolve_native_sighash(&method_name, is_public, sighash_specs) {
             Some(Ok(v)) => Some(v),
             Some(Err(msg)) => {
-                self.errors.push(Diagnostic::error(msg, Some(def_loc)));
+                self.errors.push(Diagnostic::error(msg, Some(def_loc.clone())));
                 None
             }
             None => None,
@@ -1556,7 +1556,7 @@ impl<'a> PyParser<'a> {
             } else {
                 Visibility::Private
             },
-            source_location: self.loc(),
+            source_location: def_loc,
             sighash_type,
         }
     }

@@ -995,7 +995,7 @@ impl<'a> SolParser<'a> {
         let sighash_type = match resolve_native_sighash(&name, visibility == Visibility::Public, &sighash_specs) {
             Some(Ok(v)) => Some(v),
             Some(Err(msg)) => {
-                self.errors.push(Diagnostic::error(msg, Some(location)));
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
                 None
             }
             None => None,
@@ -1006,7 +1006,7 @@ impl<'a> SolParser<'a> {
             params,
             body,
             visibility,
-            source_location: self.loc(),
+            source_location: location,
             sighash_type,
         }
     }
