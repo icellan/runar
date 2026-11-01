@@ -510,6 +510,10 @@ struct ZigParser<'a> {
     file: &'a str,
     errors: &'a mut Vec<String>,
     contract_name: String,
+    /// N-490: the contract struct's `struct` keyword, where the constructor
+    /// statements the source does not write (the implied super() and
+    /// property assignments) are anchored.
+    ctor_loc: SourceLocation,
     /// Names used as `self` receiver (first parameter whose type == contract name).
     self_names: HashSet<String>,
     /// Names of parameters typed as `StatefulContext`.
@@ -535,6 +539,7 @@ impl<'a> ZigParser<'a> {
             file,
             errors,
             contract_name: String::new(),
+            ctor_loc: SourceLocation { file: file.to_string(), line: 1, column: 1 },
             self_names: HashSet::new(),
             stateful_context_names: HashSet::new(),
             nest: NestingCounter::new(),
@@ -724,6 +729,7 @@ impl<'a> ZigParser<'a> {
             self.pos = start;
             return None;
         }
+        self.ctor_loc = self.loc();
         self.advance(); // struct
 
         self.expect(&Token::LBrace); // {
@@ -793,7 +799,7 @@ impl<'a> ZigParser<'a> {
         }
 
         // Auto-generate constructor if not provided
-        let constructor = constructor.unwrap_or_else(|| build_constructor(&properties, self.file));
+        let constructor = constructor.unwrap_or_else(|| build_constructor(&properties, self.ctor_loc.clone()));
 
         // Post-process:
         // - SmartContract: all properties readonly.
@@ -1028,6 +1034,8 @@ impl<'a> ZigParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_method(&mut self, is_public: bool) -> Option<MethodNode> {
+        // N-490: where the method starts — the constructor's location for `init`.
+        let start_loc = self.loc();
         if is_public {
             self.advance(); // pub
         }
@@ -1115,7 +1123,7 @@ impl<'a> ZigParser<'a> {
                 params,
                 body,
                 visibility: Visibility::Public,
-                source_location: self.loc(),
+                source_location: start_loc,
                 sighash_type: None,
             });
         }
@@ -1254,7 +1262,7 @@ impl<'a> ZigParser<'a> {
                     source_location: None,
                 },
                 value,
-                source_location: self.loc(),
+                source_location: self.ctor_loc.clone(),
             });
             // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
             if !self.expect_list_separator(&Token::RBrace) {
@@ -1283,7 +1291,7 @@ impl<'a> ZigParser<'a> {
                 args: super_args,
                 asm_return_type: None,
             },
-            source_location: self.loc(),
+            source_location: self.ctor_loc.clone(),
         }
     }
 
@@ -2414,7 +2422,7 @@ fn zero() -> Expression {
 // Constructor builder (auto-generate when no init() provided)
 // ---------------------------------------------------------------------------
 
-fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
+fn build_constructor(properties: &[PropertyNode], loc: SourceLocation) -> MethodNode {
     // Properties with initializers do not need constructor parameters.
     let required_props: Vec<&PropertyNode> =
         properties.iter().filter(|p| p.initializer.is_none()).collect();
@@ -2446,11 +2454,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
             args: super_args,
             asm_return_type: None,
         },
-        source_location: SourceLocation {
-            file: file.to_string(),
-            line: 1,
-            column: 0,
-        },
+        source_location: loc.clone(),
     });
 
     // this.x = x for each required property
@@ -2464,11 +2468,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
                 name: p.name.clone(),
                 source_location: None,
             },
-            source_location: SourceLocation {
-                file: file.to_string(),
-                line: 1,
-                column: 0,
-            },
+            source_location: loc.clone(),
         });
     }
 
@@ -2477,11 +2477,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         params,
         body,
         visibility: Visibility::Public,
-        source_location: SourceLocation {
-            file: file.to_string(),
-            line: 1,
-            column: 0,
-        },
+        source_location: loc,
         sighash_type: None,
     }
 }

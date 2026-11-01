@@ -299,6 +299,10 @@ const Parser = struct {
     /// N-448: bare string literals refused so far, withdrawable by
     /// `exemptBareLiteral` (matched by the literal's bytes pointer).
     bare_pending: std.ArrayListUnmanaged(BarePending) = .empty,
+    /// N-490: the contract struct's `struct` keyword, where the constructor
+    /// statements an `init` implies (the super() call and the field writes)
+    /// are anchored.
+    ctor_loc: types.SourceLocation = .{ .file = "", .line = 1, .column = 1 },
 
     const ParsedFieldType = struct {
         type_node: TypeNode,
@@ -553,6 +557,7 @@ const Parser = struct {
         if (self.expect(.kw_const) == null) return null;
         const name_tok = self.expect(.ident) orelse return null;
         if (self.expect(.assign) == null) return null;
+        self.ctor_loc = self.currentSourceLoc();
         if (self.expect(.kw_struct) == null) return null;
         if (self.expect(.lbrace) == null) return null;
 
@@ -905,8 +910,9 @@ const Parser = struct {
         }
 
         // N-487: the struct-return writes have no statement of their own; TS
-        // locates them (and the super call) at the 1:0 placeholder.
-        const placeholder_loc = types.SourceLocation{ .file = self.file_name, .line = 1, .column = 1 };
+        // locates them (and the super call) at the contract struct's `struct`
+        // keyword (N-490), as it does every statement `init` implies.
+        const placeholder_loc = self.ctor_loc;
         for (assignments.items) |assign| {
             ctor_body.append(self.allocator, .{ .assign = .{
                 .target = assign.target,

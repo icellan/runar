@@ -297,7 +297,12 @@ class MoveParser {
     }
 
     // module ContractName { ... }
-    this.expect('module');
+    const moduleToken = this.expect('module');
+    // N-490: the synthesized constructor is anchored at the first struct's
+    // `struct` keyword (the `resource` token when it stands alone), or at
+    // `module` when the contract declares no struct.
+    let ctorLoc: SourceLocation = { file: this.file, line: moduleToken.line, column: moduleToken.column };
+    let sawStruct = false;
     const contractName = this.expect('ident').value;
     this.expect('{');
 
@@ -321,8 +326,12 @@ class MoveParser {
       }
       if (this.current().type === 'resource' || this.current().type === 'struct') {
         const isResource = this.current().type === 'resource';
-        this.advance();
-        if (this.current().type === 'struct') this.advance(); // "resource struct"
+        let kindToken = this.advance();
+        if (this.current().type === 'struct') kindToken = this.advance(); // "resource struct"
+        if (!sawStruct) {
+          sawStruct = true;
+          ctorLoc = { file: this.file, line: kindToken.line, column: kindToken.column };
+        }
 
         // Struct name (skip, should match module name)
         if (this.current().type === 'ident') this.advance();
@@ -403,7 +412,7 @@ class MoveParser {
     if (hasMutable && !isUnsafe) parentClass = 'StatefulSmartContract';
 
     // Build constructor — only non-initialized properties become params
-    const loc = { file: this.file, line: 1, column: 0 };
+    const loc = ctorLoc;
     const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',

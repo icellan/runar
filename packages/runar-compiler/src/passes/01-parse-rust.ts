@@ -365,6 +365,8 @@ class RustParser extends ParserCore<RustToken> {
 
   /** Name of the contract struct. */
   private contractName = '';
+  /** N-490: the contract struct's `struct` keyword. */
+  private contractLoc: SourceLocation = { file: '', line: 1, column: 0 };
 
   /** F-017: (source spelling, Rúnar name) of every declared identifier. */
   private declared: Array<[string, string]> = [];
@@ -403,6 +405,7 @@ class RustParser extends ParserCore<RustToken> {
             const result = this.parseStructDecl();
             if (result) {
               this.contractName = result.name;
+              this.contractLoc = result.structLoc;
               parentClass = result.parentClass;
               if (attr === 'runar::stateful_contract') {
                 parentClass = 'StatefulSmartContract';
@@ -436,6 +439,7 @@ class RustParser extends ParserCore<RustToken> {
           const result = this.parseStructDecl();
           if (result) {
             this.contractName = result.name;
+            this.contractLoc = result.structLoc;
             parentClass = result.parentClass;
             properties.push(...result.properties);
           }
@@ -487,8 +491,9 @@ class RustParser extends ParserCore<RustToken> {
       }
     }
 
-    // Build auto-generated constructor
-    const loc: SourceLocation = { file: this.file, line: 1, column: 0 };
+    // Build auto-generated constructor, anchored at the contract's `struct`
+    // keyword (N-490), not a fake 1:0.
+    const loc: SourceLocation = this.contractLoc;
     const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',
@@ -613,8 +618,11 @@ class RustParser extends ParserCore<RustToken> {
     name: string;
     parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
     properties: PropertyNode[];
+    /** N-490: the `struct` keyword, where the synthesized constructor is anchored. */
+    structLoc: SourceLocation;
   } | null {
-    this.expect('struct');
+    const structToken = this.expect('struct');
+    const structLoc: SourceLocation = { file: this.file, line: structToken.line, column: structToken.column };
     const nameToken = this.expect('ident');
     const name = nameToken.value;
     this.expect('{');
@@ -678,7 +686,7 @@ class RustParser extends ParserCore<RustToken> {
 
     const parentClass = hasMutableField ? 'StatefulSmartContract' : 'SmartContract';
 
-    return { name, parentClass, properties };
+    return { name, parentClass, properties, structLoc };
   }
 
   // -----------------------------------------------------------------------

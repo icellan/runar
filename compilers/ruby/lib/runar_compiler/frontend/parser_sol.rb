@@ -477,6 +477,8 @@ module RunarCompiler
         is_stateful_keyword = match_ident("stateful")
 
         # contract Name is ParentClass {
+        # N-490: a synthesized constructor is anchored at the `contract` keyword.
+        contract_loc = loc
         unless match_ident("contract")
           raise "expected 'contract' keyword"
         end
@@ -521,7 +523,7 @@ module RunarCompiler
 
         # Auto-generate constructor if not explicitly defined
         if constructor.nil?
-          default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+          default_loc = contract_loc
           # Only non-initialized properties become constructor params
           uninit_props = properties.select { |p| p.initializer.nil? }
           constructor = MethodNode.new(

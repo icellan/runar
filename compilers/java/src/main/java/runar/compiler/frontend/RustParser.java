@@ -835,6 +835,9 @@ public final class RustParser {
         String contractName = "";
         ParentClass parentClass = ParentClass.SMART_CONTRACT;
         List<MethodNode> methods = new ArrayList<>();
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:0.
+        SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 0);
 
         while (!s.check(TOK_EOF)) {
             if (s.check(TOK_HASH_BRACKET)) {
@@ -851,6 +854,7 @@ public final class RustParser {
 
                     // Parse struct
                     if (s.check(TOK_PUB)) s.advance();
+                    ctorLoc = s.loc();
                     s.expect(TOK_STRUCT);
 
                     Token nameTok = s.peek();
@@ -988,7 +992,6 @@ public final class RustParser {
         methods = finalMethods;
 
         // Build auto-generated constructor (only properties without initializers).
-        SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 0);
         List<PropertyNode> uninit = new ArrayList<>();
         for (PropertyNode p : properties) {
             if (p.initializer() == null) uninit.add(p);

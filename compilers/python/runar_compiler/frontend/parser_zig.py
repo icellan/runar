@@ -528,6 +528,10 @@ class _ZigParser:
         self._properties: list[PropertyNode] = []
         self._methods: list[MethodNode] = []
         self._constructor: MethodNode | None = None
+        # N-490: where the constructor statements the source does not write
+        # (the implied super() and property assignments) are anchored: the
+        # contract struct's `struct` keyword once it is parsed.
+        self._ctor_loc = SourceLocation(file=file_name, line=1, column=0)
         self._self_names: set[str] = set()
         self._stateful_context_names: set[str] = set()
         # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
@@ -663,6 +667,7 @@ class _ZigParser:
         self._methods = []
         self._constructor = None
 
+        self._ctor_loc = self._loc()
         self._expect(TOK_STRUCT, "struct")
         self._expect(TOK_LBRACE, "{")
 
@@ -1782,7 +1787,7 @@ class _ZigParser:
     # -----------------------------------------------------------------------
 
     def _create_super_call(self, params: list[ParamNode]) -> Statement:
-        loc = SourceLocation(file=self._file, line=1, column=0)
+        loc = self._ctor_loc
         return ExpressionStmt(
             expr=CallExpr(
                 callee=Identifier(name="super"),
@@ -1792,7 +1797,7 @@ class _ZigParser:
         )
 
     def _create_property_assignment(self, name: str, value: Expression) -> Statement:
-        loc = SourceLocation(file=self._file, line=1, column=0)
+        loc = self._ctor_loc
         return AssignmentStmt(
             target=PropertyAccessExpr(property=name),
             value=value,
@@ -1803,7 +1808,7 @@ class _ZigParser:
         """Generate a default constructor from property declarations."""
         required_props = [p for p in self._properties if p.initializer is None]
         params = [ParamNode(name=p.name, type=p.type) for p in required_props]
-        loc = SourceLocation(file=self._file, line=1, column=0)
+        loc = self._ctor_loc
 
         body: list[Statement] = [self._create_super_call(params)]
         body.extend(

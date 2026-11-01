@@ -474,6 +474,12 @@ public final class ZigParser {
         List<PropertyNode> properties = new ArrayList<>();
         List<MethodNode> methods = new ArrayList<>();
         MethodNode constructor = null;
+        /**
+         * N-490: where the constructor statements the source does not write
+         * (the implied super() and property assignments) are anchored: the
+         * contract struct's {@code struct} keyword once it is parsed.
+         */
+        SourceLocation ctorLoc = null;
 
         // Per-method scope tracking.
         Set<String> selfNames = new HashSet<>();
@@ -600,6 +606,7 @@ public final class ZigParser {
             methods = new ArrayList<>();
             constructor = null;
 
+            ctorLoc = loc();
             expect(Kind.STRUCT, "struct");
             expect(Kind.LBRACE, "{");
 
@@ -1721,7 +1728,7 @@ public final class ZigParser {
         // ------------------ Helpers ------------------
 
         Statement createSuperCall(List<ParamNode> params) {
-            SourceLocation l = new SourceLocation(file, 1, 0);
+            SourceLocation l = ctorLocOrFileStart();
             List<Expression> args = new ArrayList<>(params.size());
             for (ParamNode p : params) {
                 args.add(new Identifier(p.name()));
@@ -1731,8 +1738,12 @@ public final class ZigParser {
         }
 
         Statement createPropertyAssignment(String name, Expression value) {
-            SourceLocation l = new SourceLocation(file, 1, 0);
+            SourceLocation l = ctorLocOrFileStart();
             return new AssignmentStatement(new PropertyAccessExpr(name), value, l);
+        }
+
+        SourceLocation ctorLocOrFileStart() {
+            return ctorLoc != null ? ctorLoc : new SourceLocation(file, 1, 0);
         }
 
         MethodNode createFallbackConstructor() {
@@ -1744,7 +1755,7 @@ public final class ZigParser {
             for (PropertyNode p : required) {
                 params.add(new ParamNode(p.name(), p.type()));
             }
-            SourceLocation l = new SourceLocation(file, 1, 0);
+            SourceLocation l = ctorLocOrFileStart();
             List<Statement> body = new ArrayList<>();
             body.add(createSuperCall(params));
             for (PropertyNode p : required) {

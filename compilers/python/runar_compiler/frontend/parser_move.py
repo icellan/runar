@@ -540,6 +540,11 @@ class _MoveParser:
         is_unsafe = self.match_ident("unsafe")
 
         # module Name { ... }
+        # N-490: the synthesized constructor is anchored at the first struct's
+        # `struct` keyword (the `resource` token when it stands alone), or at
+        # `module` when the contract declares no struct.
+        ctor_loc = self.loc()
+        saw_struct = False
         if not self.match_ident("module"):
             raise ValueError("expected 'module' keyword")
 
@@ -569,8 +574,14 @@ class _MoveParser:
             # resource struct or struct
             if self.check_ident("resource") or self.check_ident("struct"):
                 is_resource = self.check_ident("resource")
+                kind_loc = self.loc()
                 if is_resource:
                     self.advance()  # skip "resource"
+                    if self.check_ident("struct"):
+                        kind_loc = self.loc()
+                if not saw_struct:
+                    saw_struct = True
+                    ctor_loc = kind_loc
                 props = self._parse_move_struct()
                 if not is_unsafe and (
                     is_resource or any(not p.readonly for p in props)
@@ -593,7 +604,7 @@ class _MoveParser:
         self.expect(TOK_RBRACE)
 
         # Build constructor from properties
-        constructor = self._build_move_constructor(properties)
+        constructor = self._build_move_constructor(properties, ctor_loc)
 
         return ContractNode(
             name=module_name,
@@ -1467,7 +1478,7 @@ class _MoveParser:
 
     # -- Constructor builder -------------------------------------------------
 
-    def _build_move_constructor(self, properties: list[PropertyNode]) -> MethodNode:
+    def _build_move_constructor(self, properties: list[PropertyNode], loc: SourceLocation) -> MethodNode:
         # Only include properties without initializers as constructor params
         uninit_props = [p for p in properties if p.initializer is None]
 
@@ -1479,7 +1490,6 @@ class _MoveParser:
             Identifier(name=prop.name) for prop in uninit_props
         ]
 
-        loc = SourceLocation(file=self.file_name, line=1, column=0)
         body: list[Statement] = [
             ExpressionStmt(
                 expr=CallExpr(
@@ -1504,9 +1514,7 @@ class _MoveParser:
             params=params,
             body=body,
             visibility="public",
-            source_location=SourceLocation(
-                file=self.file_name, line=1, column=0,
-            ),
+            source_location=loc,
         )
 
 

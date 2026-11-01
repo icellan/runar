@@ -585,6 +585,11 @@ public final class MoveParser {
             // before.
             boolean isUnsafe = matchIdent("unsafe");
 
+            // N-490: the synthesized constructor is anchored at the first
+            // struct's `struct` keyword (the `resource` token when it stands
+            // alone), or at `module` when the contract declares no struct.
+            SourceLocation ctorLoc = loc();
+            boolean sawStruct = false;
             if (!matchIdent("module")) {
                 throw new ParseException("expected 'module' keyword");
             }
@@ -616,8 +621,14 @@ public final class MoveParser {
 
                 if (checkIdent("resource") || checkIdent("struct")) {
                     boolean isResource = checkIdent("resource");
+                    SourceLocation kindLoc = loc();
                     if (isResource) {
                         advance();
+                        if (checkIdent("struct")) kindLoc = loc();
+                    }
+                    if (!sawStruct) {
+                        sawStruct = true;
+                        ctorLoc = kindLoc;
                     }
                     List<PropertyNode> props = parseStruct();
                     boolean anyMutable = false;
@@ -648,7 +659,7 @@ public final class MoveParser {
 
             expect(Kind.RBRACE);
 
-            MethodNode constructor = buildConstructor(properties);
+            MethodNode constructor = buildConstructor(properties, ctorLoc);
 
             return new ContractNode(
                 moduleName,
@@ -1551,7 +1562,7 @@ public final class MoveParser {
 
         // -- constructor synthesis ------------------------------------------
 
-        MethodNode buildConstructor(List<PropertyNode> properties) {
+        MethodNode buildConstructor(List<PropertyNode> properties, SourceLocation loc) {
             List<PropertyNode> uninit = new ArrayList<>();
             for (PropertyNode p : properties) {
                 if (p.initializer() == null) uninit.add(p);
@@ -1564,7 +1575,6 @@ public final class MoveParser {
                 superArgs.add(new Identifier(p.name()));
             }
 
-            SourceLocation loc = new SourceLocation(filename, 1, 0);
             List<Statement> body = new ArrayList<>();
             body.add(new ExpressionStatement(
                 new CallExpr(new Identifier("super"), superArgs),

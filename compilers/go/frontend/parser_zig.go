@@ -147,6 +147,11 @@ type zigParser struct {
 	selfNames            map[string]bool
 	statefulContextNames map[string]bool
 
+	// ctorLoc (N-490) anchors the constructor statements the source does not
+	// write (the implied super() and property assignments): the contract
+	// struct's `struct` keyword.
+	ctorLoc SourceLocation
+
 	// nest is F-213 measure (A): parse nesting.
 	nest nestingCounter
 
@@ -704,6 +709,7 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 	p.contractName = nameTok.value
 	p.parentClass = "SmartContract"
 
+	p.ctorLoc = p.loc()
 	p.expect(zigTokStruct)
 	p.expect(zigTokLBrace)
 
@@ -1074,7 +1080,7 @@ func (p *zigParser) parseConstructorBody(params []ParamNode, properties *[]Prope
 				body = append(body, AssignmentStmt{
 					Target:         PropertyAccessExpr{Property: prop.Name},
 					Value:          Identifier{Name: prop.Name},
-					SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+					SourceLocation: p.ctorLoc,
 				})
 			}
 		}
@@ -1100,7 +1106,7 @@ func (p *zigParser) parseStructReturnAssignments() []Statement {
 		assignments = append(assignments, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: field},
 			Value:          value,
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: p.ctorLoc,
 		})
 		// N-033: struct-init fields are separated by `,` (a trailing one is allowed).
 		if !p.expectListSeparator(zigTokRBrace) {
@@ -1142,7 +1148,7 @@ func (p *zigParser) autoGenerateConstructor(properties []PropertyNode) MethodNod
 			Callee: Identifier{Name: "super"},
 			Args:   superArgs,
 		},
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: p.ctorLoc,
 	}
 
 	var body []Statement
@@ -1152,7 +1158,7 @@ func (p *zigParser) autoGenerateConstructor(properties []PropertyNode) MethodNod
 		body = append(body, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: prop.Name},
 			Value:          Identifier{Name: prop.Name},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: p.ctorLoc,
 		})
 	}
 
@@ -1161,7 +1167,7 @@ func (p *zigParser) autoGenerateConstructor(properties []PropertyNode) MethodNod
 		Params:         params,
 		Body:           body,
 		Visibility:     "public",
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: p.ctorLoc,
 	}
 }
 
@@ -1175,7 +1181,7 @@ func (p *zigParser) createSuperCall(params []ParamNode) Statement {
 			Callee: Identifier{Name: "super"},
 			Args:   args,
 		},
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: p.ctorLoc,
 	}
 }
 

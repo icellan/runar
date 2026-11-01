@@ -265,7 +265,7 @@ class SolParser {
     }
 
     // Parse contract
-    this.expect('contract');
+    const contractToken = this.expect('contract');
     const nameToken = this.expect('ident');
     const contractName = nameToken.value;
 
@@ -306,7 +306,8 @@ class SolParser {
 
     // Build constructor if not explicitly defined
     if (!constructorNode) {
-      const loc = { file: this.file, line: 1, column: 0 };
+      // N-490: anchored at the `contract` keyword, not a fake 1:0.
+      const loc = { file: this.file, line: contractToken.line, column: contractToken.column };
       // Only non-initialized properties become constructor params
       const uninitProps = properties.filter(p => !p.initializer);
       constructorNode = {

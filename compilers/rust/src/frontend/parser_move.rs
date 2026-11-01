@@ -700,7 +700,8 @@ impl<'a> MoveParser<'a> {
         while *self.peek() != Token::Module && *self.peek() != Token::Eof {
             // Also allow struct at top level without module wrapper
             if *self.peek() == Token::Struct || *self.peek() == Token::Resource || *self.peek() == Token::Public {
-                return self.parse_top_level_without_module(is_unsafe);
+                let loc = self.loc();
+                return self.parse_top_level_without_module(is_unsafe, loc);
             }
             // `unsafe` immediately before `module` marks an UnsafeSmartContract.
             if matches!(self.peek(), Token::Ident(n) if n == "unsafe") {
@@ -714,6 +715,7 @@ impl<'a> MoveParser<'a> {
             return None;
         }
 
+        let module_loc = self.loc();
         self.advance(); // consume 'module'
         let module_name = self.expect_ident();
 
@@ -725,18 +727,22 @@ impl<'a> MoveParser<'a> {
 
         self.expect(&Token::LBrace);
 
-        let result = self.parse_module_body(is_unsafe, Some(module_name));
+        let result = self.parse_module_body(is_unsafe, Some(module_name), module_loc);
 
         self.expect(&Token::RBrace);
 
         result
     }
 
-    fn parse_top_level_without_module(&mut self, is_unsafe: bool) -> Option<ContractNode> {
-        self.parse_module_body(is_unsafe, None)
+    fn parse_top_level_without_module(&mut self, is_unsafe: bool, loc: SourceLocation) -> Option<ContractNode> {
+        self.parse_module_body(is_unsafe, None, loc)
     }
 
-    fn parse_module_body(&mut self, is_unsafe: bool, module_name: Option<String>) -> Option<ContractNode> {
+    /// `module_loc` is the `module` keyword; N-490 anchors the synthesized
+    /// constructor there unless a struct is declared, in which case it is
+    /// the first struct's `struct` keyword (`resource` when it stands alone).
+    fn parse_module_body(&mut self, is_unsafe: bool, module_name: Option<String>, module_loc: SourceLocation) -> Option<ContractNode> {
+        let mut ctor_loc: Option<SourceLocation> = None;
         let mut contract_name: Option<String> = None;
         let mut parent_class = if is_unsafe {
             "UnsafeSmartContract".to_string()
@@ -778,7 +784,11 @@ impl<'a> MoveParser<'a> {
                 Token::Resource => {
                     // "resource struct Name { ... }"
                     is_resource = true;
+                    let resource_loc = self.loc();
                     self.advance(); // consume 'resource'
+                    if ctor_loc.is_none() {
+                        ctor_loc = Some(if *self.peek() == Token::Struct { self.loc() } else { resource_loc });
+                    }
                     if *self.peek() == Token::Struct {
                         let (name, pc, props) = self.parse_struct();
                         contract_name = Some(name.clone());
@@ -795,6 +805,9 @@ impl<'a> MoveParser<'a> {
                     }
                 }
                 Token::Struct => {
+                    if ctor_loc.is_none() {
+                        ctor_loc = Some(self.loc());
+                    }
                     let (name, pc, props) = self.parse_struct();
                     contract_name = Some(name.clone());
                     self.struct_name = name;
@@ -873,7 +886,7 @@ impl<'a> MoveParser<'a> {
         }
 
         // Build constructor from properties
-        let constructor = build_constructor(&properties, self.file);
+        let constructor = build_constructor(&properties, ctor_loc.unwrap_or(module_loc));
 
         Some(ContractNode {
             name: contract_name,
@@ -2139,7 +2152,7 @@ fn zero() -> Expression {
 // Constructor builder
 // ---------------------------------------------------------------------------
 
-fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
+fn build_constructor(properties: &[PropertyNode], loc: SourceLocation) -> MethodNode {
     // Only include properties without initializers as constructor params
     let uninit_props: Vec<&PropertyNode> = properties
         .iter()
@@ -2173,11 +2186,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
             args: super_args,
             asm_return_type: None,
         },
-        source_location: SourceLocation {
-            file: file.to_string(),
-            line: 1,
-            column: 0,
-        },
+        source_location: loc.clone(),
     });
 
     // this.x = x for each non-initialized property
@@ -2191,11 +2200,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
                 name: p.name.clone(),
                 source_location: None,
             },
-            source_location: SourceLocation {
-                file: file.to_string(),
-                line: 1,
-                column: 0,
-            },
+            source_location: loc.clone(),
         });
     }
 
@@ -2204,11 +2209,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         params,
         body,
         visibility: Visibility::Public,
-        source_location: SourceLocation {
-            file: file.to_string(),
-            line: 1,
-            column: 0,
-        },
+        source_location: loc,
         sighash_type: None,
     }
 }

@@ -1142,6 +1142,9 @@ const Parser = struct {
         var methods: std.ArrayListUnmanaged(MethodNode) = .empty;
         var funcs: std.ArrayListUnmanaged(FuncDecl) = .empty;
         var found_struct = false;
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:0.
+        var ctor_loc: types.SourceLocation = .{ .file = self.file_name, .line = 1, .column = 1 };
 
         // Parse top-level declarations: type struct, func
         while (self.current.kind != .eof) {
@@ -1154,6 +1157,7 @@ const Parser = struct {
                         continue;
                     }
                     found_struct = true;
+                    ctor_loc = result.struct_loc;
                     self.contract_name = result.name;
                     parent_class = result.parent_class;
                     for (result.properties) |p| {
@@ -1247,7 +1251,7 @@ const Parser = struct {
             .params = ctor_params,
             .super_args = super_args,
             .assignments = assignments,
-            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
+            .super_loc = ctor_loc,
         };
 
         if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
@@ -1299,6 +1303,8 @@ const Parser = struct {
         name: []const u8,
         parent_class: ParentClass,
         properties: []PropertyNode,
+        /// N-490: the `struct` keyword, where the synthesized constructor is anchored.
+        struct_loc: types.SourceLocation = .{ .file = "", .line = 0, .column = 0 },
     };
 
     fn parseTypeDecl(self: *Parser) TypeDeclResult {
@@ -1317,7 +1323,7 @@ const Parser = struct {
             self.skipToEndOfDecl();
             return empty;
         }
-        _ = self.bump(); // consume 'struct'
+        const struct_loc = self.tokenSourceLoc(self.bump()); // consume 'struct'
 
         if (self.expect(.lbrace) == null) return empty;
 
@@ -1407,6 +1413,7 @@ const Parser = struct {
             .name = name_tok.text,
             .parent_class = parent_class,
             .properties = properties.items,
+            .struct_loc = struct_loc,
         };
     }
 

@@ -487,6 +487,8 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 	}
 
 	// contract Name is ParentClass {
+	// N-490: a synthesized constructor is anchored at the `contract` keyword.
+	ctorLoc := p.loc()
 	if !p.matchIdent("contract") {
 		return nil, fmt.Errorf("expected 'contract' keyword")
 	}
@@ -550,24 +552,22 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 					Callee: Identifier{Name: "super"},
 					Args:   superArgs,
 				},
-				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+				SourceLocation: ctorLoc,
 			},
 		}
 		for _, prop := range uninitProps {
 			body = append(body, AssignmentStmt{
 				Target:         PropertyAccessExpr{Property: prop.Name},
 				Value:          Identifier{Name: prop.Name},
-				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+				SourceLocation: ctorLoc,
 			})
 		}
 		constructor = &MethodNode{
-			Name:       "constructor",
-			Params:     params,
-			Body:       body,
-			Visibility: "public",
-			SourceLocation: SourceLocation{
-				File: p.fileName, Line: 1, Column: 0,
-			},
+			Name:           "constructor",
+			Params:         params,
+			Body:           body,
+			Visibility:     "public",
+			SourceLocation: ctorLoc,
 		}
 	}
 

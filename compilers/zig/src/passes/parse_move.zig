@@ -885,6 +885,11 @@ const Parser = struct {
         const is_unsafe = self.matchIdent("unsafe");
 
         // module Name { ... }
+        // N-490: the synthesized constructor is anchored at the first struct's
+        // `struct` keyword (the `resource` token when it stands alone), or at
+        // `module` when the contract declares no struct.
+        var ctor_loc = self.currentSourceLoc();
+        var saw_struct = false;
         if (!self.matchIdent("module")) {
             self.addError("expected 'module' keyword");
             return null;
@@ -923,11 +928,17 @@ const Parser = struct {
             // resource struct or struct
             if (self.checkIdent("resource") or self.checkIdent("struct")) {
                 const is_resource = self.checkIdent("resource");
+                var kind_loc = self.currentSourceLoc();
                 if (is_resource) {
                     _ = self.bump(); // consume "resource"
                     if (!is_unsafe) {
                         parent_class = .stateful_smart_contract;
                     }
+                    if (self.checkIdent("struct")) kind_loc = self.currentSourceLoc();
+                }
+                if (!saw_struct) {
+                    saw_struct = true;
+                    ctor_loc = kind_loc;
                 }
                 const props = self.parseMoveStruct(parent_class);
                 for (props) |p| properties.append(self.allocator, p) catch {};
@@ -962,7 +973,7 @@ const Parser = struct {
         }
 
         // Build constructor from properties (auto-generate)
-        const constructor = self.buildMoveConstructor(properties.items);
+        const constructor = self.buildMoveConstructor(properties.items, ctor_loc);
 
         return ContractNode{
             .name = module_name,
@@ -2329,7 +2340,7 @@ const Parser = struct {
     /// Auto-generate a constructor from the struct properties.
     /// Non-initialized properties become constructor params.
     /// super() is called with all non-initialized property identifiers.
-    fn buildMoveConstructor(self: *Parser, properties: []PropertyNode) ConstructorNode {
+    fn buildMoveConstructor(self: *Parser, properties: []PropertyNode, ctor_loc: types.SourceLocation) ConstructorNode {
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
@@ -2355,7 +2366,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
-            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
+            .super_loc = ctor_loc,
         };
     }
 

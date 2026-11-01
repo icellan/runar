@@ -549,6 +549,8 @@ public final class SolParser {
                 match(TOK_SEMICOLON);
             }
 
+            // N-490: a synthesized constructor is anchored at the `contract` keyword.
+            SourceLocation contractLoc = loc();
             if (!matchIdent("contract")) {
                 throw new ParseException("expected 'contract' keyword");
             }
@@ -608,7 +610,7 @@ public final class SolParser {
                 // `.runar.sol` with no constructor compiled in ts/go/zig/ruby
                 // and failed here and in python, while rust refused it at parse
                 // time. Mirrors compilers/go/frontend/parser_sol.go:495-530.
-                SourceLocation synthLoc = new SourceLocation(fileName, 1, 0);
+                SourceLocation synthLoc = contractLoc;
                 List<PropertyNode> uninit = new ArrayList<>();
                 for (PropertyNode pn : properties) {
                     if (pn.initializer() == null) {

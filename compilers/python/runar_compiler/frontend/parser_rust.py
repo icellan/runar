@@ -681,6 +681,9 @@ class _RustParser:
         contract_name = ""
         parent_class = "SmartContract"
         methods: list[MethodNode] = []
+        # N-490: the synthesized constructor is anchored at the contract's
+        # `struct` keyword, not a fake 1:0.
+        ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
 
         while not self.check(TOK_EOF):
             # Attribute: #[...]
@@ -700,6 +703,7 @@ class _RustParser:
                     # Parse struct
                     if self.check(TOK_PUB):
                         self.advance()
+                    ctor_loc = self.loc()
                     self.expect(TOK_STRUCT)
 
                     name_tok = self.peek()
@@ -816,7 +820,6 @@ class _RustParser:
 
         # Build auto-generated constructor (only non-initialized properties)
         uninit_props = [p for p in properties if p.initializer is None]
-        ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
 
         # super(...) call as first statement
         super_args: list[Expression] = [

@@ -676,6 +676,9 @@ const Parser = struct {
         var parent_class: ?ParentClass = null;
         var properties: std.ArrayListUnmanaged(PropertyNode) = .empty;
         var methods: std.ArrayListUnmanaged(MethodNode) = .empty;
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:0.
+        var ctor_loc: types.SourceLocation = .{ .file = self.file_name, .line = 1, .column = 1 };
 
         while (self.current.kind != .eof) {
             if (self.current.kind == .hash_bracket) {
@@ -694,7 +697,7 @@ const Parser = struct {
                         _ = self.bump();
                         continue;
                     }
-                    _ = self.bump(); // consume 'struct'
+                    ctor_loc = self.tokenSourceLoc(self.bump()); // consume 'struct'
                     if (self.current.kind == .ident) {
                         contract_name = self.bump().text;
                     } else {
@@ -863,7 +866,7 @@ const Parser = struct {
             .params = ctor_params,
             .super_args = super_args,
             .assignments = ctor_assignments,
-            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
+            .super_loc = ctor_loc,
         };
 
         if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};

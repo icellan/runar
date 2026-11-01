@@ -642,8 +642,9 @@ class GoParser extends ParserCore<GoToken> {
       }
     }
 
-    // Build auto-generated constructor
-    const loc: SourceLocation = { file: this.file, line: 1, column: 0 };
+    // Build auto-generated constructor, anchored at the contract's `struct`
+    // keyword (N-490), not a fake 1:0.
+    const loc: SourceLocation = contractStruct.structLoc;
     const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',
@@ -725,11 +726,14 @@ class GoParser extends ParserCore<GoToken> {
     properties: PropertyNode[];
     /** F-010: embeds runar.SmartContract / StatefulSmartContract / UnsafeSmartContract. */
     embedsBase: boolean;
+    /** N-490: the `struct` keyword, where the synthesized constructor is anchored. */
+    structLoc: SourceLocation;
   } {
     this.expect('type');
     const nameToken = this.expect('ident');
     const name = nameToken.value;
-    this.expect('struct');
+    const structToken = this.expect('struct');
+    const structLoc: SourceLocation = { file: this.file, line: structToken.line, column: structToken.column };
     this.expect('{');
 
     let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
@@ -798,7 +802,7 @@ class GoParser extends ParserCore<GoToken> {
     }
     this.expect('}');
 
-    return { name, parentClass, properties, embedsBase };
+    return { name, parentClass, properties, embedsBase, structLoc };
   }
 
   // -----------------------------------------------------------------------

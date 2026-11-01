@@ -806,8 +806,9 @@ module RunarCompiler
           end
         end
 
-        # Build auto-generated constructor
-        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+        # Build auto-generated constructor, anchored at the contract's `struct`
+        # keyword (N-490), not a fake 1:0.
+        default_loc = contract_struct[:struct_loc]
         uninit_props = properties.reject { |p| p.initializer }
 
         super_call = ExpressionStmt.new(
@@ -875,6 +876,7 @@ module RunarCompiler
         expect_ident("type")
         name_tok = expect(TOK_IDENT)
         name = name_tok.value
+        struct_loc = loc
         expect_ident("struct")
         expect(TOK_LBRACE)
 
@@ -936,7 +938,7 @@ module RunarCompiler
         end
         expect(TOK_RBRACE)
 
-        { name: name, parent_class: parent_class, properties: properties, embeds_base: embeds_base }
+        { name: name, parent_class: parent_class, properties: properties, embeds_base: embeds_base, struct_loc: struct_loc }
       end
 
       def expect_ident(value)

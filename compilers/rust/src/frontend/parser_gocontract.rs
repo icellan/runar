@@ -1048,6 +1048,9 @@ impl<'a> GoParser<'a> {
         let mut contract_name = String::new();
         let mut parent_class = "SmartContract".to_string();
         let mut properties: Vec<PropertyNode> = Vec::new();
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:1.
+        let mut ctor_loc = Self::loc_at(&self.file, 1, 1);
         // (method, Go spelling of its name, receiver type or None for a free function)
         let mut funcs: Vec<(MethodNode, String, Option<String>)> = Vec::new();
 
@@ -1080,6 +1083,7 @@ impl<'a> GoParser<'a> {
                 if let TokenType::Ident(name) = self.current().typ.clone() {
                     self.advance(); // consume name
                     if matches!(self.current().typ, TokenType::Struct) {
+                        let struct_loc = self.loc();
                         self.advance(); // consume 'struct'
                         if matches!(self.current().typ, TokenType::LBrace) {
                             // Try to find runar.SmartContract or runar.StatefulSmartContract
@@ -1089,6 +1093,7 @@ impl<'a> GoParser<'a> {
                                     contract_name = name;
                                     parent_class = found_parent;
                                     properties = props;
+                                    ctor_loc = struct_loc;
                                 } else {
                                     self.errors.push(Diagnostic::error(
                                         go_multiple_contracts_message(&contract_name, &name),
@@ -1173,7 +1178,7 @@ impl<'a> GoParser<'a> {
             .map(|p| Expression::Identifier { name: p.name.clone(), source_location: None })
             .collect();
 
-        let super_loc = Self::loc_at(&self.file, 1, 1);
+        let super_loc = ctor_loc;
         let mut constructor_body: Vec<Statement> = Vec::new();
         constructor_body.push(Statement::ExpressionStatement {
             expression: Expression::CallExpr {
@@ -1197,7 +1202,7 @@ impl<'a> GoParser<'a> {
             params: constructor_params,
             body: constructor_body,
             visibility: Visibility::Public,
-            source_location: Self::loc_at(&self.file, 1, 1),
+            source_location: super_loc,
             sighash_type: None,
         };
 

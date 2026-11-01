@@ -843,7 +843,7 @@ class _GoParser:
             if self.check_ident("type"):
                 result = self._parse_type_decl()
                 if result is not None:
-                    cname, pclass, props = result
+                    cname, pclass, props, struct_loc = result
                     if struct_found:
                         # F-010: exactly one contract struct; never merged.
                         self.add_error(go_multiple_contracts_message(contract_name, cname))
@@ -851,6 +851,9 @@ class _GoParser:
                     contract_name = cname
                     parent_class = pclass
                     properties = props
+                    # N-490: the synthesized constructor is anchored at the
+                    # contract's `struct` keyword, not a fake 1:1.
+                    ctor_loc = struct_loc
                     struct_found = True
             elif self.check_ident("func"):
                 func = self._parse_func_decl()
@@ -903,7 +906,7 @@ class _GoParser:
                     callee=Identifier(name="super"),
                     args=super_args,
                 ),
-                source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                source_location=ctor_loc,
             ),
         ]
         for prop in uninit_props:
@@ -911,7 +914,7 @@ class _GoParser:
                 AssignmentStmt(
                     target=PropertyAccessExpr(property=prop.name),
                     value=Identifier(name=prop.name),
-                    source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                    source_location=ctor_loc,
                 )
             )
 
@@ -924,7 +927,7 @@ class _GoParser:
                 params=constructor_params,
                 body=constructor_body,
                 visibility="public",
-                source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                source_location=ctor_loc,
             ),
             methods=methods,
             source_file=self.file_name,
@@ -954,16 +957,17 @@ class _GoParser:
             if self.check(TOK_STRING):
                 self.advance()  # path
 
-    def _parse_type_decl(self) -> tuple[str, str, list[PropertyNode]] | None:
+    def _parse_type_decl(self) -> tuple[str, str, list[PropertyNode], SourceLocation] | None:
         """Parse a type declaration.
 
-        Returns (contractName, parentClass, properties) if a contract struct
-        is found, or None otherwise.
+        Returns (contractName, parentClass, properties, location of the
+        `struct` keyword) if a contract struct is found, or None otherwise.
         """
         self.expect_ident("type")
         name_tok = self.expect(TOK_IDENT)
         type_name = name_tok.value
 
+        struct_loc = self.loc()
         if not self.match_ident("struct"):
             # Not a struct -- skip to end of declaration
             self._skip_to_semicolon_or_brace()
@@ -1044,7 +1048,7 @@ class _GoParser:
         if not parent_class:
             return None
 
-        return (type_name, parent_class, properties)
+        return (type_name, parent_class, properties, struct_loc)
 
     def _is_embed_field(self) -> bool:
         """Look ahead to check if the current position is an embedded type field.

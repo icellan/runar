@@ -639,6 +639,11 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	isUnsafe := p.matchIdent("unsafe")
 
 	// module Name { ... }
+	// N-490: the synthesized constructor is anchored at the first struct's
+	// `struct` keyword (the `resource` token when it stands alone), or at
+	// `module` when the contract declares no struct.
+	ctorLoc := p.loc()
+	sawStruct := false
 	if !p.matchIdent("module") {
 		return nil, fmt.Errorf("expected 'module' keyword")
 	}
@@ -673,11 +678,19 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 		// resource struct or struct
 		if p.checkIdent("resource") || p.checkIdent("struct") {
 			isStateful := p.checkIdent("resource")
+			kindLoc := p.loc()
 			if isStateful {
 				p.advance() // skip "resource"
 				if !isUnsafe {
 					parentClass = "StatefulSmartContract"
 				}
+				if p.checkIdent("struct") {
+					kindLoc = p.loc()
+				}
+			}
+			if !sawStruct {
+				sawStruct = true
+				ctorLoc = kindLoc
 			}
 			props := p.parseMoveStruct()
 			properties = append(properties, props...)
@@ -701,7 +714,7 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	p.expect(moveTokRBrace)
 
 	// Build constructor from properties
-	constructor := p.buildMoveConstructor(properties)
+	constructor := p.buildMoveConstructor(properties, ctorLoc)
 
 	return &ContractNode{
 		Name:        moduleName,
@@ -1939,7 +1952,7 @@ func parseMoveNumber(s string) Expression {
 // Constructor builder
 // ---------------------------------------------------------------------------
 
-func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode {
+func (p *moveParser) buildMoveConstructor(properties []PropertyNode, ctorLoc SourceLocation) MethodNode {
 	// Only non-initialized properties become constructor params
 	var uninitProps []PropertyNode
 	for _, prop := range properties {
@@ -1964,7 +1977,7 @@ func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode 
 				Callee: Identifier{Name: "super"},
 				Args:   superArgs,
 			},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: ctorLoc,
 		},
 	}
 
@@ -1972,17 +1985,15 @@ func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode 
 		body = append(body, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: prop.Name},
 			Value:          Identifier{Name: prop.Name},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: ctorLoc,
 		})
 	}
 
 	return MethodNode{
-		Name:       "constructor",
-		Params:     params,
-		Body:       body,
-		Visibility: "public",
-		SourceLocation: SourceLocation{
-			File: p.fileName, Line: 1, Column: 0,
-		},
+		Name:           "constructor",
+		Params:         params,
+		Body:           body,
+		Visibility:     "public",
+		SourceLocation: ctorLoc,
 	}
 }

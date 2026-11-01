@@ -931,6 +931,9 @@ public final class GoParser {
             List<PropertyNode> properties = new ArrayList<>();
             List<FuncDecl> funcs = new ArrayList<>();
             boolean structFound = false;
+            // N-490: the synthesized constructor is anchored at the contract's
+            // `struct` keyword, not a fake 1:1.
+            SourceLocation ctorLoc = new SourceLocation(fileName, 1, 0);
 
             while (!check(Tok.EOF)) {
                 skipSemicolons();
@@ -947,6 +950,7 @@ public final class GoParser {
                         contractName = result.name;
                         parentClass = result.parent;
                         properties = result.properties;
+                        ctorLoc = result.structLoc;
                         structFound = true;
                     }
                 } else if (checkIdent("func")) {
@@ -1010,7 +1014,7 @@ public final class GoParser {
                 constructorParams.add(new ParamNode(p.name(), p.type()));
                 superArgs.add(new Identifier(p.name()));
             }
-            SourceLocation synthLoc = new SourceLocation(fileName, 1, 1);
+            SourceLocation synthLoc = ctorLoc;
             List<Statement> constructorBody = new ArrayList<>();
             constructorBody.add(new ExpressionStatement(
                 new CallExpr(new Identifier("super"), superArgs),
@@ -1065,11 +1069,14 @@ public final class GoParser {
             final String name;
             final String parent;
             final List<PropertyNode> properties;
+            /** N-490: the {@code struct} keyword, where the synthesized constructor is anchored. */
+            final SourceLocation structLoc;
 
-            TypeDeclResult(String name, String parent, List<PropertyNode> properties) {
+            TypeDeclResult(String name, String parent, List<PropertyNode> properties, SourceLocation structLoc) {
                 this.name = name;
                 this.parent = parent;
                 this.properties = properties;
+                this.structLoc = structLoc;
             }
         }
 
@@ -1078,6 +1085,7 @@ public final class GoParser {
             Token nameTok = expect(Tok.IDENT);
             String typeName = nameTok.value;
 
+            SourceLocation structLoc = loc();
             if (!matchIdent("struct")) {
                 skipToSemicolonOrBrace();
                 return null;
@@ -1157,7 +1165,7 @@ public final class GoParser {
             expect(Tok.RBRACE);
 
             if (parentClass.isEmpty()) return null;
-            return new TypeDeclResult(typeName, parentClass, properties);
+            return new TypeDeclResult(typeName, parentClass, properties, structLoc);
         }
 
         boolean isEmbedField() {

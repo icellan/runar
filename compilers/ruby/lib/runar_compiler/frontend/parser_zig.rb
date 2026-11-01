@@ -471,6 +471,10 @@ module RunarCompiler
         @properties = []
         @methods = []
         @constructor_node = nil
+        # N-490: where the constructor statements the source does not write
+        # (the implied super() and property assignments) are anchored: the
+        # contract struct's `struct` keyword once it is parsed.
+        @ctor_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
         @self_names = Set.new
         @stateful_context_names = Set.new
       end
@@ -618,6 +622,7 @@ module RunarCompiler
         @methods = []
         @constructor_node = nil
 
+        @ctor_loc = loc
         expect(TOK_STRUCT)
         expect(TOK_LBRACE)
 
@@ -1795,7 +1800,7 @@ module RunarCompiler
             callee: Identifier.new(name: "super"),
             args: params.map { |p| Identifier.new(name: p.name) }
           ),
-          source_location: SourceLocation.new(file: @file_name, line: 1, column: 1)
+          source_location: @ctor_loc
         )
       end
 
@@ -1803,7 +1808,7 @@ module RunarCompiler
         AssignmentStmt.new(
           target: PropertyAccessExpr.new(property: name),
           value: value,
-          source_location: SourceLocation.new(file: @file_name, line: 1, column: 1)
+          source_location: @ctor_loc
         )
       end
 
@@ -1820,7 +1825,7 @@ module RunarCompiler
             *params.map { |p| create_property_assignment(p.name, Identifier.new(name: p.name)) }
           ],
           visibility: "public",
-          source_location: SourceLocation.new(file: @file_name, line: 1, column: 1)
+          source_location: @ctor_loc
         )
       end
 

@@ -362,6 +362,9 @@ impl RustDslParser {
         let mut contract_name = String::new();
         let mut parent_class = "SmartContract".to_string();
         let mut methods: Vec<MethodNode> = Vec::new();
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:1.
+        let mut ctor_loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
 
         while !matches!(self.current().typ, TokenType::Eof) {
             // Attribute: #[...]
@@ -379,6 +382,7 @@ impl RustDslParser {
                     }
                     // Parse struct
                     if matches!(self.current().typ, TokenType::Pub) { self.advance_clone(); }
+                    ctor_loc = self.loc();
                     self.expect(&TokenType::Struct);
                     if let TokenType::Ident(name) = self.current().typ.clone() {
                         contract_name = name;
@@ -512,7 +516,7 @@ impl RustDslParser {
             .filter(|p| p.initializer.is_none())
             .collect();
 
-        let loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
+        let loc = ctor_loc;
 
         // super(...) call as first statement
         let super_args: Vec<Expression> = uninit_props.iter()

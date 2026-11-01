@@ -328,6 +328,13 @@ class ZigParser extends ParserCore<ZigToken> {
   private properties: PropertyNode[] = [];
   private methods: MethodNode[] = [];
   private constructorNode: MethodNode | null = null;
+  /**
+   * N-490: where the constructor statements the source does not write (the
+   * implied super() call and property assignments) are anchored: the contract
+   * struct's `struct` keyword once it is parsed. 1:0 only before that, on the
+   * no-contract error path.
+   */
+  private ctorLoc: SourceLocation = { file: '', line: 1, column: 0 };
   private selfNames = new Set<string>();
   private statefulContextNames = new Set<string>();
 
@@ -418,7 +425,8 @@ class ZigParser extends ParserCore<ZigToken> {
     this.methods = [];
     this.constructorNode = null;
 
-    this.expect('struct');
+    const structToken = this.expect('struct');
+    this.ctorLoc = { file: this.file, line: structToken.line, column: structToken.column };
     this.expect('{');
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
@@ -1052,7 +1060,7 @@ class ZigParser extends ParserCore<ZigToken> {
         callee: { kind: 'identifier', name: 'super' },
         args: params.map(param => ({ kind: 'identifier', name: param.name })),
       },
-      sourceLocation: { file: this.file, line: 1, column: 0 },
+      sourceLocation: { ...this.ctorLoc, file: this.file },
     };
   }
 
@@ -1061,7 +1069,7 @@ class ZigParser extends ParserCore<ZigToken> {
       kind: 'assignment',
       target: { kind: 'property_access', property: name },
       value,
-      sourceLocation: { file: this.file, line: 1, column: 0 },
+      sourceLocation: { ...this.ctorLoc, file: this.file },
     };
   }
 
@@ -1083,7 +1091,7 @@ class ZigParser extends ParserCore<ZigToken> {
         ...params.map(param => this.createPropertyAssignment(param.name, { kind: 'identifier', name: param.name })),
       ],
       visibility: 'public',
-      sourceLocation: { file: this.file, line: 1, column: 0 },
+      sourceLocation: { ...this.ctorLoc, file: this.file },
     };
   }
 

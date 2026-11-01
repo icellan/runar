@@ -526,6 +526,7 @@ module RunarCompiler
         @pos = 0
         @errors = []
         @contract_name = ""
+        @contract_loc = nil
       end
 
       attr_accessor :tokens, :pos, :errors
@@ -614,6 +615,7 @@ module RunarCompiler
                 result = parse_struct_decl
                 if result
                   @contract_name = result[:name]
+                  @contract_loc = result[:struct_loc]
                   parent_class = result[:parent_class]
                   properties = result[:properties]
                   # The attribute is authoritative for the explicit
@@ -639,6 +641,7 @@ module RunarCompiler
               result = parse_struct_decl
               if result
                 @contract_name = result[:name]
+                @contract_loc = result[:struct_loc]
                 parent_class = result[:parent_class]
                 properties = result[:properties]
               end
@@ -694,8 +697,9 @@ module RunarCompiler
           end
         end
 
-        # Build auto-generated constructor
-        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+        # Build auto-generated constructor, anchored at the contract's `struct`
+        # keyword (N-490), not a fake 1:0.
+        default_loc = @contract_loc
         uninit_props = properties.reject { |p| p.initializer }
 
         ctor_params = uninit_props.map { |p| ParamNode.new(name: p.name, type: p.type) }
@@ -799,6 +803,7 @@ module RunarCompiler
       # -- Struct declaration ------------------------------------------------
 
       def parse_struct_decl
+        struct_loc = loc
         expect(TOK_STRUCT)
         name_tok = expect(TOK_IDENT)
         name = name_tok.value
@@ -861,7 +866,7 @@ module RunarCompiler
 
         parent_class = has_mutable_field ? "StatefulSmartContract" : "SmartContract"
 
-        { name: name, parent_class: parent_class, properties: properties }
+        { name: name, parent_class: parent_class, properties: properties, struct_loc: struct_loc }
       end
 
       # -- Type parsing ------------------------------------------------------

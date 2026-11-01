@@ -558,6 +558,8 @@ impl<'a> SolParser<'a> {
             return None;
         }
 
+        // N-490: a synthesized constructor is anchored at the `contract` keyword.
+        let contract_loc = self.loc();
         self.expect(&Token::Contract);
         let name = self.expect_ident();
 
@@ -628,7 +630,7 @@ impl<'a> SolParser<'a> {
         // refused — an accept/reject split is a frontend-parity breach.
         // Mirrors compilers/go/frontend/parser_sol.go:495-530.
         let constructor = constructor.unwrap_or_else(|| {
-            let loc = self.loc();
+            let loc = contract_loc;
             let uninit: Vec<&PropertyNode> =
                 properties.iter().filter(|p| p.initializer.is_none()).collect();
             let params: Vec<ParamNode> = uninit

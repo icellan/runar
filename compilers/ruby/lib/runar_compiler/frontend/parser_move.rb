@@ -523,6 +523,11 @@ module RunarCompiler
         advance if is_unsafe
 
         # module ContractName { ... }
+        # N-490: the synthesized constructor is anchored at the first struct's
+        # `struct` keyword (the `resource` token when it stands alone), or at
+        # `module` when the contract declares no struct.
+        ctor_loc = loc
+        saw_struct = false
         expect_ident("module")
         name_tok = expect(TOK_IDENT)
         contract_name = name_tok.value
@@ -551,10 +556,16 @@ module RunarCompiler
 
           if check_ident("resource") || check_ident("struct")
             is_resource = peek.value == "resource"
+            kind_loc = loc
             advance
             # "resource struct"
             if check_ident("struct")
+              kind_loc = loc
               advance
+            end
+            unless saw_struct
+              saw_struct = true
+              ctor_loc = kind_loc
             end
 
             # Struct name (skip, should match module name)
@@ -639,7 +650,7 @@ module RunarCompiler
         parent_class = "StatefulSmartContract" if has_mutable && !is_unsafe
 
         # Build constructor -- only non-initialized properties become params
-        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+        default_loc = ctor_loc
         uninit_props = properties.reject { |p| p.initializer }
 
         super_call = ExpressionStmt.new(

@@ -371,6 +371,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 	var parentClass string
 	var properties []PropertyNode
 	var methods []MethodNode
+	ctorLoc := SourceLocation{File: p.fileName, Line: 1, Column: 0}
 
 	// Find the struct type that embeds runar.SmartContract or runar.StatefulSmartContract
 	for _, decl := range p.file.Decls {
@@ -420,6 +421,9 @@ func (p *goContractParser) extractContract() *ContractNode {
 			}
 			contractName = typeSpec.Name.Name
 			parentClass = structParent
+			// N-490: the synthesized constructor is anchored at the
+			// contract's `struct` keyword, not a fake 1:0.
+			ctorLoc = p.locAt(p.fset.Position(structType.Struct))
 
 			// Extract properties (non-embed fields)
 			for _, field := range structType.Fields.List {
@@ -616,7 +620,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			Callee: Identifier{Name: "super"},
 			Args:   superArgs,
 		},
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: ctorLoc,
 	}
 
 	// Property assignments
@@ -626,7 +630,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		constructorBody = append(constructorBody, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: prop.Name},
 			Value:          Identifier{Name: prop.Name},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: ctorLoc,
 		})
 	}
 
@@ -639,7 +643,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			Params:         constructorParams,
 			Body:           constructorBody,
 			Visibility:     "public",
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: ctorLoc,
 		},
 		Methods:    methods,
 		SourceFile: p.fileName,

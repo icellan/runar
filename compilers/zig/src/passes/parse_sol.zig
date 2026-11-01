@@ -587,6 +587,8 @@ const Parser = struct {
     // ---- Contract declaration ----
 
     fn parseContractDecl(self: *Parser) ?ContractNode {
+        // N-490: a synthesized constructor is anchored at the `contract` keyword.
+        const contract_loc = self.currentSourceLoc();
         if (!self.matchIdent("contract")) {
             self.addError("expected 'contract' keyword");
             return null;
@@ -642,7 +644,7 @@ const Parser = struct {
 
         // Auto-generate constructor if none was provided
         if (constructor == null) {
-            constructor = self.autoGenerateConstructor(properties.items);
+            constructor = self.autoGenerateConstructor(properties.items, contract_loc);
         }
 
         // Solidity names state variables WITHOUT a `this.` prefix, so every
@@ -1223,7 +1225,7 @@ const Parser = struct {
 
     /// Auto-generate a constructor for contracts without an explicit one.
     /// Only non-initialized properties become constructor params.
-    fn autoGenerateConstructor(self: *Parser, properties: []const PropertyNode) ConstructorNode {
+    fn autoGenerateConstructor(self: *Parser, properties: []const PropertyNode, ctor_loc: types.SourceLocation) ConstructorNode {
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
@@ -1246,7 +1248,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
-            .super_loc = .{ .file = self.file_name, .line = 1, .column = 1 },
+            .super_loc = ctor_loc,
         };
     }
 

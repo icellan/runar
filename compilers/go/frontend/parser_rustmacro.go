@@ -520,6 +520,9 @@ func (p *rustMacroParser) parse() *ContractNode {
 	var parentClass string
 	var properties []PropertyNode
 	var methods []MethodNode
+	// N-490: the synthesized constructor is anchored at the contract's
+	// `struct` keyword, not a fake 1:1.
+	var ctorLoc SourceLocation
 
 	for p.current().kind != rustTokEOF {
 		if p.current().kind == rustTokHashBracket {
@@ -534,6 +537,7 @@ func (p *rustMacroParser) parse() *ContractNode {
 				}
 				// Parse: (pub)? struct Name { ... }
 				p.match(rustTokPub)
+				ctorLoc = p.loc()
 				p.expect(rustTokStruct)
 				if p.current().kind == rustTokIdent {
 					contractName = p.current().value
@@ -675,7 +679,6 @@ func (p *rustMacroParser) parse() *ContractNode {
 		superArgs[i] = Identifier{Name: prop.Name}
 	}
 
-	ctorLoc := SourceLocation{File: p.fileName, Line: 1, Column: 1}
 	superCall := ExpressionStmt{
 		Expr: CallExpr{
 			Callee: Identifier{Name: "super"},
