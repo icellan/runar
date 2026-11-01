@@ -28,10 +28,8 @@ import { BrokenTier, REPO, Tier, buildSourceTiers, judge } from './tier-harness.
  *
  * Two channels, because no single one reaches every tier:
  *  - the artifact's ANF constructor bindings (`anf.methods[constructor].body[].sourceLoc`):
- *    TS, Go, Zig, Java, Python and Ruby emit it with 0-based columns (Python
- *    and Ruby since N-498). Rust emits every ANF column 1-based (all
- *    bindings, not just these — pre-existing, not this item), so its row is
- *    the same line and column + 1.
+ *    TS, Go, Zig, Java, Python, Ruby and Rust emit it with 0-based columns
+ *    (Python and Ruby since N-498, Rust since N-499).
  *  - the `StatefulSmartContract has no mutable properties` warning, which every
  *    validator anchors at the constructor: Go, Rust, Python, Ruby and Java
  *    print its `file:line:col`; the TS and Zig CLIs print warnings without a
@@ -156,11 +154,7 @@ function ctorAnfLocs(artifact: Record<string, any>): Array<string | null> {
 }
 
 /** What each tier must report on the ANF channel for a declaration at `decl`. */
-function expectedAnf(tierId: string, decl: string): Array<string | null> {
-  if (tierId === 'rust') {
-    const [l, c] = decl.split(':').map(Number);
-    return [`${l}:${c! + 1}`];
-  }
+function expectedAnf(_tierId: string, decl: string): Array<string | null> {
   return [decl];
 }
 

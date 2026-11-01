@@ -296,7 +296,14 @@ pub fn assemble_artifact(
     };
 
     let anf = if include_anf && is_stateful {
-        Some(program.clone())
+        // N-499: the compiler carries 1-based columns internally (diagnostics
+        // and the source map subtract one when printing); the artifact's ANF
+        // sourceLoc is 0-based like TS, so convert on the embedded copy only.
+        let mut embedded = program.clone();
+        for m in &mut embedded.methods {
+            zero_base_source_columns(&mut m.body);
+        }
+        Some(embedded)
     } else {
         None
     };
@@ -573,4 +580,24 @@ fn regroup_one_pass(entries: Vec<RegroupEntry>) -> Result<(Vec<RegroupEntry>, bo
         changed = true;
     }
     Ok((out, changed))
+}
+
+/// N-499: rewrite every binding's `sourceLoc.column` from the compiler's
+/// internal 1-based convention to the artifact's 0-based one, recursing into
+/// `if` branches and `loop` bodies.
+fn zero_base_source_columns(bindings: &mut [crate::ir::ANFBinding]) {
+    use crate::ir::ANFValue;
+    for b in bindings {
+        if let Some(loc) = b.source_loc.as_mut() {
+            loc.column = loc.column.saturating_sub(1);
+        }
+        match &mut b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                zero_base_source_columns(then);
+                zero_base_source_columns(else_branch);
+            }
+            ANFValue::Loop { body, .. } => zero_base_source_columns(body),
+            _ => {}
+        }
+    }
 }
