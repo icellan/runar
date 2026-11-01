@@ -20,6 +20,7 @@ const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const const_reassign = @import("const_reassign.zig");
 const types = @import("../ir/types.zig");
+const operand_loc = @import("operand_loc.zig");
 const loop_condition = @import("loop_condition.zig");
 const readonly_inference = @import("../frontend/readonly_inference.zig");
 
@@ -293,6 +294,8 @@ const Parser = struct {
     /// `parseArgList` just returned.
     last_arg_locs: []const ?types.SourceLocation = &.{},
     file_name: []const u8,
+    /// N-492: parenthesised-primary positions, for operand locations.
+    operand_locs: operand_loc.OperandLocs(Token) = .{},
     errors: std.ArrayListUnmanaged([]const u8),
     nest: input_limits.NestingCounter = .{},
     nest_error: ?[]const u8 = null,
@@ -445,7 +448,11 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
-    fn bump(self: *Parser) Token { const prev = self.current; self.current = self.fetch(); return prev; }
+    fn bump(self: *Parser) Token { const prev = self.current; self.operand_locs.consumed(prev); self.current = self.fetch(); return prev; }
+
+    fn tokenSourceLoc(self: *const Parser, tok: Token) types.SourceLocation {
+        return .{ .file = self.file_name, .line = tok.line, .column = tok.col };
+    }
 
     fn currentSourceLoc(self: *const Parser) types.SourceLocation {
         return .{ .file = self.file_name, .line = self.current.line, .column = self.current.col };
@@ -473,9 +480,21 @@ const Parser = struct {
         return Expression{ .binary_op = bin };
     }
 
-    fn makeUnaryOp(self: *Parser, op: UnaryOperator, operand: Expression) ?Expression {
+    fn makeLocatedBinOp(self: *Parser, op: BinOperator, left: Expression, left_loc: ?types.SourceLocation, right: Expression, right_loc: ?types.SourceLocation) ?Expression {
+        const bin = self.allocator.create(BinaryOp) catch return null;
+        bin.* = .{ .op = op, .left = left, .right = right, .left_loc = left_loc, .right_loc = right_loc };
+        return Expression{ .binary_op = bin };
+    }
+
+    /// N-492: where the TS reference locates the operand that began at token
+    /// `start` and ends at the token just consumed. See `operand_loc.zig`.
+    fn operandLocFrom(self: *const Parser, start: Token) ?types.SourceLocation {
+        return self.tokenSourceLoc(self.operand_locs.startOf(start));
+    }
+
+    fn makeUnaryOp(self: *Parser, op: UnaryOperator, operand: Expression, location: ?types.SourceLocation) ?Expression {
         const u = self.allocator.create(UnaryOp) catch return null;
-        u.* = .{ .op = op, .operand = operand };
+        u.* = .{ .op = op, .operand = operand, .location = location };
         return Expression{ .unary_op = u };
     }
 
@@ -1481,100 +1500,120 @@ const Parser = struct {
     }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseLogicalAnd() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .pipe_pipe or self.current.kind == .kw_or) {
             _ = self.bump();
-            const right = self.parseLogicalAnd() orelse return null;
-            left = self.makeBinOp(.or_op, left, right) orelse return null;
+            const right_start = self.current; const right = self.parseLogicalAnd() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.or_op, left, left_loc, right, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseLogicalAnd(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseOr() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .amp_amp or self.current.kind == .kw_and) {
             _ = self.bump();
-            const right = self.parseBitwiseOr() orelse return null;
-            left = self.makeBinOp(.and_op, left, right) orelse return null;
+            const right_start = self.current; const right = self.parseBitwiseOr() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.and_op, left, left_loc, right, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseOr(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseXor() orelse return null;
-        while (self.current.kind == .pipe) { _ = self.bump(); const r = self.parseBitwiseXor() orelse return null;
-            left = self.makeBinOp(.bitor, left, r) orelse return null; }
+        var left_loc = self.operandLocFrom(left_start);
+        while (self.current.kind == .pipe) { _ = self.bump(); const right_start = self.current; const r = self.parseBitwiseXor() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.bitor, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start); }
         return left;
     }
 
     fn parseBitwiseXor(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseAnd() orelse return null;
-        while (self.current.kind == .caret) { _ = self.bump(); const r = self.parseBitwiseAnd() orelse return null;
-            left = self.makeBinOp(.bitxor, left, r) orelse return null; }
+        var left_loc = self.operandLocFrom(left_start);
+        while (self.current.kind == .caret) { _ = self.bump(); const right_start = self.current; const r = self.parseBitwiseAnd() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.bitxor, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start); }
         return left;
     }
 
     fn parseBitwiseAnd(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseEquality() orelse return null;
-        while (self.current.kind == .ampersand) { _ = self.bump(); const r = self.parseEquality() orelse return null;
-            left = self.makeBinOp(.bitand, left, r) orelse return null; }
+        var left_loc = self.operandLocFrom(left_start);
+        while (self.current.kind == .ampersand) { _ = self.bump(); const right_start = self.current; const r = self.parseEquality() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.bitand, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start); }
         return left;
     }
 
     fn parseEquality(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseComparison() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .eqeq or self.current.kind == .bang_eq) {
             const op: BinOperator = if (self.current.kind == .eqeq) .eq else .neq;
-            _ = self.bump(); const r = self.parseComparison() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseComparison() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseComparison(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseShift() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .lt or self.current.kind == .lt_eq or self.current.kind == .gt or self.current.kind == .gt_eq) {
             const op: BinOperator = switch (self.current.kind) { .lt => .lt, .lt_eq => .lte, .gt => .gt, .gt_eq => .gte, else => unreachable };
-            _ = self.bump(); const r = self.parseShift() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseShift() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseShift(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseAdditive() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .lshift or self.current.kind == .rshift) {
             const op: BinOperator = if (self.current.kind == .lshift) .lshift else .rshift;
-            _ = self.bump(); const r = self.parseAdditive() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseAdditive() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseAdditive(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseMultiplicative() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .plus or self.current.kind == .minus) {
             const op: BinOperator = if (self.current.kind == .plus) .add else .sub;
-            _ = self.bump(); const r = self.parseMultiplicative() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseMultiplicative() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseMultiplicative(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseUnary() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .star or self.current.kind == .slash or self.current.kind == .percent) {
             const op: BinOperator = switch (self.current.kind) { .star => .mul, .slash => .div, .percent => .mod, else => unreachable };
-            _ = self.bump(); const r = self.parseUnary() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseUnary() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseUnary(self: *Parser) ?Expression {
-        if (self.current.kind == .minus) { _ = self.bump(); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.negate, o); }
-        if (self.current.kind == .bang) { _ = self.bump(); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.not, o); }
-        if (self.current.kind == .tilde) { _ = self.bump(); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.bitnot, o); }
+        if (self.current.kind == .minus) { const op_loc = self.tokenSourceLoc(self.bump()); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.negate, o, op_loc); }
+        if (self.current.kind == .bang) { const op_loc = self.tokenSourceLoc(self.bump()); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.not, o, op_loc); }
+        if (self.current.kind == .tilde) { const op_loc = self.tokenSourceLoc(self.bump()); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.bitnot, o, op_loc); }
         // Zig's `&` is the address-of operator used for slice coercion at
         // call sites like `&.{sig1, sig2}` (an anonymous-struct literal
         // coerced to a slice). Slices have no Rúnar IR analogue — the inner
@@ -1678,7 +1717,7 @@ const Parser = struct {
                 }
                 break :blk Expression{ .identifier = tok.text };
             },
-            .lparen => blk: { _ = self.bump(); const inner = self.parseExpression() orelse break :blk null; _ = self.expect(.rparen); break :blk inner; },
+            .lparen => blk: { const open = self.bump(); const inner_first = self.current; const inner = self.parseExpression() orelse break :blk null; if (self.expect(.rparen)) |close| self.operand_locs.recordParen(self.allocator, open, inner_first, close); break :blk inner; },
             .lbracket => blk: {
                 // `[_]T{...}` — typed array literal with inferred length. The
                 // element type is parsed and discarded; Rúnar infers element

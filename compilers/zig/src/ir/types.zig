@@ -412,12 +412,13 @@ pub const Expression = union(enum) {
 pub const BytesLiteral = struct { value: []const u8, location: ?SourceLocation = null };
 pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
 /// `left_loc` / `right_loc` are the first tokens of the two operands (N-463).
-/// Only the .runar.ts parser sets them, as the TS reference locates its
-/// operands; elsewhere they are null and an operand type error prints no
-/// location.
+/// Every surface parser sets them for operator-syntax nodes (N-492), as the
+/// TS reference locates its operands; nodes a parser synthesizes carry null
+/// and an operand type error on them prints no location.
 pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression, left_loc: ?SourceLocation = null, right_loc: ?SourceLocation = null };
-/// `location` is the operator token (N-472); only the .runar.ts parser sets it,
-/// as the TS reference locates a unary node there. Elsewhere it is null.
+/// `location` is the operator token (N-472); every surface parser sets it for
+/// operator-syntax unaries (N-492), as the TS reference locates a unary node
+/// there. Synthesized unaries (Java `.negate()` / `.not()`) carry null.
 pub const UnaryOp = struct { op: UnaryOperator, operand: Expression, location: ?SourceLocation = null };
 pub const CallExpr = struct {
     callee: []const u8,

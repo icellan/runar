@@ -192,18 +192,19 @@ const CASES: Array<[string, number, string | null, string]> = [
   ['N489-ts-lit-led.runar.ts', 15, '5n + 1n', "eft operand of '&&' must be boolean"],
   ['N489-ts-paren-call.runar.ts', 15, '(abs(x)) + 1n', "eft operand of '&&' must be boolean"],
   ['N489-ts-paren-ternary.runar.ts', 15, '(flag ? x : x) + 1n', "eft operand of '&&' must be boolean"],
+  // N-492: the Zig surface parsers now record operand locations, so the
+  // identifier-operand shape converged on `.runar.sol` in all seven tiers.
+  ['N489-sol-and-right.runar.sol', 14, 'x)', "ight operand of '&&' must be boolean"],
 ];
 
 /** Still divergent on the anchor node (see header). [fixture, message fragment]. */
 const ANCHOR_PENDING: Array<[string, string]> = [
   // N-489: TS locates these on the named surface exactly where it does on
   // `.runar.ts` (so the surface is not the open question), but other tiers do
-  // not yet: every non-`.ts` Zig parser records no operand location at all
-  // (`sol-and-right`; same on move/py/rb/java/go/rs/zig), and the go / python /
+  // not yet: the go / python /
   // ruby / java / rust / zig tiers fall back to the statement on `.runar.go`,
   // `.runar.rs` and `.runar.zig` for a literal-led or paren-call-led composite
   // and (`.runar.rs`) a unary `!`. Move a row to CASES when its tiers converge.
-  ['N489-sol-and-right.runar.sol', "ight operand of '&&' must be boolean"],
   ['N489-go-lit-led.runar.go', "eft operand of '&&' must be boolean"],
   ['N489-go-paren-call.runar.go', "eft operand of '&&' must be boolean"],
   ['N489-rs-not-bigint.runar.rs', "perand of '!' must be boolean"],

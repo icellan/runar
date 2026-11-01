@@ -113,9 +113,8 @@ const PEER_SHAPES = ['not-bigint', 'neg-bool', 'lit-led', 'paren-call', 'paren-t
  * N-491 tip. Each tier's follow-up item empties its list.
  */
 const DIVERGENT: Record<string, string[]> = {
-  // N-492 (Zig): no non-`.runar.ts` Zig parser records an operand location,
-  // so every row prints the message with no location at all.
-  zig: on(Object.keys(SHAPES)),
+  // N-492 (Zig): converged — every Zig surface parser records operand locations.
+  zig: [],
   // N-493 (Go)
   go: on(PEER_SHAPES),
   // N-494 (Rust)

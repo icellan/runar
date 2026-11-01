@@ -28,6 +28,7 @@ const std = @import("std");
 const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const operand_loc = @import("operand_loc.zig");
 const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
@@ -779,6 +780,8 @@ const Parser = struct {
     tokens: []Token,
     pos: usize,
     file_name: []const u8,
+    /// N-492: parenthesised-primary positions, for operand locations.
+    operand_locs: operand_loc.OperandLocs(Token) = .{},
     /// N-464: the argument locations of the list `parseArgList` returned
     /// last; the caller copies them onto the call node it builds, as
     /// parse_ts.zig does (N-463).
@@ -841,6 +844,7 @@ const Parser = struct {
 
     fn bump(self: *Parser) Token {
         const tok = self.peek();
+        self.operand_locs.consumed(tok);
         if (self.pos < self.tokens.len) self.pos += 1;
         return tok;
     }
@@ -2131,6 +2135,18 @@ const Parser = struct {
         return .{ .binary_op = bop };
     }
 
+    fn makeLocatedBinaryExpr(self: *Parser, op: BinOperator, left: Expression, left_loc: ?types.SourceLocation, right: Expression, right_loc: ?types.SourceLocation) ?Expression {
+        const bop = self.allocator.create(BinaryOp) catch return null;
+        bop.* = .{ .op = op, .left = left, .right = right, .left_loc = left_loc, .right_loc = right_loc };
+        return .{ .binary_op = bop };
+    }
+
+    /// N-492: where the TS reference locates the operand that began at token
+    /// `start` and ends at the token just consumed. See `operand_loc.zig`.
+    fn operandLocFrom(self: *const Parser, start: Token) ?types.SourceLocation {
+        return self.tokenSourceLoc(self.operand_locs.startOf(start));
+    }
+
     // ==== Expressions ====
     // Operator precedence (lowest to highest):
     //   ternary (? :)
@@ -2170,79 +2186,111 @@ const Parser = struct {
     }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseLogicalAnd() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.pipe_pipe) or self.check(.kw_or)) {
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseLogicalAnd() orelse return null;
-            left = self.makeBinaryExpr(.or_op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.or_op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseLogicalAnd(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseLogicalNot() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.amp_amp) or self.check(.kw_and)) {
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseLogicalNot() orelse return null;
-            left = self.makeBinaryExpr(.and_op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.and_op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseLogicalNot(self: *Parser) ?Expression {
         if (self.check(.kw_not) or self.check(.bang)) {
-            _ = self.bump();
+            const op_loc = self.tokenSourceLoc(self.bump());
             const operand = self.nestedParse(Expression, Parser.parseLogicalNot) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .not, .operand = operand };
+            uop.* = .{ .op = .not, .operand = operand, .location = op_loc };
             return .{ .unary_op = uop };
         }
         return self.parseBitwiseOr();
     }
 
     fn parseBitwiseOr(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseBitwiseXor() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.pipe)) {
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseBitwiseXor() orelse return null;
-            left = self.makeBinaryExpr(.bitor, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.bitor, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseXor(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseBitwiseAnd() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.caret)) {
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseBitwiseAnd() orelse return null;
-            left = self.makeBinaryExpr(.bitxor, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.bitxor, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseAnd(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseEquality() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.ampersand)) {
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseEquality() orelse return null;
-            left = self.makeBinaryExpr(.bitand, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.bitand, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseEquality(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseComparison() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.eqeq) or self.check(.not_eq)) {
             const op: BinOperator = if (self.peek().kind == .eqeq) .eq else .neq;
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseComparison() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseComparison(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseShift() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.lt) or self.check(.lt_eq) or self.check(.gt) or self.check(.gt_eq)) {
             const op: BinOperator = switch (self.peek().kind) {
                 .lt => .lt,
@@ -2252,36 +2300,51 @@ const Parser = struct {
                 else => unreachable,
             };
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseShift() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseShift(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseAdditive() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.lshift) or self.check(.rshift)) {
             const op: BinOperator = if (self.peek().kind == .lshift) .lshift else .rshift;
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseAdditive() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseAdditive(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseMultiplicative() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.plus) or self.check(.minus)) {
             const op: BinOperator = if (self.peek().kind == .plus) .add else .sub;
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseMultiplicative() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseMultiplicative(self: *Parser) ?Expression {
+        const left_start = self.peek();
         var left = self.parseUnary() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.check(.star) or self.check(.slash) or self.check(.percent)) {
             const op: BinOperator = switch (self.peek().kind) {
                 .star => .mul,
@@ -2290,32 +2353,35 @@ const Parser = struct {
                 else => unreachable,
             };
             _ = self.bump();
+            const right_start = self.peek();
             const right = self.parseUnary() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseUnary(self: *Parser) ?Expression {
         if (self.check(.minus)) {
-            _ = self.bump();
+            const op_loc = self.tokenSourceLoc(self.bump());
             const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .negate, .operand = o };
+            uop.* = .{ .op = .negate, .operand = o, .location = op_loc };
             return .{ .unary_op = uop };
         }
         if (self.check(.tilde)) {
-            _ = self.bump();
+            const op_loc = self.tokenSourceLoc(self.bump());
             const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .bitnot, .operand = o };
+            uop.* = .{ .op = .bitnot, .operand = o, .location = op_loc };
             return .{ .unary_op = uop };
         }
         if (self.check(.bang)) {
-            _ = self.bump();
+            const op_loc = self.tokenSourceLoc(self.bump());
             const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .not, .operand = o };
+            uop.* = .{ .op = .not, .operand = o, .location = op_loc };
             return .{ .unary_op = uop };
         }
         return self.parsePower();
@@ -2490,9 +2556,10 @@ const Parser = struct {
 
         // Parenthesised expression
         if (tok.kind == .lparen) {
-            _ = self.bump();
+            const open = self.bump();
+            const inner_first = self.peek();
             const inner = self.parseExpression() orelse return null;
-            _ = self.expect(.rparen);
+            if (self.expect(.rparen)) |close| self.operand_locs.recordParen(self.allocator, open, inner_first, close);
             return inner;
         }
 
