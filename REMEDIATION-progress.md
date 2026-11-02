@@ -427,6 +427,7 @@ Logs: remediation-logs/baseline/
 ## In-flight
 
 ## Completed
+- [x] N-384 — commit 85d76f1bb — tier: top — review: dispatcher — log2 isSome re-proved vs N-103 lowering (R197/R198); asBytesNum? for OP_SIZE/SPLIT; fingerprint restamp
 - [x] N-505 — commit ecf4b332e — tier: mid — review: dispatcher — comparison operand anchors in 6 tiers; revert 17/259 red -> 284/284
 - [x] N-504 — stale on arrival, no commit — not reproducible at 9b1df961f: all 7 tiers refuse an if-expression operand on .runar.rs (Rust: unsupported token 'If'), matching docs/formats/rust.md; original observation likely a stale Rust binary
 - [x] N-503 — commit 9b1df961f — tier: mid — review: dispatcher — TS/Ruby refuse bare .runar.rs struct (R196); revert 6/17 red -> 17/17
@@ -1660,7 +1661,6 @@ Logs: remediation-logs/baseline/
 
 ## Deferred
 - [>] N-394 — - — tier history: mid
-- [>] N-384 — post-v1 per R142 (needs Stack/Eval.lean asBytes? coercion change + runar-verification exception) — tier history: top
 - [>] N-204 — release process, needs explicit tag+push authorization (R79) — tier history: n/a
 - [>] F-197 — N-056 — tier history: opus
 - [>] F-132 — spec-intended, not a defect: spec/script-analyzer-format.md §7.2/§11 mandate paths=[] and no linear fallback on UNBALANCED_IF_ENDIF; TS (probe) and all 7 tiers implement it; the error-severity finding is emitted and an unbalanced script is consensus-invalid, so no spendable lock is hidden (R42) — tier history: opus

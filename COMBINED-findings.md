@@ -823,18 +823,18 @@ Applying them: D1 items → REJECTED (by design); D2 items → one cross-SDK ite
 
 Final state after the remediation run, generated from `COMBINED-findings.json` and `remediation-logs/state.json`. Per-item detail (tier history, review notes) is in `REMEDIATION-progress.md`; dispatcher and user decisions are in `remediation-logs/dispatcher-resolutions.md`.
 
-Final battery `remediation-logs/checkpoint-final` @ `ecf4b332e`: GREEN 42/42 — vitest 32845 passed / 3 skipped, golden 99, multi-format fold-off 887 and fold-on 887 (0 vacuous), Lean 79 byte-exact, IR round-trip 99.
+Final battery `remediation-logs/checkpoint-final` @ `ecf4b332e`: GREEN 42/42 — vitest 32845 passed / 3 skipped, golden 99, multi-format fold-off 887 and fold-on 887 (0 vacuous), Lean 79 byte-exact, IR round-trip 99. N-384 (Lean-only, R197/R198) landed afterwards as `85d76f1bb`; its full `lake build`, pipelineGolden (79/99), TCB-drift and pipeline-conformance checks pass.
 
 | Outcome | Items |
 |---|---:|
-| DEFERRED | 7 |
-| DONE | 788 |
+| DEFERRED | 6 |
+| DONE | 789 |
 | GROUPED | 46 |
 | REJECTED | 23 |
 | SKIPPED | 31 |
 | STALE | 314 |
 
-`remediation-logs/state.json` records 813 completions: the 788 DONE items above, 23 follow-up items (`*-FU`, `CK*-FU*`, `PL*-FU*`) tracked only in the state file, and 2 items (F-169, N-426) recorded twice.
+`remediation-logs/state.json` records 814 completions: the 789 DONE items above, 23 follow-up items (`*-FU`, `CK*-FU*`, `PL*-FU*`) tracked only in the state file, and 2 items (F-169, N-426) recorded twice.
 
 Deferred:
 
@@ -843,7 +843,6 @@ Deferred:
 - F-197 — `parser_go.py` uses the C ladder, not Go's
 - N-034 — @embedAlways on a FixedArray property is dropped for its expanded literal slots in all 7 tiers (documented choice at 1b71ea9e; Rust comment 'synthetic array leaves are not @embedAlways targets')
 - N-204 — RELEASE: compilers/go and packages/runar-go tags are stale and form a tag cycle (runar-go@v0.4.5 lacks bn254witness/sp1fri; compilers/go v1.0.0-rc.1 unpublished); downstream go get is broken
-- N-384 — N-103-FU: AgreesA4 log2 isSome theorem is vacuous after the exact-log2 lowering
 - N-394 — Audit Go/Python/Zig/Ruby/Java source maps against TS per opcode (sub-context loc inheritance, method-tail clears, FixedArray dispatch locs)
 
 ### Items logged during remediation (533, not in the tables above)
@@ -1255,7 +1254,7 @@ Deferred:
 | N-381 | DONE `8ec3dbcb5` | `go test ./...` in conformance fails setup in conformance/negatives (mixed .runar.go package names) |
 | N-382 | DONE `f13c58e46` | Stale Rabin opcode counts in docs after F-047/F-144/F-368 ("15-opcode") |
 | N-383 | DONE `361002809` | F-368-FU: Rust r067 CORRECT_ARITY_FINGERPRINTS still pins verifyRabinSig at 45 ops (now 50) |
-| N-384 | DEFERRED | N-103-FU: AgreesA4 log2 isSome theorem is vacuous after the exact-log2 lowering |
+| N-384 | DONE `85d76f1bb` | N-103-FU: AgreesA4 log2 isSome theorem is vacuous after the exact-log2 lowering |
 | N-385 | DONE `4b5ed21bc` | Rust source map attributes method-tail and inline-tail cleanup ops to the last statement |
 | N-386 | DONE `a78b02d44` | Stale header in compilers/rust/tests/f211_source_map_attribution_tests.rs |
 | N-387 | DONE `d16d9d75b` | Python compiler conformance-goldens harness ignores the source.json compilers allowlist (checkpoint-39 red after N-314) |
