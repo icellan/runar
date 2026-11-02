@@ -764,9 +764,16 @@ jobs:
             dir=$(dirname "$test")
             name=$(basename "$dir")
             expected=$(tr -d '[:space:]' < "$dir/expected-script.hex" | tr '[:upper:]' '[:lower:]')
-            actual=$(ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding 2>&1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            # A fixture whose `compilers` allowlist excludes ruby is held to
+            # the go-only-parity rule (R-037): refuse it, or match byte for byte.
+            targeted=$(jq -r 'if has("compilers") then (.compilers | index("ruby") != null) else true end' "$dir/source.json")
+            rc=0
+            raw=$(ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding 2>&1) || rc=$?
+            actual=$(printf '%s' "$raw" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
             if [ "$expected" = "$actual" ]; then
               echo "PASS $name"
+            elif [ "$targeted" = "false" ] && [ "$rc" -ne 0 ]; then
+              echo "PASS $name (refused; not a ruby target)"
             else
               echo "FAIL $name"
               fail=1
