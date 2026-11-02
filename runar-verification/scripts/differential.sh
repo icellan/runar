@@ -147,8 +147,10 @@ echo "[differential] running Lean side..."
 # decoder past macOS's default 8 MB main-thread stack. Bump to the
 # hard limit (65520 KB on Linux/macOS by default) so the harness can
 # parse every fixture. CI Linux runners typically have an 8 MB default
-# too; the unlimited-or-65520 ceiling is standard.
-ulimit -s 65520 2>/dev/null || true
+# too; the unlimited-or-65520 ceiling is standard. bn254-pairing (≈ 9.4 MB
+# hex) overflows 65520 KB, so ask for 1 GB first where the hard limit
+# allows it (Linux runners), and fall back to 65520 KB (macOS).
+ulimit -s 1048576 2>/dev/null || ulimit -s 65520 2>/dev/null || true
 RUNAR_DIFFERENTIAL_OUT="$LEAN_REPORT" lake env ./.lake/build/bin/differential
 
 if [ ! -f "$LEAN_REPORT" ]; then
