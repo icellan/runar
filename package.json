@@ -160,5 +160,12 @@
   },
   "dependencies": {
     "@bsv/sdk": "^2.0.7"
+  },
+  "pnpm": {
+    "overrides": {
+      "fast-uri@>=3.0.0 <3.1.7": "^3.1.7",
+      "brace-expansion@>=2.0.0 <2.1.6": "^2.1.6",
+      "source-map-js@>=1.0.0 <1.2.2": "^1.2.2"
+    }
   }
 }
