@@ -313,6 +313,10 @@ KNOWN_PYTHON_BITCOINLIB_MISMATCHES = {
     # python-bitcoinlib still enforces it and refuses to evaluate the script.
     "convergence-proof": "script too large",
     "ec-unit": "script too large",
+    # ~19.5 kB, over the same cap. It used to match only by coincidence (both
+    # sides "unsupported"); once N-376 dropped an identity ROT ROT ROT the
+    # Lean side reaches OP_SPLIT first and reports a typeError instead.
+    "post-quantum-wots": "script too large",
     # Arbitrary-precision script numbers. BSV removed the 4-byte CScriptNum
     # limit post-Genesis; python-bitcoinlib still enforces it and aborts in
     # CastToBigNum() the moment it meets one of this fixture's 9- and 16-byte
