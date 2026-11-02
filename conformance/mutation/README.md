@@ -14,8 +14,9 @@ fast in-process gate(s), and records **caught vs survived**. A mutant that
 
 The gates resolve `runar-compiler` / `runar-testing` through the **root
 `vitest.config.ts` src alias** (`runar-compiler` → `packages/runar-compiler/src/index.ts`).
-`conformance/` has no nearer vitest config, so `cd conformance && npx vitest run …`
-inherits the same aliases. Mutating a file under `packages/runar-compiler/src/`
+`conformance/vitest.config.ts` re-exports the root config (Vitest 5 no longer
+walks up to a parent config), so `cd conformance && npx vitest run …` inherits
+the same aliases. Mutating a file under `packages/runar-compiler/src/`
 is therefore observed by the gates **without `pnpm run build`** — apply, run the
 gate, revert. Fast and correct. (If the gates ever move to built `dist`, this
 harness would need a per-mutant rebuild; they do not today.)

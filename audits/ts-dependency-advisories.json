@@ -43,39 +43,6 @@
       "why_deferred": "Pulled in by @changesets/cli. Runs only during a release, on repo-authored changeset files."
     },
     {
-      "module": "nanoid",
-      "advisory": "GHSA-28wg-ghj8-5hjv",
-      "severity": "high",
-      "title": "nanoid: non-secure generators can loop indefinitely with negative size",
-      "pulled_in_by": [
-        "vitest"
-      ],
-      "surface": "test-tooling",
-      "why_deferred": "Pulled in by vitest for temp identifiers."
-    },
-    {
-      "module": "nanoid",
-      "advisory": "GHSA-2v37-7h3g-55p8",
-      "severity": "high",
-      "title": "nanoid: custom generators can loop indefinitely when size is zero",
-      "pulled_in_by": [
-        "vitest"
-      ],
-      "surface": "test-tooling",
-      "why_deferred": "Pulled in by vitest for temp identifiers."
-    },
-    {
-      "module": "nanoid",
-      "advisory": "GHSA-xwg4-73v4-xw9w",
-      "severity": "high",
-      "title": "nanoid: Integer Overflow or Wraparound",
-      "pulled_in_by": [
-        "vitest"
-      ],
-      "surface": "test-tooling",
-      "why_deferred": "Pulled in by vitest for temp identifiers."
-    },
-    {
       "module": "picomatch",
       "advisory": "GHSA-c2c7-rcm5-vvqj",
       "severity": "high",
@@ -85,39 +52,6 @@
       ],
       "surface": "mixed",
       "why_deferred": "Pulled in by @changesets/cli (release-only) AND by ts-morph via runar-compiler. The ts-morph path is a compile-time glob over the author’s own source tree, so the ReDoS input is not attacker-controlled."
-    },
-    {
-      "module": "postcss",
-      "advisory": "GHSA-6g55-p6wh-862q",
-      "severity": "high",
-      "title": "PostCSS: Arbitrary file read and information disclosure via attacker-controlled sourceMappingURL in CSS comments",
-      "pulled_in_by": [
-        "vitest"
-      ],
-      "surface": "test-tooling",
-      "why_deferred": "Pulled in by vitest. CSS pipeline; this repo ships no CSS."
-    },
-    {
-      "module": "postcss",
-      "advisory": "GHSA-r28c-9q8g-f849",
-      "severity": "high",
-      "title": "PostCSS: Path Traversal in Previous Source Map Auto-Loading (sourceMappingURL) leads to Arbitrary .map File Disclosure",
-      "pulled_in_by": [
-        "vitest"
-      ],
-      "surface": "test-tooling",
-      "why_deferred": "Pulled in by vitest. CSS pipeline; this repo ships no CSS."
-    },
-    {
-      "module": "vitest",
-      "advisory": "GHSA-5xrq-8626-4rwp",
-      "severity": "critical",
-      "title": "When Vitest UI server is listening, arbitrary file can be read and executed",
-      "pulled_in_by": [
-        "vitest"
-      ],
-      "surface": "test-tooling",
-      "why_deferred": "Test runner. Not shipped in any published package and not reachable from a compiled contract."
     }
   ]
 }

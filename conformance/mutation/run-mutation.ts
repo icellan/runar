@@ -102,8 +102,8 @@ export const GATES: Record<string, GateSpec> = {
   // --- Phase E1 / TG-007 (2026-08): Palmer-class corpus additions ----------
   // branch-merged-locals-vm / state-push-framing-vm / c28-state-strict run
   // from the repo root because they live under packages/runar-testing and
-  // packages/runar-sdk, which have no nearer vitest config (same root SRC
-  // alias as the gates above).
+  // packages/runar-sdk, whose vitest.config.ts re-exports the root one (same
+  // root SRC alias as the gates above).
   'branch-merged-locals-vm': {
     cwd: '.',
     argv: ['npx', 'vitest', 'run', 'packages/runar-testing/src/__tests__/branch-merged-locals-vm.test.ts'],
