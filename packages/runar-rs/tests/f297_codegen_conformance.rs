@@ -347,7 +347,7 @@ use num_bigint::BigInt;
 use runar::sdk::{Inscription, RunarArtifact, Utxo};
 
 fn artifact(name: &str) -> RunarArtifact {
-    let path = format!("{}/../../conformance/sdk-codegen/fixtures/{}", env!("F297_REPO"), name);
+    let path = format!("{}/conformance/sdk-codegen/fixtures/{}", env!("F297_REPO"), name);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
