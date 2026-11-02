@@ -29,7 +29,10 @@ const state_mod = @import("sdk_state.zig");
 const contract_mod = @import("sdk_contract.zig");
 
 const DIR = "../../conformance/sdk-matches-artifact/";
-const CPU_BUDGET_US: i64 = 20 * std.time.us_per_s;
+// The other tiers use 20 s. This tier's tests run as an unoptimised Debug
+// build: the replay takes ~12.5 s on an M-series Mac and went past 20 s on
+// CI's x86_64 runner. 60 s still fails the quadratic decoder (~100 min).
+const CPU_BUDGET_US: i64 = 60 * std.time.us_per_s;
 
 fn cpuMicros() i64 {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);
