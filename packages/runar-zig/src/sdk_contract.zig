@@ -798,8 +798,9 @@ pub const RunarContract = struct {
 
         // Resolve args: auto-fill Sig (placeholder), PubKey (signer's key)
         var resolved_args = try self.allocator.alloc(types.StateValue, args.len);
+        var resolved_filled: usize = 0;
         defer {
-            for (resolved_args) |*a| a.deinit(self.allocator);
+            for (resolved_args[0..resolved_filled]) |*a| a.deinit(self.allocator);
             self.allocator.free(resolved_args);
         }
 
@@ -867,6 +868,7 @@ pub const RunarContract = struct {
             } else {
                 resolved_args[i] = try arg.clone(self.allocator);
             }
+            resolved_filled = i + 1;
         }
 
         // Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not
