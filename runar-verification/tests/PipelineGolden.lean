@@ -697,15 +697,23 @@ the constants had been honest all along.
 -- gains its #guard). Sharded live regens (shards 1, 8, 22 of 22) returned
 -- all three `.regenLive` anchors `[fresh]` and byte-equal to their
 -- expected-script.hex, so only their fingerprints move.
+-- 2026-11-02 (N-384 / R197-R198): the model fingerprint moved to
+-- v1:64f:7217808b:349a47748fb13a49. Stack/Eval.lean gains asBytesNum?
+-- (OP_SIZE / OP_SPLIT read a numeric element as its minimal encoding;
+-- OP_BIN2NUM is identity on a non-zero number), and the AgreesA4 log2
+-- isSome theorem is re-proved against the N-103 lowering. Sharded live
+-- regens (shards 1, 8, 22 of 22) returned all three `.regenLive` anchors
+-- `[fresh]` and byte-equal to their expected-script.hex, so only their
+-- fingerprints move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:64f:7219499b:9eddf410ce2933de"⟩,
+  ⟨"babybear", .regenLive, "v1:64f:7217808b:349a47748fb13a49"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:64f:7219499b:9eddf410ce2933de"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:64f:7217808b:349a47748fb13a49"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -728,7 +736,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:64f:7219499b:9eddf410ce2933de"⟩,
+  ⟨"state-covenant", .regenLive, "v1:64f:7217808b:349a47748fb13a49"⟩,
 ]
 
 /--

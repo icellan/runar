@@ -702,7 +702,7 @@ theorem runOpcode_SPLIT_def (s : StackState) :
        | .ok (vs, s') =>
            match vs with
            | [idx, v] =>
-               match asBytes? v, asNonNegativeNat? idx with
+               match asBytesNum? v, asNonNegativeNat? idx with
                | some bs, some i =>
                    if i > bs.size then
                      .error (.unsupported "OP_SPLIT: index past end")
@@ -717,7 +717,7 @@ theorem runOpcode_SIZE_def (s : StackState) :
       (match s.stack with
        | [] => .error (.unsupported "OP_SIZE: empty stack")
        | v :: _ =>
-           match asBytes? v with
+           match asBytesNum? v with
            | some b => .ok (s.push (.vBigint b.size))
            | none => .error (.typeError "OP_SIZE: not bytes")) := rfl
 
@@ -731,7 +731,10 @@ theorem runOpcode_BIN2NUM_def (s : StackState) :
        | some (v, s') =>
            match asBytes? v with
            | some b => .ok (s'.push (.vBigint (decodeMinimalLE b)))
-           | none => .error (.typeError "OP_BIN2NUM: not bytes")) := rfl
+           | none =>
+               match v with
+               | .vBigint i => .ok (s'.push (.vBigint i))
+               | _ => .error (.typeError "OP_BIN2NUM: not bytes")) := rfl
 
 theorem runOpcode_NUM2BIN_def (s : StackState) :
     runOpcode "OP_NUM2BIN" s =

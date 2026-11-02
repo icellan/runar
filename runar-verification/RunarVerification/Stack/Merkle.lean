@@ -373,7 +373,7 @@ private theorem mlevel_stepNonIf_split
         | Except.ok (vs, s') =>
             match vs with
             | [idx', v] =>
-                match asBytes? v, asNonNegativeNat? idx' with
+                match asBytesNum? v, asNonNegativeNat? idx' with
                 | some bs', some i' =>
                     if i' > bs'.size then
                       Except.error (ANF.Eval.EvalError.unsupported "OP_SPLIT: index past end")
