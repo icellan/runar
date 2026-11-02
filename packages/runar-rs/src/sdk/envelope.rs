@@ -501,7 +501,7 @@ pub fn verify_envelope(opts: VerifyEnvelopeOpts<'_>) -> VerifyEnvelopeResult {
     // The envelope protocol is plain ECDSA — the TS reference accepts a
     // high-S signature — so fold s into the low half first. (r, s) and
     // (r, N - s) verify for exactly the same digest and key.
-    let sig = sig.normalize_s().unwrap_or(sig);
+    let sig = sig.normalize_s();
     if verifying_key.verify_prehash(&digest, &sig).is_err() {
         return reject(VerifyEnvelopeReason::BadSig, Some(parsed));
     }

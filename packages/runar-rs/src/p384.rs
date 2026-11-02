@@ -15,7 +15,7 @@
 
 use p384::ecdsa::{signature::hazmat::{PrehashSigner, PrehashVerifier}, SigningKey, VerifyingKey, Signature};
 use sha2::{Digest, Sha256};
-use rand::rngs::OsRng;
+use p384::elliptic_curve::Generate;
 
 /// A P-384 key pair.
 pub struct P384KeyPair {
@@ -28,14 +28,14 @@ pub struct P384KeyPair {
 
 /// Generate a random P-384 key pair.
 pub fn p384_keygen() -> P384KeyPair {
-    let sk = SigningKey::random(&mut OsRng);
+    let sk = SigningKey::generate();
     let vk = sk.verifying_key();
-    let point = vk.to_encoded_point(false); // uncompressed
+    let point = vk.to_sec1_point(false); // uncompressed
     let coords = point.as_bytes();
     // uncompressed: 0x04 || x[48] || y[48] → strip prefix
     let pk = coords[1..].to_vec(); // 96 bytes
 
-    let compressed_point = vk.to_encoded_point(true);
+    let compressed_point = vk.to_sec1_point(true);
     let pk_compressed = compressed_point.as_bytes().to_vec();
 
     P384KeyPair { sk, pk, pk_compressed }

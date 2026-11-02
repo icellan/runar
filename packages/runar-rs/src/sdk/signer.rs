@@ -79,13 +79,13 @@ impl LocalSigner {
 impl Signer for LocalSigner {
     fn get_public_key(&self) -> Result<String, String> {
         let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(true); // compressed
+        let point = verifying_key.to_sec1_point(true); // compressed
         Ok(bytes_to_hex(point.as_bytes()))
     }
 
     fn get_address(&self) -> Result<String, String> {
         let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(true);
+        let point = verifying_key.to_sec1_point(true);
         let pubkey_bytes = point.as_bytes();
 
         // P2PKH address = Base58Check(0x00 + RIPEMD160(SHA256(compressed_pubkey)))

@@ -150,7 +150,7 @@ fn prepared_call_has_no_op_push_tx_sig_field() {
     let (raw_sig, _): (Signature, _) = signing_key
         .sign_prehash(&digest)
         .expect("external wallet sign_prehash");
-    let normalized = raw_sig.normalize_s().unwrap_or(raw_sig);
+    let normalized = raw_sig.normalize_s();
     let mut der = normalized.to_der().as_bytes().to_vec();
     der.push(0x41); // ALL | FORKID
     let sig_hex = bytes_to_hex(&der);

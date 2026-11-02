@@ -335,7 +335,7 @@ pub fn create_wallet() -> TestWallet {
     let signing_key = SigningKey::from_bytes((&key_bytes).into())
         .expect("valid private key");
     let verifying_key = signing_key.verifying_key();
-    let point = verifying_key.to_encoded_point(true);
+    let point = verifying_key.to_sec1_point(true);
     let pubkey_bytes = point.as_bytes();
 
     let priv_key_hex = hex_encode(&signing_key.to_bytes()[..]);

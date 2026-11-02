@@ -83,7 +83,7 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
     OP_PUSH_TX_SIGN_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Normalize to low-S
-    let normalized = sig.normalize_s().unwrap_or(sig);
+    let normalized = sig.normalize_s();
 
     // DER encode + append sighash byte
     let der = normalized.to_der();

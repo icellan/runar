@@ -4,7 +4,7 @@
 //! 64 bytes: `x[32] || y[32]` (big-endian, no prefix byte).
 
 use k256::elliptic_curve::group::Group;
-use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+use k256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 
 use crate::prelude::{Bigint, BigintBig, ByteString, Point};
@@ -21,9 +21,9 @@ fn point_to_projective(p: &[u8]) -> ProjectivePoint {
     // Build uncompressed SEC1 encoding: 0x04 || x || y
     let mut sec1 = vec![0x04u8];
     sec1.extend_from_slice(p);
-    let encoded = k256::EncodedPoint::from_bytes(&sec1)
+    let encoded = k256::Sec1Point::from_bytes(&sec1)
         .expect("invalid SEC1 encoding");
-    let affine = AffinePoint::from_encoded_point(&encoded)
+    let affine = AffinePoint::from_sec1_point(&encoded)
         .expect("point not on curve");
     ProjectivePoint::from(affine)
 }
@@ -34,7 +34,7 @@ fn projective_to_point(p: &ProjectivePoint) -> Point {
         return vec![0u8; 64];
     }
     let affine = p.to_affine();
-    let encoded = affine.to_encoded_point(false); // uncompressed
+    let encoded = affine.to_sec1_point(false); // uncompressed
     let bytes = encoded.as_bytes(); // 0x04 || x[32] || y[32]
     bytes[1..65].to_vec()
 }
@@ -165,8 +165,8 @@ pub fn ec_on_curve(p: &[u8]) -> bool {
     // reachable from ec_add(P, -P), so this matters in practice.
     let mut sec1 = vec![0x04u8];
     sec1.extend_from_slice(p);
-    let Ok(enc) = k256::EncodedPoint::from_bytes(&sec1) else { return false };
-    let ct = AffinePoint::from_encoded_point(&enc);
+    let Ok(enc) = k256::Sec1Point::from_bytes(&sec1) else { return false };
+    let ct = AffinePoint::from_sec1_point(&enc);
     ct.is_some().into()
 }
 

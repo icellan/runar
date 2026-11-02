@@ -8,10 +8,9 @@
 //! (SHA-256 hashed internally). `verify_ecdsa_p256` verifies a raw r||s signature
 //! against a 33-byte compressed public key.
 
-use p256::ecdsa::{signature::DigestSigner, SigningKey, VerifyingKey, Signature};
-use p256::ecdsa::signature::DigestVerifier;
+use p256::ecdsa::{signature::hazmat::{PrehashSigner, PrehashVerifier}, SigningKey, VerifyingKey, Signature};
 use sha2::{Digest, Sha256};
-use rand::rngs::OsRng;
+use p256::elliptic_curve::Generate;
 
 /// A P-256 key pair.
 pub struct P256KeyPair {
@@ -24,14 +23,14 @@ pub struct P256KeyPair {
 
 /// Generate a random P-256 key pair.
 pub fn p256_keygen() -> P256KeyPair {
-    let sk = SigningKey::random(&mut OsRng);
+    let sk = SigningKey::generate();
     let vk = sk.verifying_key();
-    let point = vk.to_encoded_point(false); // uncompressed
+    let point = vk.to_sec1_point(false); // uncompressed
     let coords = point.as_bytes();
     // uncompressed: 0x04 || x[32] || y[32] → strip prefix
     let pk = coords[1..].to_vec(); // 64 bytes
 
-    let compressed_point = vk.to_encoded_point(true);
+    let compressed_point = vk.to_sec1_point(true);
     let pk_compressed = compressed_point.as_bytes().to_vec();
 
     P256KeyPair { sk, pk, pk_compressed }
@@ -40,8 +39,9 @@ pub fn p256_keygen() -> P256KeyPair {
 /// Sign `msg` with P-256 ECDSA. The message is SHA-256 hashed internally.
 /// Returns a 64-byte raw signature: r[32] || s[32] (big-endian, zero-padded).
 pub fn p256_sign(msg: &[u8], kp: &P256KeyPair) -> Vec<u8> {
-    let digest = Sha256::new_with_prefix(msg);
-    let sig: Signature = kp.sk.sign_digest(digest);
+    let digest = Sha256::digest(msg);
+    let sig: Signature = kp.sk.sign_prehash(&digest)
+        .expect("p256_sign: sign_prehash failed");
     let bytes = sig.to_bytes();
     bytes.to_vec()
 }
@@ -63,6 +63,6 @@ pub fn verify_ecdsa_p256(msg: &[u8], sig: &[u8], pubkey: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let digest = Sha256::new_with_prefix(msg);
-    vk.verify_digest(digest, &sig).is_ok()
+    let digest = Sha256::digest(msg);
+    vk.verify_prehash(&digest, &sig).is_ok()
 }
